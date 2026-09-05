@@ -449,6 +449,73 @@ async fn abort_mid_stream() {
     ));
 }
 
+struct YieldThenBlockHooks;
+
+#[async_trait::async_trait]
+impl Hooks for YieldThenBlockHooks {
+    async fn before_tool_call(&self, _call: &HookToolCall) -> Option<String> {
+        // Yield so the sink-watcher can drop the receiver mid-tool-round.
+        tokio::task::yield_now().await;
+        Some("nope".into())
+    }
+}
+
+#[tokio::test]
+async fn dead_sink_mid_tool_loop_synthesizes_results() {
+    // Two tool calls in one turn; the watcher drops the event receiver once
+    // ToolExecutionStart(c1) is observed, so the End(c1) send fails and the
+    // loop must synthesize error ToolResults for both calls.
+    let events = vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "one" }),
+        },
+        LlmStreamEvent::ToolCall {
+            id: "c2".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "two" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ];
+    let stream_fn: StreamFn = Arc::new(move |_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(events.clone())) as LlmStream
+    });
+    let (tool, _seen) = echo_tool();
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![tool], Arc::new(YieldThenBlockHooks));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, AgentEvent::ToolExecutionStart { .. }) {
+                break;
+            }
+        }
+    });
+    let res = run_loop(&mut ctx, cfg, tx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Aborted);
+    assert_eq!(
+        ctx.len(),
+        4,
+        "User, Assistant(ToolUse), exactly one ToolResult per call — no dangling ToolCall"
+    );
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { tool_call_id, name, is_error: true, .. }
+            if tool_call_id == "c1" && name == "echo"
+    ));
+    assert!(matches!(
+        &ctx[3],
+        AgentMessage::ToolResult { tool_call_id, name, is_error: true, .. }
+            if tool_call_id == "c2" && name == "echo"
+    ));
+}
+
 struct StopAfterTurnHooks;
 
 #[async_trait::async_trait]
