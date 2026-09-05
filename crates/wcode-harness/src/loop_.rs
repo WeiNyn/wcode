@@ -68,9 +68,14 @@ pub async fn run_loop(
             let mut captured: Option<StopReason> = None;
             let mut usage: Option<Usage> = None;
 
-            let _ = sink.send(AgentEvent::MessageStart {
-                message: assistant(&content, StopReason::Stop, None),
-            });
+            if sink
+                .send(AgentEvent::MessageStart {
+                    message: assistant(&content, StopReason::Stop, None),
+                })
+                .is_err()
+            {
+                aborted = true;
+            }
 
             // Skip the LLM call entirely when the sink is already dead.
             if !aborted {
@@ -194,23 +199,31 @@ pub async fn run_loop(
             }
 
             // Tool execution (sequential).
-            for (id, name, arguments) in calls {
+            let mut pending = calls.into_iter();
+            while let Some((id, name, arguments)) = pending.next() {
                 let hook_call = HookToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: arguments.clone(),
                 };
-                if sink
+                let start_sent = sink
                     .send(AgentEvent::ToolExecutionStart {
                         call_id: id.clone(),
                         name: name.clone(),
                     })
-                    .is_err()
-                {
+                    .is_ok();
+                if !start_sent {
                     aborted = true;
-                    break;
                 }
-                let out = if let Some(reason) = cfg.hooks.before_tool_call(&hook_call).await {
+                let out = if !start_sent {
+                    // Dead sink: the tool never runs. Synthesize its error
+                    // output so the ToolResult still lands in ctx.
+                    ToolOutput {
+                        output: "aborted before execution".to_string(),
+                        is_error: true,
+                        ..ToolOutput::default()
+                    }
+                } else if let Some(reason) = cfg.hooks.before_tool_call(&hook_call).await {
                     ToolOutput {
                         output: format!("blocked: {reason}"),
                         is_error: true,
@@ -256,6 +269,31 @@ pub async fn run_loop(
                 });
                 if !sent {
                     aborted = true;
+                }
+                if aborted {
+                    // Sink died mid-tool-loop: synthesize an error ToolResult
+                    // for every unexecuted call so ctx never keeps a ToolCall
+                    // without its ToolResult. Event sends are best-effort
+                    // here; the abort path already returns Aborted.
+                    for (rid, rname, _) in pending {
+                        let out = ToolOutput {
+                            output: "aborted before execution".to_string(),
+                            is_error: true,
+                            ..ToolOutput::default()
+                        };
+                        let _ = sink.send(AgentEvent::ToolExecutionEnd {
+                            call_id: rid.clone(),
+                            name: rname.clone(),
+                            output: out.output.clone(),
+                            is_error: out.is_error,
+                        });
+                        ctx.push(AgentMessage::ToolResult {
+                            tool_call_id: rid,
+                            name: rname,
+                            output: out.output,
+                            is_error: out.is_error,
+                        });
+                    }
                     break;
                 }
             }
