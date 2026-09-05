@@ -174,7 +174,7 @@ mod tests {
             AgentMessage::Assistant {
                 content: vec![ContentBlock::Text { text: "a".into() }],
                 stop_reason: StopReason::Stop,
-                usage: None,
+                usage: Some(Usage::default()),
                 model: Some("m".into()),
             },
             AgentMessage::ToolResult {
@@ -246,7 +246,6 @@ mod tests {
             usage: None,
             model: None,
         };
-        assert_eq!(m2.as_text(), "ab");
         assert_eq!(m2.as_text(), "ab");
     }
 
