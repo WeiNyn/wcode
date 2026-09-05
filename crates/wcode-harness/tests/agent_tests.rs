@@ -27,6 +27,7 @@ use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool, erased};
 struct StreamCall {
     ctx: Vec<AgentMessage>,
     system: String,
+    model: String,
 }
 
 #[derive(Clone, Default)]
@@ -55,6 +56,7 @@ fn fake_stream_fn(rec: &Recorder) -> StreamFn {
             rec.calls.lock().unwrap().push(StreamCall {
                 ctx: ctx.to_vec(),
                 system: system.to_string(),
+                model: _opts.model.clone(),
             });
             let events = rec.script.lock().unwrap().pop_front().unwrap_or_default();
             Box::pin(futures::stream::iter(events)) as LlmStream
@@ -113,6 +115,7 @@ fn agent_config(
         stream_fn,
         hooks: Arc::new(DefaultHooks),
         session,
+        context: Vec::new(),
     }
 }
 
@@ -286,4 +289,79 @@ async fn steer_between_runs_is_queued_for_next_run() {
         ctx2
     );
     assert_eq!(agent.messages().len(), 5);
+}
+
+/// `/resume` backbone: AgentConfig.context seeds the conversation so the
+/// first stream call already sees the restored history.
+#[tokio::test]
+async fn seeded_context_reaches_first_stream_call() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let mut cfg = agent_config(fake_stream_fn(&rec), vec![], None);
+    cfg.context = vec![
+        AgentMessage::user_text("old question"),
+        AgentMessage::Assistant {
+            content: vec![wcode_harness::message::ContentBlock::Text {
+                text: "old answer".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        },
+    ];
+    let mut agent = Agent::new(cfg);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("new question", tx).await.unwrap();
+
+    let ctx = &rec.calls()[0].ctx;
+    assert_eq!(ctx.len(), 3);
+    assert_eq!(ctx[0].as_text(), "old question");
+    assert_eq!(ctx[1].as_text(), "old answer");
+    assert_eq!(ctx[2].as_text(), "new question");
+}
+
+/// `/model` backbone: next stream call uses the new model and a ModelChange
+/// entry lands in the open session.
+#[tokio::test]
+async fn set_model_swaps_llm_and_logs_session_change() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("a".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("b".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    let mut agent = Agent::new(agent_config(fake_stream_fn(&rec), vec![], Some(session)));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("hi", tx).await.unwrap();
+    assert_eq!(rec.calls()[0].model, "m1");
+
+    agent.set_model("m2".into()).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("again", tx).await.unwrap();
+
+    assert_eq!(rec.calls()[1].model, "m2");
+    let reopened = Session::open(&path).unwrap();
+    assert_eq!(reopened.model().as_deref(), Some("m2"));
 }

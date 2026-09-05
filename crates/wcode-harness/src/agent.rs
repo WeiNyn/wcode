@@ -19,6 +19,8 @@ pub struct AgentConfig {
     pub stream_fn: StreamFn,
     pub hooks: Arc<dyn Hooks>,
     pub session: Option<Session>, // None = no persistence
+    /// Prior messages seeding the conversation (e.g. resumed session history).
+    pub context: Vec<AgentMessage>,
 }
 
 pub struct Agent {
@@ -47,7 +49,7 @@ impl Agent {
             stream_fn: cfg.stream_fn,
             hooks: cfg.hooks,
             session: cfg.session,
-            ctx: Vec::new(),
+            ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
             follow_tx,
@@ -59,6 +61,19 @@ impl Agent {
     /// Queued for injection at the next turn start (this run or a later one).
     pub fn steer(&self, m: AgentMessage) {
         let _ = self.steer_tx.send(m);
+    }
+
+    /// Swaps the model mid-conversation (takes effect on the next run) and
+    /// logs a `ModelChange` entry when a session is open.
+    pub fn set_model(&mut self, model: String) -> std::io::Result<()> {
+        self.llm.model = model.clone();
+        if let Some(session) = &mut self.session {
+            session.append(SessionEntry::ModelChange {
+                id: uuid::Uuid::new_v4().to_string(),
+                model,
+            })?;
+        }
+        Ok(())
     }
 
     /// Sender clone for steering while `run` holds the `&mut` borrow (UI tasks).
@@ -79,6 +94,8 @@ impl Agent {
         self.cancel.cancel();
     }
 
+    /// Token for the run in flight or the next one; re-acquire after each
+    /// `run()` (a fresh token is minted at the end of every run).
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -120,6 +137,10 @@ impl Agent {
         let (follow_tx, follow_rx) = mpsc::unbounded_channel();
         self.follow_tx = follow_tx;
         self.follow_rx = Some(follow_rx);
+
+        // Fresh token for the next run: CancellationToken has no reset, so a
+        // cancel from this run must not poison the next one.
+        self.cancel = CancellationToken::new();
 
         if let Some(session) = &mut self.session {
             for m in &self.ctx[len_before..] {
