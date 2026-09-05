@@ -37,7 +37,7 @@ impl TypedTool for Bash {
             Ok(c) => c,
             Err(e) => {
                 return ToolOutput {
-                    output: format!("bash spawn: {e}"),
+                    output: format!("sh spawn: {e}"),
                     is_error: true,
                     details: None,
                 };
@@ -66,6 +66,7 @@ impl TypedTool for Bash {
             (out, err)
         };
         tokio::pin!(drained);
+        // ponytail: no process-group kill; daemonized grandchildren hold pipe until timeout — setsid+killpg if it bites
         let (stdout, stderr) = tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {

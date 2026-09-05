@@ -71,7 +71,9 @@ impl TypedTool for Edit {
         } else {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
-        match std::fs::write(&path, updated) {
+        // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
+        let tmp = path.with_extension("tmp-wcode");
+        match std::fs::write(&tmp, updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
                 output: format!("edited {}", args.path),
                 is_error: false,

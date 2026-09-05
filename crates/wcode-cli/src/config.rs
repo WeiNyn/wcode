@@ -58,13 +58,17 @@ impl Config {
                 toml::from_str::<FileConfig>(&text)
                     .map_err(|e| format!("config parse error: {e}"))?,
             ),
-            _ => None,
+            // Only a missing file counts as absent; unreadable/corrupt surfaces the real cause.
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Some(Err(e)) => return Err(format!("config read error: {e}")),
+            None => None,
         };
         merge(EnvLike::from_env(), file.unwrap_or_default())
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("wcode").join("config.toml"))
+        // Spec mandates ~/.config/wcode/config.toml even on macOS (not dirs::config_dir()).
+        dirs::home_dir().map(|p| p.join(".config/wcode/config.toml"))
     }
 
     pub fn to_llm_opts(&self) -> LlmOpts {

@@ -42,7 +42,9 @@ impl TypedTool for Write {
                 };
             }
         }
-        match std::fs::write(&path, &args.content) {
+        // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
+        let tmp = path.with_extension("tmp-wcode");
+        match std::fs::write(&tmp, &args.content).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
                 output: format!("wrote {} bytes to {}", args.content.len(), args.path),
                 is_error: false,
