@@ -1,1 +1,284 @@
-// filled by plan tasks
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use chrono::{SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::message::AgentMessage;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEntry {
+    Header {
+        version: u32,
+        id: String,
+        cwd: String,
+        created: String, // RFC3339
+    },
+    Message {
+        id: String,
+        parent_id: Option<String>,
+        message: AgentMessage,
+    },
+    ModelChange {
+        id: String,
+        model: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+pub struct Session {
+    path: Option<PathBuf>,
+    entries: Vec<SessionEntry>,
+}
+
+impl Session {
+    pub fn create(dir: &Path) -> io::Result<Session> {
+        fs::create_dir_all(dir)?;
+        let id = uuid::Uuid::new_v4();
+        let name = format!(
+            "{}_{}.jsonl",
+            Utc::now().timestamp_millis(),
+            &id.simple().to_string()[..8]
+        );
+        let path = dir.join(name);
+        let mut session = Session {
+            path: Some(path.clone()),
+            entries: Vec::new(),
+        };
+        let header = SessionEntry::Header {
+            version: 1,
+            id: id.to_string(),
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            created: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        };
+        session.append(header)?;
+        Ok(session)
+    }
+
+    pub fn open(path: &Path) -> io::Result<Session> {
+        let raw = fs::read_to_string(path)?;
+        let lines: Vec<&str> = raw.lines().collect();
+        let last = lines.len().saturating_sub(1);
+        let mut entries = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SessionEntry>(line) {
+                Ok(e) => entries.push(e),
+                Err(e) => {
+                    if i == last {
+                        break; // torn final write
+                    }
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+            }
+        }
+        Ok(Session {
+            path: Some(path.to_path_buf()),
+            entries,
+        })
+    }
+
+    pub fn in_memory() -> Session {
+        Session {
+            path: None,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn append(&mut self, e: SessionEntry) -> io::Result<()> {
+        if let Some(path) = &self.path {
+            let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let line = serde_json::to_string(&e)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            f.write_all(line.as_bytes())?;
+            f.write_all(b"\n")?;
+            f.flush()?;
+        }
+        self.entries.push(e);
+        Ok(())
+    }
+
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.entries
+    }
+
+    pub fn messages(&self) -> Vec<AgentMessage> {
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                SessionEntry::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn build_context(&self) -> Vec<AgentMessage> {
+        self.messages()
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn model(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::ModelChange { model, .. } => Some(model.clone()),
+            _ => None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{ContentBlock, StopReason};
+    use serde_json::json;
+
+    fn msg(text: &str) -> SessionEntry {
+        SessionEntry::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            message: AgentMessage::user_text(text),
+        }
+    }
+
+    #[test]
+    fn create_writes_header_with_timestamped_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Session::create(dir.path()).unwrap();
+        let name = s.path().unwrap().file_name().unwrap().to_str().unwrap();
+        let (ts, rest) = name.split_once('_').unwrap();
+        assert!(ts.parse::<i64>().is_ok());
+        let (hex, ext) = rest.split_once('.').unwrap();
+        assert_eq!(ext, "jsonl");
+        assert_eq!(hex.len(), 8);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(s.entries().len(), 1);
+        match &s.entries()[0] {
+            SessionEntry::Header {
+                version, id, cwd, ..
+            } => {
+                assert_eq!(*version, 1);
+                assert!(!id.is_empty());
+                assert!(!cwd.is_empty());
+            }
+            _ => panic!("first entry not header"),
+        }
+    }
+
+    #[test]
+    fn create_append_open_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        s.append(msg("hello")).unwrap();
+        s.append(SessionEntry::ModelChange {
+            id: "m1".into(),
+            model: "claude-x".into(),
+        })
+        .unwrap();
+        s.append(SessionEntry::Message {
+            id: "a2".into(),
+            parent_id: Some("a1".into()),
+            message: AgentMessage::Assistant {
+                content: vec![ContentBlock::Text {
+                    text: "reply".into(),
+                }],
+                stop_reason: StopReason::Stop,
+                usage: None,
+                model: Some("claude-x".into()),
+            },
+        })
+        .unwrap();
+
+        let path = s.path().unwrap().to_path_buf();
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.entries(), s.entries());
+        assert_eq!(reopened.messages().len(), 2);
+        assert_eq!(reopened.model().as_deref(), Some("claude-x"));
+    }
+
+    #[test]
+    fn torn_final_line_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}",
+                json!({"type":"message","id":"1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"q"}]}}),
+                "{\"type\":\"mess" // torn
+            ),
+        )
+        .unwrap();
+        let s = Session::open(&path).unwrap();
+        assert_eq!(s.entries().len(), 1);
+        assert_eq!(s.messages().len(), 1);
+    }
+
+    #[test]
+    fn torn_earlier_line_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"mess\n{\"type\":\"model_change\",\"id\":\"m\",\"model\":\"x\"}\n",
+        )
+        .unwrap();
+        assert!(Session::open(&path).is_err());
+    }
+
+    #[test]
+    fn unknown_entries_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"header","version":1,"id":"x","cwd":"/","created":"2026-01-01T00:00:00Z"}),
+                json!({"type":"future_thing","data":42}),
+                json!({"type":"message","id":"1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"q"}]}})
+            ),
+        )
+        .unwrap();
+        let s = Session::open(&path).unwrap();
+        assert_eq!(s.entries().len(), 3);
+        assert_eq!(s.entries()[1], SessionEntry::Unknown);
+        assert_eq!(s.messages().len(), 1);
+    }
+
+    #[test]
+    fn model_latest_wins() {
+        let mut s = Session::in_memory();
+        assert_eq!(s.model(), None);
+        s.append(SessionEntry::ModelChange {
+            id: "1".into(),
+            model: "old".into(),
+        })
+        .unwrap();
+        s.append(SessionEntry::ModelChange {
+            id: "2".into(),
+            model: "new".into(),
+        })
+        .unwrap();
+        assert_eq!(s.model().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn in_memory_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::in_memory();
+        s.append(msg("hi")).unwrap();
+        assert!(s.path().is_none());
+        assert_eq!(s.entries().len(), 1);
+        assert_eq!(s.messages().len(), 1);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
