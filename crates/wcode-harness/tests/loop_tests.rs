@@ -156,6 +156,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
         AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
         AgentEvent::TurnEnd { .. } => "turn_end",
+        AgentEvent::Error { .. } => "error",
         AgentEvent::AgentEnd => "agent_end",
     }
 }

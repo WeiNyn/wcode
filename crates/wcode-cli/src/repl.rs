@@ -321,9 +321,9 @@ async fn run_turn(
     let _ = printer.await;
     match res {
         Ok(StopReason::Aborted) => println!("{DIM}(aborted){RESET}"),
-        Ok(StopReason::Error) => println!("{DIM}✗ run failed{RESET}"),
+        Ok(StopReason::Error) => eprintln!("{DIM}✗ run failed{RESET}"),
         Ok(_) => {}
-        Err(e) => println!("{DIM}error: {e}{RESET}"),
+        Err(e) => eprintln!("{DIM}error: {e}{RESET}"),
     }
 }
 
@@ -352,6 +352,10 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                 } else {
                     println!(" {mark} {DIM}{note}{RESET}");
                 }
+            }
+            AgentEvent::Error { message } => {
+                eprintln!("{DIM}error: {message}{RESET}");
+                let _ = io::stderr().flush();
             }
             _ => {}
         }

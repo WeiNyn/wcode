@@ -22,7 +22,9 @@ api_key = "sk-..."     # optional
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
-`OPENAI_API_KEY` as a key fallback. `--model` / `--base-url` beat everything.
+`OPENAI_API_KEY` as a key fallback. `--model` / `--base-url` override a
+successfully loaded config (and rescue a missing `model`), but cannot rescue
+an unreadable or invalid config.toml — that still exits with an error.
 
 ## Use
 

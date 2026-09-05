@@ -4,6 +4,7 @@ use std::io::Write as _;
 
 use tokio::sync::mpsc;
 use wcode_harness::agent::Agent;
+use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::Session;
 
@@ -11,7 +12,7 @@ mod config;
 mod repl;
 mod tools;
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 use crate::repl::{build_agent, list_sessions, resolve_session_path, session_dir};
 
 const USAGE: &str = "\
@@ -109,7 +110,7 @@ async fn main() {
     // errors (unreadable/corrupt) still surface.
     let mut cfg = match Config::load() {
         Ok(c) => c,
-        Err(e) if args.model.is_some() && e.contains("no model configured") => Config {
+        Err(ConfigError::MissingModel) if args.model.is_some() => Config {
             base_url: None,
             api_key: None,
             model: String::new(),
@@ -185,12 +186,24 @@ async fn main() {
 async fn one_shot(agent: &mut Agent, prompt: &str) -> i32 {
     let (tx, mut rx) = mpsc::unbounded_channel();
     // Draining keeps the channel from growing; the run dies without a reader.
-    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    // The last stream error is kept so a failed run can show why.
+    let drain = tokio::spawn(async move {
+        let mut last_error: Option<String> = None;
+        while let Some(ev) = rx.recv().await {
+            if let AgentEvent::Error { message } = ev {
+                last_error = Some(message);
+            }
+        }
+        last_error
+    });
     let res = agent.run(prompt, tx).await;
-    let _ = drain.await;
+    let last_error = drain.await.unwrap_or(None);
     match res {
         Ok(StopReason::Error) => {
-            eprintln!("run failed");
+            match last_error {
+                Some(msg) => eprintln!("error: {msg}"),
+                None => eprintln!("run failed"),
+            }
             1
         }
         Ok(_) => {

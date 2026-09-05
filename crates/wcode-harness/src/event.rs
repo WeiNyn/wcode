@@ -40,6 +40,8 @@ pub enum AgentEvent {
         is_error: bool,
     },
     TurnEnd { message: AgentMessage },
+    /// Stream-level failure; the run ends with `StopReason::Error`.
+    Error { message: String },
     AgentEnd,
 }
 
@@ -117,6 +119,12 @@ mod tests {
                 message: assistant(),
             },
             "turn_end",
+        );
+        roundtrip(
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+            "error",
         );
         roundtrip(AgentEvent::AgentEnd, "agent_end");
     }

@@ -66,13 +66,15 @@ impl Agent {
     /// Swaps the model mid-conversation (takes effect on the next run) and
     /// logs a `ModelChange` entry when a session is open.
     pub fn set_model(&mut self, model: String) -> std::io::Result<()> {
-        self.llm.model = model.clone();
+        // Log first: a failed append must not leave the agent and the session
+        // disagreeing about which model runs next.
         if let Some(session) = &mut self.session {
             session.append(SessionEntry::ModelChange {
                 id: uuid::Uuid::new_v4().to_string(),
-                model,
+                model: model.clone(),
             })?;
         }
+        self.llm.model = model;
         Ok(())
     }
 

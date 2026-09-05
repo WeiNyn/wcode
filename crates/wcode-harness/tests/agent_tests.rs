@@ -4,6 +4,7 @@
 //! don't share code without a common module, ~60 lines duplication is fine).
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::StreamExt as _;
@@ -289,6 +290,62 @@ async fn steer_between_runs_is_queued_for_next_run() {
         ctx2
     );
     assert_eq!(agent.messages().len(), 5);
+}
+
+/// Run 1 is canceled mid-stream; run 2 must execute normally on a fresh
+/// token (a canceled token must not poison the next run).
+#[tokio::test]
+async fn cancel_token_refreshed_between_runs() {
+    let call = Arc::new(AtomicUsize::new(0));
+    let stream_fn: StreamFn = {
+        let call = call.clone();
+        Arc::new(move |_ctx, _sys, _tools, _opts| {
+            if call.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Run 1: one delta, then hang until the watcher cancels.
+                Box::pin(
+                    futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())])
+                        .chain(futures::stream::pending()),
+                ) as LlmStream
+            } else {
+                Box::pin(futures::stream::iter(vec![
+                    LlmStreamEvent::TextDelta("after".into()),
+                    LlmStreamEvent::Done {
+                        stop_reason: StopReason::Stop,
+                        usage: None,
+                    },
+                ])) as LlmStream
+            }
+        })
+    };
+    let mut agent = Agent::new(agent_config(stream_fn, vec![], None));
+
+    let token = agent.cancel_token();
+    let (tx1, mut rx1) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(ev) = rx1.recv().await {
+            if matches!(ev, AgentEvent::MessageUpdate { .. }) {
+                token.cancel();
+                break;
+            }
+        }
+    });
+    let res1 = agent.run("hi", tx1).await;
+    assert_eq!(res1.unwrap(), StopReason::Aborted);
+
+    // Run 2: the stale canceled token must not abort it.
+    let (tx2, _rx2) = mpsc::unbounded_channel();
+    let res2 = agent.run("again", tx2).await;
+    assert_eq!(res2.unwrap(), StopReason::Stop);
+    assert_eq!(call.load(Ordering::SeqCst), 2);
+    assert!(
+        matches!(
+            agent.messages().last().unwrap(),
+            AgentMessage::Assistant { stop_reason: StopReason::Stop, .. }
+                if agent.messages().last().unwrap().as_text() == "after"
+        ),
+        "run 2 must stream normally, got: {:?}",
+        agent.messages()
+    );
 }
 
 /// `/resume` backbone: AgentConfig.context seeds the conversation so the
