@@ -62,6 +62,10 @@ impl Agent {
     }
 
     /// Sender clone for steering while `run` holds the `&mut` borrow (UI tasks).
+    ///
+    /// Receivers are re-paired after each run: clones taken before a run are
+    /// invalid for later runs — re-acquire after each `run()` (upgrade path:
+    /// run loop hands receivers back between runs).
     pub fn steer_sender(&self) -> UnboundedSender<AgentMessage> {
         self.steer_tx.clone()
     }
