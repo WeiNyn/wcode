@@ -34,73 +34,110 @@ pub async fn run_loop(
     let tool_defs: Vec<rig::completion::ToolDefinition> =
         cfg.tools.iter().map(|t| t.definition()).collect();
 
-    let _ = sink.send(AgentEvent::AgentStart);
+    if sink.send(AgentEvent::AgentStart).is_err() {
+        // Consumer gone before the run started: nothing to finalize.
+        return Ok(StopReason::Aborted);
+    }
 
     'outer: loop {
         loop {
-            let _ = sink.send(AgentEvent::TurnStart);
+            let mut aborted = false;
+            if sink.send(AgentEvent::TurnStart).is_err() {
+                aborted = true;
+            }
 
             while let Ok(msg) = cfg.steering.try_recv() {
-                let _ = sink.send(AgentEvent::MessageStart {
-                    message: msg.clone(),
-                });
+                if sink
+                    .send(AgentEvent::MessageStart {
+                        message: msg.clone(),
+                    })
+                    .is_err()
+                {
+                    aborted = true;
+                    break;
+                }
                 ctx.push(msg.clone());
-                let _ = sink.send(AgentEvent::MessageEnd { message: msg });
+                if sink.send(AgentEvent::MessageEnd { message: msg }).is_err() {
+                    aborted = true;
+                    break;
+                }
             }
             cfg.hooks.transform_context(ctx).await;
 
             let mut content: Vec<ContentBlock> = Vec::new();
             let mut captured: Option<StopReason> = None;
             let mut usage: Option<Usage> = None;
-            let mut aborted = false;
 
             let _ = sink.send(AgentEvent::MessageStart {
                 message: assistant(&content, StopReason::Stop, None),
             });
 
-            let mut stream = (cfg.stream_fn)(ctx.as_slice(), &cfg.system, &tool_defs, &cfg.llm);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cfg.cancel.cancelled() => {
-                        aborted = true;
-                        break;
-                    }
-                    item = stream.next() => match item {
-                        None => break,
-                        Some(LlmStreamEvent::TextDelta(delta)) => {
-                            append_text(&mut content, &delta);
-                            let _ = sink.send(AgentEvent::MessageUpdate {
-                                message: assistant(&content, StopReason::Stop, None),
-                            });
-                        }
-                        Some(LlmStreamEvent::ThinkingDelta(delta)) => {
-                            append_thinking(&mut content, &delta);
-                            let _ = sink.send(AgentEvent::MessageUpdate {
-                                message: assistant(&content, StopReason::Stop, None),
-                            });
-                        }
-                        // v1: no event for ToolCallStart.
-                        Some(LlmStreamEvent::ToolCallStart { .. }) => {}
-                        Some(LlmStreamEvent::ToolCall { id, name, arguments }) => {
-                            content.push(ContentBlock::ToolCall { id, name, arguments });
-                            let _ = sink.send(AgentEvent::MessageUpdate {
-                                message: assistant(&content, StopReason::Stop, None),
-                            });
-                        }
-                        Some(LlmStreamEvent::Done { stop_reason, usage: u }) => {
-                            captured = Some(stop_reason);
-                            usage = u;
-                        }
-                        // A stream Error behaves like Done{Error}: capture, end run.
-                        Some(LlmStreamEvent::Error { .. }) => {
-                            captured = Some(StopReason::Error);
+            // Skip the LLM call entirely when the sink is already dead.
+            if !aborted {
+                let mut stream = (cfg.stream_fn)(ctx.as_slice(), &cfg.system, &tool_defs, &cfg.llm);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cfg.cancel.cancelled() => {
+                            aborted = true;
                             break;
+                        }
+                        item = stream.next() => match item {
+                            None => break,
+                            Some(LlmStreamEvent::TextDelta(delta)) => {
+                                append_text(&mut content, &delta);
+                                if sink
+                                    .send(AgentEvent::MessageUpdate {
+                                        message: assistant(&content, StopReason::Stop, None),
+                                    })
+                                    .is_err()
+                                {
+                                    aborted = true;
+                                    break;
+                                }
+                            }
+                            Some(LlmStreamEvent::ThinkingDelta(delta)) => {
+                                append_thinking(&mut content, &delta);
+                                if sink
+                                    .send(AgentEvent::MessageUpdate {
+                                        message: assistant(&content, StopReason::Stop, None),
+                                    })
+                                    .is_err()
+                                {
+                                    aborted = true;
+                                    break;
+                                }
+                            }
+                            // v1: no event for ToolCallStart.
+                            Some(LlmStreamEvent::ToolCallStart { .. }) => {}
+                            Some(LlmStreamEvent::ToolCall { id, name, arguments }) => {
+                                content.push(ContentBlock::ToolCall { id, name, arguments });
+                                if sink
+                                    .send(AgentEvent::MessageUpdate {
+                                        message: assistant(&content, StopReason::Stop, None),
+                                    })
+                                    .is_err()
+                                {
+                                    aborted = true;
+                                    break;
+                                }
+                            }
+                            Some(LlmStreamEvent::Done { stop_reason, usage: u }) => {
+                                captured = Some(stop_reason);
+                                usage = u;
+                                // Done ends the fold: a stalled stream must not
+                                // hang the run or overwrite the captured reason.
+                                break;
+                            }
+                            // A stream Error behaves like Done{Error}: capture, end run.
+                            Some(LlmStreamEvent::Error { .. }) => {
+                                captured = Some(StopReason::Error);
+                                break;
+                            }
                         }
                     }
                 }
             }
-            drop(stream);
 
             // Cancellation finalizes the partial assistant as Aborted.
             let stop = if aborted {
@@ -109,13 +146,23 @@ pub async fn run_loop(
                 captured.unwrap_or(StopReason::Stop)
             };
             let assistant = assistant(&content, stop, usage);
-            let _ = sink.send(AgentEvent::MessageEnd {
-                message: assistant.clone(),
-            });
+            if sink
+                .send(AgentEvent::MessageEnd {
+                    message: assistant.clone(),
+                })
+                .is_err()
+            {
+                aborted = true;
+            }
             ctx.push(assistant.clone());
-            let _ = sink.send(AgentEvent::TurnEnd {
-                message: assistant.clone(),
-            });
+            if sink
+                .send(AgentEvent::TurnEnd {
+                    message: assistant.clone(),
+                })
+                .is_err()
+            {
+                aborted = true;
+            }
 
             // Errors/aborts are values: end the run even if tool calls exist.
             if aborted {
@@ -153,10 +200,16 @@ pub async fn run_loop(
                     name: name.clone(),
                     arguments: arguments.clone(),
                 };
-                let _ = sink.send(AgentEvent::ToolExecutionStart {
-                    call_id: id.clone(),
-                    name: name.clone(),
-                });
+                if sink
+                    .send(AgentEvent::ToolExecutionStart {
+                        call_id: id.clone(),
+                        name: name.clone(),
+                    })
+                    .is_err()
+                {
+                    aborted = true;
+                    break;
+                }
                 let out = if let Some(reason) = cfg.hooks.before_tool_call(&hook_call).await {
                     ToolOutput {
                         output: format!("blocked: {reason}"),
@@ -185,20 +238,32 @@ pub async fn run_loop(
                         },
                     }
                 };
-                let _ = sink.send(AgentEvent::ToolExecutionEnd {
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    output: out.output.clone(),
-                    is_error: out.is_error,
-                });
+                let sent = sink
+                    .send(AgentEvent::ToolExecutionEnd {
+                        call_id: id.clone(),
+                        name: name.clone(),
+                        output: out.output.clone(),
+                        is_error: out.is_error,
+                    })
+                    .is_ok();
+                // Push the result before honoring a dead sink so ctx never
+                // keeps a ToolCall without its ToolResult.
                 ctx.push(AgentMessage::ToolResult {
                     tool_call_id: id,
                     name,
                     output: out.output,
                     is_error: out.is_error,
                 });
+                if !sent {
+                    aborted = true;
+                    break;
+                }
             }
 
+            if aborted {
+                let _ = sink.send(AgentEvent::AgentEnd);
+                return Ok(StopReason::Aborted);
+            }
             if cfg.hooks.should_stop_after_turn(ctx).await {
                 let _ = sink.send(AgentEvent::AgentEnd);
                 return Ok(StopReason::Stop);
@@ -207,9 +272,18 @@ pub async fn run_loop(
 
         match cfg.follow_ups.try_recv() {
             Ok(m) => {
-                let _ = sink.send(AgentEvent::MessageStart { message: m.clone() });
+                if sink
+                    .send(AgentEvent::MessageStart { message: m.clone() })
+                    .is_err()
+                {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return Ok(StopReason::Aborted);
+                }
                 ctx.push(m.clone());
-                let _ = sink.send(AgentEvent::MessageEnd { message: m });
+                if sink.send(AgentEvent::MessageEnd { message: m }).is_err() {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return Ok(StopReason::Aborted);
+                }
                 continue 'outer;
             }
             Err(
