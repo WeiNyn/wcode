@@ -63,7 +63,7 @@ impl Session {
     pub fn open(path: &Path) -> io::Result<Session> {
         let raw = fs::read_to_string(path)?;
         let lines: Vec<&str> = raw.lines().collect();
-        let last = lines.len().saturating_sub(1);
+        let last_non_empty = lines.iter().rposition(|l| !l.trim().is_empty());
         let mut entries = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
@@ -72,8 +72,8 @@ impl Session {
             match serde_json::from_str::<SessionEntry>(line) {
                 Ok(e) => entries.push(e),
                 Err(e) => {
-                    if i == last {
-                        break; // torn final write
+                    if Some(i) == last_non_empty {
+                        break; // torn final write; rest is blank
                     }
                     return Err(io::Error::new(io::ErrorKind::InvalidData, e));
                 }
@@ -97,8 +97,7 @@ impl Session {
             let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
             let line = serde_json::to_string(&e)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            f.write_all(line.as_bytes())?;
-            f.write_all(b"\n")?;
+            f.write_all(format!("{line}\n").as_bytes())?;
             f.flush()?;
         }
         self.entries.push(e);
@@ -214,6 +213,23 @@ mod tests {
                 "{}\n{}",
                 json!({"type":"message","id":"1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"q"}]}}),
                 "{\"type\":\"mess" // torn
+            ),
+        )
+        .unwrap();
+        let s = Session::open(&path).unwrap();
+        assert_eq!(s.entries().len(), 1);
+        assert_eq!(s.messages().len(), 1);
+    }
+
+    #[test]
+    fn torn_line_followed_by_blank_lines_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{{\"type\":\"mess\n\n",
+                json!({"type":"message","id":"1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"q"}]}})
             ),
         )
         .unwrap();
