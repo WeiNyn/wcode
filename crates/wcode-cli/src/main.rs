@@ -12,7 +12,7 @@ mod config;
 mod repl;
 mod tools;
 
-use crate::config::{Config, ConfigError};
+use crate::config::{Config, ConfigError, EnvLike, FileConfig, merge};
 use crate::repl::{build_agent, list_sessions, resolve_session_path, session_dir};
 
 const USAGE: &str = "\
@@ -87,6 +87,19 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     Ok(Parsed::Args(a))
 }
 
+/// MissingModel rescue: re-run merge() so env base_url/api_key survive a
+/// file config that lacks `model`; the flag model fills the gap.
+fn rescue(model: String, env: EnvLike) -> Config {
+    merge(
+        env,
+        FileConfig {
+            model: Some(model),
+            ..FileConfig::default()
+        },
+    )
+    .expect("model set, merge cannot fail")
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -110,11 +123,12 @@ async fn main() {
     // errors (unreadable/corrupt) still surface.
     let mut cfg = match Config::load() {
         Ok(c) => c,
-        Err(ConfigError::MissingModel) if args.model.is_some() => Config {
-            base_url: None,
-            api_key: None,
-            model: String::new(),
-        },
+        Err(ConfigError::MissingModel) if args.model.is_some() => {
+            // merge() never ran (file lacked model): rescue re-runs it so
+            // WCODE_BASE_URL/WCODE_API_KEY survive; `--base-url` flag is
+            // applied below, so flag still beats env there.
+            rescue(args.model.clone().expect("--model"), EnvLike::from_env())
+        }
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
@@ -295,6 +309,22 @@ mod tests {
     fn parse_help() {
         assert_eq!(parse_args(&args(&["-h"])), Ok(Parsed::Help));
         assert_eq!(parse_args(&args(&["--help"])), Ok(Parsed::Help));
+    }
+
+    #[test]
+    fn rescue_carries_env_base_url_and_flag_model() {
+        // --model rescue keeps env base_url/api_key via merge(); flag model wins.
+        let cfg = rescue(
+            "flag-model".into(),
+            EnvLike {
+                wcode_base_url: Some("http://env".into()),
+                wcode_api_key: Some("k-env".into()),
+                ..EnvLike::default()
+            },
+        );
+        assert_eq!(cfg.model, "flag-model");
+        assert_eq!(cfg.base_url.as_deref(), Some("http://env"));
+        assert_eq!(cfg.api_key.as_deref(), Some("k-env"));
     }
 
     #[test]
