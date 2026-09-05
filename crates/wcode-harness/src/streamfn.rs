@@ -61,7 +61,10 @@ fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolD
     let request = build_request(messages, system, tools, opts);
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
-    tokio::spawn(async move {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return error_stream("StreamFn requires a tokio runtime".to_string());
+    };
+    runtime.spawn(async move {
         let mut stream = match model.stream(request).await {
             Ok(stream) => stream,
             Err(e) => {
@@ -70,7 +73,15 @@ fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolD
             }
         };
         let mut errored = false;
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = tx.closed() => break,
+                item = stream.next() => match item {
+                    Some(item) => item,
+                    None => break,
+                },
+            };
             let events = match item {
                 Ok(content) => {
                     if errored && matches!(content, StreamedAssistantContent::Final(_)) {
@@ -176,6 +187,8 @@ fn map_item(item: StreamedAssistantContent) -> Vec<LlmStreamEvent> {
         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
             vec![LlmStreamEvent::ThinkingDelta(reasoning)]
         }
+        // ponytail: kernel v1 is append-only; this complete-block branch is dead
+        // on chat-completions wires (deltas only). Restating wire => replacement variant.
         StreamedAssistantContent::Reasoning { reasoning, .. } => {
             // Replacement semantics: the complete block supersedes the
             // accumulated deltas.
