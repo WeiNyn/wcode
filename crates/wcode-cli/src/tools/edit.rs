@@ -110,9 +110,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "alpha beta gamma").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = tool().execute(args("f.txt", "beta", "BETA", None), &ctx).await;
+        let out = tool()
+            .execute(args("f.txt", "beta", "BETA", None), &ctx)
+            .await;
         assert!(!out.is_error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "alpha BETA gamma");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "alpha BETA gamma"
+        );
     }
 
     #[tokio::test]
@@ -130,11 +135,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "same same same").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = tool().execute(args("f.txt", "same", "diff", None), &ctx).await;
+        let out = tool()
+            .execute(args("f.txt", "same", "diff", None), &ctx)
+            .await;
         assert!(out.is_error);
         assert!(out.output.contains("matches 3 times"));
         assert!(out.output.contains("replace_all"));
-        assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "same same same");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "same same same"
+        );
     }
 
     #[tokio::test]
@@ -146,6 +156,9 @@ mod tests {
             .execute(args("f.txt", "same", "diff", Some(true)), &ctx)
             .await;
         assert!(!out.is_error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "diff diff diff");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "diff diff diff"
+        );
     }
 }

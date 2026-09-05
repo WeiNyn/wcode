@@ -153,7 +153,7 @@ pub fn list_sessions(dir: &Path) -> io::Result<Vec<PathBuf>> {
     };
     let mut files: Vec<PathBuf> = read
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map_or(false, |e| e == "jsonl"))
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
         .collect();
     files.sort_unstable();
     files.reverse();
@@ -232,7 +232,9 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                     .transpose();
                 match session {
                     Ok(session) => {
-                        let path = session.as_ref().and_then(|s| s.path().map(Path::to_path_buf));
+                        let path = session
+                            .as_ref()
+                            .and_then(|s| s.path().map(Path::to_path_buf));
                         agent = build_agent(llm.clone(), session, Vec::new());
                         *cancel_slot.lock().unwrap() = agent.cancel_token();
                         match path {
@@ -291,7 +293,11 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                 Ok(list) => {
                     let current = agent.session_path();
                     for p in list {
-                        let mark = if current == Some(p.as_path()) { "*" } else { " " };
+                        let mark = if current == Some(p.as_path()) {
+                            "*"
+                        } else {
+                            " "
+                        };
                         println!(
                             "{mark} {}",
                             p.file_name().unwrap_or_default().to_string_lossy()
@@ -344,7 +350,9 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                 out(&format!("\r{DIM}⚙ {name}"));
             }
             AgentEvent::ToolExecutionUpdate { partial, .. } => out(&partial),
-            AgentEvent::ToolExecutionEnd { output, is_error, .. } => {
+            AgentEvent::ToolExecutionEnd {
+                output, is_error, ..
+            } => {
                 let mark = if is_error { "✗" } else { "✓" };
                 let note = tool_output_note(&output);
                 if note.is_empty() {
@@ -448,9 +456,7 @@ mod tests {
     fn printer_handles_interleaved_blocks() {
         let mut p = MessagePrinter::default();
         assert_eq!(
-            p.update(&assistant(vec![ContentBlock::Text {
-                text: "a".into()
-            }])),
+            p.update(&assistant(vec![ContentBlock::Text { text: "a".into() }])),
             ("a".to_string(), String::new())
         );
         assert_eq!(
@@ -507,7 +513,9 @@ mod tests {
     fn printer_mid_line_tracks_text_only() {
         let mut p = MessagePrinter::default();
         assert!(!p.mid_line());
-        p.update(&assistant(vec![ContentBlock::Thinking { text: "t".into() }]));
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "t".into(),
+        }]));
         assert!(!p.mid_line());
         p.update(&assistant(vec![
             ContentBlock::Thinking { text: "t".into() },

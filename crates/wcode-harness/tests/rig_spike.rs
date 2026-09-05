@@ -147,7 +147,7 @@ fn completions_stream_call_chain_compiles() {
 
     // Preamble is funneled into a leading System message at build time.
     assert!(request.preamble.is_none());
-    assert!(request.chat_history.is_empty() == false);
+    assert!(!request.chat_history.is_empty());
     assert!(
         matches!(request.chat_history.first(), Some(Message::System { .. })),
         "preamble must land as the first System message, got {:?}",
@@ -192,10 +192,9 @@ async fn live_completions_stream() {
         .expect("client builds");
     let model = client.completions_api().completion_model(model_name);
 
-    let request =
-        CompletionRequestBuilder::new(model.clone(), "Reply with exactly the word: pong")
-            .preamble("You are a terse echo assistant.".to_string())
-            .build();
+    let request = CompletionRequestBuilder::new(model.clone(), "Reply with exactly the word: pong")
+        .preamble("You are a terse echo assistant.".to_string())
+        .build();
 
     let mut stream = model
         .stream(request)
@@ -242,10 +241,7 @@ async fn live_completions_stream() {
         variant_names.contains(&"Text") || variant_names.contains(&"ToolCall"),
         "expected at least one content item, got {variant_names:?}"
     );
-    assert!(
-        errors.is_empty(),
-        "stream surfaced errors: {errors:?}"
-    );
+    assert!(errors.is_empty(), "stream surfaced errors: {errors:?}");
 
     // Terminal record must be readable both from the yielded Final item and
     // from `stream.response` after the drain.

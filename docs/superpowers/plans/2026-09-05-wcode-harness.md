@@ -416,10 +416,12 @@ Tools (all: `#[derive(Deserialize, JsonSchema)]` Args structs, `impl TypedTool`,
 
 ### Task 11: End-to-end smoke + polish
 
-- `cargo clippy --workspace -- -D warnings` clean.
-- `cargo test --workspace` green.
-- Optional live e2e behind `WCODE_LIVE=1`: `wcode -p "read Cargo.toml and tell me the version"` against configured endpoint (docs only if no endpoint available).
-- Commit: `chore: clippy clean + final polish`.
+- [x] `cargo clippy --workspace -- -D warnings` clean (7 findings fixed: `is_empty()==false`, redundant closure, 2x `map_or`, 2x borrowed expr in `to_value(&u)`, collapsible if).
+- [x] `cargo test --workspace` green — 81 passed, 0 failed, 2 ignored (live tests, correct).
+- [x] `cargo fmt --all` applied (never enforced before; mechanical reflow only, 13 files).
+- [x] Release build: `cargo build --release -p wcode-cli` OK; smoke: no args → config error exit 1, `--bogus-flag`/`-p` w/o arg → usage exit 2, `-h` → exit 0, matches README.
+- [x] Live e2e skipped: no `~/.config/wcode/config.toml`, no `WCODE_*`/`OPENAI_*` env creds on this machine (live tests behind `WCODE_LIVE=1` remain `#[ignore]`).
+- [ ] Commit: `chore: clippy clean + final polish`.
 
 ---
 

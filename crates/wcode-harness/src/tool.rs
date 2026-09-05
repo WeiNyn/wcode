@@ -60,7 +60,10 @@ impl<T: TypedTool> ErasedToolCore for T {
             Ok(args) => args,
             Err(e) => {
                 return ToolOutput {
-                    output: format!("invalid arguments for tool `{}`: {e}", TypedTool::name(self)),
+                    output: format!(
+                        "invalid arguments for tool `{}`: {e}",
+                        TypedTool::name(self)
+                    ),
                     is_error: true,
                     ..ToolOutput::default()
                 };
@@ -127,7 +130,9 @@ mod tests {
         }
     }
 
-    fn test_ctx(cancel: tokio_util::sync::CancellationToken) -> (ToolContext, mpsc::UnboundedReceiver<AgentEvent>) {
+    fn test_ctx(
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> (ToolContext, mpsc::UnboundedReceiver<AgentEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (
             ToolContext {

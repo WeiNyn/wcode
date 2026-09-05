@@ -31,31 +31,35 @@ pub struct LlmOpts {
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
 
-pub type StreamFn = Arc<
-    dyn Fn(&[AgentMessage], &str, &[ToolDefinition], &LlmOpts) -> LlmStream + Send + Sync,
->;
+pub type StreamFn =
+    Arc<dyn Fn(&[AgentMessage], &str, &[ToolDefinition], &LlmOpts) -> LlmStream + Send + Sync>;
 
 /// Default adapter: OpenAI-compatible Chat Completions endpoint via rig.
 pub fn rig_stream_fn() -> StreamFn {
     Arc::new(move |messages, system, tools, opts| adapt(opts, messages, system, tools))
 }
 
-fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolDefinition]) -> LlmStream {
+fn adapt(
+    opts: &LlmOpts,
+    messages: &[AgentMessage],
+    system: &str,
+    tools: &[ToolDefinition],
+) -> LlmStream {
     let key = opts
         .api_key
         .clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
     let Some(key) = key else {
-        return error_stream(
-            "no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string(),
-        );
+        return error_stream("no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string());
     };
     let mut builder = openai::Client::builder().api_key::<rig::client::BearerAuth>(key);
     if let Some(base_url) = &opts.base_url {
         builder = builder.base_url(base_url);
     }
     let model = match builder.build() {
-        Ok(client) => client.completions_api().completion_model(opts.model.clone()),
+        Ok(client) => client
+            .completions_api()
+            .completion_model(opts.model.clone()),
         Err(e) => return error_stream(format!("openai client: {e}")),
     };
     let request = build_request(messages, system, tools, opts);
@@ -68,7 +72,9 @@ fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolD
         let mut stream = match model.stream(request).await {
             Ok(stream) => stream,
             Err(e) => {
-                let _ = tx.send(LlmStreamEvent::Error { message: e.to_string() });
+                let _ = tx.send(LlmStreamEvent::Error {
+                    message: e.to_string(),
+                });
                 return;
             }
         };
@@ -91,7 +97,9 @@ fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolD
                 }
                 Err(e) => {
                     errored = true;
-                    vec![LlmStreamEvent::Error { message: e.to_string() }]
+                    vec![LlmStreamEvent::Error {
+                        message: e.to_string(),
+                    }]
                 }
             };
             for ev in events {
@@ -107,7 +115,9 @@ fn adapt(opts: &LlmOpts, messages: &[AgentMessage], system: &str, tools: &[ToolD
 }
 
 fn error_stream(message: String) -> LlmStream {
-    Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error { message }]))
+    Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
+        message,
+    }]))
 }
 
 fn build_request(
@@ -158,12 +168,14 @@ fn to_rig_message(m: &AgentMessage) -> Option<Message> {
                     ContentBlock::Thinking { text } => {
                         AssistantContent::Reasoning(Reasoning::new(text))
                     }
-                    ContentBlock::ToolCall { id, name, arguments } => {
-                        AssistantContent::ToolCall(ToolCall::new(
-                            ToolCallId::new_or_mint(id.clone()),
-                            ToolFunction::new(name.clone(), arguments.clone()),
-                        ))
-                    }
+                    ContentBlock::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } => AssistantContent::ToolCall(ToolCall::new(
+                        ToolCallId::new_or_mint(id.clone()),
+                        ToolFunction::new(name.clone(), arguments.clone()),
+                    )),
                 })
                 .collect();
             (!content.is_empty()).then_some(Message::Assistant { id: None, content })
@@ -259,7 +271,8 @@ mod tests {
     use serde_json::json;
 
     fn tool_call_item() -> StreamedAssistantContent {
-        let raw = RawStreamingToolCall::new("call_1".to_string(), "run".to_string(), json!({"x": 1}));
+        let raw =
+            RawStreamingToolCall::new("call_1".to_string(), "run".to_string(), json!({"x": 1}));
         StreamedAssistantContent::ToolCall {
             tool_call: raw.into(),
             internal_call_id: "ic1".to_string(),
@@ -284,7 +297,9 @@ mod tests {
 
     #[test]
     fn text_item_maps_to_text_delta() {
-        let events = map_item(StreamedAssistantContent::Text(rig::message::Text::new("hi")));
+        let events = map_item(StreamedAssistantContent::Text(rig::message::Text::new(
+            "hi",
+        )));
         assert_eq!(events, vec![LlmStreamEvent::TextDelta("hi".to_string())]);
     }
 
@@ -295,7 +310,10 @@ mod tests {
             provider_id: None,
             reasoning: "hmm".to_string(),
         });
-        assert_eq!(events, vec![LlmStreamEvent::ThinkingDelta("hmm".to_string())]);
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ThinkingDelta("hmm".to_string())]
+        );
     }
 
     #[test]
@@ -374,7 +392,9 @@ mod tests {
     fn final_without_finish_reason_defaults_to_stop() {
         let events = map_item(final_item(None));
         match &events[..] {
-            [LlmStreamEvent::Done { stop_reason, .. }] => assert_eq!(*stop_reason, StopReason::Stop),
+            [LlmStreamEvent::Done { stop_reason, .. }] => {
+                assert_eq!(*stop_reason, StopReason::Stop)
+            }
             other => panic!("unexpected events: {other:?}"),
         }
     }
@@ -410,7 +430,9 @@ mod tests {
                         name: "get_weather".into(),
                         arguments: json!({"city": "Tokyo"}),
                     },
-                    ContentBlock::Text { text: "Let me check.".into() },
+                    ContentBlock::Text {
+                        text: "Let me check.".into(),
+                    },
                 ],
                 stop_reason: StopReason::ToolUse,
                 usage: None,
@@ -431,15 +453,27 @@ mod tests {
         assert_eq!(request.tools.len(), 1);
         assert_eq!(request.tools[0].name, "get_weather");
 
-        let [Message::System { content: system }, Message::User { content: user }, Message::Assistant { content: assistant, .. }, Message::User { content: tool_result }] =
-            &request.chat_history[..]
+        let [
+            Message::System { content: system },
+            Message::User { content: user },
+            Message::Assistant {
+                content: assistant, ..
+            },
+            Message::User {
+                content: tool_result,
+            },
+        ] = &request.chat_history[..]
         else {
             panic!("unexpected chat_history shape: {:?}", request.chat_history);
         };
         assert_eq!(system, "You are terse.");
-        assert!(matches!(user.as_slice(), [UserContent::Text(t)] if t.text == "What is the weather?"));
+        assert!(
+            matches!(user.as_slice(), [UserContent::Text(t)] if t.text == "What is the weather?")
+        );
         assert_eq!(assistant.len(), 3);
-        assert!(matches!(&assistant[0], AssistantContent::Reasoning(r) if reasoning_text(r) == "hmm"));
+        assert!(
+            matches!(&assistant[0], AssistantContent::Reasoning(r) if reasoning_text(r) == "hmm")
+        );
         assert!(matches!(
             &assistant[1],
             AssistantContent::ToolCall(call)
@@ -477,7 +511,9 @@ mod tests {
             "expected an Error event, got {events:?}"
         );
         assert!(
-            !events.iter().any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
             "no Done after error, got {events:?}"
         );
     }
@@ -505,7 +541,12 @@ mod tests {
             temperature: None,
         };
         let stream_fn = rig_stream_fn();
-        let stream = stream_fn(&[AgentMessage::user_text("Reply with exactly: pong")], "You are a terse echo assistant.", &[], &opts);
+        let stream = stream_fn(
+            &[AgentMessage::user_text("Reply with exactly: pong")],
+            "You are a terse echo assistant.",
+            &[],
+            &opts,
+        );
         let events: Vec<LlmStreamEvent> = stream.collect().await;
         let text = events
             .iter()
@@ -516,7 +557,15 @@ mod tests {
             .collect::<String>();
         println!("text: {text:?}");
         println!("events: {events:?}");
-        assert!(events.iter().any(|e| matches!(e, LlmStreamEvent::Done { .. })));
-        assert!(!events.iter().any(|e| matches!(e, LlmStreamEvent::Error { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Error { .. }))
+        );
     }
 }

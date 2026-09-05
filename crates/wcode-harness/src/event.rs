@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 pub enum LlmStreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
-    ToolCallStart { id: String, name: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -16,7 +19,9 @@ pub enum LlmStreamEvent {
         stop_reason: StopReason,
         usage: Option<Usage>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,10 +29,19 @@ pub enum LlmStreamEvent {
 pub enum AgentEvent {
     AgentStart,
     TurnStart,
-    MessageStart { message: AgentMessage },
-    MessageUpdate { message: AgentMessage },
-    MessageEnd { message: AgentMessage },
-    ToolExecutionStart { call_id: String, name: String },
+    MessageStart {
+        message: AgentMessage,
+    },
+    MessageUpdate {
+        message: AgentMessage,
+    },
+    MessageEnd {
+        message: AgentMessage,
+    },
+    ToolExecutionStart {
+        call_id: String,
+        name: String,
+    },
     ToolExecutionUpdate {
         call_id: String,
         name: String,
@@ -39,9 +53,13 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
-    TurnEnd { message: AgentMessage },
+    TurnEnd {
+        message: AgentMessage,
+    },
     /// Stream-level failure; the run ends with `StopReason::Error`.
-    Error { message: String },
+    Error {
+        message: String,
+    },
     AgentEnd,
 }
 
@@ -136,7 +154,10 @@ mod tests {
             name: "run".into(),
         })
         .unwrap();
-        assert_eq!(v, json!({"type": "tool_execution_start", "call_id": "t1", "name": "run"}));
+        assert_eq!(
+            v,
+            json!({"type": "tool_execution_start", "call_id": "t1", "name": "run"})
+        );
 
         let m = AgentMessage::user_text("hi");
         let v2 = serde_json::to_value(&AgentEvent::TurnEnd { message: m }).unwrap();

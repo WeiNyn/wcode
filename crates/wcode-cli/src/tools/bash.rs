@@ -117,7 +117,7 @@ impl TypedTool for Bash {
         ));
         ToolOutput {
             output: parts.join("\n"),
-            is_error: status.code().map_or(true, |c| c != 0),
+            is_error: status.code() != Some(0),
             details: None,
         }
     }
@@ -181,7 +181,10 @@ mod tests {
             .await;
         assert!(out.is_error);
         assert!(out.output.contains("timed out after 1s"));
-        assert!(started.elapsed() < Duration::from_secs(4), "kill must be prompt");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "kill must be prompt"
+        );
     }
 
     #[tokio::test]

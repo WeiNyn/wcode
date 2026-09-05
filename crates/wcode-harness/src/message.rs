@@ -9,9 +9,17 @@ pub enum Role {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Thinking { text: String },
-    ToolCall { id: String, name: String, arguments: serde_json::Value },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -39,7 +47,9 @@ pub enum StopReason {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
-    User { content: Vec<ContentBlock> },
+    User {
+        content: Vec<ContentBlock>,
+    },
     Assistant {
         content: Vec<ContentBlock>,
         stop_reason: StopReason,
@@ -97,12 +107,8 @@ mod tests {
     #[test]
     fn content_block_roundtrip_and_tags() {
         let blocks = vec![
-            ContentBlock::Text {
-                text: "hi".into(),
-            },
-            ContentBlock::Thinking {
-                text: "hmm".into(),
-            },
+            ContentBlock::Text { text: "hi".into() },
+            ContentBlock::Thinking { text: "hmm".into() },
             ContentBlock::ToolCall {
                 id: "t1".into(),
                 name: "run".into(),
@@ -125,7 +131,7 @@ mod tests {
     #[test]
     fn usage_roundtrip_and_omits_none() {
         let u = Usage::default();
-        let v = serde_json::to_value(&u).unwrap();
+        let v = serde_json::to_value(u).unwrap();
         assert_eq!(v, json!({"input_tokens": 0, "output_tokens": 0}));
         let back: Usage = serde_json::from_value(v).unwrap();
         assert_eq!(back, u);
@@ -136,7 +142,7 @@ mod tests {
             cache_read_tokens: Some(5),
             cache_write_tokens: Some(7),
         };
-        let v2 = serde_json::to_value(&u2).unwrap();
+        let v2 = serde_json::to_value(u2).unwrap();
         assert_eq!(
             v2,
             json!({
@@ -271,10 +277,11 @@ mod tests {
         };
         assert_eq!(m.tool_calls().len(), 2);
         assert!(matches!(m.tool_calls()[0], ContentBlock::ToolCall { .. }));
-        assert!(m
-            .tool_calls()
-            .iter()
-            .all(|b| matches!(b, ContentBlock::ToolCall { id, .. } if id == "t1" || id == "t2")));
+        assert!(
+            m.tool_calls().iter().all(
+                |b| matches!(b, ContentBlock::ToolCall { id, .. } if id == "t1" || id == "t2")
+            )
+        );
 
         let u = AgentMessage::user_text("x");
         assert!(u.tool_calls().is_empty());

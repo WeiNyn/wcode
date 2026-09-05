@@ -33,14 +33,14 @@ impl TypedTool for Write {
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().unwrap();
         let path = super::resolve(&ctx.working_dir, &args.path);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return ToolOutput {
-                    output: format!("write {}: {e}", args.path),
-                    is_error: true,
-                    details: None,
-                };
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return ToolOutput {
+                output: format!("write {}: {e}", args.path),
+                is_error: true,
+                details: None,
+            };
         }
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
         let tmp = path.with_extension("tmp-wcode");
@@ -78,7 +78,10 @@ mod tests {
             )
             .await;
         assert!(!out.is_error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
+            "hello"
+        );
         assert!(out.output.contains("5 bytes"));
     }
 }

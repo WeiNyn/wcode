@@ -61,17 +61,14 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = file.model.ok_or(ConfigError::MissingModel)?;
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
-        api_key: env
-            .wcode_api_key
-            .or(env.openai_api_key)
-            .or(file.api_key),
+        api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
         model,
     })
 }
 
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
-        let file = match Self::default_path().map(|p| std::fs::read_to_string(p)) {
+        let file = match Self::default_path().map(std::fs::read_to_string) {
             Some(Ok(text)) => Some(
                 toml::from_str::<FileConfig>(&text)
                     .map_err(|e| ConfigError::Io(format!("config parse error: {e}")))?,

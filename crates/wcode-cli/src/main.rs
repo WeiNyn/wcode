@@ -58,11 +58,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         match flag {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-p" => {
-                a.prompt = Some(
-                    args.get(i)
-                        .ok_or("-p requires a prompt")?
-                        .clone(),
-                );
+                a.prompt = Some(args.get(i).ok_or("-p requires a prompt")?.clone());
                 i += 1;
             }
             "--resume" => {

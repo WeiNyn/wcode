@@ -55,7 +55,14 @@ mod tests {
     #[tokio::test]
     async fn reads_with_offset_and_limit() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), (1..=100).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::write(
+            dir.path().join("f.txt"),
+            (1..=100)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         let out = Read
             .execute(

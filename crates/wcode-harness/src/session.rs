@@ -94,7 +94,10 @@ impl Session {
 
     pub fn append(&mut self, e: SessionEntry) -> io::Result<()> {
         if let Some(path) = &self.path {
-            let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             let line = serde_json::to_string(&e)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             f.write_all(format!("{line}\n").as_bytes())?;
