@@ -2,7 +2,7 @@ use crate::message::{AgentMessage, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 
 /// Internal seam between LLM adapter and agent loop. Not serialized.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LlmStreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
