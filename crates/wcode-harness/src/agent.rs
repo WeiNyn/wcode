@@ -130,7 +130,8 @@ impl Agent {
         // The receivers were consumed by run_loop: re-pair so steer()/
         // follow_up() keep working. Messages queued between runs sit in the
         // stored receivers and reach the next run; only messages still queued
-        // when the loop exits (abort paths) are dropped.
+        // when the loop exits (any run exit; the outer loop checks only
+        // follow_ups) are dropped.
         // ponytail: exit-time stragglers dropped; have run_loop hand the
         // receivers back if that ever matters.
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();

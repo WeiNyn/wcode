@@ -171,19 +171,6 @@ pub async fn run_loop(
                 aborted = true;
             }
 
-            // Errors/aborts are values: end the run even if tool calls exist.
-            if aborted {
-                let _ = sink.send(AgentEvent::AgentEnd);
-                return Ok(StopReason::Aborted);
-            }
-            match captured {
-                Some(StopReason::Error) | Some(StopReason::Aborted) => {
-                    let _ = sink.send(AgentEvent::AgentEnd);
-                    return Ok(captured.unwrap());
-                }
-                _ => {}
-            }
-
             let calls: Vec<(String, String, serde_json::Value)> = assistant
                 .tool_calls()
                 .iter()
@@ -196,6 +183,20 @@ pub async fn run_loop(
                     _ => None,
                 })
                 .collect();
+
+            // Errors/aborts are values: end the run even if tool calls exist.
+            // Every unexecuted call first gets a synthesized error ToolResult
+            // so ctx never keeps a ToolCall without its ToolResult (invalid
+            // history → wire 400s on the next turn, persisted via session).
+            if aborted || matches!(captured, Some(StopReason::Error | StopReason::Aborted)) {
+                synthesize_unexecuted(&sink, ctx, calls.into_iter());
+                let _ = sink.send(AgentEvent::AgentEnd);
+                return Ok(if aborted {
+                    StopReason::Aborted
+                } else {
+                    captured.unwrap()
+                });
+            }
             if calls.is_empty() {
                 break; // turn with no tool calls: outer loop handles follow-ups
             }
@@ -274,28 +275,9 @@ pub async fn run_loop(
                 }
                 if aborted {
                     // Sink died mid-tool-loop: synthesize an error ToolResult
-                    // for every unexecuted call so ctx never keeps a ToolCall
-                    // without its ToolResult. Event sends are best-effort
-                    // here; the abort path already returns Aborted.
-                    for (rid, rname, _) in pending {
-                        let out = ToolOutput {
-                            output: "aborted before execution".to_string(),
-                            is_error: true,
-                            ..ToolOutput::default()
-                        };
-                        let _ = sink.send(AgentEvent::ToolExecutionEnd {
-                            call_id: rid.clone(),
-                            name: rname.clone(),
-                            output: out.output.clone(),
-                            is_error: out.is_error,
-                        });
-                        ctx.push(AgentMessage::ToolResult {
-                            tool_call_id: rid,
-                            name: rname,
-                            output: out.output,
-                            is_error: out.is_error,
-                        });
-                    }
+                    // for every unexecuted call (event sends are best-effort;
+                    // the abort path already returns Aborted).
+                    synthesize_unexecuted(&sink, ctx, pending);
                     break;
                 }
             }
@@ -347,6 +329,35 @@ fn assistant(
         stop_reason,
         usage,
         model: None,
+    }
+}
+
+/// Synthesizes an error ToolResult for every unexecuted tool call so ctx
+/// never keeps a ToolCall without its ToolResult. Event sends are
+/// best-effort (the sink may already be dead).
+fn synthesize_unexecuted(
+    sink: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ctx: &mut Vec<AgentMessage>,
+    calls: impl Iterator<Item = (String, String, serde_json::Value)>,
+) {
+    for (rid, rname, _) in calls {
+        let out = ToolOutput {
+            output: "aborted before execution".to_string(),
+            is_error: true,
+            ..ToolOutput::default()
+        };
+        let _ = sink.send(AgentEvent::ToolExecutionEnd {
+            call_id: rid.clone(),
+            name: rname.clone(),
+            output: out.output.clone(),
+            is_error: out.is_error,
+        });
+        ctx.push(AgentMessage::ToolResult {
+            tool_call_id: rid,
+            name: rname,
+            output: out.output,
+            is_error: out.is_error,
+        });
     }
 }
 

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::{DefaultHooks, Hooks, ToolCall as HookToolCall};
 use wcode_harness::loop_::{LoopConfig, LoopError, run_loop};
-use wcode_harness::message::{AgentMessage, StopReason};
+use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 use wcode_harness::tool::{Tool, ToolContext, ToolOutput, TypedTool, erased};
 
@@ -515,6 +515,56 @@ async fn dead_sink_mid_tool_loop_synthesizes_results() {
         AgentMessage::ToolResult { tool_call_id, name, is_error: true, .. }
             if tool_call_id == "c2" && name == "echo"
     ));
+}
+
+#[tokio::test]
+async fn captured_error_after_tool_call_pairs_tool_results() {
+    // ToolCall followed by Done{Error}: the run ends before tool execution,
+    // but ctx must still pair the call with an error ToolResult — an
+    // unpaired ToolCall is invalid history and 400s on the next turn.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "hello" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Error,
+            usage: None,
+        },
+    ]);
+
+    let (tool, seen) = echo_tool();
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(DefaultHooks));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert!(seen.lock().unwrap().is_empty(), "tool must not execute");
+    // Every ToolCall in ctx is paired with an error ToolResult.
+    let calls: Vec<&str> = ctx
+        .iter()
+        .flat_map(|m| m.tool_calls())
+        .filter_map(|b| match b {
+            ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let results: Vec<(&str, bool)> = ctx
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => Some((tool_call_id.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec!["c1"]);
+    assert_eq!(results, vec![("c1", true)]);
 }
 
 struct StopAfterTurnHooks;

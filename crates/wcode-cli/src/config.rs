@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use wcode_harness::streamfn::LlmOpts;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -35,18 +35,19 @@ impl EnvLike {
     }
 }
 
-/// Typed config failure: `MissingModel` is recoverable via `--model`,
-/// `Io` (unreadable/corrupt file) is not.
+/// Typed config failure: `MissingModel` is recoverable via `--model` (it
+/// carries the parsed file so the rescue keeps base_url/api_key), `Io`
+/// (unreadable/corrupt file) is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    MissingModel,
+    MissingModel(FileConfig),
     Io(String),
 }
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::MissingModel => write!(
+            ConfigError::MissingModel(_) => write!(
                 f,
                 "no model configured: set `model = \"...\"` in ~/.config/wcode/config.toml"
             ),
@@ -58,7 +59,10 @@ impl std::fmt::Display for ConfigError {
 /// Precedence: env (WCODE_* with OPENAI_API_KEY fallback) > toml. Model is
 /// required and comes from the toml only; error tells main what to prompt for.
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
-    let model = file.model.ok_or(ConfigError::MissingModel)?;
+    let model = match file.model.clone() {
+        Some(m) => m,
+        None => return Err(ConfigError::MissingModel(file)),
+    };
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -103,7 +107,10 @@ mod tests {
     #[test]
     fn merge_missing_model_is_typed_error() {
         let e = merge(EnvLike::default(), FileConfig::default()).unwrap_err();
-        assert_eq!(e, ConfigError::MissingModel);
+        let ConfigError::MissingModel(file) = &e else {
+            panic!("wrong error: {e:?}")
+        };
+        assert!(file.model.is_none());
         assert!(e.to_string().contains("no model configured"));
     }
 

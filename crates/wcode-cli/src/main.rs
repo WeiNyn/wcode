@@ -83,14 +83,15 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     Ok(Parsed::Args(a))
 }
 
-/// MissingModel rescue: re-run merge() so env base_url/api_key survive a
-/// file config that lacks `model`; the flag model fills the gap.
-fn rescue(model: String, env: EnvLike) -> Config {
+/// MissingModel rescue: re-run merge() with the parsed file config so env
+/// AND toml base_url/api_key survive a file that lacks `model`; the flag
+/// model fills the gap. Flag overrides are applied by the caller below.
+fn rescue(model: String, file: FileConfig, env: EnvLike) -> Config {
     merge(
         env,
         FileConfig {
             model: Some(model),
-            ..FileConfig::default()
+            ..file
         },
     )
     .expect("model set, merge cannot fail")
@@ -119,11 +120,15 @@ async fn main() {
     // errors (unreadable/corrupt) still surface.
     let mut cfg = match Config::load() {
         Ok(c) => c,
-        Err(ConfigError::MissingModel) if args.model.is_some() => {
-            // merge() never ran (file lacked model): rescue re-runs it so
-            // WCODE_BASE_URL/WCODE_API_KEY survive; `--base-url` flag is
-            // applied below, so flag still beats env there.
-            rescue(args.model.clone().expect("--model"), EnvLike::from_env())
+        Err(ConfigError::MissingModel(file)) if args.model.is_some() => {
+            // merge() never ran (file lacked model): rescue re-runs it with
+            // the parsed file so toml/env base_url+api_key survive;
+            // `--model`/`--base-url` flags are applied below and still win.
+            rescue(
+                args.model.clone().expect("--model"),
+                file,
+                EnvLike::from_env(),
+            )
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -312,6 +317,7 @@ mod tests {
         // --model rescue keeps env base_url/api_key via merge(); flag model wins.
         let cfg = rescue(
             "flag-model".into(),
+            FileConfig::default(),
             EnvLike {
                 wcode_base_url: Some("http://env".into()),
                 wcode_api_key: Some("k-env".into()),
@@ -321,6 +327,25 @@ mod tests {
         assert_eq!(cfg.model, "flag-model");
         assert_eq!(cfg.base_url.as_deref(), Some("http://env"));
         assert_eq!(cfg.api_key.as_deref(), Some("k-env"));
+    }
+
+    #[test]
+    fn rescue_carries_toml_base_url_and_api_key() {
+        // toml has base_url+api_key but no model: rescue must keep both
+        // (dropping them misrouted traffic to the default endpoint), with
+        // the flag model filling the gap. Env still beats toml.
+        let cfg = rescue(
+            "flag-model".into(),
+            FileConfig {
+                base_url: Some("http://toml".into()),
+                api_key: Some("k-toml".into()),
+                model: None,
+            },
+            EnvLike::default(),
+        );
+        assert_eq!(cfg.model, "flag-model");
+        assert_eq!(cfg.base_url.as_deref(), Some("http://toml"));
+        assert_eq!(cfg.api_key.as_deref(), Some("k-toml"));
     }
 
     #[test]
