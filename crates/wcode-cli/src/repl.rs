@@ -13,7 +13,7 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::DefaultHooks;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
-use wcode_harness::streamfn::{LlmOpts, list_models, rig_stream_fn};
+use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
 use crate::tools::default_tools;
 
@@ -40,6 +40,9 @@ pub enum Command {
     /// Some(path) = open that session; None = latest in the session dir.
     Resume(Option<String>),
     Sessions,
+    /// Rebuild (`cargo build --bin wcode`) and re-exec into the same
+    /// session. `no_session` = start fresh with `--no-session`.
+    Reload { no_session: bool },
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -59,6 +62,11 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "effort" => Some(Command::Effort(arg)),
         "resume" => Some(Command::Resume(arg)),
         "sessions" => Some(Command::Sessions),
+        "reload" => match arg.as_deref() {
+            None => Some(Command::Reload { no_session: false }),
+            Some("--no-session") => Some(Command::Reload { no_session: true }),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -189,6 +197,148 @@ pub fn build_agent(llm: LlmOpts, session: Option<Session>, context: Vec<AgentMes
     })
 }
 
+/// Re-exec argv for `/reload`: resume the session (or `--no-session`) and
+/// forward the effective LLM opts so flag overrides survive the re-exec
+/// (the session only records model/effort *changes*, not launch flags).
+pub fn reload_args(llm: &LlmOpts, session: Option<&Path>, no_session: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if no_session || session.is_none() {
+        args.push("--no-session".to_string());
+    } else if let Some(p) = session {
+        args.push("--resume".to_string());
+        args.push(p.display().to_string());
+    }
+    args.push("--model".to_string());
+    args.push(llm.model.clone());
+    if let Some(url) = &llm.base_url {
+        args.push("--base-url".to_string());
+        args.push(url.clone());
+    }
+    args.push("--endpoint".to_string());
+    args.push(
+        match llm.endpoint {
+            LlmEndpoint::Chat => "chat",
+            LlmEndpoint::Responses => "responses",
+        }
+        .to_string(),
+    );
+    args.push("--effort".to_string());
+    args.push(llm.effort.clone().unwrap_or_else(|| "-".to_string()));
+    args
+}
+
+/// Cargo root for the rebuild. The running binary is authoritative: a
+/// cargo-built `wcode` lives at `<root>/target/{debug,release}/wcode`, so
+/// walking up from the exe finds the workspace that owns it. The cwd is a
+/// fallback, in case the binary was copied out of `target/`.
+fn build_dir() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        roots.push(dir.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        let mut d = root.as_path();
+        loop {
+            if d.join("Cargo.toml").exists() {
+                return Some(d.to_path_buf());
+            }
+            match d.parent() {
+                Some(p) => d = p,
+                None => break,
+            }
+        }
+    }
+    None
+}
+
+/// `/reload [--no-session]`: `cargo build --bin wcode` first — a failed
+/// build keeps the old binary running. On success re-exec the (possibly
+/// replaced) binary with `--resume <current>` so the session continues.
+/// Ctrl-C during the build kills it and stays in the REPL.
+async fn reload(
+    agent: &Agent,
+    llm: &LlmOpts,
+    no_session: bool,
+    in_flight: &AtomicBool,
+    cancel_slot: &Mutex<CancellationToken>,
+) {
+    use std::sync::atomic::Ordering;
+    let Some(dir) = build_dir() else {
+        eprintln!("reload: no Cargo.toml above cwd or binary");
+        return;
+    };
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("reload: current exe: {e}");
+            return;
+        }
+    };
+    println!("rebuilding in {} ...", dir.display());
+    // Build-scoped token: Ctrl-C during the build must not poison the
+    // agent's own cancel token (shared with the next `run()`).
+    let build_cancel = CancellationToken::new();
+    *cancel_slot.lock().unwrap() = build_cancel.clone();
+    in_flight.store(true, Ordering::SeqCst);
+    let mut child = match tokio::process::Command::new("cargo")
+        .arg("build")
+        .arg("--bin")
+        .arg("wcode")
+        .current_dir(&dir)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            in_flight.store(false, Ordering::SeqCst);
+            *cancel_slot.lock().unwrap() = agent.cancel_token();
+            eprintln!("reload: cargo: {e}");
+            return;
+        }
+    };
+    let status = tokio::select! {
+        biased;
+        _ = build_cancel.cancelled() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            None
+        }
+        s = child.wait() => s.ok(),
+    };
+    in_flight.store(false, Ordering::SeqCst);
+    *cancel_slot.lock().unwrap() = agent.cancel_token();
+    match status {
+        Some(s) if s.success() => {}
+        Some(s) => {
+            eprintln!("reload: build failed ({s}); staying on current binary");
+            return;
+        }
+        None => {
+            println!("(reload cancelled)");
+            return;
+        }
+    }
+    let args = reload_args(llm, agent.session_path(), no_session);
+    println!("reloading {} ...", exe.display());
+    let _ = io::stdout().flush();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let err = std::process::Command::new(&exe).args(&args).exec();
+        eprintln!("reload: exec: {err}");
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&exe).args(&args).spawn() {
+            Ok(_) => std::process::exit(0),
+            Err(e) => eprintln!("reload: spawn: {e}"),
+        }
+    }
+}
 /// `/models [filter]`: list `GET {base_url}/models` ids, `*` marks the
 /// current model. Filter is a case-insensitive substring on the id.
 async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
@@ -365,6 +515,9 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                 }
                 Err(e) => eprintln!("list sessions: {e}"),
             },
+            Some(Command::Reload { no_session }) => {
+                reload(&agent, &llm, no_session, &in_flight, &cancel_slot).await
+            }
             None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
         }
     }
@@ -499,6 +652,61 @@ mod tests {
         );
         assert_eq!(parse_command("/sessions"), Some(Command::Sessions));
         assert_eq!(parse_command("/sessions now"), Some(Command::Sessions));
+        assert_eq!(
+            parse_command("/reload"),
+            Some(Command::Reload { no_session: false })
+        );
+        assert_eq!(
+            parse_command("/reload --no-session"),
+            Some(Command::Reload { no_session: true })
+        );
+        assert_eq!(parse_command("/reload foo"), None);
+    }
+
+    #[test]
+    fn reload_args_resume_and_forward_opts() {
+        let llm = LlmOpts {
+            model: "gpt-x".to_string(),
+            base_url: Some("http://x/v1".to_string()),
+            api_key: None,
+            temperature: None,
+            endpoint: LlmEndpoint::Chat,
+            effort: Some("high".to_string()),
+        };
+        assert_eq!(
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false),
+            vec![
+                "--resume",
+                "/s/a.jsonl",
+                "--model",
+                "gpt-x",
+                "--base-url",
+                "http://x/v1",
+                "--endpoint",
+                "chat",
+                "--effort",
+                "high",
+            ]
+        );
+    }
+
+    #[test]
+    fn reload_args_no_session_and_defaults() {
+        let llm = LlmOpts {
+            model: "m".to_string(),
+            ..LlmOpts::default()
+        };
+        // explicit flag wins, even with a session open
+        assert_eq!(
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true)[..2],
+            ["--no-session".to_string(), "--model".to_string()],
+        );
+        // no session file: fresh start, cleared effort round-trips as "-"
+        let args = reload_args(&llm, None, false);
+        assert_eq!(args[0], "--no-session");
+        assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
+        assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
+        assert!(!args.iter().any(|a| a == "--base-url"));
     }
 
     #[test]
