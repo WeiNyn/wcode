@@ -12,26 +12,29 @@ mod config;
 mod repl;
 mod tools;
 
-use crate::config::{Config, ConfigError, EnvLike, FileConfig, merge};
+use crate::config::{Config, ConfigError, EnvLike, FileConfig, merge, parse_endpoint};
 use crate::repl::{build_agent, list_sessions, resolve_session_path, session_dir};
 
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
   --no-session       don't record a session file
-  --model <id>       override the configured model
-  --base-url <url>   override the configured base URL
-  -h, --help         show this help
+   --model <id>       override the configured model
+   --base-url <url>   override the configured base URL
+   --endpoint <e>     override the configured endpoint (chat|responses)
+   -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
   model = \"...\"      (required)
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
-env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback";
+  endpoint = \"...\"   (optional, chat|responses, default chat)
+env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
+env: WCODE_ENDPOINT overrides the toml endpoint";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -41,6 +44,7 @@ struct Args {
     no_session: bool,
     model: Option<String>,
     base_url: Option<String>,
+    endpoint: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,6 +79,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             }
             "--base-url" => {
                 a.base_url = Some(args.get(i).ok_or("--base-url requires a url")?.clone());
+                i += 1;
+            }
+            "--endpoint" => {
+                a.endpoint = Some(args.get(i).ok_or("--endpoint requires chat|responses")?.clone());
                 i += 1;
             }
             other => return Err(format!("unexpected argument: {other}")),
@@ -147,6 +155,15 @@ async fn main() {
     }
     if let Some(u) = args.base_url.clone() {
         cfg.base_url = Some(u);
+    }
+    if let Some(e) = args.endpoint.as_deref() {
+        match parse_endpoint(Some(e)) {
+            Ok(endpoint) => cfg.endpoint = endpoint,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                std::process::exit(2);
+            }
+        }
     }
     let llm = cfg.to_llm_opts();
 
@@ -307,6 +324,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_endpoint_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--endpoint", "responses"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.endpoint.as_deref(), Some("responses"));
+        let Parsed::Args(a) = parse_args(&args(&["--endpoint", "chat"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.endpoint.as_deref(), Some("chat"));
+        assert!(parse_args(&args(&["--endpoint"])).is_err());
+    }
+
+    #[test]
     fn parse_help() {
         assert_eq!(parse_args(&args(&["-h"])), Ok(Parsed::Help));
         assert_eq!(parse_args(&args(&["--help"])), Ok(Parsed::Help));
@@ -340,6 +370,7 @@ mod tests {
                 base_url: Some("http://toml".into()),
                 api_key: Some("k-toml".into()),
                 model: None,
+                ..FileConfig::default()
             },
             EnvLike::default(),
         );

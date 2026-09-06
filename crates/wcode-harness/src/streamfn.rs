@@ -10,16 +10,23 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
 use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, CompletionRequest, FinishReason, ToolDefinition};
+use rig::completion::{CompletionError, CompletionModel, CompletionRequest, FinishReason, ToolDefinition};
 use rig::message::{
     AssistantContent, Message, Reasoning, ReasoningContent, ToolCall, ToolCallId, ToolFunction,
     UserContent,
 };
 use rig::providers::openai;
-use rig::streaming::StreamedAssistantContent;
+use rig::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 
 use crate::event::LlmStreamEvent;
 use crate::message::{AgentMessage, ContentBlock, StopReason};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LlmEndpoint {
+    #[default]
+    Chat,
+    Responses,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct LlmOpts {
@@ -27,6 +34,7 @@ pub struct LlmOpts {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub temperature: Option<f64>,
+    pub endpoint: LlmEndpoint,
 }
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
@@ -56,20 +64,33 @@ fn adapt(
     if let Some(base_url) = &opts.base_url {
         builder = builder.base_url(base_url);
     }
-    let model = match builder.build() {
-        Ok(client) => client
-            .completions_api()
-            .completion_model(opts.model.clone()),
+    let client = match builder.build() {
+        Ok(client) => client,
         Err(e) => return error_stream(format!("openai client: {e}")),
     };
     let request = build_request(messages, system, tools, opts);
+
+    // Both wires yield the same normalized StreamingCompletionResponse, so
+    // only model construction branches; the forwarding loop below is shared.
+    let stream_fut: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>> + Send>,
+    > = match opts.endpoint {
+        LlmEndpoint::Chat => {
+            let model = client.completions_api().completion_model(opts.model.clone());
+            Box::pin(async move { model.stream(request).await })
+        }
+        LlmEndpoint::Responses => {
+            let model = client.completion_model(opts.model.clone());
+            Box::pin(async move { model.stream(request).await })
+        }
+    };
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return error_stream("StreamFn requires a tokio runtime".to_string());
     };
     runtime.spawn(async move {
-        let mut stream = match model.stream(request).await {
+        let mut stream = match stream_fut.await {
             Ok(stream) => stream,
             Err(e) => {
                 let _ = tx.send(LlmStreamEvent::Error {
@@ -414,6 +435,7 @@ mod tests {
             base_url: None,
             api_key: None,
             temperature: Some(0.5),
+            ..LlmOpts::default()
         };
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
@@ -488,6 +510,33 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn endpoint_defaults_to_chat() {
+        let opts = LlmOpts {
+            model: "m1".to_string(),
+            base_url: None,
+            api_key: None,
+            temperature: None,
+            endpoint: LlmEndpoint::Chat,
+        };
+        assert_eq!(opts.endpoint, LlmEndpoint::Chat);
+        assert_eq!(LlmOpts::default().endpoint, LlmEndpoint::Chat);
+    }
+
+    #[test]
+    fn responses_request_builds_against_default_client_type() {
+        use rig::client::CompletionClient;
+        let client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://127.0.0.1:9/v1")
+            .build()
+            .expect("client builds without network");
+        let model = client.completion_model("some-model");
+        let request = build_request(&[], "sys", &[], &LlmOpts::default());
+        let fut = rig::completion::CompletionModel::stream(&model, request);
+        drop(fut);
+    }
+
     /// Unreachable endpoint: the adapter surfaces an `Error` event and no
     /// `Done`, at the stream level (initial request failure).
     #[tokio::test]
@@ -497,6 +546,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:9/v1".to_string()),
             api_key: Some("test-key".to_string()),
             temperature: None,
+            ..LlmOpts::default()
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(&[], "sys", &[], &opts);
@@ -518,6 +568,36 @@ mod tests {
         );
     }
 
+    /// Responses path hits the same shared forwarding loop: unreachable
+    /// endpoint surfaces `Error` and no `Done`.
+    #[tokio::test]
+    async fn responses_adapter_surfaces_error_without_done() {
+        let opts = LlmOpts {
+            model: "m1".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: Some("test-key".to_string()),
+            temperature: None,
+            endpoint: LlmEndpoint::Responses,
+        };
+        let stream_fn = rig_stream_fn();
+        let stream = stream_fn(&[], "sys", &[], &opts);
+        let events: Vec<LlmStreamEvent> =
+            tokio::time::timeout(std::time::Duration::from_secs(10), stream.collect())
+                .await
+                .expect("stream terminates");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Error { .. })),
+            "expected an Error event, got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "no Done after error, got {events:?}"
+        );
+    }
     /// Live smoke: real OpenAI-compatible endpoint, gated on env.
     #[tokio::test]
     #[ignore = "live test; run with WCODE_LIVE=1 WCODE_BASE_URL=... WCODE_API_KEY=... WCODE_MODEL=... cargo test -p wcode-harness --lib -- --ignored"]
@@ -539,6 +619,7 @@ mod tests {
             base_url: Some(base_url),
             api_key: Some(api_key),
             temperature: None,
+            ..LlmOpts::default()
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(

@@ -113,7 +113,7 @@ user text ──▶ Agent.run()
 
 | Crate | Used by | For |
 |---|---|---|
-| `rig` 0.42 (`default-features=false`, `reqwest`, `rustls`) | harness | openai-Completions streaming client, `ToolDefinition`, `StreamedAssistantContent`/`StreamFinal` |
+| `rig` 0.42 (`default-features=false`, `reqwest`, `rustls`) | harness | openai-Completions streaming client, `ToolDefinition`, `StreamedAssistantContent`/`StreamFinal` — `streamfn.rs` branches `LlmEndpoint::Chat` (completions client) vs `Responses` (default Responses client), sharing one forwarding loop |
 | `tokio` | both | runtime, process (bash), channels |
 | `tokio-util` | harness, repl | `CancellationToken` |
 | `async-trait` | harness | dyn-safe `TypedTool`/`Hooks` |

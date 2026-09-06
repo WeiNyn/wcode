@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use wcode_harness::streamfn::LlmOpts;
+use wcode_harness::streamfn::{LlmEndpoint, LlmOpts};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub struct Config {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: String,
+    pub endpoint: LlmEndpoint,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -23,6 +25,7 @@ pub struct EnvLike {
     pub wcode_base_url: Option<String>,
     pub wcode_api_key: Option<String>,
     pub openai_api_key: Option<String>,
+    pub wcode_endpoint: Option<String>,
 }
 
 impl EnvLike {
@@ -31,6 +34,7 @@ impl EnvLike {
             wcode_base_url: std::env::var("WCODE_BASE_URL").ok(),
             wcode_api_key: std::env::var("WCODE_API_KEY").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
+            wcode_endpoint: std::env::var("WCODE_ENDPOINT").ok(),
         }
     }
 }
@@ -63,11 +67,29 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         Some(m) => m,
         None => return Err(ConfigError::MissingModel(file)),
     };
+    let endpoint = parse_endpoint(
+        env.wcode_endpoint
+            .as_deref()
+            .or(file.endpoint.as_deref()),
+    )
+    .map_err(ConfigError::Io)?;
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
         model,
+        endpoint,
     })
+}
+
+pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(LlmEndpoint::Chat),
+        Some("chat") => Ok(LlmEndpoint::Chat),
+        Some("responses") => Ok(LlmEndpoint::Responses),
+        Some(other) => Err(format!(
+            "unknown endpoint {other:?}: valid values are \"chat\", \"responses\""
+        )),
+    }
 }
 
 impl Config {
@@ -96,6 +118,7 @@ impl Config {
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             temperature: None,
+            endpoint: self.endpoint,
         }
     }
 }
@@ -125,10 +148,46 @@ mod tests {
                 model: Some("m1".into()),
                 base_url: Some("http://file".into()),
                 api_key: None,
+                ..FileConfig::default()
             },
         )
         .unwrap();
         assert_eq!(cfg.base_url.as_deref(), Some("http://env"));
         assert_eq!(cfg.model, "m1");
+    }
+
+    #[test]
+    fn endpoint_parses_chat_and_responses() {
+        assert_eq!(parse_endpoint(None).unwrap(), LlmEndpoint::Chat);
+        assert_eq!(parse_endpoint(Some("chat")).unwrap(), LlmEndpoint::Chat);
+        assert_eq!(
+            parse_endpoint(Some("responses")).unwrap(),
+            LlmEndpoint::Responses
+        );
+    }
+
+    #[test]
+    fn endpoint_rejects_unknown_value() {
+        let err = parse_endpoint(Some("grpc")).unwrap_err();
+        assert!(err.contains("grpc"), "error names the value: {err}");
+        assert!(err.contains("chat") && err.contains("responses"));
+    }
+
+    #[test]
+    fn endpoint_env_beats_toml() {
+        let cfg = merge(
+            EnvLike {
+                wcode_endpoint: Some("responses".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                endpoint: Some("chat".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
+        assert_eq!(cfg.to_llm_opts().endpoint, LlmEndpoint::Responses);
     }
 }
