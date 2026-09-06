@@ -5,7 +5,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::event::AgentEvent;
-use crate::hooks::Hooks;
+use crate::hooks::HooksSet;
 use crate::loop_::{LoopConfig, LoopError, run_loop};
 use crate::message::{AgentMessage, StopReason};
 use crate::session::{Session, SessionEntry};
@@ -17,7 +17,7 @@ pub struct AgentConfig {
     pub tools: Vec<Tool>,
     pub llm: LlmOpts,
     pub stream_fn: StreamFn,
-    pub hooks: Arc<dyn Hooks>,
+    pub hooks: HooksSet,
     pub session: Option<Session>, // None = no persistence
     /// Prior messages seeding the conversation (e.g. resumed session history).
     pub context: Vec<AgentMessage>,
@@ -28,7 +28,7 @@ pub struct Agent {
     tools: Vec<Tool>,
     llm: LlmOpts,
     stream_fn: StreamFn,
-    hooks: Arc<dyn Hooks>,
+    hooks: HooksSet,
     session: Option<Session>,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
@@ -138,7 +138,7 @@ impl Agent {
             tools: self.tools.clone(),
             llm: self.llm.clone(),
             stream_fn: Arc::clone(&self.stream_fn),
-            hooks: Arc::clone(&self.hooks),
+            hooks: self.hooks.clone(),
             steering,
             follow_ups,
             cancel: self.cancel.clone(),

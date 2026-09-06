@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::event::{AgentEvent, LlmStreamEvent};
-use crate::hooks::{Hooks, ToolCall as HookToolCall};
+use crate::hooks::{HooksSet, ToolCall as HookToolCall};
 use crate::message::{AgentMessage, ContentBlock, StopReason, Usage};
 use crate::streamfn::{LlmOpts, StreamFn};
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -14,7 +12,7 @@ pub struct LoopConfig {
     pub tools: Vec<Tool>,
     pub llm: LlmOpts,
     pub stream_fn: StreamFn,
-    pub hooks: Arc<dyn Hooks>,
+    pub hooks: HooksSet,
     pub steering: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
     pub follow_ups: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
     pub cancel: CancellationToken,
@@ -203,12 +201,16 @@ pub async fn run_loop(
 
             // Tool execution (sequential).
             let mut pending = calls.into_iter();
-            while let Some((id, name, arguments)) = pending.next() {
-                let hook_call = HookToolCall {
+            while let Some((id, name, mut arguments)) = pending.next() {
+                let mut hook_call = HookToolCall {
                     id: id.clone(),
                     name: name.clone(),
                     arguments: arguments.clone(),
                 };
+                // Rewrites/transforms run before everything else so what
+                // executes, blocks and is logged is the final command.
+                cfg.hooks.transform_tool_input(&mut hook_call).await;
+                arguments = hook_call.arguments.clone();
                 let start_sent = sink
                     .send(AgentEvent::ToolExecutionStart {
                         call_id: id.clone(),

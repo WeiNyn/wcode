@@ -1,7 +1,19 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts};
+
+use crate::rtk::RtkPreference;
+
+/// Hook integrations, loaded from the `[hooks]` config table.
+///
+/// Built-in native hooks always have a default even when the table is absent:
+/// `rtk = "auto"` — enabled only if the rtk binary is reachable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub rtk: RtkPreference,
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
@@ -10,6 +22,8 @@ pub struct FileConfig {
     pub model: Option<String>,
     pub endpoint: Option<String>,
     pub effort: Option<String>,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +33,7 @@ pub struct Config {
     pub model: String,
     pub endpoint: LlmEndpoint,
     pub effort: Option<String>,
+    pub hooks: HooksConfig,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -29,6 +44,7 @@ pub struct EnvLike {
     pub openai_api_key: Option<String>,
     pub wcode_endpoint: Option<String>,
     pub wcode_effort: Option<String>,
+    pub wcode_rtk: Option<String>,
 }
 
 impl EnvLike {
@@ -39,6 +55,7 @@ impl EnvLike {
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             wcode_endpoint: std::env::var("WCODE_ENDPOINT").ok(),
             wcode_effort: std::env::var("WCODE_EFFORT").ok(),
+            wcode_rtk: std::env::var("WCODE_RTK").ok(),
         }
     }
 }
@@ -67,6 +84,7 @@ impl std::fmt::Display for ConfigError {
 /// Precedence: env (WCODE_* with OPENAI_API_KEY fallback) > toml. Model is
 /// required and comes from the toml only; error tells main what to prompt for.
 /// Effort is optional, free-style, passed through verbatim.
+#[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = match file.model.clone() {
         Some(m) => m,
@@ -78,12 +96,17 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             .or(file.endpoint.as_deref()),
     )
     .map_err(ConfigError::Io)?;
+    let mut hooks = file.hooks;
+    if let Some(v) = env.wcode_rtk.as_deref() {
+        hooks.rtk = RtkPreference::parse(Some(v)).map_err(ConfigError::Io)?;
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
         model,
         endpoint,
         effort: env.wcode_effort.or(file.effort),
+        hooks,
     })
 }
 
@@ -99,6 +122,7 @@ pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
 }
 
 impl Config {
+    #[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
     pub fn load() -> Result<Config, ConfigError> {
         let file = match Self::default_path().map(std::fs::read_to_string) {
             Some(Ok(text)) => Some(
@@ -227,5 +251,73 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.effort, None);
+    }
+
+    #[test]
+    fn hooks_default_to_auto_rtk() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        // Built-in native hook: present with its default even with no `[hooks]`.
+        assert_eq!(cfg.hooks, HooksConfig::default());
+        assert_eq!(cfg.hooks.rtk, RtkPreference::Auto);
+    }
+
+    #[test]
+    fn rtk_env_beats_toml() {
+        let cfg = merge(
+            EnvLike {
+                wcode_rtk: Some("off".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                hooks: HooksConfig {
+                    rtk: RtkPreference::On,
+                },
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.hooks.rtk, RtkPreference::Off);
+    }
+
+    #[test]
+    fn invalid_rtk_env_is_config_error() {
+        let err = merge(
+            EnvLike {
+                wcode_rtk: Some("sometimes".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::Io(msg) = &err else { panic!("wrong error: {err:?}") };
+        assert!(msg.contains("sometimes"), "names the value: {msg}");
+    }
+
+    #[test]
+    fn toml_hooks_accept_bool_and_string_rtk() {
+        let file: FileConfig =
+            toml::from_str("model = \"m1\"\n[hooks]\nrtk = true").unwrap();
+        assert_eq!(file.hooks.rtk, RtkPreference::On);
+        let file: FileConfig =
+            toml::from_str("model = \"m1\"\n[hooks]\nrtk = \"auto\"").unwrap();
+        assert_eq!(file.hooks.rtk, RtkPreference::Auto);
+    }
+
+    #[test]
+    fn toml_invalid_rtk_fails_parse() {
+        let err = toml::from_str::<FileConfig>("model = \"m1\"\n[hooks]\nrtk = \"sometimes\"")
+            .unwrap_err();
+        assert!(err.to_string().contains("sometimes"), "names it: {err}");
     }
 }

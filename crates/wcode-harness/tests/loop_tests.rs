@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
-use wcode_harness::hooks::{DefaultHooks, Hooks, ToolCall as HookToolCall};
+use wcode_harness::hooks::{Hooks, HooksSet, ToolCall as HookToolCall};
 use wcode_harness::loop_::{LoopConfig, LoopError, run_loop};
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
@@ -110,7 +110,7 @@ struct TestSetup {
     follow_tx: mpsc::UnboundedSender<AgentMessage>,
 }
 
-fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: Arc<dyn Hooks>) -> TestSetup {
+fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
     let (steer_tx, steering) = mpsc::unbounded_channel();
     let (follow_tx, follow_ups) = mpsc::unbounded_channel();
     TestSetup {
@@ -180,7 +180,7 @@ async fn plain_text_turn() {
             usage: None,
         },
     ]);
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -243,7 +243,7 @@ async fn tool_call_roundtrip() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, _events) = run(cfg, &mut ctx).await;
@@ -291,7 +291,7 @@ async fn invalid_tool_args_yield_error_tool_result_and_loop_continues() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, _events) = run(cfg, &mut ctx).await;
@@ -343,7 +343,7 @@ async fn before_tool_call_blocks() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(BlockingHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(BlockingHooks)));
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -371,6 +371,70 @@ async fn before_tool_call_blocks() {
     assert_eq!(rec.calls().len(), 2, "loop continues after a blocked call");
 }
 
+struct RenameHooks;
+
+#[async_trait::async_trait]
+impl Hooks for RenameHooks {
+    async fn transform_tool_input(&self, call: &mut HookToolCall) {
+        if let Some(obj) = call.arguments.as_object_mut()
+            && let Some(text) = obj.get("text").and_then(|t| t.as_str())
+        {
+            obj.insert(
+                "text".to_string(),
+                serde_json::json!(format!("rewritten:{text}")),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn transform_tool_input_rewrites_args_before_execution() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "hello" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let (tool, seen) = echo_tool();
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(RenameHooks)));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(
+        &*seen.lock().unwrap(),
+        &vec!["rewritten:hello".to_string()],
+        "tool sees the rewritten argument"
+    );
+    let end = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .expect("ToolExecutionEnd emitted");
+    assert_eq!(end, "echo:rewritten:hello");
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { output, .. } if output == "echo:rewritten:hello"
+    ));
+}
+
 struct PatchingHooks;
 
 #[async_trait::async_trait]
@@ -396,7 +460,7 @@ async fn after_tool_call_patches() {
     ]);
 
     let (tool, _seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(PatchingHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(PatchingHooks)));
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -425,7 +489,7 @@ async fn abort_mid_stream() {
         let delta = futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())]);
         Box::pin(delta.chain(futures::stream::pending())) as LlmStream
     });
-    let TestSetup { cfg, .. } = setup(stream_fn, vec![], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![], HooksSet::default());
     let cfg = LoopConfig { cancel, ..cfg };
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
@@ -486,7 +550,7 @@ async fn dead_sink_mid_tool_loop_synthesizes_results() {
         Box::pin(futures::stream::iter(events.clone())) as LlmStream
     });
     let (tool, _seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(stream_fn, vec![tool], Arc::new(YieldThenBlockHooks));
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![tool], HooksSet::one(Arc::new(YieldThenBlockHooks)));
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -536,7 +600,7 @@ async fn captured_error_after_tool_call_pairs_tool_results() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, _events) = run(cfg, &mut ctx).await;
@@ -595,7 +659,7 @@ async fn should_stop_after_turn() {
     let TestSetup { cfg, .. } = setup(
         fake_stream_fn(&rec),
         vec![tool],
-        Arc::new(StopAfterTurnHooks),
+        HooksSet::one(Arc::new(StopAfterTurnHooks)),
     );
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
@@ -626,7 +690,7 @@ async fn follow_up_runs_next_turn() {
     ]);
 
     let TestSetup { cfg, follow_tx, .. } =
-        setup(fake_stream_fn(&rec), vec![], Arc::new(DefaultHooks));
+        setup(fake_stream_fn(&rec), vec![], HooksSet::default());
     follow_tx.send(AgentMessage::user_text("follow")).unwrap();
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
@@ -660,7 +724,7 @@ async fn steering_is_drained_before_streaming() {
     ]);
 
     let TestSetup { cfg, steer_tx, .. } =
-        setup(fake_stream_fn(&rec), vec![], Arc::new(DefaultHooks));
+        setup(fake_stream_fn(&rec), vec![], HooksSet::default());
     steer_tx.send(AgentMessage::user_text("steer")).unwrap();
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
@@ -700,7 +764,7 @@ async fn default_hooks_smoke() {
     ]);
 
     let (tool, _seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], Arc::new(DefaultHooks));
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;

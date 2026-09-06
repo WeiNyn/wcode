@@ -21,10 +21,16 @@ base_url = "https://api.openai.com/v1"  # optional; any OpenAI-compatible endpoi
 api_key = "sk-..."     # optional
 endpoint = "chat"      # optional; chat|responses, default chat
 effort = "high"        # optional; free-style reasoning effort, omitted = not sent
+
+[hooks]
+rtk = "auto"           # optional; auto|true|false — route bash output through the
+                       # rtk proxy (https://github.com/rtk-ai/rtk) to cut tokens
+                       # (default auto = on only if the rtk binary is on PATH)
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
-`OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT` and `WCODE_EFFORT`.
+`OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT` and
+`WCODE_RTK`.
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with

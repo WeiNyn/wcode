@@ -10,10 +10,11 @@ use wcode_harness::session::Session;
 
 mod config;
 mod repl;
+mod rtk;
 mod tools;
 
 use crate::config::{Config, ConfigError, EnvLike, FileConfig, merge, parse_endpoint};
-use crate::repl::{build_agent, list_sessions, resolve_session_path, session_dir};
+use crate::repl::{build_agent, default_hooks, list_sessions, resolve_session_path, session_dir};
 
 const USAGE: &str = "\
 wcode — minimal coding agent
@@ -36,8 +37,12 @@ config: ~/.config/wcode/config.toml
   api_key = \"...\"    (optional)
   endpoint = \"...\"   (optional, chat|responses, default chat)
   effort = \"...\"     (optional, free-style reasoning effort, omitted = not sent)
+
+  [hooks]
+  rtk = \"...\"        (optional, auto|true|false; route bash output through the rtk proxy to cut tokens)
 env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
-env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort";
+env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort
+env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -255,11 +260,12 @@ async fn main() {
         },
     };
 
-    let mut agent = build_agent(llm.clone(), session, context);
+    let hooks = default_hooks(&cfg.hooks);
+    let mut agent = build_agent(llm.clone(), hooks.clone(), session, context);
 
     match args.prompt {
         Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
-        None => repl::run(agent, llm).await,
+        None => repl::run(agent, llm, hooks).await,
     }
 }
 

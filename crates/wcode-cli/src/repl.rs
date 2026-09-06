@@ -10,11 +10,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::event::AgentEvent;
-use wcode_harness::hooks::DefaultHooks;
+use wcode_harness::hooks::HooksSet;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
+use crate::config::HooksConfig;
+use crate::rtk::RtkHooks;
 use crate::tools::default_tools;
 
 const DIM: &str = "\x1b[2m";
@@ -240,13 +242,25 @@ pub fn resolve_session_path(arg: &str) -> PathBuf {
     }
 }
 
-pub fn build_agent(llm: LlmOpts, session: Option<Session>, context: Vec<AgentMessage>) -> Agent {
+/// Materialize the default hook set from config. Every built-in native hook
+/// gets a slot here — rtk first — so future integrations each add one entry
+/// (plus a field in [`HooksConfig`]) and nothing in the loop changes.
+pub fn default_hooks(cfg: &HooksConfig) -> HooksSet {
+    HooksSet::one(Arc::new(RtkHooks::new(cfg.rtk)))
+}
+
+pub fn build_agent(
+    llm: LlmOpts,
+    hooks: HooksSet,
+    session: Option<Session>,
+    context: Vec<AgentMessage>,
+) -> Agent {
     Agent::new(AgentConfig {
         system: SYSTEM_PROMPT.into(),
         tools: default_tools(),
         llm,
         stream_fn: rig_stream_fn(),
-        hooks: Arc::new(DefaultHooks),
+        hooks,
         session,
         context,
     })
@@ -420,7 +434,7 @@ async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
 // REPL
 // ---------------------------------------------------------------------------
 
-pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
+pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
     // run is active; the slot is refreshed after each run / agent swap.
@@ -472,7 +486,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                         let path = session
                             .as_ref()
                             .and_then(|s| s.path().map(Path::to_path_buf));
-                        agent = build_agent(llm.clone(), session, Vec::new());
+                        agent = build_agent(llm.clone(), hooks.clone(), session, Vec::new());
                         *cancel_slot.lock().unwrap() = agent.cancel_token();
                         match path {
                             Some(p) => println!("new session: {}", p.display()),
@@ -543,7 +557,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                             llm.effort = e;
                         }
                         let n = messages.len();
-                        agent = build_agent(llm.clone(), Some(s), messages);
+                        agent = build_agent(llm.clone(), hooks.clone(), Some(s), messages);
                         *cancel_slot.lock().unwrap() = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
                     }

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
-use wcode_harness::hooks::DefaultHooks;
+use wcode_harness::hooks::HooksSet;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
@@ -114,7 +114,7 @@ fn agent_config(
             ..LlmOpts::default()
         },
         stream_fn,
-        hooks: Arc::new(DefaultHooks),
+        hooks: HooksSet::default(),
         session,
         context: Vec::new(),
     }
