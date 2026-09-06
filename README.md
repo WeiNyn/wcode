@@ -19,12 +19,16 @@ cargo install --path crates/wcode-cli
 model = "gpt-4.1"      # required
 base_url = "https://api.openai.com/v1"  # optional; any OpenAI-compatible endpoint
 api_key = "sk-..."     # optional
+endpoint = "chat"      # optional; chat|responses, default chat
+effort = "high"        # optional; free-style reasoning effort, omitted = not sent
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
-`OPENAI_API_KEY` as a key fallback. `--model` / `--base-url` override a
-successfully loaded config (and rescue a missing `model`), but cannot rescue
-an unreadable or invalid config.toml — that still exits with an error.
+`OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT` and `WCODE_EFFORT`.
+`--model` / `--base-url` / `--endpoint` / `--effort` override a
+successfully loaded config (and `--model` rescues a missing `model`), but
+cannot rescue an unreadable or invalid config.toml — that still exits with
+an error. `--effort -` clears back to send-nothing.
 
 ## Use
 
@@ -33,6 +37,7 @@ wcode                        # REPL
 wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
+wcode --list-models          # print GET {base_url}/models ids, exit
 ```
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
@@ -41,9 +46,16 @@ REPL commands (unknown `/...` lines go to the LLM as prompt text):
 |---|---|
 | `/exit` | quit |
 | `/new` | fresh conversation + session file |
-| `/model <id>` | switch model mid-conversation (logged as a `ModelChange`) |
-| `/resume [path]` | reopen a session and replay its history as context (default: latest) |
+| `/model <id>` | switch model mid-conversation (logged as a `ModelChange`); bare `/model` lists models |
+| `/models [filter]` | list `GET {base_url}/models` ids, `*` marks current; optional case-insensitive substring filter |
+| `/effort [level]` | show/set reasoning effort (free-style, logged as `EffortChange`); `/effort -` clears to send-nothing |
+| `/resume [path]` | reopen a session and replay its history as context (default: latest); restores model + effort |
 | `/sessions` | list sessions, `*` marks the current one |
+
+Effort fans out per endpoint: Chat sends `reasoning_effort`, Responses
+sends `reasoning: { effort }`, unset sends nothing. Model listing only
+returns id metadata — no capability flags — so effort support stays
+user-managed.
 
 Ctrl-C aborts the run in flight and stays in the REPL; when idle it exits.
 Output: text streams to stdout, thinking and tool output are dimmed
@@ -65,8 +77,10 @@ concurrent file mutation can't interleave or truncate.
 
 JSONL files in `~/.local/share/wcode/sessions`, named `<millis>_<id>.jsonl`
 (`~/.local/share` is used even on macOS, matching the config convention).
-One entry per message plus `model_change` markers; torn final lines are
-tolerated. `/resume` replays the history as the conversation context.
+One entry per message plus `model_change` / `effort_change` markers; torn
+final lines are tolerated. `/resume` replays the history as the conversation
+context and restores the last model + effort (`--model` / `--effort` flags
+win when passed alongside `--resume`).
 
 ## Philosophy
 

@@ -422,3 +422,57 @@ async fn set_model_swaps_llm_and_logs_session_change() {
     let reopened = Session::open(&path).unwrap();
     assert_eq!(reopened.model().as_deref(), Some("m2"));
 }
+
+/// `/effort` backbone: set_effort swaps LlmOpts for the next stream call and
+/// logs an EffortChange entry; None clears back to send-nothing.
+#[tokio::test]
+async fn set_effort_swaps_llm_and_logs_session_change() {
+    let rec = Recorder::default();
+    for _ in 0..3 {
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("x".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+    }
+
+    // Recorder only captures model; re-read effort via a wrapping stream_fn.
+    let rec2 = rec.clone();
+    let effort_seen = Arc::new(Mutex::new(Vec::new()));
+    let stream_fn = {
+        let seen = effort_seen.clone();
+        let inner = fake_stream_fn(&rec2);
+        Arc::new(
+            move |ctx: &[AgentMessage],
+                  system: &str,
+                  tools: &[rig::completion::ToolDefinition],
+                  opts: &LlmOpts| {
+                seen.lock().unwrap().push(opts.effort.clone());
+                inner(ctx, system, tools, opts)
+            },
+        ) as StreamFn
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    let mut agent = Agent::new(agent_config(stream_fn, vec![], Some(session)));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("hi", tx).await.unwrap();
+    agent.set_effort(Some("high".into())).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("again", tx).await.unwrap();
+    agent.set_effort(None).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("third", tx).await.unwrap();
+
+    assert_eq!(
+        *effort_seen.lock().unwrap(),
+        vec![None, Some("high".to_string()), None]
+    );
+    let reopened = Session::open(&path).unwrap();
+    assert_eq!(reopened.effort(), Some(None));
+}

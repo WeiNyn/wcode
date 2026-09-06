@@ -13,7 +13,7 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::DefaultHooks;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
-use wcode_harness::streamfn::{LlmOpts, rig_stream_fn};
+use wcode_harness::streamfn::{LlmOpts, list_models, rig_stream_fn};
 
 use crate::tools::default_tools;
 
@@ -31,8 +31,12 @@ Be concise.";
 pub enum Command {
     Exit,
     New,
-    /// Some(id) = switch; None = `/model` without an id (usage error).
+    /// Some(id) = switch; None = list models (same as `/models`).
     Model(Option<String>),
+    /// Some(filter) = substring filter; None = list all.
+    Models(Option<String>),
+    /// Some(level) = set; Some("-") = clear; None = show current.
+    Effort(Option<String>),
     /// Some(path) = open that session; None = latest in the session dir.
     Resume(Option<String>),
     Sessions,
@@ -51,6 +55,8 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "exit" => Some(Command::Exit),
         "new" => Some(Command::New),
         "model" => Some(Command::Model(arg)),
+        "models" => Some(Command::Models(arg)),
+        "effort" => Some(Command::Effort(arg)),
         "resume" => Some(Command::Resume(arg)),
         "sessions" => Some(Command::Sessions),
         _ => None,
@@ -183,6 +189,28 @@ pub fn build_agent(llm: LlmOpts, session: Option<Session>, context: Vec<AgentMes
     })
 }
 
+/// `/models [filter]`: list `GET {base_url}/models` ids, `*` marks the
+/// current model. Filter is a case-insensitive substring on the id.
+async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
+    match list_models(llm).await {
+        Ok(ids) => {
+            let ids = ids.iter().filter(|id| {
+                filter.is_none_or(|f| id.to_lowercase().contains(&f.to_lowercase()))
+            });
+            let mut empty = true;
+            for id in ids {
+                empty = false;
+                let mark = if *id == llm.model { "*" } else { " " };
+                println!("{mark} {id}");
+            }
+            if empty {
+                println!("(no models)");
+            }
+        }
+        Err(e) => eprintln!("models: {e}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // REPL
 // ---------------------------------------------------------------------------
@@ -208,6 +236,10 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
     }
 
     println!("wcode {} — model: {}", env!("CARGO_PKG_VERSION"), llm.model);
+    match &llm.effort {
+        Some(e) => println!("effort: {e}"),
+        None => println!("(no effort)"),
+    }
     match agent.session_path() {
         Some(p) => println!("session: {}", p.display()),
         None => println!("(no session)"),
@@ -253,7 +285,31 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                     }
                     Err(e) => eprintln!("model: {e}"),
                 },
-                None => println!("usage: /model <id>"),
+                // Bare `/model` lists available models (same as `/models`).
+                None => print_models(&llm, None).await,
+            },
+            Some(Command::Models(filter)) => print_models(&llm, filter.as_deref()).await,
+            Some(Command::Effort(arg)) => match arg.as_deref() {
+                // `/effort` with no arg shows the current level.
+                None => match &llm.effort {
+                    Some(e) => println!("effort: {e}"),
+                    None => println!("(no effort)"),
+                },
+                // `/effort -` clears back to send-nothing.
+                Some("-") | Some("none") | Some("off") => match agent.set_effort(None) {
+                    Ok(()) => {
+                        llm.effort = None;
+                        println!("(no effort)");
+                    }
+                    Err(e) => eprintln!("effort: {e}"),
+                },
+                Some(level) => match agent.set_effort(Some(level.to_string())) {
+                    Ok(()) => {
+                        llm.effort = Some(level.to_string());
+                        println!("effort: {level}");
+                    }
+                    Err(e) => eprintln!("effort: {e}"),
+                },
             },
             Some(Command::Resume(arg)) => {
                 let path = match arg {
@@ -277,6 +333,9 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
                         let messages = s.messages();
                         if let Some(m) = s.model() {
                             llm.model = m;
+                        }
+                        if let Some(e) = s.effort() {
+                            llm.effort = e;
                         }
                         let n = messages.len();
                         agent = build_agent(llm.clone(), Some(s), messages);
@@ -416,6 +475,23 @@ mod tests {
             Some(Command::Model(Some("gpt-x".into())))
         );
         assert_eq!(parse_command("/model"), Some(Command::Model(None)));
+        assert_eq!(
+            parse_command("/models"),
+            Some(Command::Models(None))
+        );
+        assert_eq!(
+            parse_command("/models gpt"),
+            Some(Command::Models(Some("gpt".into())))
+        );
+        assert_eq!(parse_command("/effort"), Some(Command::Effort(None)));
+        assert_eq!(
+            parse_command("/effort high"),
+            Some(Command::Effort(Some("high".into())))
+        );
+        assert_eq!(
+            parse_command("/effort -"),
+            Some(Command::Effort(Some("-".into())))
+        );
         assert_eq!(parse_command("/resume"), Some(Command::Resume(None)));
         assert_eq!(
             parse_command("/resume /tmp/s.jsonl"),

@@ -25,6 +25,11 @@ pub enum SessionEntry {
         id: String,
         model: String,
     },
+    EffortChange {
+        id: String,
+        /// None = effort cleared (send nothing).
+        effort: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -132,6 +137,13 @@ impl Session {
     pub fn model(&self) -> Option<String> {
         self.entries.iter().rev().find_map(|e| match e {
             SessionEntry::ModelChange { model, .. } => Some(model.clone()),
+            _ => None,
+        })
+    }
+
+    pub fn effort(&self) -> Option<Option<String>> {
+        self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::EffortChange { effort, .. } => Some(effort.clone()),
             _ => None,
         })
     }
@@ -288,6 +300,38 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.model().as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn effort_latest_wins_and_none_means_cleared() {
+        let mut s = Session::in_memory();
+        assert_eq!(s.effort(), None);
+        s.append(SessionEntry::EffortChange {
+            id: "1".into(),
+            effort: Some("high".into()),
+        })
+        .unwrap();
+        assert_eq!(s.effort(), Some(Some("high".into())));
+        s.append(SessionEntry::EffortChange {
+            id: "2".into(),
+            effort: None,
+        })
+        .unwrap();
+        assert_eq!(s.effort(), Some(None));
+    }
+
+    #[test]
+    fn effort_roundtrips_through_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        s.append(SessionEntry::EffortChange {
+            id: "e1".into(),
+            effort: Some("low".into()),
+        })
+        .unwrap();
+        let path = s.path().unwrap().to_path_buf();
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.effort(), Some(Some("low".into())));
     }
 
     #[test]

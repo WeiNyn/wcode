@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
-use rig::client::CompletionClient;
+use rig::client::{CompletionClient, ModelListingClient};
 use rig::completion::{CompletionError, CompletionModel, CompletionRequest, FinishReason, ToolDefinition};
 use rig::message::{
     AssistantContent, Message, Reasoning, ReasoningContent, ToolCall, ToolCallId, ToolFunction,
@@ -35,6 +35,10 @@ pub struct LlmOpts {
     pub api_key: Option<String>,
     pub temperature: Option<f64>,
     pub endpoint: LlmEndpoint,
+    /// Free-style reasoning effort, passed through verbatim. None = send
+    /// nothing (today's behavior; required for backends that reject unknown
+    /// fields). Some(level) fans out per endpoint in `build_request()`.
+    pub effort: Option<String>,
 }
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
@@ -47,26 +51,46 @@ pub fn rig_stream_fn() -> StreamFn {
     Arc::new(move |messages, system, tools, opts| adapt(opts, messages, system, tools))
 }
 
+/// Build the rig client shared by streaming and model listing, so both hit
+/// the same base_url with the same key.
+fn openai_client(opts: &LlmOpts) -> Result<rig::providers::openai::Client, String> {
+    let key = opts
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+    let Some(key) = key else {
+        return Err("no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string());
+    };
+    let mut builder = openai::Client::builder().api_key::<rig::client::BearerAuth>(key);
+    if let Some(base_url) = &opts.base_url {
+        builder = builder.base_url(base_url);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("openai client: {e}"))
+}
+
+/// List models via `GET {base_url}/models` using the same client config as
+/// streaming. Ids are sorted for stable display. The endpoint only returns
+/// id/name metadata — no capability flags — so effort support stays
+/// user-managed.
+pub async fn list_models(opts: &LlmOpts) -> Result<Vec<String>, String> {
+    let client = openai_client(opts)?;
+    let list = client.list_models().await.map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = list.iter().map(|m| m.id.clone()).collect();
+    ids.sort();
+    Ok(ids)
+}
+
 fn adapt(
     opts: &LlmOpts,
     messages: &[AgentMessage],
     system: &str,
     tools: &[ToolDefinition],
 ) -> LlmStream {
-    let key = opts
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-    let Some(key) = key else {
-        return error_stream("no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string());
-    };
-    let mut builder = openai::Client::builder().api_key::<rig::client::BearerAuth>(key);
-    if let Some(base_url) = &opts.base_url {
-        builder = builder.base_url(base_url);
-    }
-    let client = match builder.build() {
+    let client = match openai_client(opts) {
         Ok(client) => client,
-        Err(e) => return error_stream(format!("openai client: {e}")),
+        Err(message) => return error_stream(message),
     };
     let request = build_request(messages, system, tools, opts);
 
@@ -163,9 +187,22 @@ fn build_request(
         temperature: opts.temperature,
         max_tokens: None,
         tool_choice: None,
-        additional_params: None,
+        additional_params: effort_params(opts),
         output_schema: None,
         record_telemetry_content: false,
+    }
+}
+
+/// Free-style effort passthrough, fanned out per wire shape. None sends
+/// nothing (backends that reject unknown fields keep working). Some(level)
+/// is sent verbatim: Chat takes top-level `reasoning_effort`, Responses
+/// takes `reasoning: { effort }` (rig validates it against its known
+/// levels client-side; Chat forwards any string to the provider).
+fn effort_params(opts: &LlmOpts) -> Option<serde_json::Value> {
+    let effort = opts.effort.as_ref()?;
+    match opts.endpoint {
+        LlmEndpoint::Chat => Some(serde_json::json!({ "reasoning_effort": effort })),
+        LlmEndpoint::Responses => Some(serde_json::json!({ "reasoning": { "effort": effort } })),
     }
 }
 
@@ -518,9 +555,84 @@ mod tests {
             api_key: None,
             temperature: None,
             endpoint: LlmEndpoint::Chat,
+            effort: None,
         };
         assert_eq!(opts.endpoint, LlmEndpoint::Chat);
         assert_eq!(LlmOpts::default().endpoint, LlmEndpoint::Chat);
+    }
+
+    #[test]
+    fn no_effort_sends_no_additional_params() {
+        let opts = LlmOpts::default();
+        let request = build_request(&[], "sys", &[], &opts);
+        assert_eq!(request.additional_params, None);
+    }
+
+    #[test]
+    fn chat_effort_maps_to_reasoning_effort_param() {
+        let opts = LlmOpts {
+            effort: Some("high".into()),
+            endpoint: LlmEndpoint::Chat,
+            ..LlmOpts::default()
+        };
+        let request = build_request(&[], "sys", &[], &opts);
+        assert_eq!(
+            request.additional_params,
+            Some(json!({ "reasoning_effort": "high" }))
+        );
+    }
+
+    #[test]
+    fn responses_effort_maps_to_reasoning_object() {
+        let opts = LlmOpts {
+            effort: Some("xhigh".into()),
+            endpoint: LlmEndpoint::Responses,
+            ..LlmOpts::default()
+        };
+        let request = build_request(&[], "sys", &[], &opts);
+        assert_eq!(
+            request.additional_params,
+            Some(json!({ "reasoning": { "effort": "xhigh" } }))
+        );
+    }
+
+    #[test]
+    fn effort_is_verbatim_passthrough() {
+        // Free-style: any string (including provider dialects) passes through.
+        for level in ["low", "medium", "my-custom-level", ""] {
+            let opts = LlmOpts {
+                effort: Some(level.into()),
+                ..LlmOpts::default()
+            };
+            let request = build_request(&[], "sys", &[], &opts);
+            assert_eq!(
+                request.additional_params,
+                Some(json!({ "reasoning_effort": level })),
+                "level {level:?} must pass through verbatim"
+            );
+        }
+    }
+
+    /// Unreachable endpoint: list_models surfaces a string error, no panic.
+    #[tokio::test]
+    async fn list_models_unreachable_is_error() {
+        let opts = LlmOpts {
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..LlmOpts::default()
+        };
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), list_models(&opts))
+            .await
+            .expect("list terminates")
+            .expect_err("unreachable host must error");
+        assert!(!err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_models_without_key_is_error() {
+        let opts = LlmOpts::default();
+        let err = list_models(&opts).await.expect_err("no key must error");
+        assert!(err.contains("no API key"), "got: {err}");
     }
 
     #[test]
@@ -578,6 +690,7 @@ mod tests {
             api_key: Some("test-key".to_string()),
             temperature: None,
             endpoint: LlmEndpoint::Responses,
+            effort: None,
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(&[], "sys", &[], &opts);

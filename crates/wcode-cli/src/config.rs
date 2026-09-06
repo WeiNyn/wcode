@@ -9,6 +9,7 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub endpoint: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub struct Config {
     pub api_key: Option<String>,
     pub model: String,
     pub endpoint: LlmEndpoint,
+    pub effort: Option<String>,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -26,6 +28,7 @@ pub struct EnvLike {
     pub wcode_api_key: Option<String>,
     pub openai_api_key: Option<String>,
     pub wcode_endpoint: Option<String>,
+    pub wcode_effort: Option<String>,
 }
 
 impl EnvLike {
@@ -35,6 +38,7 @@ impl EnvLike {
             wcode_api_key: std::env::var("WCODE_API_KEY").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             wcode_endpoint: std::env::var("WCODE_ENDPOINT").ok(),
+            wcode_effort: std::env::var("WCODE_EFFORT").ok(),
         }
     }
 }
@@ -62,6 +66,7 @@ impl std::fmt::Display for ConfigError {
 
 /// Precedence: env (WCODE_* with OPENAI_API_KEY fallback) > toml. Model is
 /// required and comes from the toml only; error tells main what to prompt for.
+/// Effort is optional, free-style, passed through verbatim.
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = match file.model.clone() {
         Some(m) => m,
@@ -78,6 +83,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
         model,
         endpoint,
+        effort: env.wcode_effort.or(file.effort),
     })
 }
 
@@ -119,6 +125,7 @@ impl Config {
             api_key: self.api_key.clone(),
             temperature: None,
             endpoint: self.endpoint,
+            effort: self.effort.clone(),
         }
     }
 }
@@ -189,5 +196,36 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
         assert_eq!(cfg.to_llm_opts().endpoint, LlmEndpoint::Responses);
+    }
+
+    #[test]
+    fn effort_env_beats_toml_and_flows_to_llm_opts() {
+        let cfg = merge(
+            EnvLike {
+                wcode_effort: Some("high".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                effort: Some("low".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.effort.as_deref(), Some("high"));
+        assert_eq!(cfg.to_llm_opts().effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn effort_defaults_to_none() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.effort, None);
     }
 }

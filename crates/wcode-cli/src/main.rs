@@ -18,7 +18,7 @@ use crate::repl::{build_agent, list_sessions, resolve_session_path, session_dir}
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -26,6 +26,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --model <id>       override the configured model
    --base-url <url>   override the configured base URL
    --endpoint <e>     override the configured endpoint (chat|responses)
+   --effort <level>   override the reasoning effort (free-style, e.g. high; '-' clears it)
+   --list-models      list models from GET {base_url}/models and exit
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -33,8 +35,9 @@ config: ~/.config/wcode/config.toml
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
   endpoint = \"...\"   (optional, chat|responses, default chat)
+  effort = \"...\"     (optional, free-style reasoning effort, omitted = not sent)
 env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
-env: WCODE_ENDPOINT overrides the toml endpoint";
+env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -45,6 +48,9 @@ struct Args {
     model: Option<String>,
     base_url: Option<String>,
     endpoint: Option<String>,
+    /// None = flag absent; Some(None) = clear; Some(Some(level)) = set.
+    effort: Option<Option<String>>,
+    list_models: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -85,6 +91,13 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 a.endpoint = Some(args.get(i).ok_or("--endpoint requires chat|responses")?.clone());
                 i += 1;
             }
+            "--effort" => {
+                let level = args.get(i).ok_or("--effort requires a level")?.clone();
+                i += 1;
+                // "-" clears back to send-nothing (mirrors /effort clear).
+                a.effort = Some(if level == "-" { None } else { Some(level) });
+            }
+            "--list-models" => a.list_models = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -165,7 +178,31 @@ async fn main() {
             }
         }
     }
-    let llm = cfg.to_llm_opts();
+    if let Some(effort) = args.effort.clone() {
+        cfg.effort = effort;
+    }
+    let mut llm = cfg.to_llm_opts();
+
+    // `--list-models`: resolve against the same base_url/key as chat, print
+    // sorted ids (`*` marks the configured model), exit. No session touched.
+    if args.list_models {
+        match wcode_harness::streamfn::list_models(&llm).await {
+            Ok(ids) if ids.is_empty() => {
+                println!("(no models)");
+            }
+            Ok(ids) => {
+                for id in ids {
+                    let mark = if id == llm.model { "*" } else { " " };
+                    println!("{mark} {id}");
+                }
+            }
+            Err(e) => {
+                eprintln!("error: list models: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
 
     let (session, context): (Option<Session>, Vec<AgentMessage>) = match args.resume.clone() {
         Some(path) => {
@@ -188,6 +225,18 @@ async fn main() {
             match Session::open(&p) {
                 Ok(s) => {
                     let ctx = s.messages();
+                    // `--model`/`--effort` flags win over the session's last
+                    // change; otherwise the session restores both.
+                    if args.model.is_none()
+                        && let Some(m) = s.model()
+                    {
+                        llm.model = m;
+                    }
+                    if args.effort.is_none()
+                        && let Some(e) = s.effort()
+                    {
+                        llm.effort = e;
+                    }
                     (Some(s), ctx)
                 }
                 Err(e) => {
@@ -337,6 +386,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_effort_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--effort", "high"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.effort, Some(Some("high".into())));
+        // "-" clears back to send-nothing.
+        let Parsed::Args(a) = parse_args(&args(&["--effort", "-"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.effort, Some(None));
+        assert!(parse_args(&args(&["--effort"])).is_err());
+    }
+
+    #[test]
+    fn parse_list_models_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--list-models"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.list_models);
+        assert!(!Args::default().list_models);
+    }
+
+    #[test]
     fn parse_help() {
         assert_eq!(parse_args(&args(&["-h"])), Ok(Parsed::Help));
         assert_eq!(parse_args(&args(&["--help"])), Ok(Parsed::Help));
@@ -384,6 +456,7 @@ mod tests {
         assert!(parse_args(&args(&["-p"])).is_err());
         assert!(parse_args(&args(&["--model"])).is_err());
         assert!(parse_args(&args(&["--base-url"])).is_err());
+        assert!(parse_args(&args(&["--effort"])).is_err());
         assert!(parse_args(&args(&["--bogus"])).is_err());
         assert!(parse_args(&args(&["stray"])).is_err());
     }

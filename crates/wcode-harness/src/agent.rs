@@ -78,6 +78,24 @@ impl Agent {
         Ok(())
     }
 
+    /// Current reasoning effort (None = send nothing).
+    pub fn effort(&self) -> Option<&str> {
+        self.llm.effort.as_deref()
+    }
+
+    /// Swaps the reasoning effort mid-conversation (next run) and logs an
+    /// `EffortChange` entry when a session is open. None clears it.
+    pub fn set_effort(&mut self, effort: Option<String>) -> std::io::Result<()> {
+        if let Some(session) = &mut self.session {
+            session.append(SessionEntry::EffortChange {
+                id: uuid::Uuid::new_v4().to_string(),
+                effort: effort.clone(),
+            })?;
+        }
+        self.llm.effort = effort;
+        Ok(())
+    }
+
     /// Sender clone for steering while `run` holds the `&mut` borrow (UI tasks).
     ///
     /// Receivers are re-paired after each run: clones taken before a run are
