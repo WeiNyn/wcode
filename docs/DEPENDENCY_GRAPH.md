@@ -1,0 +1,137 @@
+# wcode Dependency Graph
+
+Map for exploring the codebase. Two crates, strict one-way layering.
+
+```
+crates/wcode-cli   (bin `wcode`)        the application: config, REPL, built-in tools
+       │
+       ▼
+crates/wcode-harness (lib)              the kernel: loop, tools, hooks, events, session
+       │
+       ▼
+rig 0.42                                LLM engine: streaming + tool-schema plumbing
+                                        (touched ONLY by wcode-harness/src/streamfn.rs)
+```
+
+## Crate: `wcode-harness` (module level)
+
+```mermaid
+graph TD
+    message["message.rs<br/>AgentMessage, ContentBlock,<br/>StopReason, Usage"]
+    event["event.rs<br/>AgentEvent (wire/UI),<br/>LlmStreamEvent (seam)"]
+    tool["tool.rs<br/>TypedTool trait, erased Tool,<br/>ToolContext, ToolOutput"]
+    hooks["hooks.rs<br/>Hooks trait (default no-ops)"]
+    session["session.rs<br/>Session (JSONL append-only)"]
+    streamfn["streamfn.rs<br/>StreamFn seam + rig adapter<br/>(LlmOpts, rig_stream_fn)"]
+    loop_["loop_.rs<br/>run_loop() — the kernel"]
+    agent["agent.rs<br/>Agent — stateful wrapper<br/>(queues, cancel, session)"]
+
+    event --> message
+    tool --> event
+    hooks --> message
+    hooks --> tool
+    session --> message
+    streamfn --> message
+    streamfn --> event
+    loop_ --> message
+    loop_ --> event
+    loop_ --> tool
+    loop_ --> hooks
+    loop_ --> streamfn
+    agent --> loop_
+    agent --> agent_msg[message]
+    agent --> event
+    agent --> tool
+    agent --> hooks
+    agent --> session
+    agent --> streamfn
+
+    streamfn -.->|rig types<br/>only here| rig((rig))
+    tool -.->|rig::completion::ToolDefinition<br/>in definition()| rig
+```
+
+Reading order for a new contributor:
+
+1. `message.rs` — data model, serde shapes are contractual (session format)
+2. `event.rs` — what the kernel emits (`AgentEvent`) and what providers yield (`LlmStreamEvent`)
+3. `tool.rs` — how a tool is written (`TypedTool` + erasure) and what the loop calls
+4. `loop_.rs` — the turn loop: steer drain → transform_context → stream → tool exec → follow-ups
+5. `agent.rs` — channels/cancel/session wiring around the loop
+6. `session.rs`, `hooks.rs`, `streamfn.rs` — persistence, extension points, rig adapter
+
+## Crate: `wcode-cli` (module level)
+
+```mermaid
+graph TD
+    config["config.rs<br/>Config load: env > toml<br/>(~/.config/wcode/config.toml)"]
+    read["tools/read.rs"]
+    bash["tools/bash.rs"]
+    edit["tools/edit.rs"]
+    write["tools/write.rs"]
+    toolsmod["tools/mod.rs<br/>default_tools()"]
+    repl["repl.rs<br/>REPL, /commands,<br/>event printer, Ctrl-C"]
+    main["main.rs<br/>arg parse, modes"]
+
+    read --> toolsmod
+    bash --> toolsmod
+    edit --> toolsmod
+    write --> toolsmod
+    toolsmod --> tool["harness::tool"]
+    config --> llm["harness::streamfn (LlmOpts)"]
+    repl --> config
+    repl --> toolsmod
+    repl --> agent["harness::agent + event + session"]
+    main --> config
+    main --> repl
+```
+
+## Kernel data flow (one run)
+
+```
+user text ──▶ Agent.run()
+              │  pushes User msg (+session append)
+              ▼
+          run_loop(ctx, LoopConfig, sink)──────────────┐
+              │                                        │ events
+              │ steering drain → transform_context     ▼
+              ▼                                  AgentEvent channel
+     StreamFn(ctx, system, tool_defs, opts)            │
+              │  rig: CompletionModel::stream          ▼
+              ▼                                  REPL printer (CLI)
+     LlmStreamEvent* ──▶ partial Assistant ──▶ MessageUpdate
+              │
+      tool calls? ──▶ before_tool_call hook
+              │        ▶ Tool.execute(args, ToolContext{cancel, events})
+              │        ▶ after_tool_call hook (patch)
+              ▼
+      ToolResult msg ──▶ next turn (inner loop)
+              │
+      no calls / should_stop ──▶ outer loop: follow_ups? else AgentEnd
+```
+
+## External dependencies
+
+| Crate | Used by | For |
+|---|---|---|
+| `rig` 0.42 (`default-features=false`, `reqwest`, `rustls`) | harness | openai-Completions streaming client, `ToolDefinition`, `StreamedAssistantContent`/`StreamFinal` |
+| `tokio` | both | runtime, process (bash), channels |
+| `tokio-util` | harness, repl | `CancellationToken` |
+| `async-trait` | harness | dyn-safe `TypedTool`/`Hooks` |
+| `schemars` 1 | both | JSON Schema for tool args |
+| `serde` / `serde_json` | both | message/session/event shapes |
+| `futures` | both | streams |
+| `uuid`, `chrono` | harness | session ids, timestamps |
+| `thiserror` | harness | `LoopError`, `ConfigError` |
+| `toml`, `dirs`, `anyhow` | cli | config file + paths |
+
+## Extension points
+
+| Want to… | Do this |
+|---|---|
+| Add a tool | `impl TypedTool` (Args: `Deserialize + JsonSchema`) + `erased()`; see `crates/wcode-cli/src/tools/read.rs` |
+| Change behavior (block/patch tools, rewrite context, early stop) | `impl Hooks` (all default no-ops); see `crates/wcode-harness/src/hooks.rs` |
+| Add an LLM provider / wire family | write a `StreamFn` (adapter from provider stream → `LlmStreamEvent`); default is `rig_stream_fn()` in `streamfn.rs` |
+| Build a different UI | consume `AgentEvent` from the sink channel; REPL's printer (`repl.rs`) is the reference |
+| Change persistence | `Session` in `session.rs` — append-only JSONL, one entry per line |
+
+Constraint worth knowing: rig types live only in `streamfn.rs` (exception: `Tool::definition()` returns rig's `ToolDefinition`) — kernel types never expose rig, so the engine stays swappable via the `StreamFn` seam.
