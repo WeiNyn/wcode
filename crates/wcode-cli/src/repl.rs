@@ -547,19 +547,23 @@ async fn run_turn(
 
 async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
     let mut p = MessagePrinter::default();
+    let mut st = PrintState::default();
     while let Some(ev) = rx.recv().await {
         match ev {
-            AgentEvent::MessageStart { .. } => p.reset(),
-            AgentEvent::MessageUpdate { message } => emit(&mut p, &message),
+            AgentEvent::MessageStart { .. } => {
+                p.reset();
+                // Each message owns its blocks from scratch.
+                st = PrintState::default();
+            }
+            AgentEvent::MessageUpdate { message } => emit(&mut p, &message, &mut st),
             AgentEvent::MessageEnd { message } => {
-                emit(&mut p, &message);
-                if p.mid_line() {
-                    println!();
-                    p.clear_mid_line();
-                }
+                emit(&mut p, &message, &mut st);
+                close_blocks(&mut p, &mut st);
             }
             AgentEvent::ToolExecutionStart { name, .. } => {
-                out(&format!("\r{DIM}⚙ {name}"));
+                // Break out of any open block so the tool call stands alone.
+                close_blocks(&mut p, &mut st);
+                out(&format!("{DIM}⚙ {name}{RESET}"));
             }
             AgentEvent::ToolExecutionUpdate { partial, .. } => out(&partial),
             AgentEvent::ToolExecutionEnd {
@@ -574,24 +578,60 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                 }
             }
             AgentEvent::Error { message } => {
+                close_blocks(&mut p, &mut st);
                 eprintln!("{DIM}error: {message}{RESET}");
                 let _ = io::stderr().flush();
             }
             _ => {}
         }
     }
+    close_blocks(&mut p, &mut st);
+}
+
+/// Render state distinguishing the output block types (thinking / tool call /
+/// message) so each gets its own rows instead of running together.
+#[derive(Default)]
+struct PrintState {
+    /// True while a streaming dim thinking block is open on stderr.
+    thinking_open: bool,
+}
+
+/// Ends any open output blocks — an in-flight thinking block (stderr) and/or
+/// mid-line message text (stdout) — so the next block starts on a fresh line.
+fn close_blocks(p: &mut MessagePrinter, st: &mut PrintState) {
+    if st.thinking_open {
+        eprintln!();
+        st.thinking_open = false;
+    }
     if p.mid_line() {
         println!();
+        p.clear_mid_line();
     }
 }
 
-fn emit(p: &mut MessagePrinter, message: &AgentMessage) {
+fn emit(p: &mut MessagePrinter, message: &AgentMessage, st: &mut PrintState) {
     let (text, thinking) = p.update(message);
     if !thinking.is_empty() {
+        if !st.thinking_open {
+            // Start a thinking block on its own line (breaking out of any
+            // mid-line text) so it is identified apart from the message.
+            if p.mid_line() {
+                println!();
+                p.clear_mid_line();
+            }
+            eprint!("{DIM}··· ");
+            st.thinking_open = true;
+        }
         eprint!("{DIM}{thinking}{RESET}");
         let _ = io::stderr().flush();
     }
     if !text.is_empty() {
+        if st.thinking_open {
+            // Thinking is done: close the block on its own line before the
+            // message text continues.
+            eprintln!();
+            st.thinking_open = false;
+        }
         out(&text);
     }
 }
