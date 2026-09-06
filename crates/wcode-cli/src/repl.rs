@@ -43,6 +43,8 @@ pub enum Command {
     /// Rebuild (`cargo build --bin wcode`) and re-exec into the same
     /// session. `no_session` = start fresh with `--no-session`.
     Reload { no_session: bool },
+    /// Print aggregate token usage for the current conversation.
+    Usage,
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -67,6 +69,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
             Some("--no-session") => Some(Command::Reload { no_session: true }),
             _ => None,
         },
+        "usage" => Some(Command::Usage),
         _ => None,
     }
 }
@@ -144,6 +147,58 @@ pub fn tool_output_note(output: &str) -> String {
         note.push('…');
     }
     note
+}
+
+// ---------------------------------------------------------------------------
+// Usage
+// ---------------------------------------------------------------------------
+
+/// Aggregate token usage across the assistant messages that reported it.
+/// Cache counts absent per-call are treated as 0.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct UsageTotals {
+    /// Assistant messages whose `usage` was Some.
+    pub turns: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+/// Sum `Usage` over every assistant message in `messages` that carried one.
+pub fn usage_totals(messages: &[AgentMessage]) -> UsageTotals {
+    let mut t = UsageTotals::default();
+    for m in messages {
+        let AgentMessage::Assistant { usage: Some(u), .. } = m else {
+            continue;
+        };
+        t.turns += 1;
+        t.input_tokens += u.input_tokens;
+        t.output_tokens += u.output_tokens;
+        t.cache_read_tokens += u.cache_read_tokens.unwrap_or(0);
+        t.cache_write_tokens += u.cache_write_tokens.unwrap_or(0);
+    }
+    t
+}
+
+/// `/usage`: one line of totals for the current conversation, or a note when
+/// no turn has reported usage yet.
+pub fn format_usage(t: &UsageTotals) -> String {
+    if t.turns == 0 {
+        return "(no usage reported)".to_string();
+    }
+    let mut parts = vec![
+        format!("{} turn{}", t.turns, if t.turns == 1 { "" } else { "s" }),
+        format!("{} in", t.input_tokens),
+        format!("{} out", t.output_tokens),
+    ];
+    if t.cache_read_tokens > 0 {
+        parts.push(format!("{} cache read", t.cache_read_tokens));
+    }
+    if t.cache_write_tokens > 0 {
+        parts.push(format!("{} cache write", t.cache_write_tokens));
+    }
+    format!("usage: {}", parts.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +573,9 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts) {
             Some(Command::Reload { no_session }) => {
                 reload(&agent, &llm, no_session, &in_flight, &cancel_slot).await
             }
+            Some(Command::Usage) => {
+                println!("{}", format_usage(&usage_totals(agent.messages())));
+            }
             None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
         }
     }
@@ -645,7 +703,7 @@ fn out(s: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wcode_harness::message::StopReason;
+    use wcode_harness::message::{StopReason, Usage};
 
     fn assistant(content: Vec<ContentBlock>) -> AgentMessage {
         AgentMessage::Assistant {
@@ -701,6 +759,7 @@ mod tests {
             Some(Command::Reload { no_session: true })
         );
         assert_eq!(parse_command("/reload foo"), None);
+        assert_eq!(parse_command("/usage"), Some(Command::Usage));
     }
 
     #[test]
@@ -873,5 +932,87 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["300_d.jsonl", "200_a.jsonl", "100_b.jsonl"]);
+    }
+
+    fn assistant_with_usage(
+        input: u64,
+        output: u64,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    ) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::Text {
+                text: "a".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: Some(Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: cache_write,
+            }),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn usage_totals_sums_reported_usage_only() {
+        let messages = vec![
+            AgentMessage::user_text("q"),
+            assistant_with_usage(10, 20, Some(3), None),
+            assistant(  // no usage reported
+                vec![ContentBlock::Text {
+                    text: "x".into(),
+                }],
+            ),
+            assistant_with_usage(30, 40, None, Some(5)),
+        ];
+        let t = usage_totals(&messages);
+        assert_eq!(
+            t,
+            UsageTotals {
+                turns: 2,
+                input_tokens: 40,
+                output_tokens: 60,
+                cache_read_tokens: 3,
+                cache_write_tokens: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_totals_empty_and_no_usage() {
+        assert_eq!(usage_totals(&[]), UsageTotals::default());
+        assert_eq!(
+            usage_totals(&[assistant(vec![]), AgentMessage::user_text("q")]),
+            UsageTotals::default()
+        );
+    }
+
+    #[test]
+    fn format_usage_lines_and_empty() {
+        let empty = UsageTotals::default();
+        assert_eq!(format_usage(&empty), "(no usage reported)");
+
+        let t = UsageTotals {
+            turns: 2,
+            input_tokens: 40,
+            output_tokens: 60,
+            cache_read_tokens: 3,
+            cache_write_tokens: 5,
+        };
+        assert_eq!(
+            format_usage(&t),
+            "usage: 2 turns, 40 in, 60 out, 3 cache read, 5 cache write"
+        );
+
+        // No cache hits: omit the cache fields entirely.
+        let t = UsageTotals {
+            turns: 1,
+            input_tokens: 10,
+            output_tokens: 20,
+            ..UsageTotals::default()
+        };
+        assert_eq!(format_usage(&t), "usage: 1 turn, 10 in, 20 out");
     }
 }
