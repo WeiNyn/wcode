@@ -15,6 +15,21 @@ pub struct HooksConfig {
     pub rtk: RtkPreference,
 }
 
+/// Per-tool registration flags, loaded from the `[tools]` config table.
+///
+/// `grep` and `find` are redundant with `bash` (which can run `grep`/`find`
+/// itself), so they register **off by default** to keep the model's tool
+/// surface lean; setting a flag to `true` opts that native tool back in.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ToolsConfig {
+    /// Register the `grep` tool (anchor-carrying regex search).
+    #[serde(default)]
+    pub grep: bool,
+    /// Register the `find` tool (glob file/dir listing).
+    #[serde(default)]
+    pub find: bool,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -24,6 +39,8 @@ pub struct FileConfig {
     pub effort: Option<String>,
     #[serde(default)]
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +51,7 @@ pub struct Config {
     pub endpoint: LlmEndpoint,
     pub effort: Option<String>,
     pub hooks: HooksConfig,
+    pub tools: ToolsConfig,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -45,6 +63,8 @@ pub struct EnvLike {
     pub wcode_endpoint: Option<String>,
     pub wcode_effort: Option<String>,
     pub wcode_rtk: Option<String>,
+    pub wcode_grep: Option<String>,
+    pub wcode_find: Option<String>,
 }
 
 impl EnvLike {
@@ -56,6 +76,8 @@ impl EnvLike {
             wcode_endpoint: std::env::var("WCODE_ENDPOINT").ok(),
             wcode_effort: std::env::var("WCODE_EFFORT").ok(),
             wcode_rtk: std::env::var("WCODE_RTK").ok(),
+            wcode_grep: std::env::var("WCODE_GREP").ok(),
+            wcode_find: std::env::var("WCODE_FIND").ok(),
         }
     }
 }
@@ -84,6 +106,19 @@ impl std::fmt::Display for ConfigError {
 /// Precedence: env (WCODE_* with OPENAI_API_KEY fallback) > toml. Model is
 /// required and comes from the toml only; error tells main what to prompt for.
 /// Effort is optional, free-style, passed through verbatim.
+/// Parse a `true`/`false` env override for an optional native tool (accepts
+/// on/off/1/0 as synonyms). Unlike hooks.rtk these have no `auto` state —
+/// off is the default and only an explicit enable registers the tool.
+fn parse_tool_flag(tool: &str, value: &str) -> Result<bool, String> {
+    match value.trim() {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        other => Err(format!(
+            "unknown {tool} {other:?}: valid values are \"true\", \"false\""
+        )),
+    }
+}
+
 #[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = match file.model.clone() {
@@ -100,6 +135,13 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     if let Some(v) = env.wcode_rtk.as_deref() {
         hooks.rtk = RtkPreference::parse(Some(v)).map_err(ConfigError::Io)?;
     }
+    let mut tools = file.tools;
+    if let Some(v) = env.wcode_grep.as_deref() {
+        tools.grep = parse_tool_flag("grep", v).map_err(ConfigError::Io)?;
+    }
+    if let Some(v) = env.wcode_find.as_deref() {
+        tools.find = parse_tool_flag("find", v).map_err(ConfigError::Io)?;
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -107,6 +149,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         endpoint,
         effort: env.wcode_effort.or(file.effort),
         hooks,
+        tools,
     })
 }
 
@@ -150,6 +193,7 @@ impl Config {
             temperature: None,
             endpoint: self.endpoint,
             effort: self.effort.clone(),
+            session_id: None,
         }
     }
 }
@@ -319,5 +363,72 @@ mod tests {
         let err = toml::from_str::<FileConfig>("model = \"m1\"\n[hooks]\nrtk = \"sometimes\"")
             .unwrap_err();
         assert!(err.to_string().contains("sometimes"), "names it: {err}");
+    }
+
+    #[test]
+    fn tools_default_to_off() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        // grep/find are shadowed by bash, so off unless explicitly enabled.
+        assert_eq!(cfg.tools, ToolsConfig::default());
+        assert!(!cfg.tools.grep);
+        assert!(!cfg.tools.find);
+    }
+
+    #[test]
+    fn toml_tools_enable_grep_and_find() {
+        let file: FileConfig =
+            toml::from_str("model = \"m1\"\n[tools]\ngrep = true\nfind = true").unwrap();
+        assert!(file.tools.grep);
+        assert!(file.tools.find);
+        // Absent flags default to off.
+        let file: FileConfig = toml::from_str("model = \"m1\"\n[tools]\nfind = true").unwrap();
+        assert!(!file.tools.grep);
+        assert!(file.tools.find);
+    }
+
+    #[test]
+    fn tools_env_beats_toml() {
+        let cfg = merge(
+            EnvLike {
+                wcode_grep: Some("false".into()),
+                wcode_find: Some("on".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                tools: ToolsConfig {
+                    grep: true,
+                    find: false,
+                },
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.tools.grep);
+        assert!(cfg.tools.find);
+    }
+
+    #[test]
+    fn invalid_tools_env_is_config_error() {
+        let err = merge(
+            EnvLike {
+                wcode_grep: Some("sometimes".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::Io(msg) = &err else { panic!("wrong error: {err:?}") };
+        assert!(msg.contains("grep"), "names the tool: {msg}");
     }
 }

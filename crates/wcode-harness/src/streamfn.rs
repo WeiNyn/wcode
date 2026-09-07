@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
 use rig::client::{CompletionClient, ModelListingClient};
-use rig::completion::{CompletionError, CompletionModel, CompletionRequest, FinishReason, ToolDefinition};
+use rig::completion::{
+    CompletionError, CompletionModel, CompletionRequest, FinishReason, ToolDefinition,
+};
+use rig::http_client::{HeaderMap, HeaderValue};
 use rig::message::{
     AssistantContent, Message, Reasoning, ReasoningContent, ToolCall, ToolCallId, ToolFunction,
     UserContent,
@@ -35,6 +38,9 @@ pub struct LlmOpts {
     pub api_key: Option<String>,
     pub temperature: Option<f64>,
     pub endpoint: LlmEndpoint,
+    /// Stable per-conversation id, sent as `x-opencode-session` for providers
+    /// (e.g. OpenCode Go) that route/cache on it. None = header omitted.
+    pub session_id: Option<String>,
     /// Free-style reasoning effort, passed through verbatim. None = send
     /// nothing (today's behavior; required for backends that reject unknown
     /// fields). Some(level) fans out per endpoint in `build_request()`.
@@ -61,13 +67,29 @@ fn openai_client(opts: &LlmOpts) -> Result<rig::providers::openai::Client, Strin
     let Some(key) = key else {
         return Err("no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string());
     };
-    let mut builder = openai::Client::builder().api_key::<rig::client::BearerAuth>(key);
+    let mut builder = openai::Client::builder()
+        .api_key::<rig::client::BearerAuth>(key)
+        .http_headers(session_headers(opts));
     if let Some(base_url) = &opts.base_url {
         builder = builder.base_url(base_url);
     }
-    builder
-        .build()
-        .map_err(|e| format!("openai client: {e}"))
+    builder.build().map_err(|e| format!("openai client: {e}"))
+}
+
+/// Default headers for every provider request: own `User-Agent` (OpenCode Go
+/// rejects generic SDK names for routing) plus `x-opencode-session` when set.
+fn session_headers(opts: &LlmOpts) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "user-agent",
+        HeaderValue::from_static(concat!("wcode/", env!("CARGO_PKG_VERSION"))),
+    );
+    if let Some(id) = opts.session_id.as_deref()
+        && let Ok(value) = HeaderValue::from_str(id)
+    {
+        headers.insert("x-opencode-session", value);
+    }
+    headers
 }
 
 /// List models via `GET {base_url}/models` using the same client config as
@@ -97,10 +119,15 @@ fn adapt(
     // Both wires yield the same normalized StreamingCompletionResponse, so
     // only model construction branches; the forwarding loop below is shared.
     let stream_fut: std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>>
+                + Send,
+        >,
     > = match opts.endpoint {
         LlmEndpoint::Chat => {
-            let model = client.completions_api().completion_model(opts.model.clone());
+            let model = client
+                .completions_api()
+                .completion_model(opts.model.clone());
             Box::pin(async move { model.stream(request).await })
         }
         LlmEndpoint::Responses => {
@@ -556,6 +583,7 @@ mod tests {
             temperature: None,
             endpoint: LlmEndpoint::Chat,
             effort: None,
+            session_id: None,
         };
         assert_eq!(opts.endpoint, LlmEndpoint::Chat);
         assert_eq!(LlmOpts::default().endpoint, LlmEndpoint::Chat);
@@ -611,6 +639,38 @@ mod tests {
                 "level {level:?} must pass through verbatim"
             );
         }
+    }
+
+    #[test]
+    fn client_sends_session_header_and_user_agent() {
+        let opts = LlmOpts {
+            api_key: Some("test-key".to_string()),
+            session_id: Some("sess-123".to_string()),
+            ..LlmOpts::default()
+        };
+        let headers = openai_client(&opts)
+            .expect("client builds")
+            .headers()
+            .clone();
+        assert_eq!(
+            headers.get("x-opencode-session").expect("session header"),
+            "sess-123"
+        );
+        assert!(headers.contains_key("user-agent"), "got: {headers:?}");
+    }
+
+    #[test]
+    fn client_omits_session_header_when_unset() {
+        let opts = LlmOpts {
+            api_key: Some("test-key".to_string()),
+            ..LlmOpts::default()
+        };
+        let headers = openai_client(&opts)
+            .expect("client builds")
+            .headers()
+            .clone();
+        assert!(!headers.contains_key("x-opencode-session"));
+        assert!(headers.contains_key("user-agent"), "got: {headers:?}");
     }
 
     /// Unreachable endpoint: list_models surfaces a string error, no panic.
@@ -691,6 +751,7 @@ mod tests {
             temperature: None,
             endpoint: LlmEndpoint::Responses,
             effort: None,
+            session_id: None,
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(&[], "sys", &[], &opts);

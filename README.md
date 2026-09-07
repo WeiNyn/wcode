@@ -1,9 +1,10 @@
 # wcode
 
 A minimal, pi-like coding agent for the terminal. It streams an LLM conversation
-and gives it four tools — read, bash, edit, write — and stays out of the way.
-Built on a small kernel ([`wcode-harness`](crates/wcode-harness)) that speaks to
-any OpenAI-compatible chat-completions endpoint.
+and gives it content-addressed tools — read (anchors per line), grep/find,
+bash, edit/replace, write — and stays out of the way. Built on a small kernel
+([`wcode-harness`](crates/wcode-harness)) that speaks to any OpenAI-compatible
+chat-completions endpoint.
 
 ## Install
 
@@ -26,11 +27,16 @@ effort = "high"        # optional; free-style reasoning effort, omitted = not se
 rtk = "auto"           # optional; auto|true|false — route bash output through the
                        # rtk proxy (https://github.com/rtk-ai/rtk) to cut tokens
                        # (default auto = on only if the rtk binary is on PATH)
+
+[tools]
+grep = true            # optional; true|false — register the grep tool (off by default)
+find = true            # optional; true|false — register the find tool (off by default)
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
-`OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT` and
-`WCODE_RTK`.
+`OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT`,
+`WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
+`tools.find`).
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
@@ -73,13 +79,40 @@ Output: text streams to stdout, thinking and tool output are dimmed
 
 | tool | behavior |
 |---|---|
-| `read` | file contents with line numbers, 1-based `offset`/`limit` |
+| `read` | file contents as `ANCHOR│line` — the 5-char anchor is the line's content address and the `edit` target (no line numbers; `plain:true` restores `cat -n`). Anchors survive inserts/deletes above and reindentation. `offset`/`limit` page |
+| `grep` | regex search; results carry anchors so a hit feeds straight into `edit` (`path:line  ANCHOR│line  <--`). Skips `.git`/`target`/`node_modules`/binaries; glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
+| `find` | glob-based file/dir listing, one path per line. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
 | `bash` | `sh -c` in the working dir; stdout, labeled `[stderr]`, exit code; 30s default timeout, Ctrl-C kills |
-| `edit` | exact string replace; fails on 0 or (without `replace_all`) multiple matches |
+| `ast_search` | AST-structural search via `ast-grep` (`$UPPERCASE` wildcards); **registered only when `sg` is on PATH** |
+| `edit` | replace the line range covered by `from`/`to` anchors with `replacement`. Content-addressed: edits above never shift the target; stale/ambiguous anchors are rejected with candidates, nothing written. Echoes the fresh-anchor region so edits chain without re-reads |
+| `replace` | exact string replace without a read for quick unique substitutions; fails on 0 or (without `replace_all`) multiple matches |
 | `write` | create/overwrite; parents created automatically |
 
-`edit`/`write` share a mutation lock and write via a temp file + rename, so
-concurrent file mutation can't interleave or truncate.
+`edit`/`replace`/`write` share a mutation lock and write via a temp file +
+rename, so concurrent file mutation can't interleave or truncate.
+
+## Design: content-addressed editing
+
+Line numbers are positional — insert one line and every number below silently
+means something else, the classic way agents corrupt files. wcode `read`/`edit`
+address lines by a 5-char **content anchor** instead (`XXa1b│fn main() {`),
+following the hashline ideas in `pi-better-edit`:
+
+- `anchor(line)` is a pure hash of the line's whitespace-stripped text, so
+  inserting or deleting lines elsewhere *never* changes an intact line's
+  anchor, and formatters (rustfmt/prettier/black reindentation) don't move it.
+- `edit` sends `from`/`to` anchors + the new text — old code is never re-typed
+  (token savings) and the target can't drift.
+- Identical lines intentionally share an anchor; `edit` **rejects** ambiguous
+  targets with the candidate line numbers (or `old_string` to pin one) instead
+  of guessing. Stale anchors (line changed since `read`) get the same
+  reject-with-a-hint treatment.
+- Fully stateless: no anchor store, no session memory, so external edits
+  (bash, formatters, other tools) are always picked up — `read`/`edit`
+  recompute anchors from current file contents every call.
+
+Structural search is a separate axis: `ast_search` shells out to `ast-grep`
+(`sg`) when installed (the same auto-detect pattern as the rtk hook).
 
 ## Sessions
 

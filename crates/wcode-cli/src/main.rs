@@ -40,9 +40,14 @@ config: ~/.config/wcode/config.toml
 
   [hooks]
   rtk = \"...\"        (optional, auto|true|false; route bash output through the rtk proxy to cut tokens)
+
+  [tools]
+  grep = \"...\"       (optional, true|false; register the grep tool. Off by default — bash can search)
+  find = \"...\"       (optional, true|false; register the find tool. Off by default — bash can list files)
 env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
 env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort
-env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)";
+env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
+env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -261,11 +266,11 @@ async fn main() {
     };
 
     let hooks = default_hooks(&cfg.hooks);
-    let mut agent = build_agent(llm.clone(), hooks.clone(), session, context);
+    let mut agent = build_agent(llm.clone(), hooks.clone(), &cfg.tools, session, context);
 
     match args.prompt {
         Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
-        None => repl::run(agent, llm, hooks).await,
+        None => repl::run(agent, llm, hooks, cfg.tools).await,
     }
 }
 

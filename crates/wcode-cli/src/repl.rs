@@ -15,15 +15,29 @@ use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
-use crate::config::HooksConfig;
+use crate::config::{HooksConfig, ToolsConfig};
 use crate::rtk::RtkHooks;
 use crate::tools::default_tools;
 
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
-const SYSTEM_PROMPT: &str = "You are wcode, a minimal coding agent working in the user's \
-current directory. Use the read, bash, edit and write tools to inspect and modify files. \
-Be concise.";
+/// System prompt derives from the registered tool set. The read/edit anchor
+/// contract is constant; grep/find are named only when those tools are
+/// actually registered (both are off by default — `bash` covers search).
+fn system_prompt(tools: &ToolsConfig) -> String {
+    let inspect = match (tools.grep, tools.find) {
+        (true, true) => "read, grep and find",
+        (true, false) => "read and grep",
+        (false, true) => "read and find",
+        (false, false) => "read",
+    };
+    format!(
+        "You are wcode, a minimal coding agent working in the user's current directory. \
+         Inspect with {inspect}; modify with edit and write; run anything else through bash. \
+         read emits a 5-char anchor per line and edit targets lines by those anchors \
+         (content-addressed, drift-proof). Be concise."
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -252,12 +266,13 @@ pub fn default_hooks(cfg: &HooksConfig) -> HooksSet {
 pub fn build_agent(
     llm: LlmOpts,
     hooks: HooksSet,
+    tools: &ToolsConfig,
     session: Option<Session>,
     context: Vec<AgentMessage>,
 ) -> Agent {
     Agent::new(AgentConfig {
-        system: SYSTEM_PROMPT.into(),
-        tools: default_tools(),
+        system: system_prompt(tools),
+        tools: default_tools(tools),
         llm,
         stream_fn: rig_stream_fn(),
         hooks,
@@ -434,7 +449,7 @@ async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
 // REPL
 // ---------------------------------------------------------------------------
 
-pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet) {
+pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: ToolsConfig) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
     // run is active; the slot is refreshed after each run / agent swap.
@@ -486,7 +501,8 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet) {
                         let path = session
                             .as_ref()
                             .and_then(|s| s.path().map(Path::to_path_buf));
-                        agent = build_agent(llm.clone(), hooks.clone(), session, Vec::new());
+                        agent =
+                            build_agent(llm.clone(), hooks.clone(), &tools, session, Vec::new());
                         *cancel_slot.lock().unwrap() = agent.cancel_token();
                         match path {
                             Some(p) => println!("new session: {}", p.display()),
@@ -557,7 +573,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet) {
                             llm.effort = e;
                         }
                         let n = messages.len();
-                        agent = build_agent(llm.clone(), hooks.clone(), Some(s), messages);
+                        agent = build_agent(llm.clone(), hooks.clone(), &tools, Some(s), messages);
                         *cancel_slot.lock().unwrap() = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
                     }
@@ -777,6 +793,19 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_names_only_registered_inspect_tools() {
+        let off = system_prompt(&ToolsConfig::default());
+        assert!(off.contains("Inspect with read;"), "{off}");
+        assert!(!off.contains("grep") && !off.contains("find"));
+
+        let on = system_prompt(&ToolsConfig { grep: true, find: true });
+        assert!(on.contains("Inspect with read, grep and find;"), "{on}");
+
+        let only_grep = system_prompt(&ToolsConfig { grep: true, find: false });
+        assert!(only_grep.contains("Inspect with read and grep;"), "{only_grep}");
+    }
+
+    #[test]
     fn reload_args_resume_and_forward_opts() {
         let llm = LlmOpts {
             model: "gpt-x".to_string(),
@@ -785,6 +814,7 @@ mod tests {
             temperature: None,
             endpoint: LlmEndpoint::Chat,
             effort: Some("high".to_string()),
+            session_id: None,
         };
         assert_eq!(
             reload_args(&llm, Some(Path::new("/s/a.jsonl")), false),

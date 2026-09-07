@@ -39,7 +39,17 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(cfg: AgentConfig) -> Agent {
+    pub fn new(mut cfg: AgentConfig) -> Agent {
+        // Stable routing id for providers (OpenCode Go `x-opencode-session`):
+        // session header wins (a resumed Agent inherits `llm` from the old
+        // one, so the opt may be stale), else explicit opt, else a per-agent
+        // id (covers --no-session / in-memory).
+        cfg.llm.session_id = cfg
+            .session
+            .as_ref()
+            .and_then(session_header_id)
+            .or_else(|| cfg.llm.session_id.clone())
+            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (follow_tx, follow_rx) = mpsc::unbounded_channel();
         Agent {
@@ -184,4 +194,12 @@ impl Agent {
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_ref().and_then(|s| s.path())
     }
+}
+
+/// Id from the session's `Header` entry, if present (old files may lack one).
+fn session_header_id(session: &Session) -> Option<String> {
+    session.entries().iter().find_map(|e| match e {
+        SessionEntry::Header { id, .. } => Some(id.clone()),
+        _ => None,
+    })
 }
