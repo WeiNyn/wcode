@@ -125,12 +125,8 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         Some(m) => m,
         None => return Err(ConfigError::MissingModel(file)),
     };
-    let endpoint = parse_endpoint(
-        env.wcode_endpoint
-            .as_deref()
-            .or(file.endpoint.as_deref()),
-    )
-    .map_err(ConfigError::Io)?;
+    let endpoint = parse_endpoint(env.wcode_endpoint.as_deref().or(file.endpoint.as_deref()))
+        .map_err(ConfigError::Io)?;
     let mut hooks = file.hooks;
     if let Some(v) = env.wcode_rtk.as_deref() {
         hooks.rtk = RtkPreference::parse(Some(v)).map_err(ConfigError::Io)?;
@@ -344,17 +340,17 @@ mod tests {
             },
         )
         .unwrap_err();
-        let ConfigError::Io(msg) = &err else { panic!("wrong error: {err:?}") };
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
         assert!(msg.contains("sometimes"), "names the value: {msg}");
     }
 
     #[test]
     fn toml_hooks_accept_bool_and_string_rtk() {
-        let file: FileConfig =
-            toml::from_str("model = \"m1\"\n[hooks]\nrtk = true").unwrap();
+        let file: FileConfig = toml::from_str("model = \"m1\"\n[hooks]\nrtk = true").unwrap();
         assert_eq!(file.hooks.rtk, RtkPreference::On);
-        let file: FileConfig =
-            toml::from_str("model = \"m1\"\n[hooks]\nrtk = \"auto\"").unwrap();
+        let file: FileConfig = toml::from_str("model = \"m1\"\n[hooks]\nrtk = \"auto\"").unwrap();
         assert_eq!(file.hooks.rtk, RtkPreference::Auto);
     }
 
@@ -428,7 +424,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        let ConfigError::Io(msg) = &err else { panic!("wrong error: {err:?}") };
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
         assert!(msg.contains("grep"), "names the tool: {msg}");
     }
 }

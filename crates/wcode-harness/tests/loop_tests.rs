@@ -217,6 +217,49 @@ async fn plain_text_turn() {
 }
 
 #[tokio::test]
+async fn complete_thinking_block_replaces_accumulated_deltas() {
+    // A provider that streams reasoning deltas and then restates the full
+    // block must not leave duplicated thinking in the conversation context.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ThinkingDelta("partial ".into()),
+        LlmStreamEvent::ThinkingReplace("full thought".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(ctx.len(), 2);
+    match &ctx[1] {
+        AgentMessage::Assistant { content, .. } => {
+            let thinking_blocks = content
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::Thinking { .. }))
+                .count();
+            assert_eq!(
+                thinking_blocks, 1,
+                "replacement must not leave the delta block behind"
+            );
+            let thinking: String = content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Thinking { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(thinking, "full thought");
+        }
+        _ => panic!("expected assistant message"),
+    }
+}
+
+#[tokio::test]
 async fn tool_call_roundtrip() {
     let rec = Recorder::default();
     rec.push(vec![
@@ -343,7 +386,11 @@ async fn before_tool_call_blocks() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(BlockingHooks)));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![tool],
+        HooksSet::one(Arc::new(BlockingHooks)),
+    );
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -410,7 +457,11 @@ async fn transform_tool_input_rewrites_args_before_execution() {
     ]);
 
     let (tool, seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(RenameHooks)));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![tool],
+        HooksSet::one(Arc::new(RenameHooks)),
+    );
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -460,7 +511,11 @@ async fn after_tool_call_patches() {
     ]);
 
     let (tool, _seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::one(Arc::new(PatchingHooks)));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![tool],
+        HooksSet::one(Arc::new(PatchingHooks)),
+    );
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (res, events) = run(cfg, &mut ctx).await;
@@ -514,6 +569,69 @@ async fn abort_mid_stream() {
     ));
 }
 
+#[tokio::test]
+async fn cancel_during_tool_loop_ends_run_without_extra_turn() {
+    // The tool cancels the shared token mid-execution; the loop must end the
+    // run right there instead of firing another LLM turn.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "cancel".into(),
+            arguments: serde_json::json!({ "text": "hi" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    let TestSetup { mut cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    cfg.tools = vec![erased(CancelTool {
+        token: cfg.cancel.clone(),
+    })];
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Aborted);
+    // No second stream call: cancel during the tool loop ends the run.
+    assert_eq!(
+        rec.calls().len(),
+        1,
+        "cancel during a tool must not start another turn"
+    );
+    // Complete history: User, Assistant(ToolUse), one ToolResult. No orphan.
+    assert_eq!(ctx.len(), 3);
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { output, is_error: false, .. } if output == "ran:hi"
+    ));
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
+struct CancelTool {
+    token: tokio_util::sync::CancellationToken,
+}
+
+#[async_trait::async_trait]
+impl TypedTool for CancelTool {
+    type Args = EchoArgs;
+    fn name(&self) -> &str {
+        "cancel"
+    }
+    fn description(&self) -> &str {
+        "cancels the run token"
+    }
+    async fn execute(&self, args: EchoArgs, _ctx: &ToolContext) -> ToolOutput {
+        self.token.cancel();
+        ToolOutput {
+            output: format!("ran:{}", args.text),
+            is_error: false,
+            details: None,
+        }
+    }
+}
+
 struct YieldThenBlockHooks;
 
 #[async_trait::async_trait]
@@ -550,7 +668,11 @@ async fn dead_sink_mid_tool_loop_synthesizes_results() {
         Box::pin(futures::stream::iter(events.clone())) as LlmStream
     });
     let (tool, _seen) = echo_tool();
-    let TestSetup { cfg, .. } = setup(stream_fn, vec![tool], HooksSet::one(Arc::new(YieldThenBlockHooks)));
+    let TestSetup { cfg, .. } = setup(
+        stream_fn,
+        vec![tool],
+        HooksSet::one(Arc::new(YieldThenBlockHooks)),
+    );
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -689,8 +811,7 @@ async fn follow_up_runs_next_turn() {
         },
     ]);
 
-    let TestSetup { cfg, follow_tx, .. } =
-        setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let TestSetup { cfg, follow_tx, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
     follow_tx.send(AgentMessage::user_text("follow")).unwrap();
 
     let mut ctx = vec![AgentMessage::user_text("hi")];
@@ -723,8 +844,7 @@ async fn steering_is_drained_before_streaming() {
         },
     ]);
 
-    let TestSetup { cfg, steer_tx, .. } =
-        setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let TestSetup { cfg, steer_tx, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
     steer_tx.send(AgentMessage::user_text("steer")).unwrap();
 
     let mut ctx = vec![AgentMessage::user_text("hi")];

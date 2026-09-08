@@ -58,7 +58,9 @@ pub enum Command {
     Sessions,
     /// Rebuild (`cargo build --bin wcode`) and re-exec into the same
     /// session. `no_session` = start fresh with `--no-session`.
-    Reload { no_session: bool },
+    Reload {
+        no_session: bool,
+    },
     /// Print aggregate token usage for the current conversation.
     Usage,
 }
@@ -79,7 +81,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "models" => Some(Command::Models(arg)),
         "effort" => Some(Command::Effort(arg)),
         "resume" => Some(Command::Resume(arg)),
-        "sessions" => Some(Command::Sessions),
+        "sessions" if arg.is_none() => Some(Command::Sessions),
         "reload" => match arg.as_deref() {
             None => Some(Command::Reload { no_session: false }),
             Some("--no-session") => Some(Command::Reload { no_session: true }),
@@ -428,9 +430,9 @@ async fn reload(
 async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
     match list_models(llm).await {
         Ok(ids) => {
-            let ids = ids.iter().filter(|id| {
-                filter.is_none_or(|f| id.to_lowercase().contains(&f.to_lowercase()))
-            });
+            let ids = ids
+                .iter()
+                .filter(|id| filter.is_none_or(|f| id.to_lowercase().contains(&f.to_lowercase())));
             let mut empty = true;
             for id in ids {
                 empty = false;
@@ -756,10 +758,7 @@ mod tests {
             Some(Command::Model(Some("gpt-x".into())))
         );
         assert_eq!(parse_command("/model"), Some(Command::Model(None)));
-        assert_eq!(
-            parse_command("/models"),
-            Some(Command::Models(None))
-        );
+        assert_eq!(parse_command("/models"), Some(Command::Models(None)));
         assert_eq!(
             parse_command("/models gpt"),
             Some(Command::Models(Some("gpt".into())))
@@ -779,7 +778,7 @@ mod tests {
             Some(Command::Resume(Some("/tmp/s.jsonl".into())))
         );
         assert_eq!(parse_command("/sessions"), Some(Command::Sessions));
-        assert_eq!(parse_command("/sessions now"), Some(Command::Sessions));
+        assert_eq!(parse_command("/sessions now"), None);
         assert_eq!(
             parse_command("/reload"),
             Some(Command::Reload { no_session: false })
@@ -798,11 +797,20 @@ mod tests {
         assert!(off.contains("Inspect with read;"), "{off}");
         assert!(!off.contains("grep") && !off.contains("find"));
 
-        let on = system_prompt(&ToolsConfig { grep: true, find: true });
+        let on = system_prompt(&ToolsConfig {
+            grep: true,
+            find: true,
+        });
         assert!(on.contains("Inspect with read, grep and find;"), "{on}");
 
-        let only_grep = system_prompt(&ToolsConfig { grep: true, find: false });
-        assert!(only_grep.contains("Inspect with read and grep;"), "{only_grep}");
+        let only_grep = system_prompt(&ToolsConfig {
+            grep: true,
+            find: false,
+        });
+        assert!(
+            only_grep.contains("Inspect with read and grep;"),
+            "{only_grep}"
+        );
     }
 
     #[test]
@@ -985,9 +993,7 @@ mod tests {
         cache_write: Option<u64>,
     ) -> AgentMessage {
         AgentMessage::Assistant {
-            content: vec![ContentBlock::Text {
-                text: "a".into(),
-            }],
+            content: vec![ContentBlock::Text { text: "a".into() }],
             stop_reason: StopReason::Stop,
             usage: Some(Usage {
                 input_tokens: input,
@@ -1004,10 +1010,9 @@ mod tests {
         let messages = vec![
             AgentMessage::user_text("q"),
             assistant_with_usage(10, 20, Some(3), None),
-            assistant(  // no usage reported
-                vec![ContentBlock::Text {
-                    text: "x".into(),
-                }],
+            assistant(
+                // no usage reported
+                vec![ContentBlock::Text { text: "x".into() }],
             ),
             assistant_with_usage(30, 40, None, Some(5)),
         ];

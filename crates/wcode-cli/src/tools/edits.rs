@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
@@ -37,11 +37,11 @@ pub struct EditsArgs {
 const MAX_ECHO_LINES: usize = 120;
 
 pub struct Edits {
-    lock: Arc<Mutex<()>>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Edits {
-    pub fn new(lock: Arc<Mutex<()>>) -> Self {
+    pub fn new(lock: Arc<tokio::sync::Mutex<()>>) -> Self {
         Self { lock }
     }
 }
@@ -57,10 +57,10 @@ impl TypedTool for Edits {
         "edits"
     }
     fn description(&self) -> &str {
-        "Apply a batch of anchor-range edits (like `edit`) to ONE file in a single call. Every op is resolved against the same snapshot, so earlier ops can't derail later ones, and the batch is atomic — any stale, ambiguous (without replace_all) or overlapping op aborts the whole call with nothing written. Use for several same-file edits that would otherwise be N separate read/edit round-trips."
+        "Apply a batch of anchor-range edits (like `edit`) to ONE file in a single call. Every op is resolved against the same snapshot, so earlier ops can't derail later ones, and the batch is atomic — any stale, ambiguous (without replace_all) or overlapping op aborts the whole call with nothing written. Use for several same-file edits that would otherwise be N separate read/edit round-trips. Same verbatim-`replacement` (keep exact indentation) and fresh-anchor rules as `edit`."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock().await;
         if args.edits.is_empty() {
             return ToolOutput {
                 output: "[E_EMPTY_BATCH] `edits` needs at least one op.".into(),
@@ -239,7 +239,7 @@ impl TypedTool for Edits {
             };
         }
 
-        let tmp = path.with_extension("tmp-wcode");
+        let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => {
                 let summary = per_op_spans
@@ -332,7 +332,7 @@ mod tests {
     use super::*;
 
     fn tool() -> Edits {
-        Edits::new(Arc::new(Mutex::new(())))
+        Edits::new(Arc::new(tokio::sync::Mutex::new(())))
     }
 
     fn op(path: &str, from: &str, to: Option<&str>, replacement: &str) -> EditOp {

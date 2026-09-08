@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod ast;
 pub mod ast_edit;
 pub mod ast_search;
 pub mod bash;
@@ -11,7 +12,7 @@ pub mod replace;
 pub mod write;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use wcode_harness::tool::{Tool, erased};
 
@@ -19,7 +20,7 @@ use crate::config::ToolsConfig;
 
 pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
     // ponytail: full mutation queue when parallel exec lands
-    let lock = Arc::new(Mutex::new(()));
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut tools = vec![
         erased(read::Read),
         erased(bash::Bash),
@@ -56,6 +57,15 @@ pub(crate) fn resolve(working_dir: &Path, path: &str) -> PathBuf {
     } else {
         working_dir.join(p)
     }
+}
+
+/// Same-directory temp name for atomic write+rename mutations. PID-suffixed so
+/// two wcode processes editing the same file can't clobber each other's temp
+/// (rename is still atomic — last writer wins, never a truncation), and it
+/// never collides with a user file that happens to be named `*.tmp-wcode`.
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{name}.tmp-wcode-{}", std::process::id()))
 }
 
 #[cfg(test)]

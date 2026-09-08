@@ -1,11 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-pub enum Role {
-    User,
-    Assistant,
-    Tool,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {

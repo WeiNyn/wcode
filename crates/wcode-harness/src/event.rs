@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 pub enum LlmStreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
+    /// A complete thinking block (provider restates the whole reasoning after
+    /// streaming deltas). Replacement semantics: supersedes *all* thinking
+    /// accumulated so far in this message — the kernel drops prior thinking
+    /// blocks instead of appending, so the context never doubles up.
+    ThinkingReplace(String),
     ToolCallStart {
         id: String,
         name: String,

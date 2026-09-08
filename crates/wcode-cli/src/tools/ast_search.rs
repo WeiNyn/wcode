@@ -1,14 +1,12 @@
-//! Optional AST-structural search backed by the `ast-grep` (`sg`) binary.
+//! Optional AST-structural search backed by an ast-grep binary (`ast-grep` or
+//! its legacy `sg` alias; discovery lives in [`super::ast`]).
 //!
 //! Mirrors wcode's existing "auto if binary on PATH" pattern (rtk): the tool
-//! is only registered when `sg` is present, so the model never sees a tool it
-//! can't use. `sg` ships via `cargo install ast-grep` / `npm i -g @ast-grep/cli`
-//! / `brew install ast-grep`.
+//! is only registered when one of the binaries is present, so the model never
+//! sees a tool it can't use.
 
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
-
-const BIN: &str = "sg";
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AstSearchArgs {
@@ -26,14 +24,10 @@ pub struct AstSearchArgs {
 
 pub struct AstSearch;
 
-/// Whether the `sg` binary is available on PATH. If false, the tool is simply
+/// Whether either ast-grep binary is on PATH. If false, the tool is simply
 /// not registered (see tools::default_tools).
 pub fn available() -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths)
-            .filter(|p| !p.as_os_str().is_empty())
-            .any(|p| p.join(BIN).is_file())
-    })
+    super::ast::available()
 }
 
 #[async_trait::async_trait]
@@ -46,7 +40,16 @@ impl TypedTool for AstSearch {
         "AST-structural code search via ast-grep (`sg`). Pattern is ordinary code with `$UPPERCASE` as wildcards, e.g. `await $X` finds every await regardless of operand. Use it when regex grep cannot express the structure; regex grep is cheaper for text matches. Currently search-only — structural rewrite is a follow-up."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
-        let mut cmd = tokio::process::Command::new(BIN);
+        let Some(bin) = super::ast::find_bin() else {
+            return ToolOutput {
+                output:
+                    "ast_search: no ast-grep binary on PATH (tool should not have been registered)"
+                        .into(),
+                is_error: true,
+                details: None,
+            };
+        };
+        let mut cmd = tokio::process::Command::new(bin);
         cmd.arg("-p").arg(&args.pattern);
         if let Some(lang) = &args.lang {
             cmd.arg("--lang").arg(lang);
@@ -73,7 +76,7 @@ impl TypedTool for AstSearch {
             Ok(o) => o,
             Err(e) => {
                 return ToolOutput {
-                    output: format!("ast_search: failed to run `{BIN}`: {e}"),
+                    output: format!("ast_search: failed to run `{bin}`: {e}"),
                     is_error: true,
                     details: None,
                 };
@@ -81,10 +84,11 @@ impl TypedTool for AstSearch {
         };
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stderr = super::ast::clean_stderr(&stderr);
         if !out.status.success() {
             return ToolOutput {
                 output: format!(
-                    "ast_search: `{BIN}` exited {}:\n{}\n{}",
+                    "ast_search: `{bin}` exited {}:\n{}\n{}",
                     out.status,
                     stdout,
                     if stderr.is_empty() {

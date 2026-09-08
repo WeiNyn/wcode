@@ -125,13 +125,15 @@ mod tests {
     #[async_trait::async_trait]
     impl Hooks for RecordingHooks {
         async fn transform_tool_input(&self, call: &mut ToolCall) {
-            self.transforms.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.transforms
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(obj) = call.arguments.as_object_mut() {
                 obj.insert("n".into(), serde_json::json!(1));
             }
         }
         async fn after_tool_call(&self, _call: &ToolCall, out: &mut ToolOutput) {
-            self.outputs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.outputs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             out.output.push('!');
         }
     }
@@ -193,6 +195,9 @@ mod tests {
             name: "bash".into(),
             arguments: serde_json::json!({ "command": "ls" }),
         };
-        assert_eq!(set.before_tool_call(&call).await.as_deref(), Some("blocked"));
+        assert_eq!(
+            set.before_tool_call(&call).await.as_deref(),
+            Some("blocked")
+        );
     }
 }

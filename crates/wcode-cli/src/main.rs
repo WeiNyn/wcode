@@ -27,7 +27,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --model <id>       override the configured model
    --base-url <url>   override the configured base URL
    --endpoint <e>     override the configured endpoint (chat|responses)
-   --effort <level>   override the reasoning effort (free-style, e.g. high; '-' clears it)
+   --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
    -h, --help         show this help
 
@@ -98,14 +98,22 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 i += 1;
             }
             "--endpoint" => {
-                a.endpoint = Some(args.get(i).ok_or("--endpoint requires chat|responses")?.clone());
+                a.endpoint = Some(
+                    args.get(i)
+                        .ok_or("--endpoint requires chat|responses")?
+                        .clone(),
+                );
                 i += 1;
             }
             "--effort" => {
                 let level = args.get(i).ok_or("--effort requires a level")?.clone();
                 i += 1;
-                // "-" clears back to send-nothing (mirrors /effort clear).
-                a.effort = Some(if level == "-" { None } else { Some(level) });
+                // "-", "none" and "off" clear back to send-nothing (mirror
+                // the REPL's /effort clear synonyms).
+                a.effort = Some(match level.as_str() {
+                    "-" | "none" | "off" => None,
+                    _ => Some(level),
+                });
             }
             "--list-models" => a.list_models = true,
             other => return Err(format!("unexpected argument: {other}")),
@@ -117,7 +125,8 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
 /// MissingModel rescue: re-run merge() with the parsed file config so env
 /// AND toml base_url/api_key survive a file that lacks `model`; the flag
 /// model fills the gap. Flag overrides are applied by the caller below.
-fn rescue(model: String, file: FileConfig, env: EnvLike) -> Config {
+#[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
+fn rescue(model: String, file: FileConfig, env: EnvLike) -> Result<Config, ConfigError> {
     merge(
         env,
         FileConfig {
@@ -125,7 +134,6 @@ fn rescue(model: String, file: FileConfig, env: EnvLike) -> Config {
             ..file
         },
     )
-    .expect("model set, merge cannot fail")
 }
 
 #[tokio::main]
@@ -155,11 +163,19 @@ async fn main() {
             // merge() never ran (file lacked model): rescue re-runs it with
             // the parsed file so toml/env base_url+api_key survive;
             // `--model`/`--base-url` flags are applied below and still win.
-            rescue(
+            // An invalid env override (endpoint/rtk/grep/find) still surfaces
+            // as a clean error here — not a panic.
+            match rescue(
                 args.model.clone().expect("--model"),
                 file,
                 EnvLike::from_env(),
-            )
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -402,11 +418,13 @@ mod tests {
             panic!("not args");
         };
         assert_eq!(a.effort, Some(Some("high".into())));
-        // "-" clears back to send-nothing.
-        let Parsed::Args(a) = parse_args(&args(&["--effort", "-"])).unwrap() else {
-            panic!("not args");
-        };
-        assert_eq!(a.effort, Some(None));
+        // "-", "none" and "off" all clear back to send-nothing.
+        for clear in ["-", "none", "off"] {
+            let Parsed::Args(a) = parse_args(&args(&["--effort", clear])).unwrap() else {
+                panic!("not args");
+            };
+            assert_eq!(a.effort, Some(None), "clear synonym {clear:?}");
+        }
         assert!(parse_args(&args(&["--effort"])).is_err());
     }
 
@@ -436,7 +454,8 @@ mod tests {
                 wcode_api_key: Some("k-env".into()),
                 ..EnvLike::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(cfg.model, "flag-model");
         assert_eq!(cfg.base_url.as_deref(), Some("http://env"));
         assert_eq!(cfg.api_key.as_deref(), Some("k-env"));
@@ -456,10 +475,31 @@ mod tests {
                 ..FileConfig::default()
             },
             EnvLike::default(),
-        );
+        )
+        .unwrap();
         assert_eq!(cfg.model, "flag-model");
         assert_eq!(cfg.base_url.as_deref(), Some("http://toml"));
         assert_eq!(cfg.api_key.as_deref(), Some("k-toml"));
+    }
+
+    #[test]
+    fn rescue_invalid_env_override_is_error_not_panic() {
+        // A model-less config rescued by --model must still surface an
+        // invalid env override (WCODE_GREP here) as a clean error — a
+        // regression guard for the old `expect("model set, merge cannot fail")`.
+        let e = rescue(
+            "flag-model".into(),
+            FileConfig::default(),
+            EnvLike {
+                wcode_grep: Some("banana".into()),
+                ..EnvLike::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::Io(msg) = &e else {
+            panic!("wrong error: {e:?}")
+        };
+        assert!(msg.contains("grep"), "names the tool: {msg}");
     }
 
     #[test]

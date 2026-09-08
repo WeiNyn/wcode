@@ -69,7 +69,11 @@ impl<'de> Deserialize<'de> for RtkPreference {
                 write!(f, "\"auto\", a boolean, or \"true\"/\"false\"")
             }
             fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<Self::Value, E> {
-                Ok(if b { RtkPreference::On } else { RtkPreference::Off })
+                Ok(if b {
+                    RtkPreference::On
+                } else {
+                    RtkPreference::Off
+                })
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
                 RtkPreference::parse(Some(s)).map_err(E::custom)
@@ -175,7 +179,10 @@ mod tests {
 
     #[test]
     fn preference_parses_on_off_with_synonyms() {
-        assert_eq!(RtkPreference::parse(Some("true")).unwrap(), RtkPreference::On);
+        assert_eq!(
+            RtkPreference::parse(Some("true")).unwrap(),
+            RtkPreference::On
+        );
         assert_eq!(RtkPreference::parse(Some("on")).unwrap(), RtkPreference::On);
         assert_eq!(RtkPreference::parse(Some("1")).unwrap(), RtkPreference::On);
         assert_eq!(
@@ -202,7 +209,10 @@ mod tests {
             let back: RtkPreference = serde_json::from_str(&json).unwrap();
             assert_eq!(pref, back, "round-trip of {pref} via {json}");
         }
-        assert_eq!(serde_json::to_string(&RtkPreference::Auto).unwrap(), "\"auto\"");
+        assert_eq!(
+            serde_json::to_string(&RtkPreference::Auto).unwrap(),
+            "\"auto\""
+        );
     }
 
     #[test]
@@ -293,6 +303,9 @@ mod tests {
         let hooks = RtkHooks::new(RtkPreference::On);
         let mut call = bash_call("wcode-rtk-does-not-know-this 123");
         hooks.transform_tool_input(&mut call).await;
-        assert_eq!(call.arguments["command"], "wcode-rtk-does-not-know-this 123");
+        assert_eq!(
+            call.arguments["command"],
+            "wcode-rtk-does-not-know-this 123"
+        );
     }
 }

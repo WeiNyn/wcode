@@ -80,67 +80,79 @@ pub async fn run_loop(
                 let mut stream = (cfg.stream_fn)(ctx.as_slice(), &cfg.system, &tool_defs, &cfg.llm);
                 loop {
                     tokio::select! {
-                        biased;
-                        _ = cfg.cancel.cancelled() => {
-                            aborted = true;
-                            break;
-                        }
-                        item = stream.next() => match item {
-                            None => break,
-                            Some(LlmStreamEvent::TextDelta(delta)) => {
-                                append_text(&mut content, &delta);
-                                if sink
-                                    .send(AgentEvent::MessageUpdate {
-                                        message: assistant(&content, StopReason::Stop, None),
-                                    })
-                                    .is_err()
-                                {
-                                    aborted = true;
-                                    break;
-                                }
-                            }
-                            Some(LlmStreamEvent::ThinkingDelta(delta)) => {
-                                append_thinking(&mut content, &delta);
-                                if sink
-                                    .send(AgentEvent::MessageUpdate {
-                                        message: assistant(&content, StopReason::Stop, None),
-                                    })
-                                    .is_err()
-                                {
-                                    aborted = true;
-                                    break;
-                                }
-                            }
-                            // v1: no event for ToolCallStart.
-                            Some(LlmStreamEvent::ToolCallStart { .. }) => {}
-                            Some(LlmStreamEvent::ToolCall { id, name, arguments }) => {
-                                content.push(ContentBlock::ToolCall { id, name, arguments });
-                                if sink
-                                    .send(AgentEvent::MessageUpdate {
-                                        message: assistant(&content, StopReason::Stop, None),
-                                    })
-                                    .is_err()
-                                {
-                                    aborted = true;
-                                    break;
-                                }
-                            }
-                            Some(LlmStreamEvent::Done { stop_reason, usage: u }) => {
-                                captured = Some(stop_reason);
-                                usage = u;
-                                // Done ends the fold: a stalled stream must not
-                                // hang the run or overwrite the captured reason.
-                                break;
-                            }
-                            // A stream Error behaves like Done{Error}: capture, end run.
-                            // The message is surfaced first so consumers can show it.
-                            Some(LlmStreamEvent::Error { message }) => {
-                                let _ = sink.send(AgentEvent::Error { message });
-                                captured = Some(StopReason::Error);
-                                break;
-                            }
-                        }
-                    }
+                                            biased;
+                                            _ = cfg.cancel.cancelled() => {
+                                                aborted = true;
+                                                break;
+                                            }
+                                            item = stream.next() => match item {
+                                                None => break,
+                                                Some(LlmStreamEvent::TextDelta(delta)) => {
+                                                    append_text(&mut content, &delta);
+                                                    if sink
+                                                        .send(AgentEvent::MessageUpdate {
+                                                            message: assistant(&content, StopReason::Stop, None),
+                                                        })
+                                                        .is_err()
+                                                    {
+                                                        aborted = true;
+                                                        break;
+                                                    }
+                                                }
+                    Some(LlmStreamEvent::ThinkingDelta(delta)) => {
+                                                    append_thinking(&mut content, &delta);
+                                                    if sink
+                                                        .send(AgentEvent::MessageUpdate {
+                                                            message: assistant(&content, StopReason::Stop, None),
+                                                        })
+                                                        .is_err()
+                                                    {
+                                                        aborted = true;
+                                                        break;
+                                                    }
+                                                }
+                                                Some(LlmStreamEvent::ThinkingReplace(delta)) => {
+                                                    replace_thinking(&mut content, &delta);
+                                                    if sink
+                                                        .send(AgentEvent::MessageUpdate {
+                                                            message: assistant(&content, StopReason::Stop, None),
+                                                        })
+                                                        .is_err()
+                                                    {
+                                                        aborted = true;
+                                                        break;
+                                                    }
+                                                }
+                                                // v1: no event for ToolCallStart.
+                                                Some(LlmStreamEvent::ToolCallStart { .. }) => {}
+                                                Some(LlmStreamEvent::ToolCall { id, name, arguments }) => {
+                                                    content.push(ContentBlock::ToolCall { id, name, arguments });
+                                                    if sink
+                                                        .send(AgentEvent::MessageUpdate {
+                                                            message: assistant(&content, StopReason::Stop, None),
+                                                        })
+                                                        .is_err()
+                                                    {
+                                                        aborted = true;
+                                                        break;
+                                                    }
+                                                }
+                                                Some(LlmStreamEvent::Done { stop_reason, usage: u }) => {
+                                                    captured = Some(stop_reason);
+                                                    usage = u;
+                                                    // Done ends the fold: a stalled stream must not
+                                                    // hang the run or overwrite the captured reason.
+                                                    break;
+                                                }
+                                                // A stream Error behaves like Done{Error}: capture, end run.
+                                                // The message is surfaced first so consumers can show it.
+                                                Some(LlmStreamEvent::Error { message }) => {
+                                                    let _ = sink.send(AgentEvent::Error { message });
+                                                    captured = Some(StopReason::Error);
+                                                    break;
+                                                }
+                                            }
+                                        }
                 }
             }
 
@@ -284,6 +296,13 @@ pub async fn run_loop(
                 }
             }
 
+            if cfg.cancel.is_cancelled() {
+                // A cancel that fired mid-tool-loop ends the run right here
+                // instead of rolling into another LLM turn: tools already saw
+                // the token via ToolContext.cancel and pushed their results, so
+                // the history is complete (no orphan ToolCalls to synthesize).
+                aborted = true;
+            }
             if aborted {
                 let _ = sink.send(AgentEvent::AgentEnd);
                 return Ok(StopReason::Aborted);
@@ -379,4 +398,13 @@ fn append_thinking(content: &mut Vec<ContentBlock>, delta: &str) {
             text: delta.to_string(),
         }),
     }
+}
+
+/// Replacement semantics for a complete Thinking block: any thinking
+/// accumulated from deltas is dropped and the block holds just `text`.
+fn replace_thinking(content: &mut Vec<ContentBlock>, text: &str) {
+    content.retain(|b| !matches!(b, ContentBlock::Thinking { .. }));
+    content.push(ContentBlock::Thinking {
+        text: text.to_string(),
+    });
 }

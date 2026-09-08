@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
@@ -24,11 +24,11 @@ pub struct EditArgs {
 }
 
 pub struct Edit {
-    lock: Arc<Mutex<()>>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Edit {
-    pub fn new(lock: Arc<Mutex<()>>) -> Self {
+    pub fn new(lock: Arc<tokio::sync::Mutex<()>>) -> Self {
         Self { lock }
     }
 }
@@ -50,10 +50,10 @@ impl TypedTool for Edit {
         "edit"
     }
     fn description(&self) -> &str {
-        "Replace the line range covered by the `from`/`to` anchors with `replacement`. `from` and `to` are the anchors `read` printed — they address lines by content, so edits above never shift this target. Old code is never re-typed: send the two anchors and the new text. Ambiguous anchors (identical lines share an anchor) and stale anchors (line changed since read) are rejected with candidates to retry — nothing is written. For a literal string replacement without reading, use `replace`. For a whole-file rewrite, use `write`."
+        "Replace the line range covered by the `from`/`to` anchors with `replacement`. `from` and `to` are the anchors `read` printed — they address lines by content, so edits above never shift this target. Old code is never re-typed: send the two anchors and the new text. Ambiguous anchors (identical lines share an anchor) and stale anchors (line changed since read) are rejected with candidates to retry — nothing is written. For a literal string replacement without reading, use `replace`. For a whole-file rewrite, use `write`. Reminders: `replacement` is inserted verbatim — keep the exact leading whitespace on every line (indentation is part of the anchor contract); the entire inclusive `from`–`to` line range is replaced; if the file changed since read (formatter, other tool), re-read first — anchors move."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
-        let _guard = self.lock.lock().unwrap();
+        let _guard = self.lock.lock().await;
         let path = super::resolve(&ctx.working_dir, &args.path);
 
         if !anchor::is_anchor(&args.from) {
@@ -187,7 +187,7 @@ impl TypedTool for Edit {
             };
         }
 
-        let tmp = path.with_extension("tmp-wcode");
+        let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => {
                 // Echo the resulting region with fresh anchors so subsequent
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
 
     fn tool() -> Edit {
-        Edit::new(Arc::new(Mutex::new(())))
+        Edit::new(Arc::new(tokio::sync::Mutex::new(())))
     }
 
     fn args(

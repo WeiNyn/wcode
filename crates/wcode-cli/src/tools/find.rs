@@ -45,6 +45,7 @@ impl TypedTool for Find {
         let max = args.max.unwrap_or(500) as usize;
 
         let mut out = String::new();
+        let mut shown = 0usize;
         let base_is_file = base.is_file();
         let entries: Vec<std::path::PathBuf> = if base_is_file {
             vec![base.clone()]
@@ -63,7 +64,7 @@ impl TypedTool for Find {
             if want_file && !p.is_file() {
                 continue;
             }
-            if out.lines().count() >= max {
+            if shown >= max {
                 out.push_str(&format!("[find: truncated at {max} entries]\n"));
                 break;
             }
@@ -77,6 +78,7 @@ impl TypedTool for Find {
             }
             out.push_str(&rel_str);
             out.push('\n');
+            shown += 1;
         }
         if out.is_empty() {
             out.push_str(&format!("find: nothing matched under {}\n", base.display()));

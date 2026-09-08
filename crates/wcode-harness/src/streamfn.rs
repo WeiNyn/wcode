@@ -64,8 +64,27 @@ fn openai_client(opts: &LlmOpts) -> Result<rig::providers::openai::Client, Strin
         .api_key
         .clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-    let Some(key) = key else {
-        return Err("no API key: pass LlmOpts.api_key or set OPENAI_API_KEY".to_string());
+    let key = match key {
+        Some(k) => k,
+        None => {
+            // Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp,
+            // vLLM, ...) accept any bearer token, so a placeholder keeps them
+            // usable while a missing key against a real endpoint fails loudly.
+            let local = opts.base_url.as_deref().is_some_and(|url| {
+                let u = url.to_ascii_lowercase();
+                ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+                    .iter()
+                    .any(|prefix| u.starts_with(prefix))
+            });
+            if local {
+                "wcode-local".to_string()
+            } else {
+                return Err(
+                    "no API key: pass LlmOpts.api_key or set OPENAI_API_KEY (a localhost base_url works keyless)"
+                        .to_string(),
+                );
+            }
+        }
     };
     let mut builder = openai::Client::builder()
         .api_key::<rig::client::BearerAuth>(key)
@@ -288,8 +307,8 @@ fn map_item(item: StreamedAssistantContent) -> Vec<LlmStreamEvent> {
         // on chat-completions wires (deltas only). Restating wire => replacement variant.
         StreamedAssistantContent::Reasoning { reasoning, .. } => {
             // Replacement semantics: the complete block supersedes the
-            // accumulated deltas.
-            vec![LlmStreamEvent::ThinkingDelta(reasoning_text(&reasoning))]
+            // accumulated deltas (the loop drops prior thinking on this event).
+            vec![LlmStreamEvent::ThinkingReplace(reasoning_text(&reasoning))]
         }
         StreamedAssistantContent::ToolCallDelta { .. } => vec![],
         StreamedAssistantContent::ToolCall { tool_call, .. } => vec![
@@ -409,7 +428,7 @@ mod tests {
         });
         assert_eq!(
             events,
-            vec![LlmStreamEvent::ThinkingDelta("full thought".to_string())]
+            vec![LlmStreamEvent::ThinkingReplace("full thought".to_string())]
         );
     }
 
@@ -671,6 +690,38 @@ mod tests {
             .clone();
         assert!(!headers.contains_key("x-opencode-session"));
         assert!(headers.contains_key("user-agent"), "got: {headers:?}");
+    }
+
+    #[test]
+    fn localhost_base_url_builds_without_key() {
+        // Keyless local endpoints (Ollama, llama.cpp, ...) should work with no
+        // configured key via a placeholder bearer token.
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            let opts = LlmOpts {
+                base_url: Some(url.to_string()),
+                api_key: None,
+                ..LlmOpts::default()
+            };
+            assert!(
+                openai_client(&opts).is_ok(),
+                "keyless {url} must build a client"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_base_url_without_key_is_error() {
+        let opts = LlmOpts {
+            base_url: Some("https://api.example.com/v1".to_string()),
+            api_key: None,
+            ..LlmOpts::default()
+        };
+        let err = openai_client(&opts).unwrap_err();
+        assert!(err.contains("no API key"), "got: {err}");
     }
 
     /// Unreachable endpoint: list_models surfaces a string error, no panic.

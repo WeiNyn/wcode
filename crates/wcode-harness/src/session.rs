@@ -126,10 +126,6 @@ impl Session {
             .collect()
     }
 
-    pub fn build_context(&self) -> Vec<AgentMessage> {
-        self.messages()
-    }
-
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }

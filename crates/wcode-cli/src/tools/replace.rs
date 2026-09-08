@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
@@ -16,11 +16,11 @@ pub struct ReplaceArgs {
 }
 
 pub struct Replace {
-    lock: Arc<Mutex<()>>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Replace {
-    pub fn new(lock: Arc<Mutex<()>>) -> Self {
+    pub fn new(lock: Arc<tokio::sync::Mutex<()>>) -> Self {
         Self { lock }
     }
 }
@@ -32,11 +32,12 @@ impl TypedTool for Replace {
         "replace"
     }
     fn description(&self) -> &str {
-        "Replace an exact literal string in a file without reading it first. `old_string` must occur exactly once unless `replace_all` is set. Prefer `edit` (anchors) for targeted line edits — `replace` is for quick, unique, whole-text substitutions."
+        "Replace an exact literal string in a file without reading it first. `old_string` must occur exactly once unless `replace_all` is set. Prefer `edit` (anchors) for targeted line edits — `replace` is for quick, unique, whole-text substitutions. The match is byte-exact: whitespace counts."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
-        // Sync fs + std lock: guard never crosses an await, edits stay serialized.
-        let _guard = self.lock.lock().unwrap();
+        // Async lock + sync fs: the guard may cross awaits, but the fs work stays
+        // serialized and synchronous.
+        let _guard = self.lock.lock().await;
         let path = super::resolve(&ctx.working_dir, &args.path);
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -72,7 +73,7 @@ impl TypedTool for Replace {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
-        let tmp = path.with_extension("tmp-wcode");
+        let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
                 output: format!("replaced in {}", args.path),
@@ -93,7 +94,7 @@ mod tests {
     use super::*;
 
     fn tool() -> Replace {
-        Replace::new(Arc::new(Mutex::new(())))
+        Replace::new(Arc::new(tokio::sync::Mutex::new(())))
     }
 
     fn args(path: &str, old: &str, new: &str, replace_all: Option<bool>) -> ReplaceArgs {

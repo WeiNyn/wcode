@@ -40,7 +40,11 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
-an error. `--effort -` clears back to send-nothing.
+an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
+
+Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
+`localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a
+placeholder bearer token so `--base-url http://localhost:11434/v1` just works.
 
 ## Use
 
@@ -83,12 +87,12 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | `grep` | regex search; results carry anchors so a hit feeds straight into `edit` (`path:line  ANCHOR│line  <--`). Skips `.git`/`target`/`node_modules`/binaries; glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
 | `find` | glob-based file/dir listing, one path per line. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
 | `bash` | `sh -c` in the working dir; stdout, labeled `[stderr]`, exit code; 30s default timeout, Ctrl-C kills |
-| `ast_search` | AST-structural search via `ast-grep` (`$UPPERCASE` wildcards); **registered only when `sg` is on PATH** |
+| `ast_search` | AST-structural search via `ast-grep` (`$UPPERCASE` wildcards); **registered only when an `ast-grep`/`sg` binary is on PATH** |
 | `ast_edit` | AST-structural rewrite of **one file** via `ast-grep` (`pattern`/`rewrite` with `$UPPERCASE` wildcards); `commit:false` dry-runs (diff only), default commits atomically and echoes the diff. **Registered only when an `ast-grep`/`sg` binary is on PATH** |
-| `edit` | replace the line range covered by `from`/`to` anchors with `replacement`. Content-addressed: edits above never shift the target; stale/ambiguous anchors are rejected with candidates, nothing written. Echoes the fresh-anchor region so edits chain without re-reads |
+| `edit` | replace the line range covered by `from`/`to` anchors with `replacement`. Content-addressed: edits above never shift the target; stale/ambiguous anchors are rejected with candidates, nothing written. Echoes the fresh-anchor region so edits chain without re-reads. `replacement` is verbatim — preserve leading indentation; re-read after any external change first |
 | `edits` | apply a batch of anchor-range edits (`{edits: [{path,from,to?,replacement,…}]}`) to **one file** in a single call. Every op resolves against the same snapshot and the batch is atomic — any stale/ambiguous/overlapping op aborts with nothing written |
 | `replace` | exact string replace without a read for quick unique substitutions; fails on 0 or (without `replace_all`) multiple matches |
-| `write` | create/overwrite; parents created automatically |
+| `write` | create/overwrite; parents created automatically. Content is written byte-for-byte — indentation preserved, never reformatted |
 
 `edit`/`replace`/`write` share a mutation lock and write via a temp file +
 rename, so concurrent file mutation can't interleave or truncate.
@@ -116,8 +120,9 @@ following the hashline ideas in `pi-better-edit`:
   (bash, formatters, other tools) are always picked up — `read`/`edit`
   recompute anchors from current file contents every call.
 
-Structural search is a separate axis: `ast_search` shells out to `ast-grep`
-(`sg`) when installed (the same auto-detect pattern as the rtk hook).
+Structural search is a separate axis: `ast_search`/`ast_edit` shell out to an
+`ast-grep` binary (the legacy `sg` alias is the fallback; the same auto-detect
+pattern as the rtk hook).
 
 ## Sessions
 
