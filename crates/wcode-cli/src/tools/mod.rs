@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod ast_edit;
 pub mod ast_search;
 pub mod bash;
 pub mod edit;
@@ -25,7 +26,7 @@ pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
         erased(edit::Edit::new(lock.clone())),
         erased(edits::Edits::new(lock.clone())),
         erased(replace::Replace::new(lock.clone())),
-        erased(write::Write::new(lock)),
+        erased(write::Write::new(lock.clone())),
     ];
     // grep/find are redundant with `bash` (it can grep/find itself), so they
     // register only when explicitly enabled in `[tools]`.
@@ -39,6 +40,11 @@ pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
     // the `sg` binary is on PATH so the model never holds an unusable tool.
     if ast_search::available() {
         tools.push(erased(ast_search::AstSearch));
+    }
+    // ast_edit rewrites files, so it shares the mutation lock; registered only
+    // when an ast-grep binary is on PATH (same auto pattern).
+    if ast_edit::available() {
+        tools.push(erased(ast_edit::AstEdit::new(lock.clone())));
     }
     tools
 }

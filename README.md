@@ -84,6 +84,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | `find` | glob-based file/dir listing, one path per line. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
 | `bash` | `sh -c` in the working dir; stdout, labeled `[stderr]`, exit code; 30s default timeout, Ctrl-C kills |
 | `ast_search` | AST-structural search via `ast-grep` (`$UPPERCASE` wildcards); **registered only when `sg` is on PATH** |
+| `ast_edit` | AST-structural rewrite of **one file** via `ast-grep` (`pattern`/`rewrite` with `$UPPERCASE` wildcards); `commit:false` dry-runs (diff only), default commits atomically and echoes the diff. **Registered only when an `ast-grep`/`sg` binary is on PATH** |
 | `edit` | replace the line range covered by `from`/`to` anchors with `replacement`. Content-addressed: edits above never shift the target; stale/ambiguous anchors are rejected with candidates, nothing written. Echoes the fresh-anchor region so edits chain without re-reads |
 | `edits` | apply a batch of anchor-range edits (`{edits: [{path,from,to?,replacement,…}]}`) to **one file** in a single call. Every op resolves against the same snapshot and the batch is atomic — any stale/ambiguous/overlapping op aborts with nothing written |
 | `replace` | exact string replace without a read for quick unique substitutions; fails on 0 or (without `replace_all`) multiple matches |

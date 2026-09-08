@@ -102,10 +102,18 @@ optional-tool registration rule (`sg` on PATH). Two flavors of one tool:
   transforms), but the echoed hunks carry line numbers for later
   anchor-based follow-ups.
 
-**Decision requested:** diff echo on commit is non-negotiable (visibility), but
-should dry-run be the default (extra round-trip, safest) or commit-on with
-diff-echo (fewer round-trips, still visible)? Proposal: **commit-on with
-diff-echo**; the diff acts as the verification step.
+**Decision RESOLVED: commit-on with diff-echo**; the diff acts as the
+verification step (`commit:false` stays as the explicit dry-run escape hatch).
+
+**Landed notes.** Tool `ast_edit` (`tools/ast_edit.rs`), registered when an
+`ast-grep` *or* `sg` binary is on PATH (prefers `ast-grep` to skip the `sg`
+deprecation banner), sharing the mutation lock. Mechanics: a `-r` run without
+`-U` prints ast-grep's own diff (exit 0) and never writes — that is both the
+dry-run and the echo; `-U` applies. Apply is atomic: rewrite a same-directory
+temp copy that **keeps the file's extension** (so language auto-detect
+survives), then temp-write + rename over the original. Dry-run with no matches
+→ success, "nothing to rewrite"; commit echoes the diff plus the changed-line
+span (`changed_range`) and a re-read hint for anchor-based follow-ups.
 
 ### B2. Batch same-file edits (from #5)
 
@@ -448,7 +456,7 @@ recoverable via `old_string`. Not revisited in Phase 2.
 | ✅ landed | **A2** read size guard + truncation | — | token safety |
 | 4 | **C** session-memory anchors (de-scoped after D1) | D1 | remaining duplicates = same-indent identical lines only |
 | ✅ landed | **B2** `edits` batching tool | — | all-or-nothing single-file batch; only needs edit's own overlap machinery |
-| 6 | **B1** `ast_edit` | — (independent) | stretch; optional-tool pattern already exists |
+| ✅ landed | **B1** `ast_edit` | — | optional-tool pattern; atomic single-file rewrite + diff echo |
 
 Each item is independently revertable; nothing past step 1 changes the model
 never writes the wrong line.
@@ -459,7 +467,8 @@ never writes the wrong line.
    removed; `{` ≠ `  {` ≠ `\t{`), CRLF-stripped. Breaking, landed in working
    tree, whole suite green. Trades formatter-survival for direct nested-brace
    addressing; de-scopes #7.
-2. **B1 `ast_edit`**: commit-with-diff-echo (proposed) vs dry-run-first.
+2. **B1 `ast_edit` RESOLVED**: commit-on with diff-echo (dry-run kept as
+   `commit:false`), landed.
 3. **B2 `edits` RESOLVED**: all-or-nothing atomic batch, landed (single file
    per call enforced; echo capped; each error names the op).
 4. **C6**: whole-file occurrence numbering (all duplicates, adjacent or not)
