@@ -98,9 +98,11 @@ means something else, the classic way agents corrupt files. wcode `read`/`edit`
 address lines by a 5-char **content anchor** instead (`XXa1b│fn main() {`),
 following the hashline ideas in `pi-better-edit`:
 
-- `anchor(line)` is a pure hash of the line's whitespace-stripped text, so
-  inserting or deleting lines elsewhere *never* changes an intact line's
-  anchor, and formatters (rustfmt/prettier/black reindentation) don't move it.
+- `anchor(line)` is a pure hash of the line's canonical text — ASCII whitespace
+  runs collapse to a single space, so inserting or deleting lines elsewhere
+  *never* changes an intact line's anchor, and formatters
+  (rustfmt/prettier/black reindentation) don't move it — yet `foo bar` and
+  `foobar` stay distinct anchors.
 - `edit` sends `from`/`to` anchors + the new text — old code is never re-typed
   (token savings) and the target can't drift.
 - Identical lines intentionally share an anchor; `edit` **rejects** ambiguous

@@ -1,7 +1,7 @@
 //! Content-addressed line anchors — the wcode hashline core.
 //!
 //! Stateless by design. A line's anchor is a pure function of its *canonical*
-//! text (ASCII whitespace stripped), so:
+//! text (ASCII whitespace runs collapsed to a single space), so:
 //!
 //! - inserting or deleting lines elsewhere never changes an intact line's
 //!   anchor (no line-number drift), and anchors are reproducible across
@@ -27,10 +27,15 @@ pub const ANCHOR_SEP: char = '│';
 const ALPHA_LEN: u64 = 62;
 const ANCHOR_SPACE: u64 = ALPHA_LEN.pow(ANCHOR_LEN as u32); // 62^5
 
-/// Canonical form of a line: all ASCII whitespace removed. Two lines that
-/// differ only in indentation/spacing are the same anchor (formatter-tolerant).
+/// Canonical form of a line: ASCII whitespace runs collapse to a single space
+/// and leading/trailing whitespace is trimmed. Formatter-tolerant (indentation
+/// and spacing changes keep the anchor), but whitespace *between* words still
+/// separates tokens, so `foo bar` and `foobar` are different anchors.
 pub fn canon(line: &str) -> String {
-    line.chars().filter(|c| !c.is_ascii_whitespace()).collect()
+    line.split(|c: char| c.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// FNV-1a 64 with a splitmix64 finalizer (good avalanche, no dependencies,
@@ -65,7 +70,9 @@ pub fn is_anchor(s: &str) -> bool {
 }
 
 /// Split file content into logical lines. A trailing `\n` is a separator, not
-/// a line; an empty or `\n`-only file yields zero lines.
+/// a line, so `"a\n"` yields `["a"]`; a byte-empty file yields zero lines.
+/// A lone `"\n"` file yields the single degenerate line `[""]` — treat it as
+/// empty via [`is_degenerate_empty`] rather than as a real blank line.
 pub fn split_lines(content: &str) -> Vec<String> {
     if content.is_empty() {
         return vec![];
@@ -78,6 +85,14 @@ pub fn split_lines(content: &str) -> Vec<String> {
         v.pop();
     }
     v
+}
+
+/// True when a file has no logical lines at all: byte-empty, or only the
+/// newline separator. `read` and `edit` treat both as one anonymous
+/// insertion point (`anchor("")`). A `"\n\n"` file has a real blank line and
+/// is *not* degenerate.
+pub fn is_degenerate_empty(content: &str) -> bool {
+    content.is_empty() || content == "\n"
 }
 
 pub fn anchors_for(lines: &[String]) -> Vec<String> {
@@ -203,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_collapses_but_words_stay_distinct() {
+        // Runs of whitespace are formatter-tolerant…
+        assert_eq!(anchor("foo bar"), anchor("  foo   bar "));
+        assert_eq!(anchor("let n = 1;"), anchor("let  n  =  1;"));
+        // … but distinct token boundaries are NOT conflated (the old canon
+        // collided these: it stripped every whitespace char).
+        assert_ne!(anchor("foo bar"), anchor("foobar"));
+        assert_ne!(anchor("let x = 1;"), anchor("letx=1;"));
+    }
+
+    #[test]
     fn anchors_do_not_move_under_insert_above() {
         // The core promise: editing lines above must not change anchors below.
         let plain = ["a = 1", "b = 2", "c = 3"]
@@ -243,6 +269,16 @@ mod tests {
         assert_eq!(split_lines("a\nb\n"), ["a", "b"]);
         assert_eq!(split_lines("\n"), [""]);
         assert_eq!(split_lines("a\n\n"), ["a", ""]);
+    }
+
+    #[test]
+    fn degenerate_empty_is_only_byte_empty_or_lone_separator() {
+        assert!(is_degenerate_empty(""));
+        assert!(is_degenerate_empty("\n"));
+        // A real blank line makes the file (trivially) non-empty.
+        assert!(!is_degenerate_empty("\n\n"));
+        assert!(!is_degenerate_empty("a"));
+        assert!(!is_degenerate_empty("a\n"));
     }
 
     #[test]

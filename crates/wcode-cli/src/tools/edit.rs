@@ -76,9 +76,9 @@ impl TypedTool for Edit {
             }
         };
 
-        // An empty file is one anonymous empty insertion point, so the agent
-        // can populate it with `edit { from: <emptyAnchor> }`.
-        let empty = content.is_empty();
+        // A byte-empty or "\n"-only file is one anonymous empty insertion point, so
+        // the agent can populate it with `edit { from: <emptyAnchor> }`.
+        let empty = anchor::is_degenerate_empty(&content);
         let original = content.clone();
         let lines = if empty {
             vec![String::new()]
@@ -119,6 +119,34 @@ impl TypedTool for Edit {
                 is_error: true,
                 details: None,
             };
+        }
+
+        // Overlapping ranges are a hard error: the apply loop runs bottom-up
+        // but keeps using the *original* indices against the *accumulated*
+        // content, which is only correct when ranges are disjoint. When a
+        // multi-line range's `to` lands on or past the next `from` match, the
+        // second range would replace text the first already wrote — silent
+        // corruption. Fail closed instead of guessing which one was meant.
+        for i in 1..ranges.len() {
+            let prev = &ranges[i - 1];
+            let cur = &ranges[i];
+            if cur.start <= prev.end {
+                return ToolOutput {
+                    output: format!(
+                        "[E_OVERLAPPING_RANGES] `replace_all` matches {} ranges for from=`{}` in {}, and match #{} (lines {}–{}) already contains match #{} (starting at line {}). Applying both would rewrite already-replaced text and corrupt the file — nothing was written. Pin ONE range with a unique old_string (or a closer to-anchor) and edit it alone, or drop `to` so matches are single lines.",
+                        ranges.len(),
+                        args.from,
+                        args.path,
+                        i,
+                        prev.start + 1,
+                        prev.end + 1,
+                        i + 1,
+                        cur.start + 1,
+                    ),
+                    is_error: true,
+                    details: None,
+                };
+            }
         }
 
         // Apply bottom-up so earlier indices stay valid; each step re-anchors
@@ -435,19 +463,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn populates_empty_file() {
+    async fn overlapping_replace_all_ranges_are_rejected() {
+        // from=a to=b replace_all matches [0..=3] and [2..=3]: the second `a`
+        // sits inside the first range, so applying both bottom-up with the
+        // original indices would rewrite already-replaced text.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "").unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nx\na\nb\n").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let he = anchor::anchor("");
+        let ha = anchor::anchor("a");
+        let hb = anchor::anchor("b");
         let out = tool()
-            .execute(args("f.txt", &he, None, "l1\nl2", None, None), &ctx)
+            .execute(args("f.txt", &ha, Some(&hb), "y", None, Some(true)), &ctx)
+            .await;
+        assert!(out.is_error, "{}", out.output);
+        assert!(out.output.contains("E_OVERLAPPING_RANGES"));
+        // Nothing was written — fail closed.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a\nx\na\nb\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn disjoint_replace_all_ranges_still_apply() {
+        // Non-overlapping multi-line ranges are the legitimate replace_all
+        // shape and must keep working after the overlap guard.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nx\na\nb\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let hb = anchor::anchor("b");
+        let out = tool()
+            .execute(
+                args("f.txt", &ha, Some(&hb), "A\nB", None, Some(true)),
+                &ctx,
+            )
             .await;
         assert!(!out.is_error, "{}", out.output);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "l1\nl2\n"
+            "A\nB\nx\nA\nB\n"
         );
+    }
+
+    #[tokio::test]
+    async fn populates_empty_file() {
+        // Both degenerate empty states ("", "\n") populate identically from the
+        // single insertion anchor.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let he = anchor::anchor("");
+        for content in ["", "\n"] {
+            let f = dir.path().join("f.txt");
+            std::fs::write(&f, content).unwrap();
+            let out = tool()
+                .execute(args("f.txt", &he, None, "l1\nl2", None, None), &ctx)
+                .await;
+            assert!(!out.is_error, "{}", out.output);
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                "l1\nl2\n",
+                "for {content:?}"
+            );
+        }
     }
 
     #[tokio::test]
