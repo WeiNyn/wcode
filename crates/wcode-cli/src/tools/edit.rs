@@ -541,4 +541,23 @@ mod tests {
         assert!(out.is_error);
         assert!(out.output.contains("E_STALE_ANCHOR"));
     }
+
+    #[tokio::test]
+    async fn replacement_keeps_indentation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "fn main() {\n    let a = 1;\n}\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let h = anchor::anchor("    let a = 1;");
+        let out = tool()
+            .execute(
+                args("f.txt", &h, None, "        let b = 2;", None, None),
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "fn main() {\n        let b = 2;\n}\n"
+        );
+    }
 }

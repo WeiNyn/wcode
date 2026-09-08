@@ -79,7 +79,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 
 | tool | behavior |
 |---|---|
-| `read` | file contents as `ANCHOR│line` — the 5-char anchor is the line's content address and the `edit` target (no line numbers; `plain:true` restores `cat -n`). Anchors survive inserts/deletes above and reindentation. `offset`/`limit` page |
+| `read` | file contents as `ANCHOR│line` — the 5-char anchor is the line's content address and the `edit` target (no line numbers; `plain:true` restores `cat -n`). Anchors survive inserts/deletes above; they hash the line's raw content, so indentation is semantically meaningful (a nested `}` is a different anchor from a top-level one) — but a formatter that reindents moves an indented line's anchor (re-read after formatting). `offset`/`limit` page |
 | `grep` | regex search; results carry anchors so a hit feeds straight into `edit` (`path:line  ANCHOR│line  <--`). Skips `.git`/`target`/`node_modules`/binaries; glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
 | `find` | glob-based file/dir listing, one path per line. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
 | `bash` | `sh -c` in the working dir; stdout, labeled `[stderr]`, exit code; 30s default timeout, Ctrl-C kills |
@@ -98,11 +98,12 @@ means something else, the classic way agents corrupt files. wcode `read`/`edit`
 address lines by a 5-char **content anchor** instead (`XXa1b│fn main() {`),
 following the hashline ideas in `pi-better-edit`:
 
-- `anchor(line)` is a pure hash of the line's canonical text — ASCII whitespace
-  runs collapse to a single space, so inserting or deleting lines elsewhere
-  *never* changes an intact line's anchor, and formatters
-  (rustfmt/prettier/black reindentation) don't move it — yet `foo bar` and
-  `foobar` stay distinct anchors.
+- `anchor(line)` is a pure hash of the line's **raw content** (a trailing `\r`
+  is dropped for CRLF/LF portability). Inserting or deleting lines elsewhere
+  *never* changes an intact line's anchor; whitespace is part of the address, so
+  `{`, `  {` and `\t{` are distinct (a nested brace is directly addressable),
+  and `foo bar` ≠ `foobar`. Cost: a formatter that reindents moves indented
+  lines' anchors — re-read before editing after a format.
 - `edit` sends `from`/`to` anchors + the new text — old code is never re-typed
   (token savings) and the target can't drift.
 - Identical lines intentionally share an anchor; `edit` **rejects** ambiguous

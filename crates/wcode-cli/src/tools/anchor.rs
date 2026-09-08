@@ -1,20 +1,24 @@
 //! Content-addressed line anchors — the wcode hashline core.
 //!
-//! Stateless by design. A line's anchor is a pure function of its *canonical*
-//! text (ASCII whitespace runs collapsed to a single space), so:
+//! Stateless by design. A line's anchor is a pure hash of its **raw, exact
+//! content** (only a trailing `\r` is dropped, so CRLF and LF checkouts of the
+//! same file address identically):
 //!
 //! - inserting or deleting lines elsewhere never changes an intact line's
 //!   anchor (no line-number drift), and anchors are reproducible across
 //!   processes and sessions — no store, no session state;
-//! - anchors survive formatters (rustfmt / prettier / black) that only
-//!   reindent, because whitespace is ignored by `canon`;
+//! - whitespace is **semantically meaningful**: `{`, `  {` and `\t{` are
+//!   different anchors, so "that nested closing brace" is directly addressable
+//!   instead of colliding with every other brace in the file. Cost: running a
+//!   formatter (rustfmt/prettier reindent) moves an indented line's anchor, so
+//!   re-read the file before editing after a format;
 //! - the tool is self-healing under external edits: every `read`/`edit`
 //!   recomputes anchors from the current file contents.
 //!
-//! The one honest limitation: two lines with identical canonical text share
-//! the same anchor. `edit` therefore *rejects* ambiguous targets (listing the
-//! candidate line numbers and suggesting `old_string` disambiguation) rather
-//! than guessing — fail closed, never silent, exactly like a hash map lookup.
+//! The one honest limitation: two *byte-identical* lines share an anchor.
+//! `edit` therefore *rejects* ambiguous targets (listing the candidate line
+//! numbers and suggesting `old_string` disambiguation) rather than guessing —
+//! fail closed, never silent, exactly like a hash map lookup.
 //!
 //! Anchors are 5 chars over `[A-Za-z0-9]` (62^5 = 916M addresses). Unequal
 //! lines collide in practice only when a real file holds >~10k distinct lines;
@@ -27,15 +31,14 @@ pub const ANCHOR_SEP: char = '│';
 const ALPHA_LEN: u64 = 62;
 const ANCHOR_SPACE: u64 = ALPHA_LEN.pow(ANCHOR_LEN as u32); // 62^5
 
-/// Canonical form of a line: ASCII whitespace runs collapse to a single space
-/// and leading/trailing whitespace is trimmed. Formatter-tolerant (indentation
-/// and spacing changes keep the anchor), but whitespace *between* words still
-/// separates tokens, so `foo bar` and `foobar` are different anchors.
-pub fn canon(line: &str) -> String {
-    line.split(|c: char| c.is_ascii_whitespace())
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Exact bytes hashed for a line: the line minus one trailing `\r` (CRLF → LF
+/// hygiene). Everything else — indentation, tabs, intra-line spacing — is part
+/// of the address, which is what makes nesting level an anchor property.
+fn hash_input(line: &str) -> &[u8] {
+    match line.strip_suffix('\r') {
+        Some(without_cr) => without_cr.as_bytes(),
+        None => line.as_bytes(),
+    }
 }
 
 /// FNV-1a 64 with a splitmix64 finalizer (good avalanche, no dependencies,
@@ -54,9 +57,9 @@ fn hash64(bytes: &[u8]) -> u64 {
     h
 }
 
-/// 5-char anchor for a line: pure function of the canonicalized text.
+/// 5-char anchor for a line: pure function of the line's raw content.
 pub fn anchor(line: &str) -> String {
-    let mut idx = hash64(canon(line).as_bytes()) % ANCHOR_SPACE;
+    let mut idx = hash64(hash_input(line)) % ANCHOR_SPACE;
     let mut out = [0u8; ANCHOR_LEN];
     for slot in out.iter_mut().rev() {
         *slot = ALPHA[(idx % ALPHA_LEN) as usize];
@@ -212,20 +215,25 @@ mod tests {
     }
 
     #[test]
-    fn anchors_survive_indentation_rewrites() {
-        assert_eq!(anchor("  let x = 1;"), anchor("let x = 1;"));
-        assert_eq!(anchor("}\n"), anchor("}"));
+    fn anchors_are_raw_byte_addresses() {
+        // Whitespace is semantically meaningful: a nested brace is a DIFFERENT
+        // line from a top-level one, so each has its own anchor.
+        assert_ne!(anchor("{"), anchor("  {"));
+        assert_ne!(anchor("}"), anchor("\t}"));
+        assert_ne!(anchor("  let x = 1;"), anchor("let x = 1;"));
+        assert_ne!(anchor("foo bar"), anchor("foobar"));
+        assert_ne!(anchor("foo bar"), anchor("  foo   bar "));
+        // Exact match is still exact.
+        assert_eq!(anchor("  {"), anchor("  {"));
+        assert_eq!(anchor("}"), anchor("}"));
     }
 
     #[test]
-    fn whitespace_collapses_but_words_stay_distinct() {
-        // Runs of whitespace are formatter-tolerant…
-        assert_eq!(anchor("foo bar"), anchor("  foo   bar "));
-        assert_eq!(anchor("let n = 1;"), anchor("let  n  =  1;"));
-        // … but distinct token boundaries are NOT conflated (the old canon
-        // collided these: it stripped every whitespace char).
-        assert_ne!(anchor("foo bar"), anchor("foobar"));
-        assert_ne!(anchor("let x = 1;"), anchor("letx=1;"));
+    fn crlf_and_lf_address_identically() {
+        // A trailing \r is an encoding artifact, not line content: the same
+        // file checked out as CRLF or LF keeps working anchors.
+        assert_eq!(anchor("fn main() {"), anchor("fn main() {\r"));
+        assert_eq!(anchor("{"), anchor("{\r"));
     }
 
     #[test]

@@ -146,11 +146,16 @@ single-line + multi-line batch.
 
 ### C1. Problem restated
 
-Stateless anchors are a pure hash of canonical line text, so identical lines
-share an anchor. Today `edit` rejects ambiguous duplicates with candidates
-(`[E_AMBIGUOUS_ANCHOR]`) and asks for `old_string`/`replace_all`. The
-question this item answers: *within one session, can the agent address "the
-2nd `}`" directly, without losing the never-edit-the-wrong-line guarantee?*
+Stateless anchors are a pure hash of raw line text (decision D1), so only
+*byte-identical* lines share an anchor. Today `edit` rejects ambiguous
+duplicates with candidates (`[E_AMBIGUOUS_ANCHOR]`) and asks for
+`old_string`/`replace_all`. **After D1's raw hashing, the duplicate-anchor
+population shrinks dramatically** — nested `}` at different indents are now
+distinct anchors — so this item is de-scoped to same-indent identical lines:
+two col-0 `}`s, consecutive blank lines, repeated `foo();`. The question this
+item answers: *within one session, can the agent address "the 2nd `}`" (at the
+same indent) directly, without losing the never-edit-the-wrong-line
+guarantee?*
 
 ### C2. Architecture
 
@@ -371,32 +376,37 @@ style) — is prettier but breaks the bare-alphanumeric anchor grammar; rejected
 
 ## D. Anchor-scheme changes (breaking — decide order first)
 
-### D1. Canon: whitespace runs → single space (from #9)
+### D1. Anchors hash raw content — `canon` removed (**DECIDED: option B**)
 
-**Problem (the real one we missed):** today `canon` strips *all* ASCII
-whitespace, so `foo bar` and `foobar` **collide** — a genuine, common false
-collision for identifier/string pairs, not just the formatter-tolerant case.
+**Problem with whitespace tolerance (the deeper of the two):** collapsing
+whitespace made indentation *invisible to the address*, so every `{`/`}` at any
+indent shared one anchor — nesting level was the #1 real-world ambiguity, and
+the whole #7 store existed mainly to fight it. Also whitespace-tolerant canon
+still collided `foo bar` with `foobar`.
 
-**Design.** `canon(line) = tokens.join(" ")` where tokens = the line split on
-any ASCII whitespace (runs collapse, leading/trailing trimmed):
+**Decision: raw-byte anchors.** `anchor(line) = base62(hash(line))` over the
+line's exact content; only a single trailing `\r` is dropped (CRLF/LF
+hygiene). Consequences:
 
-- `foo bar`, `  foo   bar ` → `foo bar` (formatter-tolerant preserved)
-- `foobar` → `foobar` (no longer collides)
-- unchanged: anchors survive reindentation; global recompute keeps read/edit
-  stateless.
+- `{`, `  {`, `\t{` are **different anchors** — nested braces are directly
+  addressable; the duplicate-anchor problem shrinks to *byte-identical lines at
+  the same indent* (two col-0 `}`s, consecutive blanks, repeated `foo();`),
+  which `old_string` already handles. **This largely de-scopes #7** (see C1).
+- `foo bar` ≠ `foobar` (raw bytes differ).
+- **Cost:** formatter reindent moves indented lines' anchors → the anchors are
+  stale after rustfmt/prettier. In an agentic loop the model re-reads the
+  formatted file anyway to see what landed, so this is a bounded re-read, not a
+  correctness gap. Explicitly traded for the ambiguity win above.
 
-**Consequence: this is a breaking change to every anchor value.** Anchors are
-never persisted (stateless), so the blast radius is one session at most — but
-it invalidates all anchors shown before the upgrade within the same
-conversation. **Do it first or never**: if we land session-memory (#7)
-before this, a mid-session anchor-rule change also invalidates `served`
-snapshots (same checksum? no — checksum is byte-hash, unaffected, but
-canonical neighborhood comparisons change… making old `ServedOcc` fingerprints
-uncomparable). Recommend ordering: **D1 before C**.
+**Consequence: breaking anchor-rule change (2nd this phase).** Anchors are
+never persisted (stateless), blast radius is one session at most; do it while
+the phase is young. The `ServedOcc` fingerprints in C compare raw lines now
+(canon no longer exists). Still order **D1 before C**.
 
-**Tests.** Re-run the entire existing anchor test-suite under the new canon;
-specifically assert `anchor("foo bar") != anchor("foobar")` and
-`anchor("  foo   bar ") == anchor("foo bar")`.
+**Tests.** `anchor("{") != anchor("  {")`, `anchor("}") != anchor("\t}")`,
+`anchor("foo bar") != anchor("foobar")`, `anchor("  foo   bar ") != anchor("foo bar")`,
+`anchor(line) == anchor(line + "\r")`, and exact-match equality.
+(Landed in working tree; whole suite green.)
 
 ### D2. Anchor length stays 5.
 
@@ -425,10 +435,10 @@ recoverable via `old_string`. Not revisited in Phase 2.
 
 | step | item | depends on | why |
 |---|---|---|---|
-| 1 | **D1** canon → single-space tokens | — | breaking; must precede memory |
-| 2 | **A1** degenerate empty files | — | small correctness |
-| 3 | **A2** read size guard + truncation | — | token safety before more read surface |
-| 4 | **C** session-memory anchors | D1 | the flagship item, largest surface |
+| ✅ landed | **D1** raw-hash anchors (option B) | — | breaking; done in working tree |
+| ✅ landed | **A1** degenerate empty files | — | small correctness |
+| ✅ landed | **A2** read size guard + truncation | — | token safety |
+| 4 | **C** session-memory anchors (de-scoped after D1) | D1 | remaining duplicates = same-indent identical lines only |
 | 5 | **B2** `edits` batching | C (reuse occurrence/overlap logic) | envelope win; good after ambiguity UX is solid |
 | 6 | **B1** `ast_edit` | — (independent) | stretch; optional-tool pattern already exists |
 
@@ -437,8 +447,10 @@ never writes the wrong line.
 
 ## G. Open decisions for review (consolidated)
 
-1. **D1 canon change**: accept the mid-session anchor invalidation for the
-   `foo bar`/`foobar` fix? (I recommend yes, and *before* C.)
+1. **D1 anchor rule → option B RESOLVED**: anchors hash raw content (canon
+   removed; `{` ≠ `  {` ≠ `\t{`), CRLF-stripped. Breaking, landed in working
+   tree, whole suite green. Trades formatter-survival for direct nested-brace
+   addressing; de-scopes #7.
 2. **B1 `ast_edit`**: commit-with-diff-echo (proposed) vs dry-run-first.
 3. **B2 `edits`**: all-or-nothing atomic batch (proposed) vs partial-apply.
 4. **C6**: whole-file occurrence numbering (all duplicates, adjacent or not)
@@ -452,4 +464,6 @@ never writes the wrong line.
    content-identical). Within the no-external-change flow, byte-identical
    environments require `old_string` past the identical neighborhood, else
    refuse.
-7. **Sizing**: are `MAX_LINE_CHARS=300` / `MAX_READ_LINES=1000` sane defaults?
+7. **Sizing RESOLVED**: `MAX_LINE_CHARS=300` / `MAX_READ_LINES=1000` landed
+   with A2; constants are documented as tunable-in-code if sessions show
+   different economics.

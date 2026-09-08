@@ -3,6 +3,28 @@ use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
 use super::anchor;
 
+/// Anchored display caps a single line at this many chars, appending `…(+N)`
+/// for the truncated remainder. Raw (`plain:true`) mode is untouched. The
+/// rendered anchor still hashes the FULL line, so a truncated line remains a
+/// valid, unambiguous `edit` target. Tune here; no config surface.
+const MAX_LINE_CHARS: usize = 300;
+/// When `read` is called without a `limit`, the page is capped at this many
+/// lines and a continuation note is appended. An explicit `limit` always wins
+/// (even above the cap). Tune here; no config surface.
+const MAX_READ_LINES: usize = 1000;
+
+/// Anchored display shape for a line that exceeds `MAX_LINE_CHARS`: first
+/// `MAX_LINE_CHARS` chars plus `…(+N)` for the truncated remainder. Plain mode
+/// never calls this (raw text means raw).
+fn truncate_line(line: &str) -> String {
+    let len = line.chars().count();
+    if len <= MAX_LINE_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(MAX_LINE_CHARS).collect();
+    format!("{head}…(+{})", len - MAX_LINE_CHARS)
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReadArgs {
     /// File path (relative to the working directory unless absolute).
@@ -34,7 +56,7 @@ impl TypedTool for Read {
         "read"
     }
     fn description(&self) -> &str {
-        "Read a text file. Every line is returned as ANCHOR│content; the 5-char anchor is the line's content address and the `edit` target. Anchors are stable: inserting/deleting lines elsewhere never changes a line's anchor, and reindenting (formatters) leaves anchors intact. No line numbers — use the anchor in `edit`. For raw text without anchors pass plain:true. Page with offset/limit, or pass `from` (an anchor from grep or a previous edit echo) plus optional `context` to read the region around a hit without knowing its line number. An empty file shows one insertion-point anchor."
+        "Read a text file. Every line is returned as ANCHOR│content; the 5-char anchor is the line's content address and the `edit` target. Anchors are stable under inserts/deletes elsewhere; they hash the line's raw content, so indentation is meaningful (a nested `}` has a different anchor than a top-level `}`) — but a formatter that reindents moves indented lines' anchors, so re-read after formatting. No line numbers — use the anchor in `edit`. For raw text without anchors pass plain:true. Page with offset/limit, or pass `from` (an anchor from grep or a previous edit echo) plus optional `context` to read the region around a hit without knowing its line number. Without `limit`, at most 1000 lines are shown, then a continuation note (an explicit `limit` always wins); lines longer than 300 chars are displayed truncated as `…(+N)` but their anchor still hashes the full line, so they remain editable. An empty file shows one insertion-point anchor."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let path = super::resolve(&ctx.working_dir, &args.path);
@@ -50,7 +72,7 @@ impl TypedTool for Read {
         };
         let lines = anchor::split_lines(&content);
         let mut ambiguity_note: Option<String> = None;
-        let (start, limit) = match &args.from {
+        let (start, mut limit) = match &args.from {
             None => (
                 args.offset.unwrap_or(1).max(1) as usize - 1,
                 args.limit.unwrap_or(u64::MAX) as usize,
@@ -107,6 +129,19 @@ impl TypedTool for Read {
                 )
             }
         };
+        // Page guard: without an explicit `limit` (raw and anchored modes alike),
+        // cap the default page to protect the context window. An explicit
+        // `limit` always wins, even above the cap.
+        let explicit_limit = args.limit.is_some();
+        let mut page_note = false;
+        if !explicit_limit {
+            let available = lines.len().saturating_sub(start);
+            if available > MAX_READ_LINES {
+                limit = limit.min(MAX_READ_LINES);
+                page_note = true;
+            }
+        }
+
         let mut out = String::new();
         if let Some(note) = ambiguity_note {
             out.push_str(&note);
@@ -125,12 +160,24 @@ impl TypedTool for Read {
             }
         } else {
             for (i, line) in lines.iter().skip(start).take(limit).enumerate() {
-                let n = start + i + 1; // 1-based, for plain output
+                let rendered = i + 1; // 1-based count actually shown
+                let n = start + i + 1; // 1-based line number, for plain output
                 if plain {
                     out.push_str(&format!("{n:>6}\t{line}\n"));
                 } else {
-                    out.push_str(&anchor::render(&anchor::anchor(line), line));
+                    // Anchor hashes the FULL line; only the display is capped,
+                    // so the truncated line stays a valid `edit` target.
+                    out.push_str(&anchor::render(&anchor::anchor(line), &truncate_line(line)));
                     out.push('\n');
+                }
+                if page_note && rendered == limit {
+                    let remaining = lines.len().saturating_sub(start + rendered);
+                    if remaining > 0 {
+                        out.push_str(&format!(
+                            "… ({remaining} more lines — re-read with offset/limit to continue)\n"
+                        ));
+                        break;
+                    }
                 }
             }
         }
@@ -415,5 +462,146 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
+    }
+
+    #[test]
+    fn truncate_line_caps_long_lines_and_passes_short() {
+        assert_eq!(truncate_line("short"), "short");
+        assert_eq!(truncate_line(""), "");
+        let long = "x".repeat(MAX_LINE_CHARS + 7);
+        let t = truncate_line(&long);
+        assert!(t.ends_with("…(+7)"), "{t}");
+        assert_eq!(t.chars().count(), MAX_LINE_CHARS + 5); // head + '…' + "(+7)"
+        let exact = "y".repeat(MAX_LINE_CHARS);
+        assert_eq!(
+            truncate_line(&exact),
+            exact,
+            "exact boundary must not truncate"
+        );
+    }
+
+    #[tokio::test]
+    async fn anchored_read_truncates_long_lines_and_keeps_full_line_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "fn ".to_string() + &"x".repeat(MAX_LINE_CHARS + 50) + "()";
+        std::fs::write(dir.path().join("f.txt"), format!("short\n{long}\n")).unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: None,
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let lines: Vec<&str> = out.output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("short"), "{}", lines[0]);
+        // Display is truncated, but the leading anchor hashes the FULL line.
+        let (hash, display) = lines[1].split_once(anchor::ANCHOR_SEP).unwrap();
+        assert_eq!(hash, anchor::anchor(&long));
+        assert!(display.contains("…(+"), "{}", display);
+    }
+
+    #[tokio::test]
+    async fn no_limit_caps_page_and_notes_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = MAX_READ_LINES + 10;
+        let content = (1..=n)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+
+        // No limit: capped at MAX_READ_LINES with a continuation note.
+        let out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: None,
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let lines: Vec<&str> = out.output.lines().collect();
+        assert_eq!(lines.len(), MAX_READ_LINES + 1); // page + note
+        assert!(lines[MAX_READ_LINES].contains("10 more lines"));
+
+        // An explicit limit above the cap is honored (no note).
+        let out2 = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: Some((MAX_READ_LINES + 10) as u64),
+                    plain: None,
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out2.is_error, "{}", out2.output);
+        assert_eq!(out2.output.lines().count(), MAX_READ_LINES + 10);
+
+        // Plain mode is capped too.
+        let out3 = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(true),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out3.is_error, "{}", out3.output);
+        assert_eq!(out3.output.lines().count(), MAX_READ_LINES + 1);
+    }
+}
+
+#[cfg(test)]
+mod indentation_regression {
+    use super::*;
+
+    #[tokio::test]
+    async fn anchored_read_keeps_indentation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "fn main() {\n    let a = 1;\n}\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: None,
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(
+            out.output.contains("    let a = 1;\n"),
+            "indent was stripped:\n{:?}",
+            out.output
+        );
     }
 }
