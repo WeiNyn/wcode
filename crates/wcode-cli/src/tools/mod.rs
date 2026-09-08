@@ -2,6 +2,7 @@ pub mod anchor;
 pub mod ast_search;
 pub mod bash;
 pub mod edit;
+pub mod edits;
 pub mod find;
 pub mod grep;
 pub mod read;
@@ -22,6 +23,7 @@ pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
         erased(read::Read),
         erased(bash::Bash),
         erased(edit::Edit::new(lock.clone())),
+        erased(edits::Edits::new(lock.clone())),
         erased(replace::Replace::new(lock.clone())),
         erased(write::Write::new(lock)),
     ];
@@ -73,7 +75,10 @@ mod tests {
     use super::*;
 
     fn names(cfg: &ToolsConfig) -> Vec<String> {
-        default_tools(cfg).iter().map(|t| t.name().to_string()).collect()
+        default_tools(cfg)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect()
     }
 
     #[test]
@@ -82,14 +87,17 @@ mod tests {
         let n = names(&ToolsConfig::default());
         assert!(!n.iter().any(|s| s == "grep"));
         assert!(!n.iter().any(|s| s == "find"));
-        for core in ["read", "bash", "edit", "replace", "write"] {
+        for core in ["read", "bash", "edit", "edits", "replace", "write"] {
             assert!(n.contains(&core.to_string()), "{core} missing from {n:?}");
         }
     }
 
     #[test]
     fn default_tools_include_grep_and_find_when_enabled() {
-        let n = names(&ToolsConfig { grep: true, find: true });
+        let n = names(&ToolsConfig {
+            grep: true,
+            find: true,
+        });
         assert!(n.iter().any(|s| s == "grep"));
         assert!(n.iter().any(|s| s == "find"));
     }

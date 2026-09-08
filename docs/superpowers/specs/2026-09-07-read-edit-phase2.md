@@ -132,9 +132,17 @@ EditsArgs { edits: Vec<EditOp> }
 4. On success, apply resolved (disjoint) ranges bottom-up to the accumulating
    content — identical to today's multi-apply loop — then temp-write + rename.
 
-**Decision requested:** all-or-nothing vs apply-good-and-report-missing.
-Proposal: **all-or-nothing** — the batch is a transaction; partial application
-makes the file state depend on op order and hides an op that "sort of worked".
+**Decision RESOLVED: all-or-nothing** — the batch is a transaction; partial
+application makes the file state depend on op order and hides an op that "sort
+of worked".
+
+**Landed notes.** Tool `edits` (`tools/edits.rs`), registered in `default_tools`
+with the shared mutation lock. Added over the sketch: (a) **single file per
+call** is enforced — `[E_MIXED_FILES]` if ops target different paths; (b) the
+fresh-anchor echo covers the combined `changed_range` only when it spans
+`≤ MAX_ECHO_LINES` (120), otherwise replies with a re-read hint, so a batch
+that touches both ends of a big file doesn't emit a huge echo; (c) empty batch
+→ `[E_EMPTY_BATCH]`; each error names the offending op (`op1`/`op2`).
 
 **Tests.** Disjoint batch applies atomically; one stale op aborts the whole
 batch untouched; overlapping ops in a batch rejected; mixed `replace_all`
@@ -439,7 +447,7 @@ recoverable via `old_string`. Not revisited in Phase 2.
 | ✅ landed | **A1** degenerate empty files | — | small correctness |
 | ✅ landed | **A2** read size guard + truncation | — | token safety |
 | 4 | **C** session-memory anchors (de-scoped after D1) | D1 | remaining duplicates = same-indent identical lines only |
-| 5 | **B2** `edits` batching | C (reuse occurrence/overlap logic) | envelope win; good after ambiguity UX is solid |
+| ✅ landed | **B2** `edits` batching tool | — | all-or-nothing single-file batch; only needs edit's own overlap machinery |
 | 6 | **B1** `ast_edit` | — (independent) | stretch; optional-tool pattern already exists |
 
 Each item is independently revertable; nothing past step 1 changes the model
@@ -452,7 +460,8 @@ never writes the wrong line.
    tree, whole suite green. Trades formatter-survival for direct nested-brace
    addressing; de-scopes #7.
 2. **B1 `ast_edit`**: commit-with-diff-echo (proposed) vs dry-run-first.
-3. **B2 `edits`**: all-or-nothing atomic batch (proposed) vs partial-apply.
+3. **B2 `edits` RESOLVED**: all-or-nothing atomic batch, landed (single file
+   per call enforced; echo capped; each error names the op).
 4. **C6**: whole-file occurrence numbering (all duplicates, adjacent or not)
    — the worked example shows the common case is non-adjacent, so the
    earlier adjacent-run-only limit is withdrawn (revised).
