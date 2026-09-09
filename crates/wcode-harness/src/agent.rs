@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -20,7 +20,12 @@ pub struct AgentConfig {
     pub hooks: HooksSet,
     pub session: Option<Session>, // None = no persistence
     /// Prior messages seeding the conversation (e.g. resumed session history).
+    /// Prior messages seeding the conversation (e.g. resumed session history).
     pub context: Vec<AgentMessage>,
+    /// Working directory for tool execution; empty falls back to the process
+    /// cwd (bash runs here, file paths resolve) — plumb it so embeddings can
+    /// run against a directory other than `current_dir()`.
+    pub working_dir: PathBuf,
 }
 
 pub struct Agent {
@@ -30,6 +35,7 @@ pub struct Agent {
     stream_fn: StreamFn,
     hooks: HooksSet,
     session: Option<Session>,
+    working_dir: PathBuf,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
     steer_rx: Option<UnboundedReceiver<AgentMessage>>,
@@ -52,6 +58,12 @@ impl Agent {
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+        // An empty working_dir means "process cwd" (the historical default).
+        let working_dir = if cfg.working_dir.as_os_str().is_empty() {
+            default_working_dir()
+        } else {
+            cfg.working_dir
+        };
         Agent {
             system: cfg.system,
             tools: cfg.tools,
@@ -59,6 +71,7 @@ impl Agent {
             stream_fn: cfg.stream_fn,
             hooks: cfg.hooks,
             session: cfg.session,
+            working_dir,
             ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
@@ -135,8 +148,21 @@ impl Agent {
         user_text: &str,
         sink: UnboundedSender<AgentEvent>,
     ) -> Result<StopReason, LoopError> {
-        let len_before = self.ctx.len();
-        self.ctx.push(AgentMessage::user_text(user_text));
+        // The user message is persisted before the loop takes over; the loop
+        // records every subsequent message as it enters ctx, so a crash
+        // mid-run loses at most the in-flight message instead of the whole
+        // turn (see `record_session` in loop_).
+        let user = AgentMessage::user_text(user_text);
+        if let Some(session) = &mut self.session {
+            session
+                .append(SessionEntry::Message {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    parent_id: None,
+                    message: user.clone(),
+                })
+                .map_err(LoopError::Session)?;
+        }
+        self.ctx.push(user);
 
         let steering = self.steer_rx.take().expect("steer_rx present between runs");
         let follow_ups = self
@@ -152,6 +178,8 @@ impl Agent {
             steering,
             follow_ups,
             cancel: self.cancel.clone(),
+            working_dir: self.working_dir.clone(),
+            session: self.session.as_mut(),
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
 
@@ -173,17 +201,6 @@ impl Agent {
         // cancel from this run must not poison the next one.
         self.cancel = CancellationToken::new();
 
-        if let Some(session) = &mut self.session {
-            for m in &self.ctx[len_before..] {
-                session
-                    .append(SessionEntry::Message {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        parent_id: None,
-                        message: m.clone(),
-                    })
-                    .map_err(LoopError::Session)?;
-            }
-        }
         res
     }
 
@@ -194,6 +211,11 @@ impl Agent {
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_ref().and_then(|s| s.path())
     }
+}
+
+/// Process cwd, used only when `AgentConfig.working_dir` is left empty.
+fn default_working_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Id from the session's `Header` entry, if present (old files may lack one).

@@ -280,6 +280,7 @@ pub fn build_agent(
         hooks,
         session,
         context,
+        working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     })
 }
 

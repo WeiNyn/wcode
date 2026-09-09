@@ -101,11 +101,75 @@ fn echo_tool() -> (Tool, Arc<Mutex<Vec<String>>>) {
 }
 
 // ---------------------------------------------------------------------------
+#[derive(Deserialize, schemars::JsonSchema)]
+struct NoArgs {}
+
+struct CwdProbe {
+    seen: Arc<Mutex<std::path::PathBuf>>,
+}
+
+#[async_trait::async_trait]
+impl TypedTool for CwdProbe {
+    type Args = NoArgs;
+    fn name(&self) -> &str {
+        "cwd"
+    }
+    fn description(&self) -> &str {
+        "records the tool working_dir"
+    }
+    async fn execute(&self, _args: NoArgs, ctx: &ToolContext) -> ToolOutput {
+        *self.seen.lock().unwrap() = ctx.working_dir.clone();
+        ToolOutput {
+            output: "ok".into(),
+            is_error: false,
+            details: None,
+        }
+    }
+}
+
+/// Finding #2: tools execute against `LoopConfig.working_dir`, not the
+/// process cwd.
+#[tokio::test]
+async fn tool_working_dir_comes_from_config() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "cwd".into(),
+            arguments: serde_json::json!({}),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let seen = Arc::new(Mutex::new(std::env::current_dir().unwrap_or_default()));
+    let probe = erased(CwdProbe { seen: seen.clone() });
+    let mut ts = setup(fake_stream_fn(&rec), vec![probe], HooksSet::default());
+
+    let dir = tempfile::tempdir().unwrap();
+    let wd = dir.path().to_path_buf();
+    ts.cfg.working_dir = wd.clone();
+
+    let mut ctx = Vec::new();
+    let (res, _events) = run(ts.cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(*seen.lock().unwrap(), wd);
+}
+
 // Config + run helpers
 // ---------------------------------------------------------------------------
 
 struct TestSetup {
-    cfg: LoopConfig,
+    cfg: LoopConfig<'static>,
     steer_tx: mpsc::UnboundedSender<AgentMessage>,
     follow_tx: mpsc::UnboundedSender<AgentMessage>,
 }
@@ -126,6 +190,8 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             steering,
             follow_ups,
             cancel: tokio_util::sync::CancellationToken::new(),
+            working_dir: std::path::PathBuf::from("."),
+            session: None,
         },
         steer_tx,
         follow_tx,
@@ -133,7 +199,7 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
 }
 
 async fn run(
-    cfg: LoopConfig,
+    cfg: LoopConfig<'_>,
     ctx: &mut Vec<AgentMessage>,
 ) -> (Result<StopReason, LoopError>, Vec<AgentEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel();

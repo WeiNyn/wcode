@@ -4,10 +4,11 @@ use tokio_util::sync::CancellationToken;
 use crate::event::{AgentEvent, LlmStreamEvent};
 use crate::hooks::{HooksSet, ToolCall as HookToolCall};
 use crate::message::{AgentMessage, ContentBlock, StopReason, Usage};
+use crate::session::{Session, SessionEntry};
 use crate::streamfn::{LlmOpts, StreamFn};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
-pub struct LoopConfig {
+pub struct LoopConfig<'a> {
     pub system: String,
     pub tools: Vec<Tool>,
     pub llm: LlmOpts,
@@ -16,17 +17,25 @@ pub struct LoopConfig {
     pub steering: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
     pub follow_ups: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
     pub cancel: CancellationToken,
+    /// Working directory for tool execution (bash cwd, file resolution).
+    /// Plumbed explicitly so embeddings can run against a directory other
+    /// than the process cwd; an empty path falls back to `current_dir()`.
+    pub working_dir: std::path::PathBuf,
+    /// Optional session to persist each produced message to as it is pushed
+    /// into context — incremental, so a crash mid-run loses at most the
+    /// in-flight message instead of the whole turn.
+    pub session: Option<&'a mut Session>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoopError {
     #[error(transparent)]
-    Session(std::io::Error), // reserved; the loop itself never produces it in v1
+    Session(std::io::Error), // session append failure while persisting produced messages
 }
 
 pub async fn run_loop(
     ctx: &mut Vec<AgentMessage>,
-    mut cfg: LoopConfig,
+    mut cfg: LoopConfig<'_>,
     sink: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StopReason, LoopError> {
     let tool_defs: Vec<rig::completion::ToolDefinition> =
@@ -54,6 +63,7 @@ pub async fn run_loop(
                     aborted = true;
                     break;
                 }
+                record_session(&mut cfg, &msg)?;
                 ctx.push(msg.clone());
                 if sink.send(AgentEvent::MessageEnd { message: msg }).is_err() {
                     aborted = true;
@@ -171,6 +181,7 @@ pub async fn run_loop(
             {
                 aborted = true;
             }
+            record_session(&mut cfg, &assistant)?;
             ctx.push(assistant.clone());
             if sink
                 .send(AgentEvent::TurnEnd {
@@ -199,7 +210,10 @@ pub async fn run_loop(
             // so ctx never keeps a ToolCall without its ToolResult (invalid
             // history → wire 400s on the next turn, persisted via session).
             if aborted || matches!(captured, Some(StopReason::Error | StopReason::Aborted)) {
-                synthesize_unexecuted(&sink, ctx, calls.into_iter());
+                if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, calls.into_iter()) {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return Err(e);
+                }
                 let _ = sink.send(AgentEvent::AgentEnd);
                 return Ok(if aborted {
                     StopReason::Aborted
@@ -252,8 +266,7 @@ pub async fn run_loop(
                             let tctx = ToolContext {
                                 call_id: id.clone(),
                                 name: name.clone(),
-                                // ponytail: env cwd; plumb a LoopConfig.working_dir if a caller needs to override
-                                working_dir: std::env::current_dir().unwrap_or_default(),
+                                working_dir: cfg.working_dir.clone(),
                                 cancel: cfg.cancel.clone(),
                                 events: sink.clone(),
                             };
@@ -278,12 +291,14 @@ pub async fn run_loop(
                     .is_ok();
                 // Push the result before honoring a dead sink so ctx never
                 // keeps a ToolCall without its ToolResult.
-                ctx.push(AgentMessage::ToolResult {
+                let result = AgentMessage::ToolResult {
                     tool_call_id: id,
                     name,
                     output: out.output,
                     is_error: out.is_error,
-                });
+                };
+                record_session(&mut cfg, &result)?;
+                ctx.push(result);
                 if !sent {
                     aborted = true;
                 }
@@ -291,7 +306,10 @@ pub async fn run_loop(
                     // Sink died mid-tool-loop: synthesize an error ToolResult
                     // for every unexecuted call (event sends are best-effort;
                     // the abort path already returns Aborted).
-                    synthesize_unexecuted(&sink, ctx, pending);
+                    if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, pending) {
+                        let _ = sink.send(AgentEvent::AgentEnd);
+                        return Err(e);
+                    }
                     break;
                 }
             }
@@ -322,6 +340,7 @@ pub async fn run_loop(
                     let _ = sink.send(AgentEvent::AgentEnd);
                     return Ok(StopReason::Aborted);
                 }
+                record_session(&mut cfg, &m)?;
                 ctx.push(m.clone());
                 if sink.send(AgentEvent::MessageEnd { message: m }).is_err() {
                     let _ = sink.send(AgentEvent::AgentEnd);
@@ -355,12 +374,14 @@ fn assistant(
 
 /// Synthesizes an error ToolResult for every unexecuted tool call so ctx
 /// never keeps a ToolCall without its ToolResult. Event sends are
-/// best-effort (the sink may already be dead).
+/// best-effort (the sink may already be dead). Pushes are persisted to the
+/// session like every other produced message.
 fn synthesize_unexecuted(
+    cfg: &mut LoopConfig<'_>,
     sink: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ctx: &mut Vec<AgentMessage>,
     calls: impl Iterator<Item = (String, String, serde_json::Value)>,
-) {
+) -> Result<(), LoopError> {
     for (rid, rname, _) in calls {
         let out = ToolOutput {
             output: "aborted before execution".to_string(),
@@ -373,13 +394,32 @@ fn synthesize_unexecuted(
             output: out.output.clone(),
             is_error: out.is_error,
         });
-        ctx.push(AgentMessage::ToolResult {
+        let result = AgentMessage::ToolResult {
             tool_call_id: rid,
             name: rname,
             output: out.output,
             is_error: out.is_error,
-        });
+        };
+        record_session(cfg, &result)?;
+        ctx.push(result);
     }
+    Ok(())
+}
+
+/// Persist a just-produced message to the configured session, if any. Runs at
+/// every `ctx.push` so a crash mid-run loses only the in-flight message
+/// instead of the whole turn.
+fn record_session(cfg: &mut LoopConfig<'_>, msg: &AgentMessage) -> Result<(), LoopError> {
+    let Some(session) = cfg.session.as_deref_mut() else {
+        return Ok(());
+    };
+    session
+        .append(SessionEntry::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            message: msg.clone(),
+        })
+        .map_err(LoopError::Session)
 }
 
 fn append_text(content: &mut Vec<ContentBlock>, delta: &str) {

@@ -117,6 +117,7 @@ fn agent_config(
         hooks: HooksSet::default(),
         session,
         context: Vec::new(),
+        working_dir: std::path::PathBuf::new(),
     }
 }
 
@@ -246,6 +247,73 @@ async fn session_file_contains_all_messages_after_run() {
     assert_eq!(msgs.len(), 2);
     assert!(matches!(&msgs[0], AgentMessage::User { .. } if msgs[0].as_text() == "hi"));
     assert!(matches!(&msgs[1], AgentMessage::Assistant { .. } if msgs[1].as_text() == "hello"));
+}
+
+/// Finding #1: persistence is incremental. While a tool is still blocked, the
+/// user message and the tool-calling assistant are already on disk — a crash
+/// at this point re-resumes with those, losing only the in-flight tool.
+#[tokio::test]
+async fn session_persists_messages_before_run_finishes() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "gate".into(),
+            arguments: json!({ "text": "hi" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("done".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = erased(GateTool {
+        entered: entered_tx,
+        release: release.clone(),
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    let mut agent = Agent::new(agent_config(
+        fake_stream_fn(&rec),
+        vec![gate],
+        Some(session),
+    ));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move { agent.run("hi", tx).await.unwrap() });
+    entered_rx.recv().await.unwrap(); // gate entered: the run is mid-flight
+
+    let mid = Session::open(&path).unwrap();
+    let msgs = mid.messages();
+    assert_eq!(
+        msgs.len(),
+        2,
+        "messages must be on disk pre-finish: {msgs:?}"
+    );
+    assert!(matches!(&msgs[0], AgentMessage::User { .. } if msgs[0].as_text() == "hi"));
+
+    release.notify_one();
+    assert_eq!(handle.await.unwrap(), StopReason::Stop);
+
+    let after = Session::open(&path).unwrap();
+    let msgs = after.messages();
+    assert_eq!(
+        msgs.len(),
+        4,
+        "user + tool-call assistant + ToolResult + final assistant"
+    );
+    assert!(matches!(&msgs[3], AgentMessage::Assistant { .. } if msgs[3].as_text() == "done"));
 }
 
 #[tokio::test]
