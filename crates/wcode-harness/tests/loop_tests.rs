@@ -420,6 +420,63 @@ async fn invalid_tool_args_yield_error_tool_result_and_loop_continues() {
     assert_eq!(ctx.len(), 4);
 }
 
+#[tokio::test]
+async fn error_tool_result_is_annotated_in_wire_context() {
+    // Finding #2: a failed tool's output must carry an error marker in the
+    // context the next stream call actually receives — the wire has no
+    // structured error flag, so the marker is what tells the LLM it failed.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "wrong": 42 }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("recovered".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let (tool, _seen) = echo_tool();
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let calls = rec.calls();
+    assert_eq!(calls.len(), 2, "loop continues to the next stream call");
+    // The second stream call's recorded ctx is what reaches the LLM. The
+    // ERROR: marker itself is applied by `to_rig_message` at wire conversion
+    // (unit-tested in streamfn.rs); what the loop must guarantee here is that
+    // the error *flag* survives into the stream context so that conversion
+    // actually prefixes it.
+    let (wire_output, wire_is_error) = calls[1]
+        .ctx
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::ToolResult {
+                output, is_error, ..
+            } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("a ToolResult reached the second stream call");
+    assert!(wire_is_error, "error flag must reach the next stream call");
+    assert!(
+        wire_output.starts_with("invalid arguments for tool `echo`"),
+        "raw output passes through unmodified into the stream context: {:?}",
+        wire_output
+    );
+}
+
 struct BlockingHooks;
 
 #[async_trait::async_trait]
@@ -633,6 +690,67 @@ async fn abort_mid_stream() {
         AgentMessage::Assistant { stop_reason: StopReason::Aborted, .. }
             if ctx[1].as_text() == "part"
     ));
+}
+
+#[tokio::test]
+async fn cancel_before_first_delta_leaves_no_assistant() {
+    // Pre-cancelled token: the biased select aborts before any delta, so the
+    // run must end Aborted without persisting an empty assistant message.
+    // MessageEnd/TurnEnd are still emitted so the event framing stays balanced.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let stream_fn: StreamFn =
+        Arc::new(|_ctx, _sys, _tools, _opts| Box::pin(futures::stream::pending()) as LlmStream);
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![], HooksSet::default());
+    let cfg = LoopConfig { cancel, ..cfg };
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Aborted);
+    assert_eq!(ctx.len(), 1, "no empty assistant may be recorded");
+    assert_eq!(
+        tags(&events),
+        vec![
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn stream_error_before_any_delta_leaves_no_assistant() {
+    // A stream that errors on its first item produces no content; the run must
+    // end Error without persisting an empty assistant message, yet still close
+    // the turn framing (Error surfaces after MessageStart).
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
+            message: "boom".into(),
+        }])) as LlmStream
+    });
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert_eq!(ctx.len(), 1, "no empty assistant may be recorded");
+    assert_eq!(
+        tags(&events),
+        vec![
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "error",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
 }
 
 #[tokio::test]

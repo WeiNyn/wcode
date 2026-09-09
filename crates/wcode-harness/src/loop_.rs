@@ -181,8 +181,18 @@ pub async fn run_loop(
             {
                 aborted = true;
             }
-            record_session(&mut cfg, &assistant)?;
-            ctx.push(assistant.clone());
+            // Don't persist an empty assistant. An abort/error that lands
+            // before the model produced anything (dead sink, cancel before the
+            // first delta, stream error on the first item) leaves nothing worth
+            // keeping in ctx or the session; `to_rig_message` drops empty
+            // assistant content at the wire anyway. Partial messages (content
+            // streamed before the abort) are still recorded. Event sends above
+            // stay unconditional so the consumer's message framing stays
+            // balanced — MessageStart was already emitted.
+            if !content.is_empty() {
+                record_session(&mut cfg, &assistant)?;
+                ctx.push(assistant.clone());
+            }
             if sink
                 .send(AgentEvent::TurnEnd {
                     message: assistant.clone(),

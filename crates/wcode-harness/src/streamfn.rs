@@ -252,6 +252,14 @@ fn effort_params(opts: &LlmOpts) -> Option<serde_json::Value> {
     }
 }
 
+/// Prefix applied to a failed tool's output *on the wire only*. The chat wire
+/// has no structured error flag for tool results (rig's `ToolResult` only
+/// carries text/content), so a failed tool's output must be annotated in the
+/// text the model sees — otherwise a tool failure looks exactly like a
+/// success. The UI and the JSONL session keep the raw output; only the wire
+/// copy read by the LLM is marked.
+const TOOL_OUTPUT_ERROR_PREFIX: &str = "ERROR: ";
+
 fn to_rig_message(m: &AgentMessage) -> Option<Message> {
     match m {
         AgentMessage::User { content } => {
@@ -288,12 +296,22 @@ fn to_rig_message(m: &AgentMessage) -> Option<Message> {
             tool_call_id,
             name,
             output,
-            ..
-        } => Some(Message::tool_result(
-            tool_call_id.clone(),
-            name.clone(),
-            output.clone(),
-        )),
+            is_error,
+        } => {
+            // The wire has no structured error flag for tool results, so mark
+            // failures in the text the model sees. The UI and the session keep
+            // the raw output — only this wire copy is prefixed.
+            let output = if *is_error {
+                format!("{TOOL_OUTPUT_ERROR_PREFIX}{output}")
+            } else {
+                output.clone()
+            };
+            Some(Message::tool_result(
+                tool_call_id.clone(),
+                name.clone(),
+                output,
+            ))
+        }
     }
 }
 
@@ -371,6 +389,7 @@ fn reasoning_text(reasoning: &Reasoning) -> String {
 mod tests {
     use super::*;
     use rig::completion::Usage as RigUsage;
+    use rig::message::{ToolResultContent, UserContent};
     use rig::streaming::{RawStreamingToolCall, StreamFinal, ToolCallDeltaContent};
     use serde_json::json;
 
@@ -591,6 +610,50 @@ mod tests {
             tool_result.as_slice(),
             [UserContent::ToolResult(r)] if r.call.as_str() == "t1" && r.name == "get_weather"
         ));
+    }
+
+    #[test]
+    fn tool_result_error_is_annotated_on_the_wire_only() {
+        let err = AgentMessage::ToolResult {
+            tool_call_id: "t1".into(),
+            name: "echo".into(),
+            output: "boom".into(),
+            is_error: true,
+        };
+        let ok = AgentMessage::ToolResult {
+            tool_call_id: "t1".into(),
+            name: "echo".into(),
+            output: "boom".into(),
+            is_error: false,
+        };
+
+        fn wire_text(m: &AgentMessage) -> String {
+            match to_rig_message(m) {
+                Some(Message::User { content }) => match &content[..] {
+                    [UserContent::ToolResult(r)] => match &r.content[..] {
+                        [ToolResultContent::Text(t)] => t.text.clone(),
+                        other => panic!("unexpected tool result content: {other:?}"),
+                    },
+                    other => panic!("unexpected user content: {other:?}"),
+                },
+                other => panic!("unexpected wire message: {other:?}"),
+            }
+        }
+
+        // Success passes through byte-for-byte; a failed tool is marked.
+        assert_eq!(wire_text(&ok), "boom");
+        assert_eq!(wire_text(&err), "ERROR: boom");
+        // The stored message itself is untouched — the flag is only consumed
+        // at the wire seam.
+        match err {
+            AgentMessage::ToolResult {
+                output, is_error, ..
+            } => {
+                assert_eq!(output, "boom");
+                assert!(is_error);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

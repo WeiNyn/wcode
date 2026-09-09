@@ -219,6 +219,41 @@ async fn cancel_returns_aborted() {
 }
 
 #[tokio::test]
+async fn error_before_any_delta_persists_only_user_message() {
+    // Finding #1 regression: a stream that errors before producing any content
+    // must not leave an empty assistant message in ctx or the session.
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
+            message: "boom".into(),
+        }])) as LlmStream
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    let mut agent = Agent::new(agent_config(stream_fn, vec![], Some(session)));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let res = agent.run("hi", tx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert_eq!(
+        agent.messages().len(),
+        1,
+        "only the user message, no empty assistant: {:?}",
+        agent.messages()
+    );
+
+    let reopened = Session::open(&path).unwrap();
+    let msgs = reopened.messages();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "session must not contain an empty assistant: {msgs:?}"
+    );
+    assert!(matches!(&msgs[0], AgentMessage::User { .. } if msgs[0].as_text() == "hi"));
+}
+
+#[tokio::test]
 async fn session_file_contains_all_messages_after_run() {
     let rec = Recorder::default();
     rec.push(vec![
