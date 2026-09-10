@@ -47,16 +47,30 @@ impl TypedTool for Find {
         let mut out = String::new();
         let mut shown = 0usize;
         let base_is_file = base.is_file();
-        let entries: Vec<std::path::PathBuf> = if base_is_file {
-            vec![base.clone()]
+        let mut entries: Vec<std::path::PathBuf> = Vec::new();
+        if base_is_file {
+            entries.push(base.clone());
         } else {
-            WalkDir::new(&base)
+            // Check cancel per directory entry: a tree walk can be long, and
+            // collecting it all up-front would make a mid-run cancel wait for
+            // the whole walk to finish (the loop honors cancel only after the
+            // tool returns).
+            for entry in WalkDir::new(&base)
                 .into_iter()
                 .filter_entry(|e| !is_skipped_dir(e))
-                .filter_map(|e| e.ok())
-                .map(|e| e.into_path())
-                .collect()
-        };
+            {
+                if ctx.cancel.is_cancelled() {
+                    return ToolOutput {
+                        output: "cancelled".to_string(),
+                        is_error: true,
+                        details: None,
+                    };
+                }
+                if let Ok(entry) = entry {
+                    entries.push(entry.into_path());
+                }
+            }
+        }
         for p in entries {
             if want_dir && !p.is_dir() {
                 continue;

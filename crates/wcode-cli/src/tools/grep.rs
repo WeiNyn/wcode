@@ -66,15 +66,34 @@ impl TypedTool for Grep {
             for entry in WalkDir::new(&base)
                 .into_iter()
                 .filter_entry(|e| !is_skipped_dir(e))
-                .filter_map(|e| e.ok())
             {
-                if entry.file_type().is_file() {
-                    files.push(entry.into_path());
+                // Cancel-checked per entry: discovery can be long on a big
+                // tree, and the loop honors cancel only after the tool returns.
+                if ctx.cancel.is_cancelled() {
+                    return ToolOutput {
+                        output: "cancelled".to_string(),
+                        is_error: true,
+                        details: None,
+                    };
+                }
+                if let Ok(entry) = entry {
+                    if entry.file_type().is_file() {
+                        files.push(entry.into_path());
+                    }
                 }
             }
         }
 
         for file in files {
+            // Reading + regexing every matched file can also be long; stop the
+            // scan promptly when a cancel lands mid-run.
+            if ctx.cancel.is_cancelled() {
+                return ToolOutput {
+                    output: "cancelled".to_string(),
+                    is_error: true,
+                    details: None,
+                };
+            }
             let rel = file.strip_prefix(&ctx.working_dir).unwrap_or(&file);
             let rel_str = rel.to_string_lossy();
             if !include_path(&rel_str, &includes, &excludes) {

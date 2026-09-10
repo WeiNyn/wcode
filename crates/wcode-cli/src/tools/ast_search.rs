@@ -72,15 +72,28 @@ impl TypedTool for AstSearch {
         // Machine-readable output: no ANSI, no color.
         cmd.env("NO_COLOR", "1");
 
-        let out = match cmd.output().await {
-            Ok(o) => o,
-            Err(e) => {
+        // Race the subprocess against the cancel token like ast_edit does: a big
+        // repo AST search must not make a mid-run cancel wait for the binary
+        // to finish. The spawned child is not killed on cancel (same compromise
+        // as ast_edit) — the tool just stops waiting.
+        let out = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
                 return ToolOutput {
-                    output: format!("ast_search: failed to run `{bin}`: {e}"),
+                    output: "cancelled".to_string(),
                     is_error: true,
                     details: None,
                 };
             }
+            res = cmd.output() => match res {
+                Ok(o) => o,
+                Err(e) => {
+                    return ToolOutput {
+                        output: format!("ast_search: failed to run `{bin}`: {e}"),
+                        is_error: true,
+                        details: None,
+                    };
+                }
+            },
         };
         let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();

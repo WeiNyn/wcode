@@ -85,7 +85,14 @@ pub async fn run_loop(
                 aborted = true;
             }
 
-            // Skip the LLM call entirely when the sink is already dead.
+            // Skip the LLM call entirely when the sink is already dead, or when a
+            // cancel landed between the post-tool check and this turn start —
+            // minting the request only to abort it on the first poll of the
+            // biased select would waste one LLM round-trip for nothing.
+            if !aborted && cfg.cancel.is_cancelled() {
+                aborted = true;
+            }
+
             if !aborted {
                 let mut stream = (cfg.stream_fn)(ctx.as_slice(), &cfg.system, &tool_defs, &cfg.llm);
                 loop {

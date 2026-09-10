@@ -750,6 +750,39 @@ async fn cancel_before_first_delta_leaves_no_assistant() {
 }
 
 #[tokio::test]
+async fn cancel_before_turn_skips_llm_call() {
+    // Finding #7: a cancel that lands before a turn starts must not mint an
+    // LLM request at all — the biased select would abort it on the first poll
+    // anyway, wasting a round-trip. stream_fn must never be invoked.
+    let rec = Recorder::default();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let cfg = LoopConfig { cancel, ..cfg };
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Aborted);
+    assert!(
+        rec.calls().is_empty(),
+        "stream_fn must not be invoked on an already-cancelled run"
+    );
+    assert_eq!(ctx.len(), 1, "no assistant persisted");
+    assert_eq!(
+        tags(&events),
+        vec![
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn stream_error_before_any_delta_leaves_no_assistant() {
     // A stream that errors on its first item produces no content; the run must
     // end Error without persisting an empty assistant message, yet still close
