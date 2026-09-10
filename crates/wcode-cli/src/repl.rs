@@ -654,7 +654,10 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
             AgentEvent::ToolExecutionStart { name, .. } => {
                 // Break out of any open block so the tool call stands alone.
                 close_blocks(&mut p, &mut st);
-                out(&format!("{DIM}⚙ {name}{RESET}"));
+                // Newline after the marker: streamed ToolExecutionUpdate
+                // partials (each ending in '\n') and the ✓/✗ line then render
+                // on their own lines rather than gluing onto the ⚙ marker.
+                out(&format!("{DIM}⚙ {name}{RESET}\n"));
             }
             AgentEvent::ToolExecutionUpdate { partial, .. } => out(&partial),
             AgentEvent::ToolExecutionEnd {
