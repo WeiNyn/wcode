@@ -97,20 +97,28 @@ pub fn parse_command(line: &str) -> Option<Command> {
 // ---------------------------------------------------------------------------
 
 /// Diffs streamed assistant snapshots into what still needs printing.
-/// Content only ever grows (deltas append), so "new length minus printed
-/// length" is a valid char-boundary suffix.
+///
+/// Text only ever grows (deltas append), so "new length minus printed
+/// length" is a valid char-boundary suffix. Thinking is different: a
+/// `ThinkingReplace` restates the whole block and can diverge from — shrink
+/// or not extend — what was already printed, so the printer keeps the last
+/// full thinking text and flags that case for a full re-render.
 #[derive(Default)]
 pub struct MessagePrinter {
     text_len: usize,
-    thinking_len: usize,
+    last_thinking: String,
+    /// Set when the latest update replaced thinking instead of appending to
+    /// it: the UI closes the partially-streamed block and re-renders.
+    thinking_replaced: bool,
     mid_line: bool,
 }
 
 impl MessagePrinter {
-    /// A new message started: forget accumulated lengths.
+    /// A new message started: forget accumulated text/thinking state.
     pub fn reset(&mut self) {
         self.text_len = 0;
-        self.thinking_len = 0;
+        self.last_thinking.clear();
+        self.thinking_replaced = false;
     }
 
     /// Returns (text delta for stdout, thinking delta for stderr).
@@ -140,11 +148,18 @@ impl MessagePrinter {
             self.text_len = text.len();
             self.mid_line = true;
         }
-        let mut think_out = String::new();
-        if thinking.len() > self.thinking_len {
-            think_out = thinking[self.thinking_len..].to_string();
-            self.thinking_len = thinking.len();
-        }
+        let think_out = if thinking.starts_with(&self.last_thinking) {
+            // Monotonic stream, or a superset restate: the new thinking extends
+            // what's already printed, so emit the new suffix.
+            self.thinking_replaced = false;
+            thinking[self.last_thinking.len()..].to_string()
+        } else {
+            // Wholesale replacement (shrunk or divergent text): the printed
+            // prefix is stale — emit the full reasoning and flag a re-render.
+            self.thinking_replaced = true;
+            thinking.clone()
+        };
+        self.last_thinking = thinking;
         (text_out, think_out)
     }
 
@@ -154,6 +169,12 @@ impl MessagePrinter {
 
     pub fn clear_mid_line(&mut self) {
         self.mid_line = false;
+    }
+
+    /// True when the latest `update` replaced thinking instead of appending
+    /// to it — the UI then closes the partial block and re-renders.
+    pub fn thinking_replaced(&self) -> bool {
+        self.thinking_replaced
     }
 }
 
@@ -705,6 +726,13 @@ fn close_blocks(p: &mut MessagePrinter, st: &mut PrintState) {
 
 fn emit(p: &mut MessagePrinter, message: &AgentMessage, st: &mut PrintState) {
     let (text, thinking) = p.update(message);
+    if st.thinking_open && p.thinking_replaced() {
+        // Thinking was replaced wholesale (shrunk, or restated with a
+        // divergent prefix): the partially-streamed line is stale. Close it;
+        // the block below re-renders the full reasoning on a fresh line.
+        eprintln!();
+        st.thinking_open = false;
+    }
     if !thinking.is_empty() {
         if !st.thinking_open {
             // Start a thinking block on its own line (breaking out of any
@@ -963,6 +991,87 @@ mod tests {
         assert!(p.mid_line());
         p.clear_mid_line();
         assert!(!p.mid_line());
+    }
+
+    #[test]
+    fn printer_reports_thinking_replace_and_rerenders_full() {
+        let mut p = MessagePrinter::default();
+        // Streamed deltas, then a divergent (shorter) wholesale restate.
+        assert_eq!(
+            p.update(&assistant(vec![ContentBlock::Thinking {
+                text: "abcdefgh".into()
+            }])),
+            (String::new(), "abcdefgh".to_string())
+        );
+        assert!(!p.thinking_replaced());
+        assert_eq!(
+            p.update(&assistant(vec![ContentBlock::Thinking {
+                text: "short".into()
+            }])),
+            (String::new(), "short".to_string())
+        );
+        assert!(
+            p.thinking_replaced(),
+            "a divergent replacement must be flagged for a fresh line"
+        );
+    }
+
+    #[test]
+    fn printer_thinking_delta_resumes_from_replaced_text() {
+        let mut p = MessagePrinter::default();
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "long text".into(),
+        }]));
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "short".into(),
+        }]));
+        // Deltas after a replace continue from the NEW text, not the old.
+        assert_eq!(
+            p.update(&assistant(vec![ContentBlock::Thinking {
+                text: "short but".into()
+            }])),
+            (String::new(), " but".to_string())
+        );
+        assert!(!p.thinking_replaced());
+    }
+
+    #[test]
+    fn printer_superset_restate_is_plain_append() {
+        // A complete-block restate that *extends* the already-printed text is
+        // visually just an append — no re-render needed.
+        let mut p = MessagePrinter::default();
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "abc".into(),
+        }]));
+        assert_eq!(
+            p.update(&assistant(vec![ContentBlock::Thinking {
+                text: "abcxyz".into()
+            }])),
+            (String::new(), "xyz".to_string())
+        );
+        assert!(!p.thinking_replaced());
+    }
+
+    #[test]
+    fn printer_reset_clears_thinking_replacement_state() {
+        let mut p = MessagePrinter::default();
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "old".into(),
+        }]));
+        p.update(&assistant(vec![ContentBlock::Thinking {
+            text: "x".into(),
+        }]));
+        assert!(p.thinking_replaced());
+        p.reset();
+        assert!(!p.thinking_replaced());
+        // A fresh message starts streaming like new.
+        assert_eq!(
+            p.update(&assistant(vec![ContentBlock::Thinking {
+                text: "new".into()
+            }])),
+            (String::new(), "new".to_string())
+        );
+        assert!(!p.thinking_replaced());
     }
 
     #[test]
