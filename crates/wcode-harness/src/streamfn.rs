@@ -328,18 +328,18 @@ fn map_item(item: StreamedAssistantContent) -> Vec<LlmStreamEvent> {
             // accumulated deltas (the loop drops prior thinking on this event).
             vec![LlmStreamEvent::ThinkingReplace(reasoning_text(&reasoning))]
         }
+        // Deltas are dropped: rig's streaming fold accumulates every tool-call
+        // fragment and emits the complete `ToolCall` on `ToolInputEnd` (both
+        // chat-completions and responses wires do this), so the reassembled
+        // call always follows. A provider that ends input without closing it
+        // loses the call inside rig itself; the loop surfaces that as an error
+        // rather than silently treating the turn as done.
         StreamedAssistantContent::ToolCallDelta { .. } => vec![],
-        StreamedAssistantContent::ToolCall { tool_call, .. } => vec![
-            LlmStreamEvent::ToolCallStart {
-                id: tool_call.id.as_str().to_string(),
-                name: tool_call.function.name.clone(),
-            },
-            LlmStreamEvent::ToolCall {
-                id: tool_call.id.as_str().to_string(),
-                name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
-            },
-        ],
+        StreamedAssistantContent::ToolCall { tool_call, .. } => vec![LlmStreamEvent::ToolCall {
+            id: tool_call.id.as_str().to_string(),
+            name: tool_call.function.name,
+            arguments: tool_call.function.arguments,
+        }],
         StreamedAssistantContent::Final(final_record) => {
             vec![LlmStreamEvent::Done {
                 stop_reason: final_record
@@ -466,21 +466,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_maps_to_start_plus_call() {
+    fn tool_call_maps_to_call_event() {
         let events = map_item(tool_call_item());
         assert_eq!(
             events,
-            vec![
-                LlmStreamEvent::ToolCallStart {
-                    id: "call_1".to_string(),
-                    name: "run".to_string(),
-                },
-                LlmStreamEvent::ToolCall {
-                    id: "call_1".to_string(),
-                    name: "run".to_string(),
-                    arguments: json!({"x": 1}),
-                },
-            ]
+            vec![LlmStreamEvent::ToolCall {
+                id: "call_1".to_string(),
+                name: "run".to_string(),
+                arguments: json!({"x": 1}),
+            }]
         );
     }
 

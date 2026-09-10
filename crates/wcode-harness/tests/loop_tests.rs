@@ -283,6 +283,37 @@ async fn plain_text_turn() {
 }
 
 #[tokio::test]
+async fn tool_use_without_streamed_call_is_an_error() {
+    // Finding #3: rig only emits the complete ToolCall on ToolInputEnd, so a
+    // stream that finishes with tool_use but never streams a call has lost the
+    // model's requested action. The run must fail loudly, not silently end.
+    let rec = Recorder::default();
+    rec.push(vec![LlmStreamEvent::Done {
+        stop_reason: StopReason::ToolUse,
+        usage: None,
+    }]);
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert_eq!(ctx.len(), 1, "no tool call occurred, nothing to persist");
+    assert_eq!(
+        tags(&events),
+        vec![
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "error",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn complete_thinking_block_replaces_accumulated_deltas() {
     // A provider that streams reasoning deltas and then restates the full
     // block must not leave duplicated thinking in the conversation context.
@@ -329,10 +360,6 @@ async fn complete_thinking_block_replaces_accumulated_deltas() {
 async fn tool_call_roundtrip() {
     let rec = Recorder::default();
     rec.push(vec![
-        LlmStreamEvent::ToolCallStart {
-            id: "c1".into(),
-            name: "echo".into(),
-        },
         LlmStreamEvent::ToolCall {
             id: "c1".into(),
             name: "echo".into(),

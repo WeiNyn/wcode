@@ -133,8 +133,6 @@ pub async fn run_loop(
                                                         break;
                                                     }
                                                 }
-                                                // v1: no event for ToolCallStart.
-                                                Some(LlmStreamEvent::ToolCallStart { .. }) => {}
                                                 Some(LlmStreamEvent::ToolCall { id, name, arguments }) => {
                                                     content.push(ContentBlock::ToolCall { id, name, arguments });
                                                     if sink
@@ -164,6 +162,23 @@ pub async fn run_loop(
                                             }
                                         }
                 }
+            }
+
+            // Finding #3: a tool-use finish that never streamed a tool call
+            // means the model's requested action was lost. rig only delivers
+            // the reassembled call on ToolInputEnd (deltas are dropped); a
+            // provider that ends input without closing it has no call to emit,
+            // so the call would vanish silently. Fail loudly instead.
+            if !aborted
+                && captured == Some(StopReason::ToolUse)
+                && !content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+            {
+                let _ = sink.send(AgentEvent::Error {
+                    message: "model requested tool use but no tool call was streamed".to_string(),
+                });
+                captured = Some(StopReason::Error);
             }
 
             // Cancellation finalizes the partial assistant as Aborted.

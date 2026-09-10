@@ -11,10 +11,6 @@ pub enum LlmStreamEvent {
     /// accumulated so far in this message — the kernel drops prior thinking
     /// blocks instead of appending, so the context never doubles up.
     ThinkingReplace(String),
-    ToolCallStart {
-        id: String,
-        name: String,
-    },
     ToolCall {
         id: String,
         name: String,
