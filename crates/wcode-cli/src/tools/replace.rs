@@ -45,7 +45,6 @@ impl TypedTool for Replace {
                 return ToolOutput {
                     output: format!("replace {}: {e}", args.path),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -54,7 +53,6 @@ impl TypedTool for Replace {
             return ToolOutput {
                 output: format!("old_string not found in {}", args.path),
                 is_error: true,
-                details: None,
             };
         }
         if matches > 1 && !args.replace_all.unwrap_or(false) {
@@ -64,7 +62,6 @@ impl TypedTool for Replace {
                     args.path
                 ),
                 is_error: true,
-                details: None,
             };
         }
         let updated = if args.replace_all.unwrap_or(false) {
@@ -78,12 +75,10 @@ impl TypedTool for Replace {
             Ok(_) => ToolOutput {
                 output: format!("replaced in {}", args.path),
                 is_error: false,
-                details: None,
             },
             Err(e) => ToolOutput {
                 output: format!("replace {}: {e}", args.path),
                 is_error: true,
-                details: None,
             },
         }
     }

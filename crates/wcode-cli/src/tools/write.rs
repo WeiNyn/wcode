@@ -39,7 +39,6 @@ impl TypedTool for Write {
             return ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
-                details: None,
             };
         }
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
@@ -48,12 +47,10 @@ impl TypedTool for Write {
             Ok(_) => ToolOutput {
                 output: format!("wrote {} bytes to {}", args.content.len(), args.path),
                 is_error: false,
-                details: None,
             },
             Err(e) => ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
-                details: None,
             },
         }
     }

@@ -96,7 +96,6 @@ impl TypedTool for GateTool {
         ToolOutput {
             output: format!("ran:{}", args.text),
             is_error: false,
-            details: None,
         }
     }
 }

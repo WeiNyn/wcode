@@ -39,7 +39,6 @@ fn bad_anchor(ref_: &str, field: &str) -> ToolOutput {
             "[E_BAD_ANCHOR] `{field}` must be a bare 5-char anchor as shown by read (e.g. \"aB3x1\"), got \"{ref_}\". No line numbers, no `{ANCHOR_SEP}content`, no surrounding text."
         ),
         is_error: true,
-        details: None,
     }
 }
 
@@ -71,7 +70,6 @@ impl TypedTool for Edit {
                 return ToolOutput {
                     output: format!("edit {}: {e}", args.path),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -98,7 +96,6 @@ impl TypedTool for Edit {
             return ToolOutput {
                 output: stale_message(&args, &lines, &anchors),
                 is_error: true,
-                details: None,
             };
         }
         let replace_all = args.replace_all.unwrap_or(false);
@@ -117,7 +114,6 @@ impl TypedTool for Edit {
                     candidates
                 ),
                 is_error: true,
-                details: None,
             };
         }
 
@@ -144,7 +140,6 @@ impl TypedTool for Edit {
                         cur.start + 1,
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
         }
@@ -183,7 +178,6 @@ impl TypedTool for Edit {
                     spans.join(", ")
                 ),
                 is_error: false,
-                details: None,
             };
         }
 
@@ -213,13 +207,11 @@ impl TypedTool for Edit {
                         fresh
                     ),
                     is_error: false,
-                    details: None,
                 }
             }
             Err(e) => ToolOutput {
                 output: format!("edit {}: {e}", args.path),
                 is_error: true,
-                details: None,
             },
         }
     }

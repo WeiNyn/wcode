@@ -20,7 +20,6 @@ pub struct AgentConfig {
     pub hooks: HooksSet,
     pub session: Option<Session>, // None = no persistence
     /// Prior messages seeding the conversation (e.g. resumed session history).
-    /// Prior messages seeding the conversation (e.g. resumed session history).
     pub context: Vec<AgentMessage>,
     /// Working directory for tool execution; empty falls back to the process
     /// cwd (bash runs here, file paths resolve) — plumb it so embeddings can

@@ -65,7 +65,6 @@ impl TypedTool for Edits {
             return ToolOutput {
                 output: "[E_EMPTY_BATCH] `edits` needs at least one op.".into(),
                 is_error: true,
-                details: None,
             };
         }
 
@@ -78,7 +77,6 @@ impl TypedTool for Edits {
                         args.edits[0].path, op.path
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
         }
@@ -89,7 +87,6 @@ impl TypedTool for Edits {
                 return ToolOutput {
                     output: format!("edits {}: {e}", args.edits[0].path),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -115,7 +112,6 @@ impl TypedTool for Edits {
                         label, op.from, ANCHOR_SEP
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
             if let Some(t) = &op.to
@@ -127,7 +123,6 @@ impl TypedTool for Edits {
                         label
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
             let ranges = anchor::find_ranges(
@@ -152,7 +147,6 @@ impl TypedTool for Edits {
                         op.path
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
             if ranges.len() > 1 && !op.replace_all.unwrap_or(false) {
@@ -170,7 +164,6 @@ impl TypedTool for Edits {
                         candidates
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
             for r in ranges {
@@ -198,7 +191,6 @@ impl TypedTool for Edits {
                         cur.end + 1,
                     ),
                     is_error: true,
-                    details: None,
                 };
             }
         }
@@ -235,7 +227,6 @@ impl TypedTool for Edits {
                     args.edits[0].path
                 ),
                 is_error: false,
-                details: None,
             };
         }
 
@@ -281,13 +272,11 @@ impl TypedTool for Edits {
                         if total == 1 { "" } else { "s" },
                     ),
                     is_error: false,
-                    details: None,
                 }
             }
             Err(e) => ToolOutput {
                 output: format!("edits {}: {e}", args.edits[0].path),
                 is_error: true,
-                details: None,
             },
         }
     }

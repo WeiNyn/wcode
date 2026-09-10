@@ -73,7 +73,6 @@ impl TypedTool for Bash {
                 return ToolOutput {
                     output: format!("sh spawn: {e}"),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -133,7 +132,6 @@ impl TypedTool for Bash {
                 return ToolOutput {
                     output: "cancelled".to_string(),
                     is_error: true,
-                    details: None,
                 };
             }
             _ = tokio::time::sleep(timeout) => {
@@ -142,7 +140,6 @@ impl TypedTool for Bash {
                 return ToolOutput {
                     output: format!("timed out after {}s (command killed)", timeout.as_secs()),
                     is_error: true,
-                    details: None,
                 };
             }
             drained_res = &mut drained => drained_res,
@@ -153,7 +150,6 @@ impl TypedTool for Bash {
                 return ToolOutput {
                     output: format!("bash wait: {e}"),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -176,7 +172,6 @@ impl TypedTool for Bash {
         ToolOutput {
             output: parts.join("\n"),
             is_error: status.code() != Some(0),
-            details: None,
         }
     }
 }

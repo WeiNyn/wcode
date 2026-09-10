@@ -66,7 +66,6 @@ impl TypedTool for Read {
                 return ToolOutput {
                     output: format!("read {}: {e}", args.path),
                     is_error: true,
-                    details: None,
                 };
             }
         };
@@ -85,7 +84,6 @@ impl TypedTool for Read {
                             anchor::ANCHOR_SEP
                         ),
                         is_error: true,
-                        details: None,
                     };
                 }
                 if args.offset.is_some() {
@@ -95,7 +93,6 @@ impl TypedTool for Read {
                             args.context, args.plain
                         ),
                         is_error: true,
-                        details: None,
                     };
                 }
                 let anchors = anchor::anchors_for(&lines);
@@ -107,7 +104,6 @@ impl TypedTool for Read {
                             args.path, args.path
                         ),
                         is_error: true,
-                        details: None,
                     };
                 }
                 if matches.len() > 1 {
@@ -184,7 +180,6 @@ impl TypedTool for Read {
         ToolOutput {
             output: out,
             is_error: false,
-            details: None,
         }
     }
 }

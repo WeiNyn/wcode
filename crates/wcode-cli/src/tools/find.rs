@@ -36,7 +36,6 @@ impl TypedTool for Find {
             return ToolOutput {
                 output: format!("find: {} does not exist", base.display()),
                 is_error: true,
-                details: None,
             };
         }
         let (includes, excludes) = parse_globs(args.glob.as_deref());
@@ -63,7 +62,6 @@ impl TypedTool for Find {
                     return ToolOutput {
                         output: "cancelled".to_string(),
                         is_error: true,
-                        details: None,
                     };
                 }
                 if let Ok(entry) = entry {
@@ -100,7 +98,6 @@ impl TypedTool for Find {
         ToolOutput {
             output: out,
             is_error: false,
-            details: None,
         }
     }
 }

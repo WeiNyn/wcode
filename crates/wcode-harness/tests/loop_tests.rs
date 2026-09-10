@@ -91,7 +91,6 @@ impl TypedTool for RecordingTool {
         ToolOutput {
             output: format!("echo:{}", self.seen.lock().unwrap().last().unwrap()),
             is_error: false,
-            details: None,
         }
     }
 }
@@ -123,7 +122,6 @@ impl TypedTool for CwdProbe {
         ToolOutput {
             output: "ok".into(),
             is_error: false,
-            details: None,
         }
     }
 }
@@ -911,7 +909,6 @@ impl TypedTool for CancelTool {
         ToolOutput {
             output: format!("ran:{}", args.text),
             is_error: false,
-            details: None,
         }
     }
 }

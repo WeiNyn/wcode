@@ -14,7 +14,6 @@ pub struct ToolContext {
 pub struct ToolOutput {
     pub output: String,
     pub is_error: bool,
-    pub details: Option<serde_json::Value>, // session/UI only, never sent to LLM
 }
 
 #[async_trait::async_trait]
@@ -53,7 +52,6 @@ impl<T: TypedTool> ErasedToolCore for T {
             return ToolOutput {
                 output: "cancelled".to_string(),
                 is_error: true,
-                ..ToolOutput::default()
             };
         }
         let parsed: T::Args = match serde_json::from_value(args) {
@@ -65,7 +63,6 @@ impl<T: TypedTool> ErasedToolCore for T {
                         TypedTool::name(self)
                     ),
                     is_error: true,
-                    ..ToolOutput::default()
                 };
             }
         };
@@ -125,7 +122,6 @@ mod tests {
             ToolOutput {
                 output: format!("echo:{}", args.text),
                 is_error: false,
-                details: None,
             }
         }
     }

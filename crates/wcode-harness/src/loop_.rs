@@ -320,13 +320,11 @@ pub async fn run_loop(
                     ToolOutput {
                         output: "aborted before execution".to_string(),
                         is_error: true,
-                        ..ToolOutput::default()
                     }
                 } else if let Some(reason) = cfg.hooks.before_tool_call(&hook_call).await {
                     ToolOutput {
                         output: format!("blocked: {reason}"),
                         is_error: true,
-                        ..ToolOutput::default()
                     }
                 } else {
                     match cfg.tools.iter().find(|t| t.name() == name) {
@@ -345,7 +343,6 @@ pub async fn run_loop(
                         None => ToolOutput {
                             output: format!("unknown tool: {name}"),
                             is_error: true,
-                            ..ToolOutput::default()
                         },
                     }
                 };
@@ -454,7 +451,6 @@ fn synthesize_unexecuted(
         let out = ToolOutput {
             output: "aborted before execution".to_string(),
             is_error: true,
-            ..ToolOutput::default()
         };
         let _ = sink.send(AgentEvent::ToolExecutionEnd {
             call_id: rid.clone(),
