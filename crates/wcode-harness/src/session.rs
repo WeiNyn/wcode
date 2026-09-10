@@ -41,6 +41,17 @@ pub struct Session {
 
 impl Session {
     pub fn create(dir: &Path) -> io::Result<Session> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Session::create_with_cwd(dir, &cwd)
+    }
+
+    /// Like [`create`], but records `cwd` in the session header instead of the
+    /// process working directory. An agent whose tools run against a custom
+    /// `working_dir` (see `AgentConfig.working_dir`) should stamp that same
+    /// directory here so a resumed session's header agrees with where the tools
+    /// actually ran — otherwise the header's `cwd` describes a directory the
+    /// tools never touched.
+    pub fn create_with_cwd(dir: &Path, cwd: &Path) -> io::Result<Session> {
         fs::create_dir_all(dir)?;
         let id = uuid::Uuid::new_v4();
         let name = format!(
@@ -56,9 +67,7 @@ impl Session {
         let header = SessionEntry::Header {
             version: 1,
             id: id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            cwd: cwd.to_string_lossy().into_owned(),
             created: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         };
         session.append(header)?;
@@ -179,6 +188,17 @@ mod tests {
                 assert!(!id.is_empty());
                 assert!(!cwd.is_empty());
             }
+            _ => panic!("first entry not header"),
+        }
+    }
+
+    #[test]
+    fn create_with_cwd_stamps_header_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::path::Path::new("/custom/workdir");
+        let s = Session::create_with_cwd(dir.path(), cwd).unwrap();
+        match &s.entries()[0] {
+            SessionEntry::Header { cwd, .. } => assert_eq!(cwd, "/custom/workdir"),
             _ => panic!("first entry not header"),
         }
     }

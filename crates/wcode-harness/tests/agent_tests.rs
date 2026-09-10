@@ -395,6 +395,52 @@ async fn steer_between_runs_is_queued_for_next_run() {
     assert_eq!(agent.messages().len(), 5);
 }
 
+#[tokio::test]
+async fn steer_sender_clone_survives_runs() {
+    // Finding #5: run_loop hands the lent channels back at the end of a run,
+    // so a sender clone taken *before* run1 stays valid for run2 — a message
+    // sent in between reaches run2. Previously the receivers were re-paired
+    // with fresh channels and the clone's channel was dropped, silently
+    // losing the message.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("one".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("two".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let mut agent = Agent::new(agent_config(fake_stream_fn(&rec), vec![], None));
+    let steer = agent.steer_sender(); // pre-run1 clone
+
+    let (tx1, _rx1) = mpsc::unbounded_channel();
+    agent.run("hi", tx1).await.unwrap();
+    assert_eq!(rec.calls().len(), 1);
+
+    let _ = steer.send(AgentMessage::user_text("straggler"));
+
+    let (tx2, _rx2) = mpsc::unbounded_channel();
+    let res = agent.run("again", tx2).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let calls = rec.calls();
+    assert_eq!(calls.len(), 2);
+    let ctx2 = &calls[1].ctx;
+    assert!(
+        matches!(&ctx2[3], AgentMessage::User { .. } if ctx2[3].as_text() == "straggler"),
+        "pre-run steer clone must reach the next run, got: {:?}",
+        ctx2
+    );
+}
+
 /// Run 1 is canceled mid-stream; run 2 must execute normally on a fresh
 /// token (a canceled token must not poison the next run).
 #[tokio::test]

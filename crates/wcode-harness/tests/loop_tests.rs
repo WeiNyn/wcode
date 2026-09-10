@@ -5,6 +5,7 @@
 //! and recording what it received per call: `(ctx snapshot, system, tools)`.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
@@ -203,7 +204,7 @@ async fn run(
     ctx: &mut Vec<AgentMessage>,
 ) -> (Result<StopReason, LoopError>, Vec<AgentEvent>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let res = run_loop(ctx, cfg, tx).await;
+    let res = run_loop(ctx, cfg, tx).await.map(|r| r.stop_reason);
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         events.push(ev);
@@ -354,6 +355,45 @@ async fn complete_thinking_block_replaces_accumulated_deltas() {
         }
         _ => panic!("expected assistant message"),
     }
+}
+
+#[tokio::test]
+async fn stop_hook_runs_on_tool_call_free_turn() {
+    // Finding #6: should_stop_after_turn was only consulted after tool
+    // execution, so a final answer (no tool calls) never triggered it despite
+    // the documented "after a turn's tool execution" contract. It must fire
+    // on tool-call-free turns too.
+    struct CountStop(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl Hooks for CountStop {
+        async fn should_stop_after_turn(&self, _ctx: &[AgentMessage]) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    let rec = Recorder::default();
+    rec.push(vec![LlmStreamEvent::Done {
+        stop_reason: StopReason::Stop,
+        usage: None,
+    }]);
+    let count = Arc::new(AtomicUsize::new(0));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![],
+        HooksSet::one(Arc::new(CountStop(count.clone()))),
+    );
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "hook must fire once on the tool-call-free final turn"
+    );
+    assert_eq!(ctx.len(), 1, "no empty assistant persisted");
 }
 
 #[tokio::test]
@@ -708,7 +748,7 @@ async fn abort_mid_stream() {
             }
         }
     });
-    let res = run_loop(&mut ctx, cfg, tx).await;
+    let res = run_loop(&mut ctx, cfg, tx).await.map(|r| r.stop_reason);
 
     assert_eq!(res.unwrap(), StopReason::Aborted);
     assert_eq!(ctx.len(), 2);
@@ -927,7 +967,7 @@ async fn dead_sink_mid_tool_loop_synthesizes_results() {
             }
         }
     });
-    let res = run_loop(&mut ctx, cfg, tx).await;
+    let res = run_loop(&mut ctx, cfg, tx).await.map(|r| r.stop_reason);
 
     assert_eq!(res.unwrap(), StopReason::Aborted);
     assert_eq!(

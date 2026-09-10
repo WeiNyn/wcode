@@ -121,9 +121,10 @@ impl Agent {
 
     /// Sender clone for steering while `run` holds the `&mut` borrow (UI tasks).
     ///
-    /// Receivers are re-paired after each run: clones taken before a run are
-    /// invalid for later runs — re-acquire after each `run()` (upgrade path:
-    /// run loop hands receivers back between runs).
+    /// `run_loop` hands the lent channels back at the end of every run, so a
+    /// clone taken once stays valid across runs and a message sent while a run
+    /// is in flight — even one the loop never drained — reaches the next run.
+    /// (Only an *error* exit reboots the channels, invalidating old clones.)
     pub fn steer_sender(&self) -> UnboundedSender<AgentMessage> {
         self.steer_tx.clone()
     }
@@ -183,25 +184,33 @@ impl Agent {
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
 
-        // The receivers were consumed by run_loop: re-pair so steer()/
-        // follow_up() keep working. Messages queued between runs sit in the
-        // stored receivers and reach the next run; only messages still queued
-        // when the loop exits (any run exit; the outer loop checks only
-        // follow_ups) are dropped.
-        // ponytail: exit-time stragglers dropped; have run_loop hand the
-        // receivers back if that ever matters.
-        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
-        self.steer_tx = steer_tx;
-        self.steer_rx = Some(steer_rx);
-        let (follow_tx, follow_rx) = mpsc::unbounded_channel();
-        self.follow_tx = follow_tx;
-        self.follow_rx = Some(follow_rx);
-
         // Fresh token for the next run: CancellationToken has no reset, so a
         // cancel from this run must not poison the next one.
         self.cancel = CancellationToken::new();
 
-        res
+        match res {
+            Ok(result) => {
+                // run_loop hands the lent channels back, so steer()/follow_up()
+                // and any sender clone taken before the run keep working, and a
+                // message sent while the run was in flight — even one the loop
+                // never drained — reaches the next run.
+                self.steer_rx = Some(result.steering);
+                self.follow_rx = Some(result.follow_ups);
+                Ok(result.stop_reason)
+            }
+            Err(e) => {
+                // Error exit: the channels were dropped with the error. Reboot
+                // both sides so a later steer()/follow_up() still work
+                // (pre-run sender clones are stale after an error).
+                let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+                self.steer_tx = steer_tx;
+                self.steer_rx = Some(steer_rx);
+                let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+                self.follow_tx = follow_tx;
+                self.follow_rx = Some(follow_rx);
+                Err(e)
+            }
+        }
     }
 
     pub fn messages(&self) -> &[AgentMessage] {

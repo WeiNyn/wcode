@@ -33,17 +33,41 @@ pub enum LoopError {
     Session(std::io::Error), // session append failure while persisting produced messages
 }
 
+/// Return value of [`run_loop`]: the stop reason plus the two input channels
+/// that were lent in, handed back so messages queued but never drained (e.g. a
+/// follow-up sent while the loop was on its final turn) survive the run
+/// boundary instead of being dropped when the caller re-pairs channels.
+#[derive(Debug)]
+pub struct RunResult {
+    pub stop_reason: StopReason,
+    pub steering: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
+    pub follow_ups: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
+}
+
+/// Wrap a normal run exit together with the lent-in channels.
+fn finish(
+    stop_reason: StopReason,
+    steering: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
+    follow_ups: tokio::sync::mpsc::UnboundedReceiver<AgentMessage>,
+) -> Result<RunResult, LoopError> {
+    Ok(RunResult {
+        stop_reason,
+        steering,
+        follow_ups,
+    })
+}
+
 pub async fn run_loop(
     ctx: &mut Vec<AgentMessage>,
     mut cfg: LoopConfig<'_>,
     sink: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-) -> Result<StopReason, LoopError> {
+) -> Result<RunResult, LoopError> {
     let tool_defs: Vec<rig::completion::ToolDefinition> =
         cfg.tools.iter().map(|t| t.definition()).collect();
 
     if sink.send(AgentEvent::AgentStart).is_err() {
         // Consumer gone before the run started: nothing to finalize.
-        return Ok(StopReason::Aborted);
+        return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
     }
 
     'outer: loop {
@@ -247,14 +271,26 @@ pub async fn run_loop(
                     return Err(e);
                 }
                 let _ = sink.send(AgentEvent::AgentEnd);
-                return Ok(if aborted {
-                    StopReason::Aborted
-                } else {
-                    captured.unwrap()
-                });
+                return finish(
+                    if aborted {
+                        StopReason::Aborted
+                    } else {
+                        captured.unwrap()
+                    },
+                    cfg.steering,
+                    cfg.follow_ups,
+                );
             }
             if calls.is_empty() {
-                break; // turn with no tool calls: outer loop handles follow-ups
+                // Turn with no tool calls: the turn's tool work (none) is
+                // done, so the stop hook — documented to run after a turn's
+                // tool execution — fires here too. Otherwise its contract
+                // silently skipped every tool-call-free final answer.
+                if cfg.hooks.should_stop_after_turn(ctx).await {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return finish(StopReason::Stop, cfg.steering, cfg.follow_ups);
+                }
+                break; // outer loop handles follow-ups
             }
 
             // Tool execution (sequential).
@@ -355,11 +391,11 @@ pub async fn run_loop(
             }
             if aborted {
                 let _ = sink.send(AgentEvent::AgentEnd);
-                return Ok(StopReason::Aborted);
+                return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
             }
             if cfg.hooks.should_stop_after_turn(ctx).await {
                 let _ = sink.send(AgentEvent::AgentEnd);
-                return Ok(StopReason::Stop);
+                return finish(StopReason::Stop, cfg.steering, cfg.follow_ups);
             }
         }
 
@@ -370,13 +406,13 @@ pub async fn run_loop(
                     .is_err()
                 {
                     let _ = sink.send(AgentEvent::AgentEnd);
-                    return Ok(StopReason::Aborted);
+                    return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
                 }
                 record_session(&mut cfg, &m)?;
                 ctx.push(m.clone());
                 if sink.send(AgentEvent::MessageEnd { message: m }).is_err() {
                     let _ = sink.send(AgentEvent::AgentEnd);
-                    return Ok(StopReason::Aborted);
+                    return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
                 }
                 continue 'outer;
             }
@@ -385,7 +421,7 @@ pub async fn run_loop(
                 | tokio::sync::mpsc::error::TryRecvError::Disconnected,
             ) => {
                 let _ = sink.send(AgentEvent::AgentEnd);
-                return Ok(StopReason::Stop);
+                return finish(StopReason::Stop, cfg.steering, cfg.follow_ups);
             }
         }
     }

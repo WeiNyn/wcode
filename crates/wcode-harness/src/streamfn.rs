@@ -41,9 +41,12 @@ pub struct LlmOpts {
     /// Stable per-conversation id, sent as `x-opencode-session` for providers
     /// (e.g. OpenCode Go) that route/cache on it. None = header omitted.
     pub session_id: Option<String>,
-    /// Free-style reasoning effort, passed through verbatim. None = send
-    /// nothing (today's behavior; required for backends that reject unknown
-    /// fields). Some(level) fans out per endpoint in `build_request()`.
+    /// Free-style reasoning effort. None = send nothing (backends that reject
+    /// unknown fields keep working). Some(level) fans out per endpoint in
+    /// `build_request()`: Chat forwards any string verbatim under
+    /// `reasoning_effort`, while the Responses endpoint validates client-side
+    /// against `none|minimal|low|medium|high|xhigh|max` (rig's typed enum) — a
+    /// value outside that set fails with a clear error before the request.
     pub effort: Option<String>,
 }
 
@@ -129,6 +132,9 @@ fn adapt(
     system: &str,
     tools: &[ToolDefinition],
 ) -> LlmStream {
+    if let Some(message) = invalid_effort(opts) {
+        return error_stream(message);
+    }
     let client = match openai_client(opts) {
         Ok(client) => client,
         Err(message) => return error_stream(message),
@@ -239,11 +245,33 @@ fn build_request(
     }
 }
 
+/// Effort levels accepted by the Responses wire. rig deserializes
+/// `reasoning.effort` into a snake_case enum client-side (`ReasoningEffort`),
+/// so any other string fails with an opaque RequestError at send time;
+/// `invalid_effort` surfaces a clear error instead. Chat forwards any string.
+const RESPONSES_EFFORT_LEVELS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// `Some(message)` when `opts.effort` cannot cross the configured wire: the
+/// Responses endpoint validates effort client-side against the enum above,
+/// while Chat forwards any string to the provider.
+fn invalid_effort(opts: &LlmOpts) -> Option<String> {
+    if opts.endpoint == LlmEndpoint::Responses
+        && let Some(effort) = opts.effort.as_deref()
+        && !RESPONSES_EFFORT_LEVELS.contains(&effort)
+    {
+        return Some(format!(
+            "effort `{effort}` is not valid for the Responses endpoint; use one of: {}",
+            RESPONSES_EFFORT_LEVELS.join(", ")
+        ));
+    }
+    None
+}
+
 /// Free-style effort passthrough, fanned out per wire shape. None sends
-/// nothing (backends that reject unknown fields keep working). Some(level)
-/// is sent verbatim: Chat takes top-level `reasoning_effort`, Responses
-/// takes `reasoning: { effort }` (rig validates it against its known
-/// levels client-side; Chat forwards any string to the provider).
+/// nothing (backends that reject unknown fields keep working). Values are
+/// forwarded verbatim on Chat (`reasoning_effort`); on Responses the payload
+/// is `reasoning: { effort }` after `invalid_effort` has validated the level.
 fn effort_params(opts: &LlmOpts) -> Option<serde_json::Value> {
     let effort = opts.effort.as_ref()?;
     match opts.endpoint {
@@ -701,20 +729,54 @@ mod tests {
     }
 
     #[test]
-    fn effort_is_verbatim_passthrough() {
-        // Free-style: any string (including provider dialects) passes through.
+    fn chat_effort_is_verbatim_passthrough() {
+        // Free-style on the Chat wire: any string (including provider
+        // dialects) is forwarded verbatim under `reasoning_effort`.
         for level in ["low", "medium", "my-custom-level", ""] {
             let opts = LlmOpts {
                 effort: Some(level.into()),
+                endpoint: LlmEndpoint::Chat,
                 ..LlmOpts::default()
             };
             let request = build_request(&[], "sys", &[], &opts);
             assert_eq!(
                 request.additional_params,
                 Some(json!({ "reasoning_effort": level })),
-                "level {level:?} must pass through verbatim"
+                "level {level:?} must pass through verbatim on Chat"
             );
         }
+    }
+
+    #[test]
+    fn responses_effort_validation() {
+        // Known snake_case levels pass; anything else is rejected with a clear
+        // message (rig would otherwise fail the request with an opaque error).
+        for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let opts = LlmOpts {
+                effort: Some(level.into()),
+                endpoint: LlmEndpoint::Responses,
+                ..LlmOpts::default()
+            };
+            assert_eq!(invalid_effort(&opts), None, "level {level} must be valid");
+        }
+        let opts = LlmOpts {
+            effort: Some("deep".into()),
+            endpoint: LlmEndpoint::Responses,
+            ..LlmOpts::default()
+        };
+        let msg = invalid_effort(&opts).expect("unknown level must be rejected");
+        assert!(msg.contains("not valid"), "got: {msg}");
+        assert!(
+            msg.contains("xhigh"),
+            "message must list valid levels: {msg}"
+        );
+        // Chat stays verbatim even for a value Responses would reject.
+        let opts = LlmOpts {
+            effort: Some("deep".into()),
+            endpoint: LlmEndpoint::Chat,
+            ..LlmOpts::default()
+        };
+        assert_eq!(invalid_effort(&opts), None);
     }
 
     #[test]
