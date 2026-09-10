@@ -32,7 +32,7 @@ impl TypedTool for Replace {
         "replace"
     }
     fn description(&self) -> &str {
-        "Replace an exact literal string in a file without reading it first. `old_string` must occur exactly once unless `replace_all` is set. Prefer `edit` (anchors) for targeted line edits — `replace` is for quick, unique, whole-text substitutions. The match is byte-exact: whitespace counts."
+        "Replace an exact literal string in a file: old_string must occur exactly once unless replace_all is set. Byte-exact match (whitespace counts). Prefer edit for line-targeted changes."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         // Async lock + sync fs: the guard may cross awaits, but the fs work stays

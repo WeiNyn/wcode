@@ -28,7 +28,7 @@ impl TypedTool for Write {
         "write"
     }
     fn description(&self) -> &str {
-        "Write full contents to a file, creating parent directories. Overwrites existing files. `content` is written byte-for-byte — every line's leading whitespace is preserved exactly; this tool never reformats."
+        "Write full contents to a file, creating parent directories. Overwrites existing files. content is written byte-for-byte — leading whitespace preserved exactly; never reformats."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;

@@ -117,4 +117,29 @@ mod tests {
         assert!(n.iter().any(|s| s == "grep"));
         assert!(n.iter().any(|s| s == "find"));
     }
+
+    #[test]
+    #[ignore = "diagnostic: print tool definition sizes"]
+    fn print_tool_definition_sizes() {
+        let tools = default_tools(&ToolsConfig::default());
+        let mut total = 0usize;
+        for t in &tools {
+            let d = t.definition();
+            let json = serde_json::to_string(&d).unwrap();
+            total += json.len();
+            println!(
+                "{:<12} desc={:>4}ch params={:>6}ch json={:>6}ch  ~tok={:>3}",
+                d.name,
+                d.description.len(),
+                d.parameters.to_string().len(),
+                json.len(),
+                json.len() / 4
+            );
+            println!("    params: {}", d.parameters);
+        }
+        println!(
+            "TOTAL tool-def JSON: {total} chars ~= {} tokens (chars/4)",
+            total / 4
+        );
+    }
 }

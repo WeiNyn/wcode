@@ -57,7 +57,7 @@ impl TypedTool for Edits {
         "edits"
     }
     fn description(&self) -> &str {
-        "Apply a batch of anchor-range edits (like `edit`) to ONE file in a single call. Every op is resolved against the same snapshot, so earlier ops can't derail later ones, and the batch is atomic — any stale, ambiguous (without replace_all) or overlapping op aborts the whole call with nothing written. Use for several same-file edits that would otherwise be N separate read/edit round-trips. Same verbatim-`replacement` (keep exact indentation) and fresh-anchor rules as `edit`."
+        "Apply a batch of anchor-range edits (same args as edit) to ONE file atomically: every op resolves against the same snapshot, and any stale/ambiguous/overlapping op aborts the whole batch with nothing written. Use for several same-file edits in one round-trip."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;

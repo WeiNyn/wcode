@@ -49,7 +49,7 @@ impl TypedTool for Edit {
         "edit"
     }
     fn description(&self) -> &str {
-        "Replace the line range covered by the `from`/`to` anchors with `replacement`. `from` and `to` are the anchors `read` printed — they address lines by content, so edits above never shift this target. Old code is never re-typed: send the two anchors and the new text. Ambiguous anchors (identical lines share an anchor) and stale anchors (line changed since read) are rejected with candidates to retry — nothing is written. For a literal string replacement without reading, use `replace`. For a whole-file rewrite, use `write`. Reminders: `replacement` is inserted verbatim — keep the exact leading whitespace on every line (indentation is part of the anchor contract); the entire inclusive `from`–`to` line range is replaced; if the file changed since read (formatter, other tool), re-read first — anchors move."
+        "Replace the line range covered by the from/to anchors with replacement — content-addressed, so edits above never shift the target. Ambiguous (identical lines share an anchor) or stale anchors are rejected with candidates, nothing written; old_string disambiguates, replace_all applies to every match. replacement is verbatim — preserve leading whitespace; re-read if the file changed before editing. Whole-file rewrite = write; literal string = replace."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;

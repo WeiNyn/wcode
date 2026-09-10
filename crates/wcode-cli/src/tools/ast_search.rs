@@ -37,7 +37,7 @@ impl TypedTool for AstSearch {
         "ast_search"
     }
     fn description(&self) -> &str {
-        "AST-structural code search via ast-grep (`sg`). Pattern is ordinary code with `$UPPERCASE` as wildcards, e.g. `await $X` finds every await regardless of operand. Use it when regex grep cannot express the structure; regex grep is cheaper for text matches. Currently search-only — structural rewrite is a follow-up."
+        "AST-structural search via ast-grep. Pattern is ordinary code with $UPPERCASE wildcards, e.g. await $X finds every await. Use when regex can't express the structure; regex is cheaper for text matches. Search-only — rewrites live in ast_edit."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let Some(bin) = super::ast::find_bin() else {

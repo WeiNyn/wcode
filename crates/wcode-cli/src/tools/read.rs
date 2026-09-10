@@ -56,7 +56,7 @@ impl TypedTool for Read {
         "read"
     }
     fn description(&self) -> &str {
-        "Read a text file. Every line is returned as ANCHOR│content; the 5-char anchor is the line's content address and the `edit` target. Anchors are stable under inserts/deletes elsewhere; they hash the line's raw content, so indentation is meaningful (a nested `}` has a different anchor than a top-level `}`) — but a formatter that reindents moves indented lines' anchors, so re-read after formatting. No line numbers — use the anchor in `edit`. For raw text without anchors pass plain:true. Page with offset/limit, or pass `from` (an anchor from grep or a previous edit echo) plus optional `context` to read the region around a hit without knowing its line number. Without `limit`, at most 1000 lines are shown, then a continuation note (an explicit `limit` always wins); lines longer than 300 chars are displayed truncated as `…(+N)` but their anchor still hashes the full line, so they remain editable. An empty file shows one insertion-point anchor."
+        "Read a text file. Each line renders as ANCHOR│content — the 5-char anchor is its content address and the target for edit. Anchors survive edits elsewhere and hash raw content, so indentation matters; re-read after a formatter reindents. Page with offset/limit, or pass from (an anchor from grep or a prior edit echo) plus context. plain:true prints cat -n style."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let path = super::resolve(&ctx.working_dir, &args.path);

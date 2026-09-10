@@ -53,7 +53,7 @@ impl TypedTool for AstEdit {
         "ast_edit"
     }
     fn description(&self) -> &str {
-        "Structural code rewrite via ast-grep. `pattern` is ordinary code with `$UPPERCASE` wildcards (e.g. `println!($A, $B)`), `rewrite` re-emits those wildcards (e.g. `dbg!($B)`). Operates on ONE file per call, applied atomically. Default `commit:true` applies and echoes the diff; `commit:false` dry-runs (diff only, nothing written). Structural rewrites bypass line anchors, so re-read the file afterwards before anchoring further edits."
+        "AST-structural rewrite of ONE file via ast-grep. pattern uses $UPPERCASE wildcards; rewrite re-emits them (e.g. println!($A, $B) → dbg!($B)). commit:true (default) applies atomically and echoes the diff; commit:false dry-runs. Bypasses line anchors — re-read before further edits."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;
