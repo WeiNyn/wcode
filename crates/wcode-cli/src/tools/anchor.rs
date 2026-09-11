@@ -184,8 +184,11 @@ pub fn apply_replace(
     (out, Some((first, last.max(first))))
 }
 
-/// First/last 1-based line that differ between two file contents, or `None`
-/// when identical. Used to echo the fresh-anchor view of a just-edited region.
+/// First/last 1-based line, in the NEW content, that the change touches, or
+/// `None` when the two are byte-identical. Used to echo the fresh-anchor view
+/// of a just-edited region: insertions/replacements report the new lines, and a
+/// deletion reports the surviving line that moved up into the gap (or the last
+/// line, if the deletion was at EOF) — so the span is never one past EOF.
 pub fn changed_range(orig: &str, new: &str) -> Option<(usize, usize)> {
     if orig == new {
         return None;
@@ -202,11 +205,19 @@ pub fn changed_range(orig: &str, new: &str) -> Option<(usize, usize)> {
         ia -= 1;
         ib -= 1;
     }
-    if first >= ia && first >= ib {
-        // pure insertion/removal collapsed to a boundary by the front skip
-        return Some((first + 1, first + 1));
+    // Region of the NEW content that differs, 0-based [first, ib). When
+    // `ib > first` the changed lines are present (insertion or replacement).
+    if ib > first {
+        return Some((first + 1, ib));
     }
-    Some((first + 1, ib.max(first + 1)))
+    // Pure deletion: the new side has no lines at the gap, so point at the line
+    // that moved up into it — or the line just above — always a real line,
+    // never one past EOF.
+    if b.is_empty() {
+        return Some((1, 1)); // nothing to echo; callers render an empty region
+    }
+    let keep = first.min(b.len() - 1);
+    Some((keep + 1, keep + 1))
 }
 
 #[cfg(test)]
@@ -318,6 +329,38 @@ mod tests {
         assert!(!is_degenerate_empty("\n\n"));
         assert!(!is_degenerate_empty("a"));
         assert!(!is_degenerate_empty("a\n"));
+    }
+
+    #[test]
+    fn changed_range_reports_new_side_lines() {
+        assert_eq!(changed_range("a\nb\n", "a\nb\n"), None);
+        // Insertion at EOF -> the inserted line.
+        assert_eq!(changed_range("a\nb\n", "a\nb\nc\n"), Some((3, 3)));
+        // Replacement -> the new line.
+        assert_eq!(changed_range("a\nb\nc\n", "a\nB\nc\n"), Some((2, 2)));
+        // Mid-file deletion -> the surviving line that moved up.
+        assert_eq!(changed_range("x\ndel\ny\n", "x\ny\n"), Some((2, 2)));
+        // Tail deletion -> the last surviving line, never one past EOF.
+        assert_eq!(changed_range("x\ny\nz\n", "x\ny\n"), Some((2, 2)));
+        // Deleting the only line -> nothing to echo, but a valid empty span.
+        assert_eq!(changed_range("x\n", ""), Some((1, 1)));
+
+        // The new-side span is always non-empty and within the new file.
+        for (orig, new) in [
+            ("a\nb\nc\n", "a\nb\n"),
+            ("a\nb\n", "a\n"),
+            ("a\n", ""),
+            ("", "a\n"),
+            ("x\ndel\ny\n", "x\ny\n"),
+        ] {
+            if let Some((first, last)) = changed_range(orig, new) {
+                assert!(first <= last, "{orig:?}->{new:?}: {first}..={last}");
+                let len = split_lines(new).len();
+                if len > 0 {
+                    assert!(last <= len, "{orig:?}->{new:?}: {last} past EOF ({len})");
+                }
+            }
+        }
     }
 
     #[test]

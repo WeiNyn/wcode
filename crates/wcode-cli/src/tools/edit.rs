@@ -327,6 +327,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_the_last_line_echoes_a_real_region() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "x\ny\nz\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let hz = anchor::anchor("z");
+        let out = tool()
+            .execute(args("f.txt", &hz, None, "", None, None), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "x\ny\n"
+        );
+        // The echo must show a real surviving line, not an empty "Region now".
+        assert!(
+            out.output
+                .contains(&anchor::render(&anchor::anchor("y"), "y")),
+            "echo should show the surviving line: {}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
     async fn ambiguous_duplicate_is_rejected_with_candidates() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "x\n}\ny\n}\n").unwrap();
