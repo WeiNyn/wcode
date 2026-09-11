@@ -391,7 +391,7 @@ async fn reload(
     // Build-scoped token: Ctrl-C during the build must not poison the
     // agent's own cancel token (shared with the next `run()`).
     let build_cancel = CancellationToken::new();
-    *cancel_slot.lock().unwrap() = build_cancel.clone();
+    *lock_cancel_slot(cancel_slot) = build_cancel.clone();
     in_flight.store(true, Ordering::SeqCst);
     let mut child = match tokio::process::Command::new("cargo")
         .arg("build")
@@ -403,7 +403,7 @@ async fn reload(
         Ok(c) => c,
         Err(e) => {
             in_flight.store(false, Ordering::SeqCst);
-            *cancel_slot.lock().unwrap() = agent.cancel_token();
+            *lock_cancel_slot(cancel_slot) = agent.cancel_token();
             eprintln!("reload: cargo: {e}");
             return;
         }
@@ -418,7 +418,7 @@ async fn reload(
         s = child.wait() => s.ok(),
     };
     in_flight.store(false, Ordering::SeqCst);
-    *cancel_slot.lock().unwrap() = agent.cancel_token();
+    *lock_cancel_slot(cancel_slot) = agent.cancel_token();
     match status {
         Some(s) if s.success() => {}
         Some(s) => {
@@ -473,6 +473,15 @@ async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
 // REPL
 // ---------------------------------------------------------------------------
 
+/// Lock the shared cancel slot, tolerating a poisoned mutex: a panic elsewhere
+/// while the lock was held must not take down the REPL's Ctrl-C / run plumbing.
+fn lock_cancel_slot(
+    slot: &Mutex<CancellationToken>,
+) -> std::sync::MutexGuard<'_, CancellationToken> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: ToolsConfig) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
@@ -484,7 +493,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
                 if in_flight.load(Ordering::SeqCst) {
-                    cancel_slot.lock().unwrap().cancel();
+                    lock_cancel_slot(&cancel_slot).cancel();
                 } else {
                     println!();
                     std::process::exit(0);
@@ -527,7 +536,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
                             .and_then(|s| s.path().map(Path::to_path_buf));
                         agent =
                             build_agent(llm.clone(), hooks.clone(), &tools, session, Vec::new());
-                        *cancel_slot.lock().unwrap() = agent.cancel_token();
+                        *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         match path {
                             Some(p) => println!("new session: {}", p.display()),
                             None => println!("new conversation"),
@@ -598,7 +607,7 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
                         }
                         let n = messages.len();
                         agent = build_agent(llm.clone(), hooks.clone(), &tools, Some(s), messages);
-                        *cancel_slot.lock().unwrap() = agent.cancel_token();
+                        *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
                     }
                     Err(e) => eprintln!("open {}: {e}", path.display()),
@@ -647,7 +656,7 @@ async fn run_turn(
     in_flight.store(true, Ordering::SeqCst);
     let res = agent.run(input, tx).await;
     in_flight.store(false, Ordering::SeqCst);
-    *cancel_slot.lock().unwrap() = agent.cancel_token();
+    *lock_cancel_slot(cancel_slot) = agent.cancel_token();
     let _ = printer.await;
     match res {
         Ok(StopReason::Aborted) => println!("{DIM}(aborted){RESET}"),
@@ -890,6 +899,20 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
         assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
         assert!(!args.iter().any(|a| a == "--base-url"));
+    }
+
+    #[test]
+    fn lock_cancel_slot_tolerates_poisoning() {
+        let m = Mutex::new(CancellationToken::new());
+        // Poison the mutex by panicking while the lock is held.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap();
+            panic!("poison on purpose");
+        }));
+        // The helper must still hand back the guard rather than panicking.
+        let guard = lock_cancel_slot(&m);
+        guard.cancel();
+        assert!(guard.is_cancelled());
     }
 
     #[test]
