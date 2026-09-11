@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::compaction::{self, CompactOutcome, CompactionPolicy};
 use crate::event::AgentEvent;
 use crate::hooks::HooksSet;
 use crate::loop_::{LoopConfig, LoopError, run_loop};
@@ -29,6 +30,9 @@ pub struct AgentConfig {
     /// (see [`crate::loop_::LoopConfig::max_turns`]). Use
     /// [`crate::loop_::DEFAULT_MAX_TURNS`] for the kernel default.
     pub max_turns: usize,
+    /// When to compact and how much recent context to keep
+    /// (see [`crate::compaction`]). Use [`CompactionPolicy::default`].
+    pub compaction: CompactionPolicy,
 }
 
 pub struct Agent {
@@ -40,6 +44,7 @@ pub struct Agent {
     session: Option<Session>,
     working_dir: PathBuf,
     max_turns: usize,
+    compaction: CompactionPolicy,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
     steer_rx: Option<UnboundedReceiver<AgentMessage>>,
@@ -77,6 +82,7 @@ impl Agent {
             session: cfg.session,
             working_dir,
             max_turns: cfg.max_turns,
+            compaction: cfg.compaction,
             ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
@@ -221,6 +227,33 @@ impl Agent {
 
     pub fn messages(&self) -> &[AgentMessage] {
         &self.ctx
+    }
+
+    /// Summarize the older part of the conversation in place: keep the newest
+    /// messages per [`CompactionPolicy`] and replace the rest with a single
+    /// summary message. `instructions` focuses the summary (the
+    /// `/compact <prompt>` argument).
+    ///
+    /// In-memory only for now: the session still holds the raw history, so a
+    /// resumed session re-expands until compaction is persisted.
+    pub async fn compact(&mut self, instructions: Option<&str>) -> Result<CompactOutcome, String> {
+        let cut = compaction::cut_for_policy(&self.ctx, &self.compaction);
+        if cut == 0 {
+            return Ok(CompactOutcome::NothingToDo);
+        }
+        let prefix = self.ctx[..cut].to_vec();
+        let summary =
+            compaction::summarize(&self.stream_fn, &self.llm, &prefix, instructions).await?;
+        let kept = self.ctx.len() - cut;
+        let mut next = Vec::with_capacity(kept + 1);
+        next.push(compaction::summary_message(&summary.text));
+        next.extend_from_slice(&self.ctx[cut..]);
+        self.ctx = next;
+        Ok(CompactOutcome::Done {
+            summarized: cut,
+            kept,
+            usage: summary.usage,
+        })
     }
 
     pub fn session_path(&self) -> Option<&Path> {

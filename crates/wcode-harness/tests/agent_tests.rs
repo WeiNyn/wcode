@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use wcode_harness::agent::{Agent, AgentConfig};
+use wcode_harness::compaction::{CompactOutcome, CompactionPolicy};
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::message::{AgentMessage, StopReason};
@@ -118,6 +119,7 @@ fn agent_config(
         context: Vec::new(),
         working_dir: std::path::PathBuf::new(),
         max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+        compaction: wcode_harness::compaction::CompactionPolicy::default(),
     }
 }
 
@@ -624,4 +626,58 @@ async fn set_effort_swaps_llm_and_logs_session_change() {
     );
     let reopened = Session::open(&path).unwrap();
     assert_eq!(reopened.effort(), Some(None));
+}
+
+#[tokio::test]
+async fn compact_replaces_prefix_with_a_summary() {
+    let rec = Recorder::default();
+    // The one stream call is the summarizer.
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("Context: condensed history".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let mut cfg = agent_config(fake_stream_fn(&rec), vec![], None);
+    // A seeded history well past the tiny keep budget below.
+    cfg.context = (0..20)
+        .map(|i| AgentMessage::user_text(format!("message {i} {}", "x".repeat(400))))
+        .collect();
+    // Keep ~2 of the ~104-token messages.
+    cfg.compaction = CompactionPolicy {
+        keep_recent_tokens: 200,
+        keep_recent_turns: 0,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(cfg);
+    let before = agent.messages().len();
+
+    match agent.compact(None).await.unwrap() {
+        CompactOutcome::Done {
+            summarized, kept, ..
+        } => {
+            assert_eq!(summarized + kept, before, "accounting covers all of ctx");
+            assert_eq!(kept, 2, "kept the newest messages within the budget");
+            assert_eq!(agent.messages().len(), kept + 1, "summary + kept");
+            assert!(
+                agent.messages()[0].as_text().contains("condensed history"),
+                "the summary replaces the summarized prefix"
+            );
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn compact_is_a_noop_when_history_fits_the_budget() {
+    let rec = Recorder::default();
+    let mut cfg = agent_config(fake_stream_fn(&rec), vec![], None);
+    cfg.context = vec![AgentMessage::user_text("short")];
+    let mut agent = Agent::new(cfg);
+
+    let out = agent.compact(None).await.unwrap();
+    assert!(matches!(out, CompactOutcome::NothingToDo));
+    assert_eq!(agent.messages().len(), 1, "nothing dropped");
+    assert!(rec.calls().is_empty(), "the summarizer was never called");
 }

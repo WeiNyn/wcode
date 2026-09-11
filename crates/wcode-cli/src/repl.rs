@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use wcode_harness::compaction::{CompactOutcome, CompactionPolicy};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::HooksSet;
@@ -65,6 +66,8 @@ pub enum Command {
     },
     /// Print aggregate token usage for the current conversation.
     Usage,
+    /// Summarize older messages now, optionally focused by <prompt>.
+    Compact(Option<String>),
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -90,6 +93,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
             _ => None,
         },
         "usage" => Some(Command::Usage),
+        "compact" => Some(Command::Compact(arg)),
         _ => None,
     }
 }
@@ -314,6 +318,7 @@ pub fn build_agent(
         context,
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         max_turns: DEFAULT_MAX_TURNS,
+        compaction: CompactionPolicy::default(),
     })
 }
 
@@ -659,6 +664,13 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
                     println!("context: {used}/{} ({pct}%)", limit.context);
                 }
             }
+            Some(Command::Compact(arg)) => match agent.compact(arg.as_deref()).await {
+                Ok(CompactOutcome::NothingToDo) => println!("(nothing to compact)"),
+                Ok(CompactOutcome::Done {
+                    summarized, kept, ..
+                }) => println!("compacted: summarized {summarized}, kept {kept} (+ summary)"),
+                Err(e) => eprintln!("compact: {e}"),
+            },
             None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
         }
     }
@@ -851,6 +863,11 @@ mod tests {
         );
         assert_eq!(parse_command("/reload foo"), None);
         assert_eq!(parse_command("/usage"), Some(Command::Usage));
+        assert_eq!(parse_command("/compact"), Some(Command::Compact(None)));
+        assert_eq!(
+            parse_command("/compact focus on the API"),
+            Some(Command::Compact(Some("focus on the API".into())))
+        );
     }
 
     #[test]
