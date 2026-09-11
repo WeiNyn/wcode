@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::message::AgentMessage;
+use crate::message::{AgentMessage, Usage};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -31,6 +31,17 @@ pub enum SessionEntry {
         id: String,
         /// None = effort cleared (send nothing).
         effort: Option<String>,
+    },
+    /// A compaction boundary: `summary` stands in for every `Message` before
+    /// `first_kept_message` (an ordinal into the `Message` sequence).
+    Compaction {
+        id: String,
+        summary: String,
+        first_kept_message: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     #[serde(other)]
     Unknown,
@@ -128,13 +139,64 @@ impl Session {
     }
 
     pub fn messages(&self) -> Vec<AgentMessage> {
+        // The last compaction governs: everything before its kept boundary is
+        // represented by the summary; everything after is kept verbatim.
+        let boundary = self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::Compaction {
+                summary,
+                first_kept_message,
+                ..
+            } => Some((summary.clone(), *first_kept_message)),
+            _ => None,
+        });
+        let (summary, skip) = match boundary {
+            Some((s, k)) => (Some(s), k),
+            None => (None, 0),
+        };
+
+        let mut out = Vec::new();
+        if let Some(s) = summary {
+            out.push(AgentMessage::summary(s));
+        }
+        let mut ordinal = 0usize;
+        for entry in &self.entries {
+            if let SessionEntry::Message { message, .. } = entry {
+                if ordinal >= skip {
+                    out.push(message.clone());
+                }
+                ordinal += 1;
+            }
+        }
+        out
+    }
+
+    /// Number of persisted `Message` entries — the ordinal space that
+    /// [`SessionEntry::Compaction::first_kept_message`] indexes into.
+    pub fn message_count(&self) -> usize {
         self.entries
             .iter()
-            .filter_map(|e| match e {
-                SessionEntry::Message { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
+            .filter(|e| matches!(e, SessionEntry::Message { .. }))
+            .count()
+    }
+
+    /// Record a compaction: `summary` stands in for every `Message` before the
+    /// most recent `kept_messages`, which stay. The boundary ordinal is derived
+    /// from the current message count, so it stays correct as messages append.
+    pub fn record_compaction(
+        &mut self,
+        summary: &str,
+        kept_messages: usize,
+        tokens_before: Option<u64>,
+        usage: Option<Usage>,
+    ) -> io::Result<()> {
+        let first_kept_message = self.message_count().saturating_sub(kept_messages);
+        self.append(SessionEntry::Compaction {
+            id: uuid::Uuid::new_v4().to_string(),
+            summary: summary.to_string(),
+            first_kept_message,
+            tokens_before,
+            usage,
+        })
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -361,5 +423,80 @@ mod tests {
         assert_eq!(s.entries().len(), 1);
         assert_eq!(s.messages().len(), 1);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    fn msg(text: &str) -> SessionEntry {
+        SessionEntry::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_id: None,
+            message: AgentMessage::user_text(text),
+        }
+    }
+
+    fn texts(s: &Session) -> Vec<String> {
+        s.messages().iter().map(|m| m.as_text()).collect()
+    }
+
+    #[test]
+    fn no_compaction_returns_every_message() {
+        let mut s = Session::in_memory();
+        s.append(msg("a")).unwrap();
+        s.append(msg("b")).unwrap();
+        assert_eq!(texts(&s), ["a", "b"]);
+        assert_eq!(s.message_count(), 2);
+    }
+
+    #[test]
+    fn compaction_rebuilds_summary_plus_kept_tail_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        for t in ["m1", "m2", "m3", "m4", "m5"] {
+            s.append(msg(t)).unwrap();
+        }
+        // Keep the newest two (m4, m5); summarize the rest.
+        s.record_compaction("did 1..3", 2, Some(123), None).unwrap();
+
+        let path = s.path().unwrap().to_path_buf();
+        let mut reopened = Session::open(&path).unwrap();
+        let got = texts(&reopened);
+        assert_eq!(got.len(), 3, "summary + two kept");
+        assert!(got[0].contains("did 1..3"), "summary leads: {got:?}");
+        assert_eq!(got[1], "m4");
+        assert_eq!(got[2], "m5");
+
+        // Messages appended after the compaction are kept too.
+        reopened.append(msg("m6")).unwrap();
+        assert_eq!(texts(&reopened), [got[0].clone(), "m4".into(), "m5".into(), "m6".into()]);
+        assert_eq!(reopened.message_count(), 6);
+    }
+
+    #[test]
+    fn second_compaction_supersedes_the_first() {
+        let mut s = Session::in_memory();
+        for t in ["m1", "m2", "m3", "m4", "m5", "m6"] {
+            s.append(msg(t)).unwrap();
+        }
+        s.record_compaction("first", 4, None, None).unwrap(); // keep m3..m6
+        assert_eq!(
+            texts(&s),
+            [
+                "Summary of the earlier conversation (auto-generated by compaction):\n\nfirst",
+                "m3",
+                "m4",
+                "m5",
+                "m6"
+            ]
+        );
+        s.record_compaction("second", 2, None, None).unwrap(); // keep m5, m6
+        let got = texts(&s);
+        assert_eq!(got.len(), 3);
+        assert!(got[0].contains("second"), "the latest summary wins: {got:?}");
+        assert_eq!(got[1], "m5");
+        assert_eq!(got[2], "m6");
     }
 }

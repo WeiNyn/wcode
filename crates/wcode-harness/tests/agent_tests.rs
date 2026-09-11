@@ -17,7 +17,7 @@ use wcode_harness::compaction::{CompactOutcome, CompactionPolicy};
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::message::{AgentMessage, StopReason};
-use wcode_harness::session::Session;
+use wcode_harness::session::{Session, SessionEntry};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool, erased};
 
@@ -680,4 +680,62 @@ async fn compact_is_a_noop_when_history_fits_the_budget() {
     assert!(matches!(out, CompactOutcome::NothingToDo));
     assert_eq!(agent.messages().len(), 1, "nothing dropped");
     assert!(rec.calls().is_empty(), "the summarizer was never called");
+}
+
+#[tokio::test]
+async fn compact_persists_and_resumes_to_summary_plus_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("summary body".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    // Persist ten ~104-token messages, then seed the agent with exactly them.
+    let mut session = Session::create(dir.path()).unwrap();
+    for i in 0..10 {
+        session
+            .append(SessionEntry::Message {
+                id: format!("id{i}"),
+                parent_id: None,
+                message: AgentMessage::user_text(format!("m{i} {}", "x".repeat(400))),
+            })
+            .unwrap();
+    }
+    let path = session.path().unwrap().to_path_buf();
+    let seeded = session.messages();
+
+    let mut cfg = agent_config(fake_stream_fn(&rec), vec![], Some(session));
+    cfg.context = seeded;
+    cfg.compaction = CompactionPolicy {
+        keep_recent_tokens: 200, // ~two messages
+        keep_recent_turns: 0,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(cfg);
+
+    agent.compact(None).await.unwrap();
+
+    // In memory: [summary, m8, m9].
+    let ctx = agent.messages();
+    assert_eq!(ctx.len(), 3, "summary + two kept");
+    assert!(ctx[0].as_text().contains("summary body"));
+    assert!(ctx[1].as_text().starts_with("m8 "));
+    assert!(ctx[2].as_text().starts_with("m9 "));
+
+    // On disk, a reopen rebuilds the same compacted view.
+    let reopened = Session::open(&path).unwrap();
+    let resumed: Vec<String> = reopened.messages().iter().map(|m| m.as_text()).collect();
+    assert_eq!(resumed.len(), 3, "summary + two kept after resume");
+    assert!(resumed[0].contains("summary body"), "summary leads: {resumed:?}");
+    assert!(resumed[1].starts_with("m8 "));
+    assert!(resumed[2].starts_with("m9 "));
+    assert_eq!(
+        reopened.message_count(),
+        10,
+        "all messages stay on disk; only the view is compacted"
+    );
 }

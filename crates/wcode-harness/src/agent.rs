@@ -234,8 +234,9 @@ impl Agent {
     /// summary message. `instructions` focuses the summary (the
     /// `/compact <prompt>` argument).
     ///
-    /// In-memory only for now: the session still holds the raw history, so a
-    /// resumed session re-expands until compaction is persisted.
+    /// When a session is open, the boundary is persisted
+    /// ([`crate::session::SessionEntry::Compaction`]), so a resumed session
+    /// rebuilds to the same `summary + kept` view instead of re-expanding.
     pub async fn compact(&mut self, instructions: Option<&str>) -> Result<CompactOutcome, String> {
         let cut = compaction::cut_for_policy(&self.ctx, &self.compaction);
         if cut == 0 {
@@ -245,6 +246,17 @@ impl Agent {
         let summary =
             compaction::summarize(&self.stream_fn, &self.llm, &prefix, instructions).await?;
         let kept = self.ctx.len() - cut;
+        // Persist the boundary before mutating ctx: a failed append must not
+        // leave the conversation compacted in memory but unmarked on disk.
+        if let Some(session) = &mut self.session {
+            let tokens_before = self.ctx.iter().rev().find_map(|m| match m {
+                AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
+                _ => None,
+            });
+            session
+                .record_compaction(&summary.text, kept, tokens_before, summary.usage)
+                .map_err(|e| e.to_string())?;
+        }
         let mut next = Vec::with_capacity(kept + 1);
         next.push(compaction::summary_message(&summary.text));
         next.extend_from_slice(&self.ctx[cut..]);
