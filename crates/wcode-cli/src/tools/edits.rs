@@ -199,14 +199,9 @@ impl TypedTool for Edits {
 
         // Per-op span summary + bottom-up application, one read of the file.
         let ends_nl = empty || content.ends_with('\n');
-        let mut per_op_spans: Vec<Vec<String>> = vec![Vec::new(); args.edits.len()];
-        for (r, idx, _) in &resolved {
-            per_op_spans[*idx].push(if r.start == r.end {
-                format!("{}", r.start + 1)
-            } else {
-                format!("{}–{}", r.start + 1, r.end + 1)
-            });
-        }
+        // Per-op (start line, span label) for the ranges actually applied, so
+        // the count/summary below reflect real changes, not resolved no-ops.
+        let mut applied_spans: Vec<Vec<(usize, String)>> = vec![Vec::new(); args.edits.len()];
 
         let mut updated = content;
         let mut applied_per_op = vec![0usize; args.edits.len()];
@@ -219,6 +214,14 @@ impl TypedTool for Edits {
             let (next, changed) = anchor::apply_replace(&cur_lines, r, &op.replacement, ends_nl);
             if changed.is_some() {
                 applied_per_op[*idx] += 1;
+                applied_spans[*idx].push((
+                    r.start,
+                    if r.start == r.end {
+                        format!("{}", r.start + 1)
+                    } else {
+                        format!("{}–{}", r.start + 1, r.end + 1)
+                    },
+                ));
             }
             updated = next;
         }
@@ -235,14 +238,23 @@ impl TypedTool for Edits {
         let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => {
-                let summary = per_op_spans
+                // Ranges are applied bottom-up; present each op's spans in file
+                // order, and count only the ranges that actually changed.
+                for spans in applied_spans.iter_mut() {
+                    spans.sort_by_key(|(start, _)| *start);
+                }
+                let summary = applied_spans
                     .iter()
                     .enumerate()
-                    .filter(|(_, s)| !s.is_empty())
-                    .map(|(i, s)| format!("{} → lines {}", op_label(i), s.join(", ")))
+                    .filter(|(_, spans)| !spans.is_empty())
+                    .map(|(i, spans)| {
+                        let labels: Vec<&str> =
+                            spans.iter().map(|(_, label)| label.as_str()).collect();
+                        format!("{} → lines {}", op_label(i), labels.join(", "))
+                    })
                     .collect::<Vec<_>>()
                     .join("; ");
-                let total: usize = resolved.len();
+                let total: usize = applied_per_op.iter().sum();
                 // Echo the combined changed span only when it's small; a big
                 // batch replies with a re-read hint instead of a huge echo.
                 let mut echo = String::new();
@@ -437,6 +449,44 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
             "b\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn applied_count_excludes_noop_ops() {
+        // A batch with one real edit and one idempotent no-op must report the
+        // ranges actually changed, not every range that resolved.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let hb = anchor::anchor("b");
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    edits: vec![
+                        op("f.txt", &ha, None, "A"), // changes
+                        op("f.txt", &hb, None, "b"), // already "b" -> no-op
+                    ],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(
+            out.output.contains("1 range applied"),
+            "count must exclude the no-op op: {}",
+            out.output
+        );
+        assert!(out.output.contains("op1 → lines 1"), "{}", out.output);
+        assert!(
+            !out.output.contains("op2"),
+            "a no-op op must not be listed: {}",
+            out.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "A\nb\nc\n"
         );
     }
 
