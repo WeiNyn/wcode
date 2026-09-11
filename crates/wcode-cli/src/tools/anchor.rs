@@ -20,9 +20,13 @@
 //! numbers and suggesting `old_string` disambiguation) rather than guessing —
 //! fail closed, never silent, exactly like a hash map lookup.
 //!
-//! Anchors are 5 chars over `[A-Za-z0-9]` (62^5 = 916M addresses). Unequal
-//! lines collide in practice only when a real file holds >~10k distinct lines;
-//! identical lines colliding is *expected* and handled by ambiguity rejection.
+//! Anchors are 5 chars over `[A-Za-z0-9]` (62^5 ≈ 9.2×10^8 addresses). Distinct
+//! lines hash into that space uniformly, so by the birthday bound a colliding
+//! pair is not negligible on large files: about 1% by ~4.5k distinct lines, ~5%
+//! at 10k, ~40% near √N ≈ 30k. A collision is never silent — the two lines
+//! share an anchor and are *rejected* as an ambiguous (or stale) target with
+//! candidates — so its cost is a disambiguation round-trip, not a wrong edit.
+//! Identical lines sharing an anchor is *expected* and handled the same way.
 
 /// Follows pi-better-edit's anchor alphabet and separator convention.
 pub const ALPHA: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
