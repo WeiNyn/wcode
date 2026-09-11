@@ -116,10 +116,12 @@ pub struct Range {
 
 /// Every range `[start..=end]` in `lines` whose anchor run starts at `from`
 /// and ends at `to` (`None` = single line), optionally verified against
-/// `old_string`. `old_string` is a filter: it must appear somewhere in the
-/// file *up to and including* the candidate range — so a duplicated line can
-/// be pinned by giving the line(s) right before it. Empty result = stale
-/// target; >1 = ambiguous target.
+/// `old_string`. `old_string` must match a window that ends at the range and
+/// reaches at most `k` lines above its start (`k` = the line span of
+/// `old_string`) — so a duplicated line is pinned by the line(s) immediately
+/// before it, or by context that includes the range, but a far-away occurrence
+/// no longer satisfies every later candidate. Empty result = stale target;
+/// >1 = ambiguous target.
 pub fn find_ranges(
     lines: &[String],
     anchors: &[String],
@@ -139,10 +141,15 @@ pub fn find_ranges(
                 None => continue,
             },
         };
-        if let Some(os) = old_string
-            && !lines[..=end].join("\n").contains(os)
-        {
-            continue;
+        if let Some(os) = old_string {
+            // Bound the lookback to the line span of `old_string` (k lines), so
+            // it must match the range's own text or the context immediately
+            // above it — never a far-away occurrence.
+            let k = os.matches('\n').count() + 1;
+            let lo = i.saturating_sub(k);
+            if !lines[lo..=end].join("\n").contains(os) {
+                continue;
+            }
         }
         out.push(Range { start: i, end });
     }
@@ -267,6 +274,30 @@ mod tests {
         let with_context = find_ranges(&lines, &anchors, &anchors[1], None, Some("y"));
         assert_eq!(with_context.len(), 1); // old_string disambiguates
         assert_eq!(with_context[0].start, 3);
+    }
+
+    #[test]
+    fn old_string_must_be_local_to_the_candidate() {
+        // "beta" is the immediate context of the first "alpha" only. Under the
+        // old prefix search it satisfied every later "alpha" too, so nearby
+        // context and a far-away occurrence were indistinguishable.
+        let lines = ["beta", "alpha", "alpha"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let anchors = anchors_for(&lines);
+        let r = find_ranges(&lines, &anchors, &anchors[1], None, Some("beta"));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].start, 1);
+
+        // Two lines up, outside a one-line old_string's window: no candidate.
+        let lines = ["beta", "gamma", "alpha", "alpha"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let anchors = anchors_for(&lines);
+        let r = find_ranges(&lines, &anchors, &anchors[2], None, Some("beta"));
+        assert!(r.is_empty(), "far-above match must not pin: {r:?}");
     }
 
     #[test]

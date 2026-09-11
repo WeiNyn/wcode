@@ -16,8 +16,9 @@ pub struct EditArgs {
     pub to: Option<String>,
     /// Replacement text for the range (may be multi-line).
     pub replacement: String,
-    /// Optional verification: the range's current joined text must contain
-    /// this exact substring. Use it to disambiguate identical lines.
+    /// Optional verification: this text must appear ending at the range or in
+    /// the line(s) immediately before it (its own line span bounds how far up
+    /// it may reach). Use it to pin one of several identical lines.
     pub old_string: Option<String>,
     /// Replace every matching range instead of requiring exactly one.
     pub replace_all: Option<bool>,
@@ -357,6 +358,25 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
             "x\n}\ny\nz\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_string_matches_only_nearby_context() {
+        // `beta` is the immediate context of the FIRST `alpha` only. The old
+        // prefix search let it satisfy the second `alpha` too (ambiguous); the
+        // bounded window keeps it local, so this pins the first line.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "beta\nalpha\nalpha\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let h = anchor::anchor("alpha");
+        let out = tool()
+            .execute(args("f.txt", &h, None, "ALPHA", Some("beta"), None), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "beta\nALPHA\nalpha\n"
         );
     }
 

@@ -17,8 +17,9 @@ pub struct EditOp {
     pub to: Option<String>,
     /// Replacement text for the range (may be multi-line).
     pub replacement: String,
-    /// Optional verification: the range's current joined text must contain
-    /// this exact substring. Use it to disambiguate identical lines.
+    /// Optional verification: this text must appear ending at the range or in
+    /// the line(s) immediately before it (its own line span bounds how far up
+    /// it may reach). Use it to pin one of several identical lines.
     pub old_string: Option<String>,
     /// Replace every matching range instead of requiring exactly one.
     pub replace_all: Option<bool>,
