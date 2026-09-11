@@ -1,4 +1,4 @@
-//! Context compaction — step 1: choosing *where* to cut.
+//! Context compaction — deciding *when* to compact and *where* to cut.
 //!
 //! Compaction summarizes an old prefix of the conversation and keeps a recent
 //! suffix. The prefix is discarded from what the model sees, so only the kept
@@ -15,6 +15,12 @@
 //! The reverse direction needs no check: the agent loop never leaves a
 //! `ToolCall` without its `ToolResult`, and a `ToolResult` always follows its
 //! `ToolCall`, so a kept call's results (later indices) are kept too.
+//!
+//! [`CompactionPolicy`] decides *when* to compact (the trigger) and *how much*
+//! recent history to keep. Retention is absolute — a token budget plus a turn
+//! floor — not a fraction of the window, so it means the same thing on an 8k
+//! and a 1M model. The *trigger* uses the provider-reported input-token count
+//! (never an estimate); only the cut boundary uses [`estimate_tokens`].
 
 use std::collections::HashSet;
 
@@ -76,55 +82,66 @@ fn absorb<'a>(
     }
 }
 
-/// Tokens held free by default before compaction is considered: the trigger
-/// fires once fewer than this many remain in the window.
+/// Tokens held free below the working ceiling by default: the trigger fires
+/// once fewer than this many remain.
 pub const DEFAULT_MIN_REMAINING: u64 = 16_384;
 
-/// Default share of the window retained as recent verbatim context.
-pub const DEFAULT_KEEP_PERCENT: u8 = 50;
+/// Recent context kept verbatim by default, in tokens — an absolute budget
+/// (pi-style), independent of the model's window size.
+pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
+
+/// Complete turns always kept by default, whatever their token size.
+pub const DEFAULT_KEEP_RECENT_TURNS: usize = 2;
 
 /// When to compact and how much recent context to retain.
 ///
-/// The window is not stored here: it comes from [`crate::limits`] (the model's
-/// advertised context) or an explicit override, and is passed to the methods
-/// below. `min_remaining` is the "minimum remaining context" trigger;
-/// `keep_percent` is the share of the window kept verbatim after compacting.
+/// The model window is not stored here: it comes from [`crate::limits`] (the
+/// model's advertised context) or an override, and is passed to
+/// [`CompactionPolicy::should_compact`]. `budget` is an optional working
+/// ceiling (cost control) that defaults to the window; `min_remaining` is the
+/// "minimum remaining context" trigger; the `keep_recent_*` fields are the
+/// absolute recent history retained after compacting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactionPolicy {
-    /// Compact once fewer than this many tokens remain free
-    /// (`used >= window - min_remaining`).
+    /// Working ceiling in tokens. `None` = the model window. Capped to the
+    /// window at trigger time, so it can never disable window safety.
+    pub budget: Option<u64>,
+    /// Compact once fewer than this many tokens remain below the ceiling
+    /// (`used >= ceiling - min_remaining`).
     pub min_remaining: u64,
-    /// After compacting, retain roughly this percentage of the window as recent
-    /// verbatim messages; the older remainder is summarized. Clamped to 100.
-    pub keep_percent: u8,
+    /// Recent context kept verbatim after compacting, in tokens.
+    pub keep_recent_tokens: u64,
+    /// Complete turns always kept, whatever their token size.
+    pub keep_recent_turns: usize,
 }
 
 impl Default for CompactionPolicy {
     fn default() -> Self {
         Self {
+            budget: None,
             min_remaining: DEFAULT_MIN_REMAINING,
-            keep_percent: DEFAULT_KEEP_PERCENT,
+            keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
+            keep_recent_turns: DEFAULT_KEEP_RECENT_TURNS,
         }
     }
 }
 
 impl CompactionPolicy {
-    /// True once the provider-reported `used` input tokens leave less than
-    /// `min_remaining` free in a `window`-token context.
-    pub fn should_compact(&self, window: u64, used: u64) -> bool {
-        used >= window.saturating_sub(self.min_remaining)
+    /// The working ceiling: the configured budget, capped to the model window.
+    pub fn ceiling(&self, window: u64) -> u64 {
+        self.budget.map_or(window, |b| b.min(window))
     }
 
-    /// Token budget retained as recent verbatim context after compacting
-    /// (`keep_percent`% of the window).
-    pub fn keep_budget(&self, window: u64) -> u64 {
-        window.saturating_mul(self.keep_percent.min(100) as u64) / 100
+    /// True once the provider-reported `used` input tokens leave less than
+    /// `min_remaining` free below the ceiling.
+    pub fn should_compact(&self, window: u64, used: u64) -> bool {
+        used >= self.ceiling(window).saturating_sub(self.min_remaining)
     }
 }
 
 /// Rough per-message token estimate (~4 chars/token plus a small fixed
-/// overhead). Used only to place the keep-budget boundary; the compaction
-/// *trigger* uses provider-reported token counts, never this.
+/// overhead). Used only to place the cut boundary; the compaction *trigger*
+/// uses provider-reported token counts, never this.
 pub fn estimate_tokens(msg: &AgentMessage) -> u64 {
     let bytes = match msg {
         AgentMessage::User { content } | AgentMessage::Assistant { content, .. } => {
@@ -151,21 +168,49 @@ fn block_bytes(block: &ContentBlock) -> u64 {
 
 /// Oldest index to keep when retaining `keep_budget` tokens of the most recent
 /// history, adjusted by [`safe_cut`] so the kept suffix never orphans a tool
-/// result. Walks backward accumulating [`estimate_tokens`] until the budget is
-/// met, then hands the boundary to `safe_cut`.
+/// result.
 pub fn cut_for_budget(ctx: &[AgentMessage], keep_budget: u64) -> usize {
+    safe_cut(ctx, token_cut(ctx, keep_budget))
+}
+
+/// Newest-first accumulation of [`estimate_tokens`] until `budget` is met:
+/// the rough index where the retained verbatim tail begins.
+fn token_cut(ctx: &[AgentMessage], budget: u64) -> usize {
     let mut acc = 0u64;
     let mut idx = ctx.len();
-    while idx > 0 && acc < keep_budget {
+    while idx > 0 && acc < budget {
         idx -= 1;
         acc += estimate_tokens(&ctx[idx]);
     }
-    safe_cut(ctx, idx)
+    idx
 }
 
-/// Convenience: the cut for `policy` against a `window`-token model.
-pub fn cut_for_policy(ctx: &[AgentMessage], window: u64, policy: &CompactionPolicy) -> usize {
-    cut_for_budget(ctx, policy.keep_budget(window))
+/// Index of the user message that begins the `turns`-th-most-recent turn, so
+/// keeping from here retains at least `turns` complete turns. `0` when the
+/// conversation has fewer than `turns` user messages; `ctx.len()` (no floor)
+/// when `turns` is 0.
+fn turn_start_cut(ctx: &[AgentMessage], turns: usize) -> usize {
+    if turns == 0 {
+        return ctx.len();
+    }
+    let mut seen = 0usize;
+    for idx in (0..ctx.len()).rev() {
+        if matches!(&ctx[idx], AgentMessage::User { .. }) {
+            seen += 1;
+            if seen == turns {
+                return idx;
+            }
+        }
+    }
+    0
+}
+
+/// Cut for `policy`: keep the newest messages up to `keep_recent_tokens` but
+/// never fewer than `keep_recent_turns` turns, made tool-safe by [`safe_cut`].
+pub fn cut_for_policy(ctx: &[AgentMessage], policy: &CompactionPolicy) -> usize {
+    let by_tokens = token_cut(ctx, policy.keep_recent_tokens);
+    let by_turns = turn_start_cut(ctx, policy.keep_recent_turns);
+    safe_cut(ctx, by_tokens.min(by_turns))
 }
 
 #[cfg(test)]
@@ -339,22 +384,49 @@ mod policy_tests {
     }
 
     #[test]
-    fn trigger_fires_at_min_remaining() {
-        let p = CompactionPolicy { min_remaining: 100, keep_percent: 50 };
+    fn trigger_uses_min_remaining_and_budget() {
+        // No budget: the ceiling is the model window.
+        let p = CompactionPolicy {
+            min_remaining: 100,
+            ..Default::default()
+        };
         assert!(!p.should_compact(1000, 899));
         assert!(p.should_compact(1000, 900), "window - min_remaining");
-        assert!(p.should_compact(1000, 1000));
         assert!(p.should_compact(1000, 5000), "past the window still triggers");
+
+        // A working budget below the window triggers far earlier.
+        let p = CompactionPolicy {
+            budget: Some(500),
+            min_remaining: 100,
+            ..Default::default()
+        };
+        assert!(!p.should_compact(1_000_000, 399));
+        assert!(p.should_compact(1_000_000, 400));
+
+        // A budget above the window is capped to the window.
+        let p = CompactionPolicy {
+            budget: Some(2_000_000),
+            min_remaining: 100,
+            ..Default::default()
+        };
+        assert!(!p.should_compact(1000, 899));
+        assert!(p.should_compact(1000, 900));
     }
 
     #[test]
-    fn keep_budget_is_percent_of_window_clamped() {
-        let quarter = CompactionPolicy { min_remaining: 0, keep_percent: 25 };
-        assert_eq!(quarter.keep_budget(1000), 250);
-        let all = CompactionPolicy { min_remaining: 0, keep_percent: 100 };
-        assert_eq!(all.keep_budget(1000), 1000);
-        let over = CompactionPolicy { min_remaining: 0, keep_percent: 200 };
-        assert_eq!(over.keep_budget(1000), 1000, "keep_percent clamps to 100");
+    fn ceiling_is_budget_capped_to_window() {
+        let p = CompactionPolicy {
+            budget: Some(500),
+            ..Default::default()
+        };
+        assert_eq!(p.ceiling(1_000_000), 500);
+        let p = CompactionPolicy {
+            budget: Some(2_000_000),
+            ..Default::default()
+        };
+        assert_eq!(p.ceiling(1_000_000), 1_000_000);
+        let p = CompactionPolicy::default();
+        assert_eq!(p.ceiling(1234), 1234);
     }
 
     #[test]
@@ -399,15 +471,38 @@ mod policy_tests {
     }
 
     #[test]
-    fn cut_for_policy_uses_keep_percent_of_window() {
+    fn cut_for_policy_keeps_recent_tokens() {
         let ctx = vec![
             user(&"a".repeat(200)),
             assistant_text(&"b".repeat(200)),
             user(&"c".repeat(200)),
             assistant_text(&"d".repeat(200)),
         ];
-        // ~54 tokens each; 25% of 400 = 100 tokens -> keeps the newest two.
-        let p = CompactionPolicy { min_remaining: 0, keep_percent: 25 };
-        assert_eq!(cut_for_policy(&ctx, 400, &p), 2);
+        // ~54 tokens each; a 100-token budget keeps the newest two.
+        let p = CompactionPolicy {
+            keep_recent_tokens: 100,
+            keep_recent_turns: 0,
+            ..Default::default()
+        };
+        assert_eq!(cut_for_policy(&ctx, &p), 2);
+    }
+
+    #[test]
+    fn cut_for_policy_keeps_at_least_the_turn_floor() {
+        // A tiny token budget must not drop below the last two turns.
+        let ctx = vec![
+            user("u1"),
+            assistant_text("a1"),
+            user("u2"),
+            assistant_text("a2"),
+            user("u3"),
+            assistant_text("a3"),
+        ];
+        let p = CompactionPolicy {
+            keep_recent_tokens: 0,
+            keep_recent_turns: 2,
+            ..Default::default()
+        };
+        assert_eq!(cut_for_policy(&ctx, &p), 2, "last two turns start at u2");
     }
 }
