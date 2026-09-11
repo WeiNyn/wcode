@@ -282,6 +282,31 @@ async fn plain_text_turn() {
 }
 
 #[tokio::test]
+async fn assistant_message_carries_the_model() {
+    // The loop stamps the model that produced each assistant message, so a
+    // session keeps provenance across a mid-conversation model swap.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("hi".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("q")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert!(
+        matches!(&ctx[1], AgentMessage::Assistant { model: Some(m), .. } if m == "m1"),
+        "assistant must carry the run's model (m1): {:?}",
+        ctx[1]
+    );
+}
+
+#[tokio::test]
 async fn tool_use_without_streamed_call_is_an_error() {
     // Finding #3: rig only emits the complete ToolCall on ToolInputEnd, so a
     // stream that finishes with tool_use but never streams a call has lost the

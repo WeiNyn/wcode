@@ -64,6 +64,9 @@ pub async fn run_loop(
 ) -> Result<RunResult, LoopError> {
     let tool_defs: Vec<rig::completion::ToolDefinition> =
         cfg.tools.iter().map(|t| t.definition()).collect();
+    // The model producing this run's assistant messages, stamped on each for
+    // provenance. The session records it; the wire converter ignores it.
+    let model = cfg.llm.model.clone();
 
     if sink.send(AgentEvent::AgentStart).is_err() {
         // Consumer gone before the run started: nothing to finalize.
@@ -102,7 +105,7 @@ pub async fn run_loop(
 
             if sink
                 .send(AgentEvent::MessageStart {
-                    message: assistant(&content, StopReason::Stop, None),
+                    message: assistant(&content, StopReason::Stop, None, &model),
                 })
                 .is_err()
             {
@@ -132,7 +135,7 @@ pub async fn run_loop(
                                                     append_text(&mut content, &delta);
                                                     if sink
                                                         .send(AgentEvent::MessageUpdate {
-                                                            message: assistant(&content, StopReason::Stop, None),
+                                                            message: assistant(&content, StopReason::Stop, None, &model),
                                                         })
                                                         .is_err()
                                                     {
@@ -144,7 +147,7 @@ pub async fn run_loop(
                                                     append_thinking(&mut content, &delta);
                                                     if sink
                                                         .send(AgentEvent::MessageUpdate {
-                                                            message: assistant(&content, StopReason::Stop, None),
+                                                            message: assistant(&content, StopReason::Stop, None, &model),
                                                         })
                                                         .is_err()
                                                     {
@@ -156,7 +159,7 @@ pub async fn run_loop(
                                                     replace_thinking(&mut content, &delta);
                                                     if sink
                                                         .send(AgentEvent::MessageUpdate {
-                                                            message: assistant(&content, StopReason::Stop, None),
+                                                            message: assistant(&content, StopReason::Stop, None, &model),
                                                         })
                                                         .is_err()
                                                     {
@@ -168,7 +171,7 @@ pub async fn run_loop(
                                                     content.push(ContentBlock::ToolCall { id, name, arguments });
                                                     if sink
                                                         .send(AgentEvent::MessageUpdate {
-                                                            message: assistant(&content, StopReason::Stop, None),
+                                                            message: assistant(&content, StopReason::Stop, None, &model),
                                                         })
                                                         .is_err()
                                                     {
@@ -218,7 +221,7 @@ pub async fn run_loop(
             } else {
                 captured.unwrap_or(StopReason::Stop)
             };
-            let assistant = assistant(&content, stop, usage);
+            let assistant = assistant(&content, stop, usage, &model);
             if sink
                 .send(AgentEvent::MessageEnd {
                     message: assistant.clone(),
@@ -428,12 +431,14 @@ fn assistant(
     content: &[ContentBlock],
     stop_reason: StopReason,
     usage: Option<Usage>,
+    model: &str,
 ) -> AgentMessage {
     AgentMessage::Assistant {
         content: content.to_vec(),
         stop_reason,
         usage,
-        model: None,
+        // Provenance only: the wire converter ignores `model`; the session keeps it.
+        model: (!model.is_empty()).then(|| model.to_string()),
     }
 }
 
