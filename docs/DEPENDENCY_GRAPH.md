@@ -63,27 +63,71 @@ Reading order for a new contributor:
 
 ```mermaid
 graph TD
-    config["config.rs<br/>Config load: env > toml<br/>(~/.config/wcode/config.toml)"]
-    read["tools/read.rs"]
-    bash["tools/bash.rs"]
-    edit["tools/edit.rs"]
-    write["tools/write.rs"]
-    toolsmod["tools/mod.rs<br/>default_tools()"]
-    repl["repl.rs<br/>REPL, /commands,<br/>event printer, Ctrl-C"]
-    main["main.rs<br/>arg parse, modes"]
+    main["main.rs<br/>arg parse · modes · --list-models"]
+    config["config.rs<br/>env > toml<br/>[hooks] · [tools] tables"]
+    repl["repl.rs<br/>REPL · /commands · event printer · Ctrl-C<br/>build_agent · default_hooks · system_prompt"]
+    rtk["rtk.rs<br/>RtkHooks (Hooks impl)<br/>rtk rewrite of bash"]
 
-    read --> toolsmod
-    bash --> toolsmod
-    edit --> toolsmod
-    write --> toolsmod
-    toolsmod --> tool["harness::tool"]
-    config --> llm["harness::streamfn (LlmOpts)"]
-    repl --> config
-    repl --> toolsmod
-    repl --> agent["harness::agent + event + session"]
+    subgraph tools["tools/"]
+        toolsmod["mod.rs<br/>default_tools · resolve · normalize · temp_path"]
+        anchor["anchor.rs<br/>content-addressed line anchors"]
+        read["read"]
+        bash["bash (process-group kill)"]
+        edit["edit"]
+        edits["edits"]
+        replace["replace"]
+        write["write"]
+        grep["grep (opt-in)"]
+        find["find (opt-in)"]
+        ast["ast.rs<br/>ast-grep discovery"]
+        asts["ast_search"]
+        aste["ast_edit"]
+    end
+
     main --> config
     main --> repl
+    repl --> config
+    repl --> rtk
+    repl --> toolsmod
+    repl --> agent["harness::agent · event · session"]
+
+    toolsmod --> read
+    toolsmod --> bash
+    toolsmod --> edit
+    toolsmod --> edits
+    toolsmod --> replace
+    toolsmod --> write
+    toolsmod --> grep
+    toolsmod --> find
+    toolsmod --> asts
+    toolsmod --> aste
+    read --> anchor
+    edit --> anchor
+    edits --> anchor
+    grep --> anchor
+    asts --> ast
+    aste --> ast
+
+    toolsmod --> tool["harness::tool"]
+    rtk --> hooks["harness::hooks"]
+    config --> llm["harness::streamfn (LlmOpts)"]
 ```
+
+### Config & tool gating
+
+`~/.config/wcode/config.toml` (env beats toml): `model` (required), `base_url`,
+`api_key`, `endpoint`, `effort`, plus two tables:
+
+- `[hooks] rtk = auto|true|false` — `rtk.rs` wraps `bash` commands through the
+  `rtk rewrite` proxy (auto = on only if the `rtk` binary is on PATH).
+- `[tools] grep / find = true|false` — off by default (bash can search/glob).
+
+`default_tools()` registers the six core tools (`read`, `bash`, `edit`, `edits`,
+`replace`, `write`) sharing one mutation lock, adds `grep`/`find` only when
+enabled, and auto-registers `ast_search`/`ast_edit` only when an `ast-grep`/`sg`
+binary is on PATH. `build_agent()` assembles the `Agent`: `system_prompt()` (from
+the registered inspect tools) + `default_tools()` + `rig_stream_fn()` +
+`default_hooks()` (the rtk hook) + session + working dir.
 
 ## Kernel data flow (one run)
 
@@ -113,16 +157,20 @@ user text ──▶ Agent.run()
 
 | Crate | Used by | For |
 |---|---|---|
-| `rig` 0.42 (`default-features=false`, `reqwest`, `rustls`) | harness | openai-Completions streaming client, `ToolDefinition`, `StreamedAssistantContent`/`StreamFinal` — `streamfn.rs` branches `LlmEndpoint::Chat` (completions client) vs `Responses` (default Responses client), sharing one forwarding loop |
+| `rig` 0.42 (`default-features = false`, `reqwest`, `rustls`) | harness | OpenAI Completions streaming client, `ToolDefinition`, `StreamedAssistantContent` / `StreamFinal` — `streamfn.rs` branches `LlmEndpoint::Chat` (completions client) vs `Responses` (default client) around one shared forwarding loop |
 | `tokio` | both | runtime, process (bash), channels |
 | `tokio-util` | harness, repl | `CancellationToken` |
-| `async-trait` | harness | dyn-safe `TypedTool`/`Hooks` |
+| `async-trait` | harness | dyn-safe `TypedTool` / `Hooks` |
 | `schemars` 1 | both | JSON Schema for tool args |
-| `serde` / `serde_json` | both | message/session/event shapes |
+| `serde` / `serde_json` | both | message / session / event shapes |
 | `futures` | both | streams |
 | `uuid`, `chrono` | harness | session ids, timestamps |
-| `thiserror` | harness | `LoopError`, `ConfigError` |
-| `toml`, `dirs`, `anyhow` | cli | config file + paths |
+| `thiserror` | harness | `LoopError` |
+| `regex` | cli | `grep` pattern matching |
+| `walkdir` | cli | `grep` / `find` directory walk |
+| `globset` | cli | `grep` / `find` include/exclude globs |
+| `libc` | cli | `bash` process-group kill (unix) |
+| `toml`, `dirs` | cli | config parsing; `~/.config` / `~/.local/share` paths |
 
 ## Extension points
 
