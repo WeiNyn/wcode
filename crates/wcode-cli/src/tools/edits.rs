@@ -133,17 +133,18 @@ impl TypedTool for Edits {
                 op.old_string.as_deref(),
             );
             if ranges.is_empty() {
-                let hint = nearest_hint(&lines, &anchors, &op.from);
+                // No positional info to offer: an anchor is a content hash, so a
+                // missing `from` says nothing about where the line was. A
+                // re-read is the only way to get fresh anchors.
                 return ToolOutput {
                     output: format!(
-                        "[E_STALE_ANCHOR] {label} has no edit target for from=`{}`{} in {} — the file changed since read. Nearby anchors:\n{}\nRe-read the file (read {}) and retry with fresh anchors.",
+                        "[E_STALE_ANCHOR] {label} has no edit target for from=`{}`{} in {} — the file changed since read. Re-read the file (read {}) and retry with fresh anchors.",
                         op.from,
                         op.to
                             .as_ref()
                             .map(|t| format!(", to=`{t}`"))
                             .unwrap_or_default(),
                         op.path,
-                        hint,
                         op.path
                     ),
                     is_error: true,
@@ -280,40 +281,6 @@ impl TypedTool for Edits {
             },
         }
     }
-}
-
-/// Closest 3 anchors to `from` by edit distance, for the stale hint.
-fn nearest_hint(lines: &[String], anchors: &[String], from: &str) -> String {
-    let mut best: Vec<(i64, usize)> = anchors
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (edit_distance(a, from) as i64, i))
-        .collect();
-    best.sort_by_key(|(d, _)| *d);
-    let mut hint = String::new();
-    for (_, i) in best.iter().take(3) {
-        hint.push_str(&format!(
-            "    {}  {}\n",
-            anchors[*i],
-            lines[*i].chars().take(48).collect::<String>()
-        ));
-    }
-    hint
-}
-
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
 }
 
 #[cfg(test)]

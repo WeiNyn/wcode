@@ -218,75 +218,49 @@ impl TypedTool for Edit {
 }
 
 fn stale_message(args: &EditArgs, lines: &[String], anchors: &[String]) -> String {
-    let from_idx = anchors.iter().position(|a| a == &args.from);
-    let mut hint = String::new();
-    match from_idx {
-        None => {
-            // from not found at all: show the closest few anchors.
-            let mut best: Vec<(i64, usize)> = anchors
-                .iter()
-                .enumerate()
-                .map(|(i, a)| (edit_distance(a, &args.from) as i64, i))
-                .collect();
-            best.sort_by_key(|(d, _)| *d);
-            for (_, i) in best.iter().take(3) {
-                hint.push_str(&format!(
-                    "    {}  {}",
-                    anchors[*i],
-                    lines[*i].chars().take(48).collect::<String>()
+    // `from` still present: the anchor is live but its range failed to resolve,
+    // so pointing at that line is positional and actionable. `from` gone: there
+    // is nothing to point at — an anchor is a content hash, so a missing one
+    // says nothing about where the line used to be. Only a re-read yields fresh
+    // anchors, so don't guess.
+    let mut hint: Vec<String> = Vec::new();
+    if let Some(i) = anchors.iter().position(|a| a == &args.from) {
+        if let Some(t) = &args.to {
+            if anchors[i..].iter().any(|a| a == t) {
+                hint.push("`to` exists but old_string verification failed for that range.".into());
+            } else {
+                hint.push(format!(
+                    "`to` anchor {t} not found after the `from` match on line {} (file changed since read?).",
+                    i + 1
                 ));
-                hint.push('\n');
             }
+        } else if args.old_string.is_some() {
+            hint.push(
+                "`from` was found but old_string does not match its line (file changed since read?)."
+                    .into(),
+            );
         }
-        Some(i) => {
-            // from found but to/old_string didn't resolve from there.
-            if let Some(t) = &args.to {
-                if anchors[i..].iter().any(|a| a == t) {
-                    hint.push_str(
-                        "`to` exists but old_string verification failed for that range.\n",
-                    );
-                } else {
-                    hint.push_str(&format!(
-                        "`to` anchor {} not found after the `from` match on line {} (file changed since read?).\n",
-                        t, i + 1
-                    ));
-                }
-            } else if args.old_string.is_some() {
-                hint.push_str("`from` was found but old_string does not match its line (file changed since read?).\n");
-            }
-            hint.push_str(&format!(
-                "    {}  {}\n",
-                anchors[i],
-                lines[i].chars().take(48).collect::<String>()
-            ));
-        }
+        hint.push(format!(
+            "    {}  {}",
+            anchors[i],
+            lines[i].chars().take(48).collect::<String>()
+        ));
     }
+    let detail = if hint.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", hint.join("\n"))
+    };
     format!(
-        "[E_STALE_ANCHOR] no edit target in {} for from=`{}`{} — the file changed since read. Nearby anchors:\n{}Re-read the file (read {}) and retry with fresh anchors.",
+        "[E_STALE_ANCHOR] no edit target in {} for from=`{}`{} — the file changed since read.{detail}\nRe-read the file (read {}) and retry with fresh anchors.",
         args.path,
         args.from,
         args.to
             .as_ref()
             .map(|t| format!(", to=`{t}`"))
             .unwrap_or_default(),
-        hint,
         args.path
     )
-}
-
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
 }
 
 #[cfg(test)]
@@ -387,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_anchor_is_rejected_with_nearby_hint() {
+    async fn stale_anchor_is_rejected_with_reread_hint() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f.txt"), "only line here\n").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
@@ -397,6 +371,38 @@ mod tests {
         assert!(out.is_error);
         assert!(out.output.contains("E_STALE_ANCHOR"));
         assert!(out.output.contains("Re-read"));
+        // The old hint listed 3 lines chosen by anchor-hash edit distance, which
+        // is meaningless (a hash is not positional); it must be gone.
+        assert!(
+            !out.output.contains("Nearby"),
+            "no hash-distance 'nearby' list: {}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_from_present_shows_the_line_and_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        // `from` is live (alpha) but old_string doesn't match its line, so the
+        // hint should name the reason and show that line (positional, useful).
+        let ha = anchor::anchor("alpha");
+        let out = tool()
+            .execute(args("f.txt", &ha, None, "x", Some("nope"), None), &ctx)
+            .await;
+        assert!(out.is_error);
+        assert!(out.output.contains("E_STALE_ANCHOR"));
+        assert!(
+            out.output.contains("old_string does not match"),
+            "{}",
+            out.output
+        );
+        assert!(
+            out.output.contains("alpha"),
+            "shows the from line: {}",
+            out.output
+        );
     }
 
     #[tokio::test]
