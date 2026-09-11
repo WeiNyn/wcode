@@ -314,6 +314,10 @@ async fn one_shot(agent: &mut Agent, prompt: &str) -> i32 {
             }
             1
         }
+        Ok(StopReason::MaxTurns) => {
+            eprintln!("error: hit maximum turns; task may be incomplete");
+            1
+        }
         Ok(_) => {
             let text = agent
                 .messages()

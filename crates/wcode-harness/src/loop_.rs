@@ -8,6 +8,11 @@ use crate::session::{Session, SessionEntry};
 use crate::streamfn::{LlmOpts, StreamFn};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
+/// Default per-run turn cap for [`LoopConfig::max_turns`]. Generous enough for
+/// long agentic tasks, low enough that a runaway tool loop can't burn tokens
+/// unbounded. Unlike cancellation, hitting it is a clean, resumable stop.
+pub const DEFAULT_MAX_TURNS: usize = 100;
+
 pub struct LoopConfig<'a> {
     pub system: String,
     pub tools: Vec<Tool>,
@@ -21,6 +26,12 @@ pub struct LoopConfig<'a> {
     /// Plumbed explicitly so embeddings can run against a directory other
     /// than the process cwd; an empty path falls back to `current_dir()`.
     pub working_dir: std::path::PathBuf,
+    /// Maximum number of LLM turns in a single run. A turn is one model call
+    /// plus the tool calls it produces. Caps a runaway tool loop (the model
+    /// re-issuing tool calls forever) that would otherwise run until cancelled;
+    /// the run ends on a completed turn boundary with `StopReason::MaxTurns`.
+    /// Counts every turn in the run, including follow-up-triggered ones.
+    pub max_turns: usize,
     /// Optional session to persist each produced message to as it is pushed
     /// into context — incremental, so a crash mid-run loses at most the
     /// in-flight message instead of the whole turn.
@@ -73,8 +84,20 @@ pub async fn run_loop(
         return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
     }
 
+    // Turns used so far, checked against `cfg.max_turns` at each turn start.
+    let mut turns: usize = 0;
     'outer: loop {
         loop {
+            // Turn budget: caps a runaway tool loop (the model re-issuing tool
+            // calls forever). Checked before a turn starts, so the run ends on a
+            // completed turn boundary — the final turn's ToolResults are already
+            // in ctx and no ToolCall is left unpaired. Counts every turn in the
+            // run, including follow-up-triggered ones.
+            if turns >= cfg.max_turns {
+                let _ = sink.send(AgentEvent::AgentEnd);
+                return finish(StopReason::MaxTurns, cfg.steering, cfg.follow_ups);
+            }
+            turns += 1;
             let mut aborted = false;
             if sink.send(AgentEvent::TurnStart).is_err() {
                 aborted = true;

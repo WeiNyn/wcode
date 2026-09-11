@@ -164,6 +164,43 @@ async fn tool_working_dir_comes_from_config() {
     assert_eq!(*seen.lock().unwrap(), wd);
 }
 
+/// The per-run turn cap stops a runaway tool loop: a model that re-issues the
+/// same tool call forever must end after `max_turns` turns (not run until
+/// cancelled), on a completed turn boundary, with `StopReason::MaxTurns`.
+#[tokio::test]
+async fn max_turns_caps_runaway_tool_loop() {
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "x" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ])) as LlmStream
+    });
+    let (tool, seen) = echo_tool();
+    let TestSetup { mut cfg, .. } = setup(stream_fn, vec![tool], HooksSet::default());
+    cfg.max_turns = 3;
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::MaxTurns);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "exactly max_turns tool turns ran"
+    );
+    // Complete history: the user message plus one assistant + one ToolResult
+    // per turn — the cap never leaves a ToolCall without its ToolResult.
+    assert_eq!(ctx.len(), 1 + 3 * 2);
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
 // Config + run helpers
 // ---------------------------------------------------------------------------
 
@@ -191,6 +228,7 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             cancel: tokio_util::sync::CancellationToken::new(),
             working_dir: std::path::PathBuf::from("."),
             session: None,
+            max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
         },
         steer_tx,
         follow_tx,

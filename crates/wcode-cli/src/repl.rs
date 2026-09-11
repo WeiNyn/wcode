@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::HooksSet;
+use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
@@ -302,6 +303,7 @@ pub fn build_agent(
         session,
         context,
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        max_turns: DEFAULT_MAX_TURNS,
     })
 }
 
@@ -661,6 +663,7 @@ async fn run_turn(
     match res {
         Ok(StopReason::Aborted) => println!("{DIM}(aborted){RESET}"),
         Ok(StopReason::Error) => eprintln!("{DIM}✗ run failed{RESET}"),
+        Ok(StopReason::MaxTurns) => println!("{DIM}(hit max turns){RESET}"),
         Ok(_) => {}
         Err(e) => eprintln!("{DIM}error: {e}{RESET}"),
     }

@@ -38,6 +38,10 @@ pub enum StopReason {
     Deferred,
     Aborted,
     Error,
+    /// Run stopped at the per-run turn cap (`LoopConfig::max_turns`) before the
+    /// model signalled completion — the task may be incomplete, but the history
+    /// is intact and the run can be resumed.
+    MaxTurns,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -160,6 +164,7 @@ mod tests {
             (StopReason::Deferred, "deferred"),
             (StopReason::Aborted, "aborted"),
             (StopReason::Error, "error"),
+            (StopReason::MaxTurns, "max_turns"),
         ] {
             let v = serde_json::to_value(r).unwrap();
             assert_eq!(v, json!(s));

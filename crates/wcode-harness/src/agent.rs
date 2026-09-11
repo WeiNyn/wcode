@@ -25,6 +25,10 @@ pub struct AgentConfig {
     /// cwd (bash runs here, file paths resolve) — plumb it so embeddings can
     /// run against a directory other than `current_dir()`.
     pub working_dir: PathBuf,
+    /// Maximum number of LLM turns in a single `run`; caps a runaway tool loop
+    /// (see [`crate::loop_::LoopConfig::max_turns`]). Use
+    /// [`crate::loop_::DEFAULT_MAX_TURNS`] for the kernel default.
+    pub max_turns: usize,
 }
 
 pub struct Agent {
@@ -35,6 +39,7 @@ pub struct Agent {
     hooks: HooksSet,
     session: Option<Session>,
     working_dir: PathBuf,
+    max_turns: usize,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
     steer_rx: Option<UnboundedReceiver<AgentMessage>>,
@@ -71,6 +76,7 @@ impl Agent {
             hooks: cfg.hooks,
             session: cfg.session,
             working_dir,
+            max_turns: cfg.max_turns,
             ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
@@ -179,6 +185,7 @@ impl Agent {
             follow_ups,
             cancel: self.cancel.clone(),
             working_dir: self.working_dir.clone(),
+            max_turns: self.max_turns,
             session: self.session.as_mut(),
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
