@@ -6748,6 +6748,7 @@ dependencies = [
  "dirs",
  "futures",
  "globset",
+ "libc",
  "regex",
  "schemars 1.2.2",
  "serde",

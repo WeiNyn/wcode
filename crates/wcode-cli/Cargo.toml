@@ -24,6 +24,7 @@ futures = { workspace = true }
 regex = "1"
 walkdir = "2"
 globset = "0.4"
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
