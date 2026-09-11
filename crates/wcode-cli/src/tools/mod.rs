@@ -59,6 +59,33 @@ pub(crate) fn resolve(working_dir: &Path, path: &str) -> PathBuf {
     }
 }
 
+/// Lexically normalize a path for comparison: drop `.` components and resolve
+/// `..` against the preceding component, without touching the filesystem. So
+/// `a`, `./a`, and `sub/../a` compare equal even though [`resolve`] returns
+/// different `PathBuf`s for them.
+pub(crate) fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `..` at the root is a no-op; otherwise keep it unresolved.
+                Some(Component::RootDir) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
 /// Same-directory temp name for atomic write+rename mutations. PID-suffixed so
 /// two wcode processes editing the same file can't clobber each other's temp
 /// (rename is still atomic — last writer wins, never a truncation), and it
@@ -95,6 +122,19 @@ mod tests {
             .iter()
             .map(|t| t.name().to_string())
             .collect()
+    }
+
+    #[test]
+    fn normalize_collapses_dot_and_dotdot() {
+        let n = |s: &str| normalize(Path::new(s));
+        assert_eq!(n("./f.txt"), PathBuf::from("f.txt"));
+        assert_eq!(n("f.txt"), PathBuf::from("f.txt"));
+        assert_eq!(n("sub/../f.txt"), PathBuf::from("f.txt"));
+        assert_eq!(n("a/b/../c"), PathBuf::from("a/c"));
+        assert_eq!(n("/x/../y"), PathBuf::from("/y"));
+        assert_eq!(n("a/../../b"), PathBuf::from("../b"));
+        assert_eq!(n("/.."), PathBuf::from("/"));
+        assert_eq!(n(""), PathBuf::from("."));
     }
 
     #[test]

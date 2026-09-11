@@ -70,8 +70,9 @@ impl TypedTool for Edits {
         }
 
         let path = super::resolve(&ctx.working_dir, &args.edits[0].path);
+        let norm = super::normalize(&path);
         for op in &args.edits[1..] {
-            if super::resolve(&ctx.working_dir, &op.path) != path {
+            if super::normalize(&super::resolve(&ctx.working_dir, &op.path)) != norm {
                 return ToolOutput {
                     output: format!(
                         "[E_MIXED_FILES] `edits` is scoped to ONE file per call ({} and {} were mixed). Split them into separate `edits` calls.",
@@ -449,6 +450,30 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
             "b\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn equivalent_paths_are_not_mixed_files() {
+        // `./f.txt` and `f.txt` resolve to different PathBufs but are the same
+        // file; the batch must not be rejected as E_MIXED_FILES.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let hb = anchor::anchor("b");
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    edits: vec![op("f.txt", &ha, None, "A"), op("./f.txt", &hb, None, "B")],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "A\nB\n"
         );
     }
 
