@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::HooksSet;
+use wcode_harness::limits::model_limit;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::session::Session;
@@ -219,6 +220,15 @@ pub fn usage_totals(messages: &[AgentMessage]) -> UsageTotals {
         t.cache_write_tokens += u.cache_write_tokens.unwrap_or(0);
     }
     t
+}
+
+/// Provider-reported input tokens of the most recent assistant message: how
+/// full the context was on the last request. `None` until a turn reports usage.
+pub fn last_input_tokens(messages: &[AgentMessage]) -> Option<u64> {
+    messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
+        _ => None,
+    })
 }
 
 /// `/usage`: one line of totals for the current conversation, or a note when
@@ -509,6 +519,9 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
         Some(e) => println!("effort: {e}"),
         None => println!("(no effort)"),
     }
+    if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
+        println!("context: {} tokens", limit.context);
+    }
     match agent.session_path() {
         Some(p) => println!("session: {}", p.display()),
         None => println!("(no session)"),
@@ -640,6 +653,11 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
             }
             Some(Command::Usage) => {
                 println!("{}", format_usage(&usage_totals(agent.messages())));
+                if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
+                    let used = last_input_tokens(agent.messages()).unwrap_or(0);
+                    let pct = used * 100 / limit.context.max(1);
+                    println!("context: {used}/{} ({pct}%)", limit.context);
+                }
             }
             None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
         }
@@ -1123,6 +1141,19 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["300_d.jsonl", "200_a.jsonl", "100_b.jsonl"]);
+    }
+
+    #[test]
+    fn last_input_tokens_takes_most_recent_reported_usage() {
+        let messages = vec![
+            assistant_with_usage(10, 20, None, None),
+            AgentMessage::user_text("q"),
+            assistant_with_usage(41, 3, None, None),
+            assistant(vec![]), // no usage: skipped
+        ];
+        assert_eq!(last_input_tokens(&messages), Some(41));
+        assert_eq!(last_input_tokens(&[]), None);
+        assert_eq!(last_input_tokens(&[AgentMessage::user_text("q")]), None);
     }
 
     fn assistant_with_usage(
