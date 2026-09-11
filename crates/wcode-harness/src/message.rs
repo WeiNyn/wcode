@@ -33,6 +33,8 @@ pub enum StopReason {
     Stop,
     Length,
     ToolUse,
+    /// Reserved: kept for the closed-enum contract inherited from pi, but no
+    /// provider maps to it yet — the kernel never produces this stop reason.
     Deferred,
     Aborted,
     Error,

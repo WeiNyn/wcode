@@ -18,6 +18,8 @@ pub enum SessionEntry {
     },
     Message {
         id: String,
+        /// Reserved for future tree/fork sessions; the kernel is linear today
+        /// and always records `None`.
         parent_id: Option<String>,
         message: AgentMessage,
     },

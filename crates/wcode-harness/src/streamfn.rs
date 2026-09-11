@@ -36,6 +36,8 @@ pub struct LlmOpts {
     pub model: String,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    /// Sampling temperature. No CLI flag surfaces it yet; a library embedder
+    /// that builds `LlmOpts` directly can set it.
     pub temperature: Option<f64>,
     pub endpoint: LlmEndpoint,
     /// Stable per-conversation id, sent as `x-opencode-session` for providers
