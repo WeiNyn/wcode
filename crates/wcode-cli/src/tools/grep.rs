@@ -23,7 +23,8 @@ pub struct GrepArgs {
     pub context: Option<u64>,
     /// Case-insensitive matching.
     pub ignore_case: Option<bool>,
-    /// Maximum number of match lines to report.
+    /// Maximum number of result lines to report — matches plus the context
+    /// lines around them (default 200).
     pub max: Option<u64>,
 }
 
@@ -129,7 +130,8 @@ impl TypedTool for Grep {
             }
             for i in emit {
                 if shown >= max {
-                    out.push_str(&format!("[grep: truncated at {max} matches]\n"));
+                    let unit = if max == 1 { "line" } else { "lines" };
+                    out.push_str(&format!("[grep: truncated at {max} {unit}]\n"));
                     return ToolOutput {
                         output: out,
                         is_error: false,
@@ -277,5 +279,36 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.output.contains("ok.txt"));
         assert!(!out.output.contains("target"));
+    }
+
+    #[tokio::test]
+    async fn max_caps_result_lines_including_context() {
+        // `max` bounds the emitted result lines (matches + context), not just
+        // the matches: with context:1 and max:1 the first emitted line is the
+        // context line above the match, then the scan truncates.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nneedle\nb\nneedle\nc\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Grep
+            .execute(
+                GrepArgs {
+                    pattern: "needle".into(),
+                    path: None,
+                    glob: None,
+                    context: Some(1),
+                    ignore_case: None,
+                    max: Some(1),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(
+            out.output.contains("[grep: truncated at 1 line]"),
+            "{}",
+            out.output
+        );
+        // one result line (the context line above the first match) + the note
+        assert_eq!(out.output.lines().count(), 2, "{}", out.output);
     }
 }
