@@ -6,7 +6,7 @@
 //! on rig's Chat Completions API client.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::{Stream, StreamExt};
 use rig::client::{CompletionClient, ModelListingClient};
@@ -55,9 +55,64 @@ pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
 pub type StreamFn =
     Arc<dyn Fn(&[AgentMessage], &str, &[ToolDefinition], &LlmOpts) -> LlmStream + Send + Sync>;
 
+/// Everything that shapes the underlying rig client: the endpoint, the key, and
+/// the routing/session header. `model`, `temperature`, and `effort` ride on the
+/// request, not the client, so a mid-conversation model swap still reuses the
+/// pooled HTTP connections. (`OPENAI_API_KEY`, the key fallback when `api_key`
+/// is None, is read once at build time and treated as constant.)
+#[derive(Clone, PartialEq, Eq)]
+struct ClientKey {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    session_id: Option<String>,
+}
+
+impl ClientKey {
+    fn of(opts: &LlmOpts) -> Self {
+        Self {
+            base_url: opts.base_url.clone(),
+            api_key: opts.api_key.clone(),
+            session_id: opts.session_id.clone(),
+        }
+    }
+}
+
+/// One-entry client cache. rig's `Client` wraps a pooled `reqwest::Client`, so
+/// rebuilding it every turn would drop the pool and re-handshake TLS; this keeps
+/// one client alive across turns and rebuilds only when [`ClientKey`] changes.
+#[derive(Default)]
+struct ClientCache {
+    slot: Mutex<Option<(ClientKey, openai::Client)>>,
+    #[cfg(test)]
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+impl ClientCache {
+    /// The client for `opts`, reusing the cached one when the key is unchanged.
+    fn get(&self, opts: &LlmOpts) -> Result<openai::Client, String> {
+        let key = ClientKey::of(opts);
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_key, client)) = slot.as_ref()
+            && *cached_key == key
+        {
+            return Ok(client.clone());
+        }
+        let client = openai_client(opts)?;
+        #[cfg(test)]
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *slot = Some((key, client.clone()));
+        Ok(client)
+    }
+}
+
 /// Default adapter: OpenAI-compatible Chat Completions endpoint via rig.
+///
+/// The provider client (and its pooled connections) is built once and reused
+/// across turns; only an endpoint/key/session change rebuilds it.
 pub fn rig_stream_fn() -> StreamFn {
-    Arc::new(move |messages, system, tools, opts| adapt(opts, messages, system, tools))
+    let cache = ClientCache::default();
+    Arc::new(move |messages, system, tools, opts| adapt(&cache, opts, messages, system, tools))
 }
 
 /// Build the rig client shared by streaming and model listing, so both hit
@@ -127,6 +182,7 @@ pub async fn list_models(opts: &LlmOpts) -> Result<Vec<String>, String> {
 }
 
 fn adapt(
+    cache: &ClientCache,
     opts: &LlmOpts,
     messages: &[AgentMessage],
     system: &str,
@@ -135,7 +191,7 @@ fn adapt(
     if let Some(message) = invalid_effort(opts) {
         return error_stream(message);
     }
-    let client = match openai_client(opts) {
+    let client = match cache.get(opts) {
         Ok(client) => client,
         Err(message) => return error_stream(message),
     };
@@ -863,6 +919,52 @@ mod tests {
         let opts = LlmOpts::default();
         let err = list_models(&opts).await.expect_err("no key must error");
         assert!(err.contains("no API key"), "got: {err}");
+    }
+
+    #[test]
+    fn client_cache_reuses_until_key_changes() {
+        let opts = LlmOpts {
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: Some("k".to_string()),
+            session_id: Some("s1".to_string()),
+            ..LlmOpts::default()
+        };
+        let cache = ClientCache::default();
+        let builds = || cache.builds.load(std::sync::atomic::Ordering::SeqCst);
+
+        // Identical opts reuse the cached client (the whole point: one pool/TLS).
+        cache.get(&opts).expect("builds");
+        cache.get(&opts).expect("builds");
+        assert_eq!(builds(), 1, "identical opts must reuse the client");
+
+        // model/temperature/effort ride on the request, not the client.
+        let model_swap = LlmOpts {
+            model: "other".to_string(),
+            effort: Some("high".to_string()),
+            ..opts.clone()
+        };
+        cache.get(&model_swap).expect("builds");
+        assert_eq!(builds(), 1, "model/effort swap must reuse the client");
+
+        // Endpoint, key, and session header each force a rebuild.
+        for changed in [
+            LlmOpts {
+                base_url: Some("http://127.0.0.1:8/v1".to_string()),
+                ..opts.clone()
+            },
+            LlmOpts {
+                api_key: Some("k2".to_string()),
+                ..opts.clone()
+            },
+            LlmOpts {
+                session_id: Some("s2".to_string()),
+                ..opts.clone()
+            },
+        ] {
+            let before = builds();
+            cache.get(&changed).expect("builds");
+            assert_eq!(builds(), before + 1, "a key change must rebuild the client");
+        }
     }
 
     #[test]
