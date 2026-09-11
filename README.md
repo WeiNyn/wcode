@@ -31,12 +31,24 @@ rtk = "auto"           # optional; auto|true|false — route bash output through
 [tools]
 grep = true            # optional; true|false — register the grep tool (off by default)
 find = true            # optional; true|false — register the find tool (off by default)
+
+[compaction]
+# Compact the conversation as it grows. An absent table = harness defaults.
+budget = 100000            # optional; working token ceiling to compact near
+                           # (default: the model's context window)
+window = 200000            # optional; context-window override for unknown models
+min_remaining = 16384      # compact once fewer than this many tokens remain
+keep_recent_tokens = 20000 # recent verbatim context kept after compacting, in tokens
+keep_recent_turns = 2      # complete turns always kept, whatever their size
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT`,
 `WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
-`tools.find`).
+`WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
+`tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
+`WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
+`WCODE_COMPACT_KEEP_RECENT_TURNS`.
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with

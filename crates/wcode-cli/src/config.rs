@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts};
 
 use crate::rtk::RtkPreference;
@@ -30,6 +31,38 @@ pub struct ToolsConfig {
     pub find: bool,
 }
 
+/// Compaction policy, loaded from the `[compaction]` table. Every field is
+/// optional so an absent table (or key) keeps the harness defaults; see
+/// [`CompactionPolicy`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct CompactionConfig {
+    /// Working ceiling in tokens; compaction triggers near it. `None` = the
+    /// model window.
+    pub budget: Option<u64>,
+    /// Context-window override, used only when the model is unknown.
+    pub window: Option<u64>,
+    /// Tokens held free below the ceiling before compacting.
+    pub min_remaining: Option<u64>,
+    /// Recent verbatim context kept after compacting, in tokens.
+    pub keep_recent_tokens: Option<u64>,
+    /// Complete turns always kept, whatever their token size.
+    pub keep_recent_turns: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// Fold the configured overrides over the harness defaults.
+    pub fn to_policy(&self) -> CompactionPolicy {
+        let d = CompactionPolicy::default();
+        CompactionPolicy {
+            window: self.window,
+            budget: self.budget,
+            min_remaining: self.min_remaining.unwrap_or(d.min_remaining),
+            keep_recent_tokens: self.keep_recent_tokens.unwrap_or(d.keep_recent_tokens),
+            keep_recent_turns: self.keep_recent_turns.unwrap_or(d.keep_recent_turns),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -41,6 +74,8 @@ pub struct FileConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +87,7 @@ pub struct Config {
     pub effort: Option<String>,
     pub hooks: HooksConfig,
     pub tools: ToolsConfig,
+    pub compaction: CompactionPolicy,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -65,6 +101,11 @@ pub struct EnvLike {
     pub wcode_rtk: Option<String>,
     pub wcode_grep: Option<String>,
     pub wcode_find: Option<String>,
+    pub wcode_compact_budget: Option<String>,
+    pub wcode_compact_window: Option<String>,
+    pub wcode_compact_min_remaining: Option<String>,
+    pub wcode_compact_keep_recent_tokens: Option<String>,
+    pub wcode_compact_keep_recent_turns: Option<String>,
 }
 
 impl EnvLike {
@@ -78,6 +119,11 @@ impl EnvLike {
             wcode_rtk: std::env::var("WCODE_RTK").ok(),
             wcode_grep: std::env::var("WCODE_GREP").ok(),
             wcode_find: std::env::var("WCODE_FIND").ok(),
+            wcode_compact_budget: std::env::var("WCODE_COMPACT_BUDGET").ok(),
+            wcode_compact_window: std::env::var("WCODE_COMPACT_WINDOW").ok(),
+            wcode_compact_min_remaining: std::env::var("WCODE_COMPACT_MIN_REMAINING").ok(),
+            wcode_compact_keep_recent_tokens: std::env::var("WCODE_COMPACT_KEEP_RECENT_TOKENS").ok(),
+            wcode_compact_keep_recent_turns: std::env::var("WCODE_COMPACT_KEEP_RECENT_TURNS").ok(),
         }
     }
 }
@@ -106,6 +152,14 @@ impl std::fmt::Display for ConfigError {
 /// Precedence: env (WCODE_* with OPENAI_API_KEY fallback) > toml. Model is
 /// required and comes from the toml only; error tells main what to prompt for.
 /// Effort is optional, free-style, passed through verbatim.
+/// Parse a non-negative integer env override (e.g. a token count).
+fn parse_count(name: &str, value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid {name} {value:?}: expected a non-negative integer"))
+}
+
 /// Parse a `true`/`false` env override for an optional native tool (accepts
 /// on/off/1/0 as synonyms). Unlike hooks.rtk these have no `auto` state —
 /// off is the default and only an explicit enable registers the tool.
@@ -138,6 +192,25 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     if let Some(v) = env.wcode_find.as_deref() {
         tools.find = parse_tool_flag("find", v).map_err(ConfigError::Io)?;
     }
+    let mut compaction = file.compaction.to_policy();
+    if let Some(v) = env.wcode_compact_budget.as_deref() {
+        compaction.budget = Some(parse_count("compaction.budget", v).map_err(ConfigError::Io)?);
+    }
+    if let Some(v) = env.wcode_compact_window.as_deref() {
+        compaction.window = Some(parse_count("compaction.window", v).map_err(ConfigError::Io)?);
+    }
+    if let Some(v) = env.wcode_compact_min_remaining.as_deref() {
+        compaction.min_remaining =
+            parse_count("compaction.min_remaining", v).map_err(ConfigError::Io)?;
+    }
+    if let Some(v) = env.wcode_compact_keep_recent_tokens.as_deref() {
+        compaction.keep_recent_tokens =
+            parse_count("compaction.keep_recent_tokens", v).map_err(ConfigError::Io)?;
+    }
+    if let Some(v) = env.wcode_compact_keep_recent_turns.as_deref() {
+        compaction.keep_recent_turns = parse_count("compaction.keep_recent_turns", v)
+            .map_err(ConfigError::Io)? as usize;
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -146,6 +219,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         effort: env.wcode_effort.or(file.effort),
         hooks,
         tools,
+        compaction,
     })
 }
 
@@ -428,5 +502,69 @@ mod tests {
             panic!("wrong error: {err:?}")
         };
         assert!(msg.contains("grep"), "names the tool: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod compaction_cfg_tests {
+    use super::*;
+
+    #[test]
+    fn absent_table_keeps_harness_defaults() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.compaction, CompactionPolicy::default());
+    }
+
+    #[test]
+    fn toml_sets_individual_fields() {
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[compaction]\nbudget = 100000\nkeep_recent_turns = 4")
+                .unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.compaction.budget, Some(100_000));
+        assert_eq!(cfg.compaction.keep_recent_turns, 4);
+        assert_eq!(
+            cfg.compaction.min_remaining,
+            CompactionPolicy::default().min_remaining
+        );
+    }
+
+    #[test]
+    fn env_beats_toml_for_compaction() {
+        let cfg = merge(
+            EnvLike {
+                wcode_compact_keep_recent_tokens: Some("1234".into()),
+                ..EnvLike::default()
+            },
+            toml::from_str("model = \"m\"\n[compaction]\nkeep_recent_tokens = 999").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg.compaction.keep_recent_tokens, 1234);
+    }
+
+    #[test]
+    fn invalid_compaction_env_is_config_error_naming_the_field() {
+        let err = merge(
+            EnvLike {
+                wcode_compact_budget: Some("lots".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("compaction.budget"), "got: {msg}");
     }
 }

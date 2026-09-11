@@ -107,6 +107,10 @@ pub const DEFAULT_KEEP_RECENT_TURNS: usize = 2;
 /// absolute recent history retained after compacting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactionPolicy {
+    /// Context-window override, consulted only when [`crate::limits`] doesn't
+    /// know the model (see [`CompactionPolicy::context_window`]). `None` =
+    /// derive it from the catalog, or fall back to a default.
+    pub window: Option<u64>,
     /// Working ceiling in tokens. `None` = the model window. Capped to the
     /// window at trigger time, so it can never disable window safety.
     pub budget: Option<u64>,
@@ -122,6 +126,7 @@ pub struct CompactionPolicy {
 impl Default for CompactionPolicy {
     fn default() -> Self {
         Self {
+            window: None,
             budget: None,
             min_remaining: DEFAULT_MIN_REMAINING,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
@@ -134,6 +139,17 @@ impl CompactionPolicy {
     /// The working ceiling: the configured budget, capped to the model window.
     pub fn ceiling(&self, window: u64) -> u64 {
         self.budget.map_or(window, |b| b.min(window))
+    }
+
+    /// The context window for `model` served from `base_url`: the model's
+    /// advertised context (via [`crate::limits`]) when known, else the
+    /// configured [`CompactionPolicy::window`], else
+    /// [`crate::limits::DEFAULT_CONTEXT_WINDOW`].
+    pub fn context_window(&self, base_url: Option<&str>, model: &str) -> u64 {
+        crate::limits::model_limit(base_url, model)
+            .map(|l| l.context)
+            .or(self.window)
+            .unwrap_or(crate::limits::DEFAULT_CONTEXT_WINDOW)
     }
 
     /// True once the provider-reported `used` input tokens leave less than
@@ -819,5 +835,37 @@ mod summarize_tests {
         assert!(matches!(m, AgentMessage::User { .. }));
         assert!(m.as_text().contains("did things"));
         assert!(m.as_text().starts_with("Summary"));
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn context_window_prefers_catalog_then_override_then_default() {
+        // A known opencode-go model: the catalog wins over the override.
+        let p = CompactionPolicy {
+            window: Some(999),
+            ..Default::default()
+        };
+        assert_eq!(
+            p.context_window(Some("https://opencode.ai/zen/go/v1"), "deepseek-v4.1-flash"),
+            1_000_000
+        );
+
+        // An unknown model: the configured override is used.
+        let p = CompactionPolicy {
+            window: Some(999),
+            ..Default::default()
+        };
+        assert_eq!(p.context_window(Some("https://api.example.com/v1"), "who"), 999);
+
+        // Unknown model, no override: the conservative default.
+        let p = CompactionPolicy::default();
+        assert_eq!(
+            p.context_window(None, "who"),
+            crate::limits::DEFAULT_CONTEXT_WINDOW
+        );
     }
 }

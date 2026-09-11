@@ -14,6 +14,10 @@
 //! response usage (`prompt_tokens` → `crate::message::Usage::input_tokens`),
 //! not from here; these limits only say *how much* fits.
 
+/// Context window assumed when neither the model catalog nor config supplies
+/// one: a conservative baseline so an unknown model still compacts in time.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+
 /// Context window and output ceiling advertised for a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelLimit {

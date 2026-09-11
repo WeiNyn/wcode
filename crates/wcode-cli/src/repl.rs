@@ -307,6 +307,7 @@ pub fn build_agent(
     tools: &ToolsConfig,
     session: Option<Session>,
     context: Vec<AgentMessage>,
+    compaction: CompactionPolicy,
 ) -> Agent {
     Agent::new(AgentConfig {
         system: system_prompt(tools),
@@ -318,7 +319,7 @@ pub fn build_agent(
         context,
         working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         max_turns: DEFAULT_MAX_TURNS,
-        compaction: CompactionPolicy::default(),
+        compaction,
     })
 }
 
@@ -499,7 +500,13 @@ fn lock_cancel_slot(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: ToolsConfig) {
+pub async fn run(
+    mut agent: Agent,
+    mut llm: LlmOpts,
+    hooks: HooksSet,
+    tools: ToolsConfig,
+    compaction: CompactionPolicy,
+) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
     // run is active; the slot is refreshed after each run / agent swap.
@@ -555,7 +562,14 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
                             .as_ref()
                             .and_then(|s| s.path().map(Path::to_path_buf));
                         agent =
-                            build_agent(llm.clone(), hooks.clone(), &tools, session, Vec::new());
+                            build_agent(
+                                llm.clone(),
+                                hooks.clone(),
+                                &tools,
+                                session,
+                                Vec::new(),
+                                compaction,
+                            );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         match path {
                             Some(p) => println!("new session: {}", p.display()),
@@ -626,7 +640,14 @@ pub async fn run(mut agent: Agent, mut llm: LlmOpts, hooks: HooksSet, tools: Too
                             llm.effort = e;
                         }
                         let n = messages.len();
-                        agent = build_agent(llm.clone(), hooks.clone(), &tools, Some(s), messages);
+                        agent = build_agent(
+                            llm.clone(),
+                            hooks.clone(),
+                            &tools,
+                            Some(s),
+                            messages,
+                            compaction,
+                        );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
                     }

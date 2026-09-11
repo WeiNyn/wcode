@@ -282,11 +282,18 @@ async fn main() {
     };
 
     let hooks = default_hooks(&cfg.hooks);
-    let mut agent = build_agent(llm.clone(), hooks.clone(), &cfg.tools, session, context);
+    let mut agent = build_agent(
+        llm.clone(),
+        hooks.clone(),
+        &cfg.tools,
+        session,
+        context,
+        cfg.compaction,
+    );
 
     match args.prompt {
         Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
-        None => repl::run(agent, llm, hooks, cfg.tools).await,
+        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction).await,
     }
 }
 
