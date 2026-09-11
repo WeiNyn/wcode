@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod compaction;
 pub mod event;
 pub mod hooks;
 pub mod limits;
