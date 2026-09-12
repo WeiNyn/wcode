@@ -2,7 +2,7 @@ use std::io::Read as _;
 
 use regex::Regex;
 use serde::Deserialize;
-use walkdir::WalkDir;
+use ignore::{DirEntry, Walk, WalkBuilder};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
 use super::anchor;
@@ -26,6 +26,8 @@ pub struct GrepArgs {
     /// Maximum number of result lines to report — matches plus the context
     /// lines around them (default 200).
     pub max: Option<u64>,
+    /// Search files that `.gitignore` excludes too (default false).
+    pub no_ignore: Option<bool>,
 }
 
 pub struct Grep;
@@ -37,7 +39,7 @@ impl TypedTool for Grep {
         "grep"
     }
     fn description(&self) -> &str {
-        "Regex-search files. Every result line carries its `read`-style anchor so it can be targeted directly with `edit`. Output: `path:lineno  ANCHOR│content`. Match lines are marked ` <--`; context lines are unmarked. Skips .git/target/node_modules and binary files by default. For AST-structural search use ast_search."
+        "Regex-search files. Every result line carries its `read`-style anchor so it can be targeted directly with `edit`. Output: `path:lineno  ANCHOR│content`. Match lines are marked ` <--`; context lines are unmarked. Respects .gitignore and skips .git/target/node_modules and binary files by default (pass no_ignore:true to search ignored files too). For AST-structural search use ast_search."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let base = match &args.path {
@@ -63,10 +65,7 @@ impl TypedTool for Grep {
         if base.is_file() {
             files.push(base.clone());
         } else {
-            for entry in WalkDir::new(&base)
-                .into_iter()
-                .filter_entry(|e| !is_skipped_dir(e))
-            {
+            for entry in walker(&base, args.no_ignore.unwrap_or(false)) {
                 // Cancel-checked per entry: discovery can be long on a big
                 // tree, and the loop honors cancel only after the tool returns.
                 if ctx.cancel.is_cancelled() {
@@ -76,7 +75,7 @@ impl TypedTool for Grep {
                     };
                 }
                 if let Ok(entry) = entry
-                    && entry.file_type().is_file()
+                    && entry.file_type().is_some_and(|t| t.is_file())
                 {
                     files.push(entry.into_path());
                 }
@@ -173,8 +172,30 @@ fn build_regex(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> 
     b.build()
 }
 
-pub(crate) fn is_skipped_dir(entry: &walkdir::DirEntry) -> bool {
-    entry.file_type().is_dir() && SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+fn is_skipped_dir(entry: &DirEntry) -> bool {
+    entry.file_type().is_some_and(|t| t.is_dir())
+        && SKIP_DIRS.contains(&entry.file_name().to_string_lossy().as_ref())
+}
+
+/// A `.gitignore`-aware walker over `base`.
+///
+/// Hidden files are still searched — only the *ignore rules* change, so this is
+/// strictly narrower than the old `walkdir` walk. [`SKIP_DIRS`] stays as a
+/// built-in floor, so `target/`/`node_modules/` are skipped even when a repo
+/// does not ignore them. `require_git(false)` applies `.gitignore` outside a git
+/// repo too (pi makes the same call). `no_ignore` is the model's escape hatch:
+/// it turns every ignore source off.
+pub(crate) fn walker(base: &std::path::Path, no_ignore: bool) -> Walk {
+    let mut b = WalkBuilder::new(base);
+    b.hidden(false).parents(true).require_git(false);
+    if no_ignore {
+        b.git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false);
+    }
+    b.filter_entry(|e| !is_skipped_dir(e));
+    b.build()
 }
 
 pub(crate) fn parse_globs(
@@ -237,6 +258,7 @@ mod tests {
                     context: Some(1),
                     ignore_case: None,
                     max: None,
+                    no_ignore: None,
                 },
                 &ctx,
             )
@@ -272,6 +294,7 @@ mod tests {
                     context: None,
                     ignore_case: None,
                     max: None,
+                    no_ignore: None,
                 },
                 &ctx,
             )
@@ -298,6 +321,7 @@ mod tests {
                     context: Some(1),
                     ignore_case: None,
                     max: Some(1),
+                    no_ignore: None,
                 },
                 &ctx,
             )
@@ -310,5 +334,86 @@ mod tests {
         );
         // one result line (the context line above the first match) + the note
         assert_eq!(out.output.lines().count(), 2, "{}", out.output);
+    }
+
+    fn put(dir: &std::path::Path, rel: &str, text: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// Run grep for the literal `needle` over `dir`.
+    async fn needle(dir: &std::path::Path, no_ignore: Option<bool>) -> String {
+        let (ctx, _rx) = super::super::test_ctx(dir);
+        Grep
+            .execute(
+                GrepArgs {
+                    pattern: "needle".into(),
+                    path: None,
+                    glob: None,
+                    context: None,
+                    ignore_case: None,
+                    max: None,
+                    no_ignore,
+                },
+                &ctx,
+            )
+            .await
+            .output
+    }
+
+    /// `.gitignore` applies even though a `tempfile` dir is not a git repo —
+    /// `require_git(false)`, matching pi.
+    #[tokio::test]
+    async fn respects_gitignore_without_a_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".gitignore", "ignored.txt\n");
+        put(dir.path(), "ignored.txt", "needle\n");
+        put(dir.path(), "kept.txt", "needle\n");
+
+        let out = needle(dir.path(), None).await;
+        assert!(out.contains("kept.txt"), "{out}");
+        assert!(!out.contains("ignored.txt"), "gitignore not honored: {out}");
+
+        // The escape hatch reaches ignored files again.
+        let out = needle(dir.path(), Some(true)).await;
+        assert!(out.contains("ignored.txt"), "no_ignore did nothing: {out}");
+    }
+
+    #[tokio::test]
+    async fn gitignore_negation_re_includes_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".gitignore", "*.log\n!keep.log\n");
+        put(dir.path(), "drop.log", "needle\n");
+        put(dir.path(), "keep.log", "needle\n");
+
+        let out = needle(dir.path(), None).await;
+        assert!(out.contains("keep.log"), "negation ignored: {out}");
+        assert!(!out.contains("drop.log"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn gitignore_from_a_parent_directory_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), ".gitignore", "skip/\n");
+        put(dir.path(), "sub/skip/x.txt", "needle\n");
+        put(dir.path(), "sub/ok.txt", "needle\n");
+
+        // Searching the subdir still honors the parent's `.gitignore`.
+        let out = needle(&dir.path().join("sub"), None).await;
+        assert!(out.contains("ok.txt"), "{out}");
+        assert!(!out.contains("x.txt"), "parent gitignore not applied: {out}");
+    }
+
+    /// The built-in noise floor still applies when a repo ignores nothing.
+    #[tokio::test]
+    async fn builtin_skip_dirs_apply_without_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "target/x.txt", "needle\n");
+        put(dir.path(), "ok.txt", "needle\n");
+
+        let out = needle(dir.path(), Some(true)).await;
+        assert!(out.contains("ok.txt"), "{out}");
+        assert!(!out.contains("target"), "SKIP_DIRS floor lost: {out}");
     }
 }

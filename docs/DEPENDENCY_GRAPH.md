@@ -192,7 +192,7 @@ user text ──▶ Agent.run()
 | `uuid`, `chrono` | harness | session ids, timestamps |
 | `thiserror` | harness | `LoopError` |
 | `regex` | cli | `grep` pattern matching |
-| `walkdir` | cli | `grep` / `find` directory walk |
+| `ignore` | cli | `grep` / `find` walk — `.gitignore`-aware (replaced `walkdir`) |
 | `globset` | cli | `grep` / `find` include/exclude globs |
 | `libc` | cli | `bash` process-group kill (unix) |
 | `toml`, `dirs` | cli | config parsing; `~/.config` / `~/.local/share` paths |

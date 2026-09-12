@@ -12,7 +12,7 @@ each task completes and keep the status table current.
 | 4 | Retry / backoff on transient errors | ☑ done |
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ◐ phases 1–2 done |
-| 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☐ todo |
+| 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ◐ phase 2 done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

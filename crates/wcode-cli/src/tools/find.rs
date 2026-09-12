@@ -1,8 +1,7 @@
 use serde::Deserialize;
-use walkdir::WalkDir;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::grep::{is_skipped_dir, parse_globs};
+use super::grep::{parse_globs, walker};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct FindArgs {
@@ -14,6 +13,8 @@ pub struct FindArgs {
     pub kind: Option<String>,
     /// Maximum number of entries to report.
     pub max: Option<u64>,
+    /// List entries that `.gitignore` excludes too (default false).
+    pub no_ignore: Option<bool>,
 }
 
 pub struct Find;
@@ -25,7 +26,7 @@ impl TypedTool for Find {
         "find"
     }
     fn description(&self) -> &str {
-        "List files and directories matching globs, one path per stdout line (relative to the working directory). Skips .git/target/node_modules by default. Use grep to search inside files; use find to locate them."
+        "List files and directories matching globs, one path per stdout line (relative to the working directory). Respects .gitignore; also skips .git/target/node_modules (pass no_ignore:true to list ignored entries). Use grep to search inside files; use find to locate them."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let base = match &args.path {
@@ -54,10 +55,11 @@ impl TypedTool for Find {
             // collecting it all up-front would make a mid-run cancel wait for
             // the whole walk to finish (the loop honors cancel only after the
             // tool returns).
-            for entry in WalkDir::new(&base)
-                .into_iter()
-                .filter_entry(|e| !is_skipped_dir(e))
-            {
+            for entry in walker(&base, args.no_ignore.unwrap_or(false)) {
+                // Check cancel per directory entry: a tree walk can be long, and
+                // collecting it all up-front would make a mid-run cancel wait for
+                // the whole walk to finish (the loop honors cancel only after the
+                // tool returns).
                 if ctx.cancel.is_cancelled() {
                     return ToolOutput {
                         output: "cancelled".to_string(),
@@ -136,6 +138,7 @@ mod tests {
                     glob: Some("**/*.rs".into()),
                     kind: Some("file".into()),
                     max: None,
+                    no_ignore: None,
                 },
                 &ctx,
             )
@@ -145,5 +148,37 @@ mod tests {
         assert!(out.output.contains("src/b.rs"));
         assert!(!out.output.contains("Cargo.toml"));
         assert!(!out.output.contains("target"));
+    }
+
+    async fn list(dir: &std::path::Path, no_ignore: Option<bool>) -> String {
+        let (ctx, _rx) = super::super::test_ctx(dir);
+        Find
+            .execute(
+                FindArgs {
+                    path: None,
+                    glob: Some("**/*.txt".into()),
+                    kind: Some("file".into()),
+                    max: None,
+                    no_ignore,
+                },
+                &ctx,
+            )
+            .await
+            .output
+    }
+
+    #[tokio::test]
+    async fn respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "hidden.txt\n").unwrap();
+        std::fs::write(dir.path().join("hidden.txt"), "").unwrap();
+        std::fs::write(dir.path().join("shown.txt"), "").unwrap();
+
+        let out = list(dir.path(), None).await;
+        assert!(out.contains("shown.txt"), "{out}");
+        assert!(!out.contains("hidden.txt"), "gitignore not honored: {out}");
+
+        let out = list(dir.path(), Some(true)).await;
+        assert!(out.contains("hidden.txt"), "no_ignore did nothing: {out}");
     }
 }

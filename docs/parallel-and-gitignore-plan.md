@@ -1,6 +1,7 @@
 # wcode — parallel tool execution & .gitignore awareness
 
-Status: **planning**. Companion to [`next-steps.md`](next-steps.md) (item 7).
+Status: **phase 2 shipped, phase 1 todo**. Companion to
+[`next-steps.md`](next-steps.md) (item 7).
 
 Two independent harness gaps identified by comparing against pi (`../wi/pi`) and
 jcode (`../jcode`): the loop runs tool calls **serially**, and `grep`/`find`
@@ -9,7 +10,7 @@ ignore files by a **hardcoded** list rather than the project's `.gitignore`.
 | phase | scope | status |
 |-------|-------|--------|
 | 1 | Parallel tool execution (kernel) | ☐ todo |
-| 2 | `.gitignore` awareness in grep/find | ☐ todo |
+| 2 | `.gitignore` awareness in grep/find | ☑ done |
 
 The two are independent and land as separate commits.
 
@@ -194,9 +195,10 @@ must diagnose). Without it, gitignore-awareness becomes a wall.
 - [ ] `[tools] parallel` / `--sequential`; loop tests (overlap, barrier, order).
 
 **Phase 2 — `.gitignore` awareness.**
-- [ ] Add `ignore`; swap `WalkBuilder` into grep and find.
-- [ ] Keep `SKIP_DIRS`; `no_ignore` arg on both tools.
-- [ ] Tests: ignore, negation (`!keep`), nested repo, `no_ignore` escape.
+- [x] Add `ignore` (replacing `walkdir`); `walker()` in grep, used by find.
+- [x] Keep `SKIP_DIRS` as a filter_entry floor; `no_ignore` arg on both tools.
+- [x] Tests: gitignore honored outside a git repo, negation, parent-dir rules,
+      the `SKIP_DIRS` floor, and the `no_ignore` escape.
 
 ## 7. Testing & verification
 
@@ -243,4 +245,28 @@ must diagnose). Without it, gitignore-awareness becomes a wall.
 
 - [ ] Settle the open questions above.
 - [ ] Phase 1 (parallel tool execution) — code + tests + live timing check.
-- [ ] Phase 2 (`.gitignore` awareness) — code + tests + live check.
+- [x] Phase 2 (`.gitignore` awareness) — verified end-to-end (see §10).
+
+## 10. Phase 2 result
+
+`walker()` in `grep.rs` builds an `ignore::WalkBuilder`: `.hidden(false)` (hidden
+files still searched — only ignore *rules* changed), `.parents(true)`,
+`.require_git(false)`, and `no_ignore` turning `git_ignore`/`git_global`/
+`git_exclude`/`ignore` off. `SKIP_DIRS` moved from a `walkdir` `filter_entry` to
+the same hook on the new walker, so it survives as a floor. `find` reuses
+`walker()`; both tools gained `no_ignore: Option<bool>`.
+
+Verified against the real binary by reading the **recorded tool results** out of
+the session JSONL (the REPL only previews the first line, so the model's prose is
+not evidence):
+
+| run | `grep` output |
+|---|---|
+| default, `secret/` in `.gitignore`, dir **not** a git repo | `visible.txt` only |
+| `no_ignore: true` | `visible.txt` + `secret/hidden.txt` |
+
+`find` behaved identically. The non-git directory is what exercises
+`require_git(false)` end-to-end.
+
+**Still open for phase 2:** whether hidden files should keep being searched
+(current: yes, to avoid a silent narrowing) — revisit if it ever matters.
