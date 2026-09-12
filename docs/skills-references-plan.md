@@ -122,10 +122,12 @@ description: Extract text/tables from PDFs and fill forms. Use for PDF documents
 
 **Roots** (searched in order; first `name` wins):
 
-- Global: `~/.local/share/wcode/skills/`, `~/.agents/skills/`.
+- Global: `~/.local/share/wcode/skills/`, then the shared cross-tool dir —
+  **`~/.agents/skills/` if it exists, otherwise `~/.claude/skills/`**.
 - Project, for each dir from the working dir up to the repo root:
-  `.wcode/skills/`, `.agents/skills/` (the cross-tool convention, so skills
-  shared across harnesses just work).
+  `.wcode/skills/` (always), then the same shared pair — `.agents/skills/`
+  preferred, `.claude/skills/` only as the fallback where `.agents/skills/` is
+  absent in that directory.
 - Extra roots from `[skills] dirs = [...]` and `WCODE_SKILLS`.
 - Within a root: any directory containing `SKILL.md`, recursive, bounded depth
   (4). Directory name need not match `name` (the standard's rule is bad for
@@ -182,8 +184,8 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 
 **Phase 2 — Skills core.**
 - [ ] `skills.rs`: frontmatter parser + validation (warn/skip), unit tests.
-- [ ] Discovery: global + project roots (`.wcode`, `.agents`), depth bound,
-      collision = first wins.
+- [ ] Discovery: global + project roots (`.wcode`; `.agents` preferred,
+      `.claude` fallback), depth bound, collision = first wins.
 - [ ] Prompt section rendering with relative paths, clipping, cap.
 - [ ] `[skills]` config + `WCODE_SKILLS` + `--no-skills`; wire into startup.
 - [ ] Live check: temp repo skill, `--dump-system-prompt` shows it; a real
@@ -213,8 +215,8 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - **Frontmatter parsing** — a real YAML deserializer, not hand-rolled. Use
   `serde_yaml_ng` (upstream `serde_yaml` is archived; this is the maintained
   fork).
-- **Skill roots** — `.agents/skills` is the shared convention. **`.claude/skills`
-  is *not* a default root.**
+- **Skill roots** — the shared `.agents/skills` convention takes **priority**;
+  `.claude/skills` is a **fallback**, read only where `.agents/skills` is absent.
 - **Global context file** — `~/.config/wcode/AGENTS.md`, beside `config.toml`.
 
 **Still open.**
