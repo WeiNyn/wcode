@@ -81,8 +81,9 @@ stop at the first dir containing `.git`), capped at 32 KiB. Target shape:
   **nearest** file appears **last** (most specific wins by recency). Same
   stop-at-`.git` rule.
 - **Candidate names** per directory, first hit wins:
-  `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md` (default list; configurable).
-  `CLAUDE.md` is in the default list (portability, as pi/jcode do).
+- **Candidate names** per directory, first hit wins: `AGENTS.override.md`,
+  `AGENTS.md`, `CLAUDE.md` (default list; configurable) — `CLAUDE.md` included
+  for portability, as pi/jcode do.
 - **Merge**: each file rendered as `# Project instructions (<path>)` + body,
   deduped by canonical path, each capped at 32 KiB, the whole block at 64 KiB.
 - Controls: keep `--no-instructions`; `WCODE_INSTRUCTIONS` and
@@ -120,15 +121,16 @@ description: Extract text/tables from PDFs and fill forms. Use for PDF documents
 - Malformed frontmatter or a missing `name`/`description` → **warn to stderr and
   skip** (lenient, like pi); never fatal.
 
-**Roots** (searched in order; first `name` wins):
+**Roots** (first `name` wins, so the scan runs highest-priority first):
 
-- Global: `~/.local/share/wcode/skills/`, then the shared cross-tool dir —
-  **`~/.agents/skills/` if it exists, otherwise `~/.claude/skills/`**.
-- Project, for each dir from the working dir up to the repo root:
-  `.wcode/skills/` (always), then the same shared pair — `.agents/skills/`
+- Project, nearest first — for each dir from the working dir up to the repo
+  root: `.wcode/skills/` (always), then the shared pair — `.agents/skills/`
   preferred, `.claude/skills/` only as the fallback where `.agents/skills/` is
-  absent in that directory.
-- Extra roots from `[skills] dirs = [...]` and `WCODE_SKILLS`.
+  absent in that directory. The working dir is the most specific, so it wins.
+- Global (lowest priority) — `~/.local/share/wcode/skills/`, then the shared
+  pair (`~/.agents/skills/` if it exists, otherwise `~/.claude/skills/`).
+- Explicit extra roots (`[skills] dirs = [...]`, `WCODE_SKILLS`) are scanned
+  first, ahead of both project and global.
 - Within a root: any directory containing `SKILL.md`, recursive, bounded depth
   (4). Directory name need not match `name` (the standard's rule is bad for
   shared dirs — pi's reasoning).
@@ -221,21 +223,23 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - **Context-file candidates** — `AGENTS.override.md` → `AGENTS.md` → `CLAUDE.md`
   (first hit per directory); `CLAUDE.md` stays in the default list for portability.
 
-**Still open.**
+- **Collision order** — **project over global**; within the project chain the
+  nearest directory (the working dir) wins. First `name` found wins, so the roots
+  are scanned project-first (see §3.3).
+- **Skills: prompt, not message** — the list lives in the system prompt (stable
+  per session); the body still loads on demand via `read`.
+- **`name` vs directory** — follow pi: the directory name need not match
+  `name` (better for shared skill dirs).
 
-- **Collision order** — project-over-global with nearest-project-first
-  (recommended) vs pi's first-found.
-- **Skills: prompt vs message** — system prompt (recommended, stable) vs a
-  per-turn message.
-- **`name` vs directory** — follow pi: allow a mismatch (shared dirs).
+**Deferred.**
+
 - **Per-skill tool policy** (`allowed-tools`) — parsed and ignored in v1; a
   `Hooks` variant owns it later.
 
 ## 8. Progress
 
-- [x] Settle parsing / roots / global-file / `CLAUDE.md` candidate (see §7).
-- [ ] Settle the remaining questions (collision order, prompt-vs-message,
-      `name`-vs-dir).
+- [x] Settle parsing / roots / global file / `CLAUDE.md` / collision order /
+      prompt / `name`-vs-dir (see §7).
 - [ ] Phase 1 (references as a set) — code + tests + `--dump-system-prompt`.
 - [ ] Phase 2 (skills core) — code + tests + live check.
 - [ ] Phase 3 (polish + docs).
