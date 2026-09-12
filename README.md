@@ -45,7 +45,6 @@ keep_recent_turns = 2      # complete turns always kept, whatever their size
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT`,
 `WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
-`WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
 `tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`.
