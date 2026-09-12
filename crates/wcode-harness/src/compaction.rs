@@ -28,6 +28,7 @@ use futures::StreamExt as _;
 
 use crate::event::LlmStreamEvent;
 use crate::message::{AgentMessage, ContentBlock, Usage};
+use crate::session::Session;
 use crate::streamfn::{LlmOpts, StreamFn};
 
 /// Earliest index at which `ctx` may be split so the kept suffix `ctx[cut..]`
@@ -565,6 +566,51 @@ pub enum CompactOutcome {
         kept: usize,
         usage: Option<Usage>,
     },
+}
+
+/// Summarize the older prefix of `ctx` in place: keep the newest messages per
+/// `policy`, replace the rest with a summary message, and — when a session is
+/// open — persist the boundary so a resume rebuilds the same view.
+///
+/// Ordered so a failure leaves `ctx` untouched: the session write happens
+/// *before* the in-memory splice. `Ok(NothingToDo)` when the cut keeps
+/// everything (nothing worth summarizing).
+pub async fn compact_ctx(
+    ctx: &mut Vec<AgentMessage>,
+    policy: &CompactionPolicy,
+    stream_fn: &StreamFn,
+    opts: &LlmOpts,
+    instructions: Option<&str>,
+    session: Option<&mut Session>,
+) -> Result<CompactOutcome, String> {
+    let cut = cut_for_policy(ctx, policy);
+    if cut == 0 {
+        return Ok(CompactOutcome::NothingToDo);
+    }
+    let prefix = ctx[..cut].to_vec();
+    let summary = summarize(stream_fn, opts, &prefix, instructions).await?;
+    let kept = ctx.len() - cut;
+
+    if let Some(session) = session {
+        let tokens_before = ctx.iter().rev().find_map(|m| match m {
+            AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
+            _ => None,
+        });
+        session
+            .record_compaction(&summary.text, kept, tokens_before, summary.usage)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut next = Vec::with_capacity(kept + 1);
+    next.push(summary_message(&summary.text));
+    next.extend_from_slice(&ctx[cut..]);
+    *ctx = next;
+
+    Ok(CompactOutcome::Done {
+        summarized: cut,
+        kept,
+        usage: summary.usage,
+    })
 }
 
 /// The message injected in place of a summarized prefix.

@@ -192,6 +192,7 @@ impl Agent {
             cancel: self.cancel.clone(),
             working_dir: self.working_dir.clone(),
             max_turns: self.max_turns,
+            compaction: self.compaction,
             session: self.session.as_mut(),
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
@@ -238,34 +239,15 @@ impl Agent {
     /// ([`crate::session::SessionEntry::Compaction`]), so a resumed session
     /// rebuilds to the same `summary + kept` view instead of re-expanding.
     pub async fn compact(&mut self, instructions: Option<&str>) -> Result<CompactOutcome, String> {
-        let cut = compaction::cut_for_policy(&self.ctx, &self.compaction);
-        if cut == 0 {
-            return Ok(CompactOutcome::NothingToDo);
-        }
-        let prefix = self.ctx[..cut].to_vec();
-        let summary =
-            compaction::summarize(&self.stream_fn, &self.llm, &prefix, instructions).await?;
-        let kept = self.ctx.len() - cut;
-        // Persist the boundary before mutating ctx: a failed append must not
-        // leave the conversation compacted in memory but unmarked on disk.
-        if let Some(session) = &mut self.session {
-            let tokens_before = self.ctx.iter().rev().find_map(|m| match m {
-                AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
-                _ => None,
-            });
-            session
-                .record_compaction(&summary.text, kept, tokens_before, summary.usage)
-                .map_err(|e| e.to_string())?;
-        }
-        let mut next = Vec::with_capacity(kept + 1);
-        next.push(compaction::summary_message(&summary.text));
-        next.extend_from_slice(&self.ctx[cut..]);
-        self.ctx = next;
-        Ok(CompactOutcome::Done {
-            summarized: cut,
-            kept,
-            usage: summary.usage,
-        })
+        compaction::compact_ctx(
+            &mut self.ctx,
+            &self.compaction,
+            &self.stream_fn,
+            &self.llm,
+            instructions,
+            self.session.as_mut(),
+        )
+        .await
     }
 
     pub fn session_path(&self) -> Option<&Path> {

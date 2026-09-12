@@ -57,6 +57,11 @@ pub enum AgentEvent {
     TurnEnd {
         message: AgentMessage,
     },
+    /// Auto-compaction summarized `summarized` older messages, keeping `kept`.
+    Compaction {
+        summarized: usize,
+        kept: usize,
+    },
     /// Stream-level failure; the run ends with `StopReason::Error`.
     Error {
         message: String,
@@ -144,6 +149,13 @@ mod tests {
                 message: "boom".into(),
             },
             "error",
+        );
+        roundtrip(
+            AgentEvent::Compaction {
+                summarized: 3,
+                kept: 2,
+            },
+            "compaction",
         );
         roundtrip(AgentEvent::AgentEnd, "agent_end");
     }

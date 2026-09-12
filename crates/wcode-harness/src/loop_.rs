@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::compaction::{self, CompactOutcome, CompactionPolicy};
 use crate::event::{AgentEvent, LlmStreamEvent};
 use crate::hooks::{HooksSet, ToolCall as HookToolCall};
 use crate::message::{AgentMessage, ContentBlock, StopReason, Usage};
@@ -32,6 +33,9 @@ pub struct LoopConfig<'a> {
     /// the run ends on a completed turn boundary with `StopReason::MaxTurns`.
     /// Counts every turn in the run, including follow-up-triggered ones.
     pub max_turns: usize,
+    /// When to auto-summarize the older prefix, and how much recent context to
+    /// keep (see [`crate::compaction`]).
+    pub compaction: CompactionPolicy,
     /// Optional session to persist each produced message to as it is pushed
     /// into context — incremental, so a crash mid-run loses at most the
     /// in-flight message instead of the whole turn.
@@ -121,6 +125,30 @@ pub async fn run_loop(
                 }
             }
             cfg.hooks.transform_context(ctx).await;
+
+            // Auto-compaction: when the last provider-reported context size is
+            // near the ceiling, summarize the older prefix before this turn's
+            // request. Best-effort — a summarizer failure must not abort a run
+            // that can still proceed (the request itself surfaces real errors).
+            if let Some(used) = last_input_tokens(ctx) {
+                let window = cfg
+                    .compaction
+                    .context_window(cfg.llm.base_url.as_deref(), &cfg.llm.model);
+                if cfg.compaction.should_compact(window, used) {
+                    let outcome = compaction::compact_ctx(
+                        ctx,
+                        &cfg.compaction,
+                        &cfg.stream_fn,
+                        &cfg.llm,
+                        None,
+                        cfg.session.as_deref_mut(),
+                    )
+                    .await;
+                    if let Ok(CompactOutcome::Done { summarized, kept, .. }) = outcome {
+                        let _ = sink.send(AgentEvent::Compaction { summarized, kept });
+                    }
+                }
+            }
 
             let mut content: Vec<ContentBlock> = Vec::new();
             let mut captured: Option<StopReason> = None;
@@ -512,6 +540,15 @@ fn record_session(cfg: &mut LoopConfig<'_>, msg: &AgentMessage) -> Result<(), Lo
             message: msg.clone(),
         })
         .map_err(LoopError::Session)
+}
+
+/// Provider-reported input tokens of the most recent assistant message: the
+/// size of the last request, used to decide whether to compact.
+fn last_input_tokens(ctx: &[AgentMessage]) -> Option<u64> {
+    ctx.iter().rev().find_map(|m| match m {
+        AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
+        _ => None,
+    })
 }
 
 fn append_text(content: &mut Vec<ContentBlock>, delta: &str) {

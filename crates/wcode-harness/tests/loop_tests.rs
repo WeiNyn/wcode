@@ -12,6 +12,7 @@ use futures::StreamExt as _;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
+use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::{Hooks, HooksSet, ToolCall as HookToolCall};
 use wcode_harness::loop_::{LoopConfig, LoopError, run_loop};
@@ -229,6 +230,7 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             working_dir: std::path::PathBuf::from("."),
             session: None,
             max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+            compaction: CompactionPolicy::default(),
         },
         steer_tx,
         follow_tx,
@@ -260,6 +262,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
         AgentEvent::TurnEnd { .. } => "turn_end",
         AgentEvent::Error { .. } => "error",
+        AgentEvent::Compaction { .. } => "compaction",
         AgentEvent::AgentEnd => "agent_end",
     }
 }
@@ -1239,4 +1242,67 @@ async fn default_hooks_smoke() {
     assert!(t.contains(&"tool_execution_end"));
     assert_eq!(*t.last().unwrap(), "agent_end");
     assert_eq!(ctx.len(), 4);
+}
+
+/// Auto-compaction: a turn whose last provider-reported context size is over
+/// the ceiling summarizes the older prefix before the request and emits a
+/// `Compaction` event.
+#[tokio::test]
+async fn auto_compacts_when_over_the_ceiling() {
+    let rec = Recorder::default();
+    // 1st stream call is the summarizer; 2nd is the turn itself.
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("CONDENSED".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("real reply".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let TestSetup { mut cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    cfg.compaction = CompactionPolicy {
+        budget: Some(10),
+        min_remaining: 0,
+        keep_recent_tokens: 1, // keep only the newest message
+        keep_recent_turns: 0,
+        ..Default::default()
+    };
+
+    // Seed a turn whose assistant reported a context far over the ceiling.
+    let earlier = AgentMessage::Assistant {
+        content: vec![ContentBlock::Text { text: "earlier".into() }],
+        stop_reason: StopReason::Stop,
+        usage: Some(wcode_harness::message::Usage {
+            input_tokens: 9_999,
+            ..Default::default()
+        }),
+        model: None,
+    };
+    let mut ctx = vec![AgentMessage::user_text("first"), earlier];
+
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let t = tags(&events);
+    assert!(t.contains(&"compaction"), "expected a compaction event: {t:?}");
+    assert!(
+        ctx[0].as_text().contains("CONDENSED"),
+        "summary leads the context: {:?}",
+        ctx[0]
+    );
+
+    // The turn's request saw the compacted context, not the raw prefix.
+    let calls = rec.calls();
+    assert_eq!(calls.len(), 2, "summarizer + turn");
+    assert!(
+        calls[1].ctx[0].as_text().contains("CONDENSED"),
+        "the request carries the summary: {:?}",
+        calls[1].ctx[0]
+    );
 }

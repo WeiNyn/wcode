@@ -760,6 +760,12 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                 eprintln!("{DIM}error: {message}{RESET}");
                 let _ = io::stderr().flush();
             }
+            AgentEvent::Compaction { summarized, kept } => {
+                close_blocks(&mut p, &mut st);
+                out(&format!(
+                    "{DIM}⋯ compacted {summarized} messages, kept {kept}{RESET}\n"
+                ));
+            }
             _ => {}
         }
     }
