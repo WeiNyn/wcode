@@ -265,6 +265,9 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::Error { .. } => "error",
         AgentEvent::Compaction { .. } => "compaction",
         AgentEvent::Retrying { .. } => "retrying",
+        AgentEvent::Ack => "ack",
+        AgentEvent::Stopped { .. } => "stopped",
+        AgentEvent::History { .. } => "history",
         AgentEvent::AgentEnd => "agent_end",
     }
 }

@@ -95,23 +95,28 @@
 //! `*` unless the tool watches `ToolContext::cancel` itself (e.g. `bash` kills
 //! its child) — then it can stop early.
 //!
-//! Scope (stage S1): the actor services the request variants that map onto an
-//! existing [`Agent`] method — [`Request::Submit`], [`Request::Steer`],
-//! [`Request::FollowUp`], [`Request::Cancel`], [`Request::SetModel`],
-//! [`Request::SetEffort`], [`Request::Compact`]. Read-back requests
-//! (`GetHistory`) and their reply events are not here yet: they need a
-//! request/reply correlation the wire (S2) will define, and the CLI is not yet
-//! pointed at the actor. `SetModel`/`SetEffort`/`Compact` failures are currently
-//! dropped, for the same reason.
+//! ## Requests and replies
+//!
+//! `send` is fire-and-forget; `ask` awaits a reply. The reply is an
+//! [`AgentEvent`] reply variant — [`AgentEvent::History`] for `GetHistory`,
+//! [`AgentEvent::Ack`]/[`AgentEvent::Error`] for `SetModel`/`SetEffort`/
+//! [`AgentEvent::Compaction`] for `Compact` — correlated in-process by a
+//! one-shot channel. Replies are never fanned out on the event stream; the wire
+//! (S2) will carry the same variants correlated by the envelope's `reply_to`.
+//!
+//! Scope so far: every request variant that maps onto an existing [`Agent`]
+//! method is serviced. Still to come (S1b): pointing the CLI at a handle.
 
 use std::collections::VecDeque;
 use std::fmt;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::agent::Agent;
+use crate::compaction::CompactOutcome;
 use crate::event::AgentEvent;
-use crate::message::AgentMessage;
+use crate::loop_::LoopError;
+use crate::message::{AgentMessage, StopReason};
 use crate::protocol::Request;
 
 /// Default outbox buffer: how far a subscriber may lag before it starts losing
@@ -125,7 +130,7 @@ pub const EVENT_BUFFER: usize = 1024;
 /// handle drops, the session shuts down and its [`Agent`] is dropped.
 #[derive(Clone)]
 pub struct SessionHandle {
-    inbox: mpsc::UnboundedSender<Request>,
+    inbox: mpsc::UnboundedSender<Message>,
     events: broadcast::Sender<AgentEvent>,
 }
 
@@ -137,7 +142,28 @@ impl SessionHandle {
     /// non-interrupt request is serviced, but `Steer`/`FollowUp`/`Cancel` sent
     /// during a run are handled immediately (see the actor's delivery rules).
     pub fn send(&self, request: Request) -> Result<(), SessionClosed> {
-        self.inbox.send(request).map_err(|_| SessionClosed)
+        self.inbox
+            .send(Message::Tell(request))
+            .map_err(|_| SessionClosed)
+    }
+
+    /// Send a request and await its reply.
+    ///
+    /// `ask` is for requests that expect a reply: `GetHistory` (→
+    /// [`AgentEvent::History`]), `SetModel`/`SetEffort` (→ [`AgentEvent::Ack`]
+    /// or [`AgentEvent::Error`]), `Compact` (→ [`AgentEvent::Compaction`],
+    /// [`AgentEvent::Ack`], or [`AgentEvent::Error`]). It also works for
+    /// `Submit`, replying when the run completes. Interrupts
+    /// (`Steer`/`FollowUp`/`Cancel`) want no reply — use `send`; an `ask` on one
+    /// is deferred like any command while a run is in flight.
+    ///
+    /// Fails only if the session has shut down.
+    pub async fn ask(&self, request: Request) -> Result<AgentEvent, SessionClosed> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.inbox
+            .send(Message::Ask(request, reply_tx))
+            .map_err(|_| SessionClosed)?;
+        reply_rx.await.map_err(|_| SessionClosed)
     }
 
     /// Subscribe to the session's event stream. Each subscriber gets its own
@@ -158,6 +184,14 @@ impl fmt::Display for SessionClosed {
 }
 
 impl std::error::Error for SessionClosed {}
+
+/// A mailbox item: fire-and-forget, or a request that expects a reply.
+enum Message {
+    /// No reply wanted.
+    Tell(Request),
+    /// The reply to the request is sent here when it is serviced.
+    Ask(Request, oneshot::Sender<AgentEvent>),
+}
 
 /// Spawns the actor task that owns an [`Agent`].
 ///
@@ -181,44 +215,87 @@ impl SessionActor {
 /// The actor loop: pull one request at a time, service it, repeat.
 async fn serve(
     mut agent: Agent,
-    mut inbox: mpsc::UnboundedReceiver<Request>,
+    mut inbox: mpsc::UnboundedReceiver<Message>,
     events: broadcast::Sender<AgentEvent>,
 ) {
     // Requests that arrive *during* a run but cannot be applied to it (a
     // second `Submit`, a model swap) wait here and are serviced once the run
     // ends, preserving their order.
-    let mut deferred: VecDeque<Request> = VecDeque::new();
+    let mut deferred: VecDeque<Message> = VecDeque::new();
 
     loop {
-        let request = match deferred.pop_front() {
-            Some(request) => request,
+        let message = match deferred.pop_front() {
+            Some(message) => message,
             None => match inbox.recv().await {
-                Some(request) => request,
+                Some(message) => message,
                 None => break, // every handle dropped: shut down
             },
         };
 
-        match request {
-            Request::Submit { text } => {
-                run(&mut agent, &text, &mut inbox, &events, &mut deferred).await
-            }
-            Request::Steer { content } => agent.steer(AgentMessage::user_text(content)),
-            Request::FollowUp { content } => agent.follow_up(AgentMessage::user_text(content)),
-            // A cancel with no run in flight is a no-op, not a queued kill: the
-            // token is minted fresh at the end of each run, so cancelling an idle
-            // session would otherwise abort the *next* run on its first poll.
-            Request::Cancel => {}
-            Request::SetModel { model } => {
-                let _ = agent.set_model(model);
-            }
-            Request::SetEffort { effort } => {
-                let _ = agent.set_effort(effort);
-            }
-            Request::Compact { instructions } => {
-                let _ = agent.compact(instructions.as_deref()).await;
-            }
-            Request::Unknown => {}
+        dispatch(&mut agent, message, &mut inbox, &events, &mut deferred).await;
+    }
+}
+
+/// Service one mailbox item: run the request, then answer an `Ask` with the
+/// reply it produced (a `Tell` drops the reply on the floor).
+async fn dispatch(
+    agent: &mut Agent,
+    message: Message,
+    inbox: &mut mpsc::UnboundedReceiver<Message>,
+    events: &broadcast::Sender<AgentEvent>,
+    deferred: &mut VecDeque<Message>,
+) {
+    let (request, reply) = match message {
+        Message::Tell(request) => (request, None),
+        Message::Ask(request, reply) => (request, Some(reply)),
+    };
+
+    let event = match request {
+        Request::Submit { text } => match run(agent, &text, inbox, events, deferred).await {
+            Ok(stop_reason) => AgentEvent::Stopped { stop_reason },
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::Steer { content } => {
+            agent.steer(AgentMessage::user_text(content));
+            AgentEvent::Ack
         }
+        Request::FollowUp { content } => {
+            agent.follow_up(AgentMessage::user_text(content));
+            AgentEvent::Ack
+        }
+        // An idle cancel is a no-op (see the delivery rules): the token is
+        // minted fresh at the end of each run, so cancelling an idle session
+        // would otherwise abort the next run on its first poll.
+        Request::Cancel => AgentEvent::Ack,
+        Request::SetModel { model } => match agent.set_model(model) {
+            Ok(()) => AgentEvent::Ack,
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::SetEffort { effort } => match agent.set_effort(effort) {
+            Ok(()) => AgentEvent::Ack,
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::Compact { instructions } => match agent.compact(instructions.as_deref()).await {
+            Ok(CompactOutcome::NothingToDo) => AgentEvent::Ack,
+            Ok(CompactOutcome::Done {
+                summarized, kept, ..
+            }) => AgentEvent::Compaction { summarized, kept },
+            Err(e) => AgentEvent::Error { message: e },
+        },
+        Request::GetHistory => AgentEvent::History {
+            messages: agent.messages().to_vec(),
+        },
+        Request::Unknown => AgentEvent::Ack,
+    };
+
+    if let Some(reply) = reply {
+        let _ = reply.send(event);
     }
 }
 
@@ -227,10 +304,10 @@ async fn serve(
 async fn run(
     agent: &mut Agent,
     text: &str,
-    inbox: &mut mpsc::UnboundedReceiver<Request>,
+    inbox: &mut mpsc::UnboundedReceiver<Message>,
     events: &broadcast::Sender<AgentEvent>,
-    deferred: &mut VecDeque<Request>,
-) {
+    deferred: &mut VecDeque<Message>,
+) -> Result<StopReason, LoopError> {
     let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<AgentEvent>();
     // Sender/token clones taken *before* `run` borrows the agent: steering and
     // cancelling the in-flight run must not need the `&mut`.
@@ -247,12 +324,12 @@ async fn run(
         // here.
         tokio::select! {
             biased;
-            Some(request) = inbox.recv() => match request {
-                Request::Cancel => cancel.cancel(),
-                Request::Steer { content } => {
+            Some(message) = inbox.recv() => match message {
+                Message::Tell(Request::Cancel) => cancel.cancel(),
+                Message::Tell(Request::Steer { content }) => {
                     let _ = steer.send(AgentMessage::user_text(content));
                 }
-                Request::FollowUp { content } => {
+                Message::Tell(Request::FollowUp { content }) => {
                     let _ = follow_up.send(AgentMessage::user_text(content));
                 }
                 other => deferred.push_back(other),
@@ -273,11 +350,12 @@ async fn run(
     // A session-write error inside the run is a `LoopError`; the run's own
     // `AgentEvent::Error` covers stream failures, so surface this one the same
     // way rather than dropping it silently.
-    if let Err(e) = result {
+    if let Err(e) = &result {
         let _ = events.send(AgentEvent::Error {
             message: e.to_string(),
         });
     }
+    result
 }
 
 #[cfg(test)]
@@ -596,6 +674,98 @@ mod tests {
             rec.models(),
             ["m1", "m1", "m2"],
             "the swap waited for the run, then applied to the next one"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_history_returns_the_conversation() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("hi back".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+        handle
+            .send(Request::Submit {
+                text: "hello".into(),
+            })
+            .unwrap();
+        wait_for_end(&mut rx).await;
+
+        let reply = handle.ask(Request::GetHistory).await.unwrap();
+        let AgentEvent::History { messages } = reply else {
+            panic!("expected a History reply, got {reply:?}");
+        };
+        assert!(
+            messages.iter().any(|m| m.as_text() == "hello"),
+            "the read-back carries the user turn: {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_set_model_replies_ack_and_takes_effect() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("x".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+
+        let reply = handle
+            .ask(Request::SetModel { model: "m2".into() })
+            .await
+            .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+        handle.send(Request::Submit { text: "go".into() }).unwrap();
+        wait_for_end(&mut rx).await;
+        assert_eq!(rec.models(), ["m2"], "the swap applied to the next run");
+    }
+
+    #[tokio::test]
+    async fn ask_compact_with_nothing_to_do_replies_ack() {
+        let handle = SessionActor::spawn(Agent::new(agent_config(
+            fake_stream_fn(&Recorder::default()),
+            vec![],
+        )));
+        let reply = handle
+            .ask(Request::Compact { instructions: None })
+            .await
+            .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn ask_submit_replies_stopped_with_the_reason() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let reply = handle
+            .ask(Request::Submit { text: "hi".into() })
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                reply,
+                AgentEvent::Stopped {
+                    stop_reason: StopReason::Stop
+                }
+            ),
+            "{reply:?}"
         );
     }
 }

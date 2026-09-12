@@ -79,6 +79,21 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// Reply: a request with no richer answer succeeded (e.g. `SetModel`).
+    /// Never *streamed* — it answers one request, correlated by the transport
+    /// (an in-process reply channel today, the envelope's `reply_to` on the
+    /// wire).
+    Ack,
+    /// Reply: the run finished, with why it stopped. Answers a `Submit`. Never
+    /// streamed (see [`AgentEvent::Ack`]).
+    Stopped {
+        stop_reason: StopReason,
+    },
+    /// Reply: the conversation so far, answering a `Request::GetHistory`. Never
+    /// streamed (see [`AgentEvent::Ack`]).
+    History {
+        messages: Vec<AgentMessage>,
+    },
     AgentEnd,
 }
 
@@ -177,6 +192,19 @@ mod tests {
                 reason: "503".into(),
             },
             "retrying",
+        );
+        roundtrip(AgentEvent::Ack, "ack");
+        roundtrip(
+            AgentEvent::Stopped {
+                stop_reason: StopReason::Aborted,
+            },
+            "stopped",
+        );
+        roundtrip(
+            AgentEvent::History {
+                messages: vec![AgentMessage::user_text("hi")],
+            },
+            "history",
         );
         roundtrip(AgentEvent::AgentEnd, "agent_end");
     }

@@ -91,8 +91,13 @@ impl std::fmt::Display for SessionId {
 /// Inbound payloads carry user **content**, not an `AgentMessage`: a remote peer
 /// must not be able to inject an `Assistant`/`ToolResult` message and impersonate
 /// the model. The session wraps content as a user message, exactly as
-/// `Agent::run` does. Read-back requests (`GetHistory`) and the reply events
-/// they need arrive with the actor (S1), when there is something to answer with.
+/// `Agent::run` does. `GetHistory` is a read: it carries no payload and its
+/// answer comes back as [`AgentEvent::History`]
+/// (with the other replies — [`AgentEvent::Ack`],
+/// and [`AgentEvent::Error`] — alongside it).
+/// These reply variants are never *streamed*: they answer a specific request,
+/// which the transport correlates (an in-process oneshot today, the envelope's
+/// `reply_to` on the wire).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -119,6 +124,10 @@ pub enum Request {
     /// Summarize the older prefix of the conversation now, optionally focused
     /// by `instructions`.
     Compact { instructions: Option<String> },
+
+    /// Read back the conversation so far. Reply:
+    /// [`AgentEvent::History`].
+    GetHistory,
 
     /// Forward-compatibility catch-all: an older peer must skip a request it
     /// does not understand rather than fail the connection.
