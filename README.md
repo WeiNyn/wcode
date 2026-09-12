@@ -42,9 +42,14 @@ keep_recent_tokens = 20000 # recent verbatim context kept after compacting, in t
 keep_recent_turns = 2      # complete turns always kept, whatever their size
 
 [instructions]
-# A project instruction file folded into the system prompt. Default: discover
-# AGENTS.md from the working dir upward (stopping at the repo root); "off" disables.
-file = "AGENTS.md"
+# Instruction ("reference") files folded into the system prompt. An absent table
+# = discover the candidate names from the working dir up to the repo root, plus
+# a global file in the config dir, merged global-first. `file` overrides
+# discovery with a single name/path; "off" disables.
+file = "AGENTS.md"          # optional; load exactly this instead of discovery
+names = ["AGENTS.md"]       # optional; candidate names per directory
+                            # (default: AGENTS.override.md, AGENTS.md, CLAUDE.md)
+global = true               # optional; also load one from ~/.config/wcode
 
 [retry]
 # Retry the connect/handshake (and the first streamed item) on transient
@@ -66,7 +71,8 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
 an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
-`--no-instructions` skips the instruction file.
+`--no-instructions` skips the instruction files; `--dump-system-prompt` prints
+the composed system prompt (instructions included) and exits — no model needed.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a
@@ -80,7 +86,8 @@ wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
-wcode --no-instructions      # run without loading AGENTS.md
+wcode --no-instructions      # run without loading instruction files
+wcode --dump-system-prompt   # print the composed system prompt, exit
 ```
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):

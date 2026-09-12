@@ -9,17 +9,19 @@ use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::Session;
 
 mod config;
+mod instructions;
 mod repl;
 mod rtk;
 mod tools;
 
-use crate::config::{Config, ConfigError, EnvLike, FileConfig, merge, parse_endpoint};
+use crate::config::{Config, ConfigError, EnvLike, FileConfig, config_dir, merge, parse_endpoint};
+use crate::instructions::{Mode, load as load_instructions};
 use crate::repl::{build_agent, default_hooks, list_sessions, resolve_session_path, session_dir};
 
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--dump-system-prompt]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -29,7 +31,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --endpoint <e>     override the configured endpoint (chat|responses)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
-   --no-instructions  don't load a project instruction file (AGENTS.md)
+   --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
+   --dump-system-prompt  print the composed system prompt and exit
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -47,7 +50,9 @@ config: ~/.config/wcode/config.toml
   find = \"...\"       (optional, true|false; register the find tool. Off by default — bash can list files)
 
   [instructions]
-  file = \"...\"       (optional; instruction file name/path loaded into the system prompt. \"off\" disables. Default: AGENTS.md)
+  file = \"...\"       (optional; load exactly this file instead of discovery. \"off\" disables)
+  names = [...]      (optional; candidate names to discover per directory. Default: AGENTS.override.md, AGENTS.md, CLAUDE.md)
+  global = true      (optional; also load the candidate file from ~/.config/wcode. Default true)
 
   [retry]
   max = 3            (optional; retry transient connect errors this many times; 0 disables)
@@ -73,6 +78,7 @@ struct Args {
     effort: Option<Option<String>>,
     list_models: bool,
     no_instructions: bool,
+    dump_system_prompt: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -129,6 +135,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             }
             "--list-models" => a.list_models = true,
             "--no-instructions" => a.no_instructions = true,
+            "--dump-system-prompt" => a.dump_system_prompt = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -171,14 +178,14 @@ async fn main() {
     // errors (unreadable/corrupt) still surface.
     let mut cfg = match Config::load() {
         Ok(c) => c,
-        Err(ConfigError::MissingModel(file)) if args.model.is_some() => {
+        Err(ConfigError::MissingModel(file)) if args.model.is_some() || args.dump_system_prompt => {
             // merge() never ran (file lacked model): rescue re-runs it with
             // the parsed file so toml/env base_url+api_key survive;
             // `--model`/`--base-url` flags are applied below and still win.
             // An invalid env override (endpoint/rtk/grep/find) still surfaces
             // as a clean error here — not a panic.
             match rescue(
-                args.model.clone().expect("--model"),
+                args.model.clone().unwrap_or_else(|| "(unset)".into()),
                 *file,
                 EnvLike::from_env(),
             ) {
@@ -220,6 +227,20 @@ async fn main() {
         cfg.effort = effort;
     }
     let mut llm = cfg.to_llm_opts();
+
+    // `--dump-system-prompt`: print the composed prompt (instructions
+    // included) and exit. Needs no endpoint, model, or session.
+    if args.dump_system_prompt {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mode = if args.no_instructions {
+            Mode::Off
+        } else {
+            cfg.instructions.mode()
+        };
+        let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
+        println!("{}", repl::system_prompt(&cfg.tools, &instructions));
+        std::process::exit(0);
+    }
 
     // `--list-models`: resolve against the same base_url/key as chat, print
     // sorted ids (`*` marks the configured model), exit. No session touched.
@@ -293,16 +314,16 @@ async fn main() {
         },
     };
 
-    // Project instructions: discover the configured file (default AGENTS.md)
-    // from the working dir upward, unless --no-instructions disables it.
+    // Instruction ("reference") files: discover the configured candidates
+    // from the working dir up to the repo root (plus the config-dir global
+    // file), unless --no-instructions disables it.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let instructions = if args.no_instructions {
-        None
+    let mode = if args.no_instructions {
+        Mode::Off
     } else {
-        cfg.instructions
-            .spec()
-            .and_then(|spec| repl::load_instructions(&cwd, &spec))
+        cfg.instructions.mode()
     };
+    let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
 
     let hooks = default_hooks(&cfg.hooks);
     let mut agent = build_agent(
@@ -312,7 +333,7 @@ async fn main() {
         session,
         context,
         cfg.compaction,
-        instructions.as_ref(),
+        &instructions,
     );
 
     match args.prompt {

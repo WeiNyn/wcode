@@ -63,10 +63,12 @@ Rust edition 2024, resolver 3.
   anchors — re-read after formatting. Identical lines share an anchor; `edit`
   rejects ambiguous targets unless `old_string` pins one. Edits never shift
   lines above them.
-- **The project instruction file** (this `AGENTS.md`, default name) is
-  discovered from the working dir up to the repo root and folded into the
-  **system prompt at startup** (32 KiB cap), `--no-instructions` / `"off"` /
-  `WCODE_INSTRUCTIONS` to control it.
+- **Instruction ("reference") files** are discovered as a *set* — a global file
+  in `~/.config/wcode/` plus the ancestor chain (repo root → working dir,
+  nearest last), candidates `AGENTS.override.md`/`AGENTS.md`/`CLAUDE.md` per
+  dir — and folded into the **system prompt at startup** (32 KiB per file, 64
+  KiB total). `--no-instructions` / `"off"` / `WCODE_INSTRUCTIONS` control it;
+  `--dump-system-prompt` prints the composed prompt and exits.
 - **Verify against a real binary.** For local checks point at a keyless
   endpoint (`--base-url http://localhost:11434/v1`); for error/retry paths a
   refused port (`http://127.0.0.1:9/v1`) with `WCODE_RETRY_MAX=2`.

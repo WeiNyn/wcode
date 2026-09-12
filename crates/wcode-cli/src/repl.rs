@@ -19,81 +19,17 @@ use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
 use crate::config::{HooksConfig, ToolsConfig};
+use crate::instructions::InstructionSet;
 use crate::rtk::RtkHooks;
 use crate::tools::default_tools;
 
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
-/// Max bytes of a project instruction file folded into the system prompt.
-/// Beyond this it is truncated — a huge `AGENTS.md` would crowd out the task.
-const MAX_INSTRUCTIONS_BYTES: usize = 32_768;
-
-/// A project instruction file discovered for the working directory.
-#[derive(Clone, Debug)]
-pub struct Instructions {
-    pub path: PathBuf,
-    pub text: String,
-}
-
-/// Find and read the instruction file for `cwd`. `spec` is the configured
-/// name/path: an absolute path, or one containing a separator, is taken
-/// verbatim; otherwise it is a file name discovered in `cwd` and its parents,
-/// stopping at the repo root (a dir containing `.git`). `None` when absent or
-/// unreadable — instructions are best-effort. Contents are size-capped.
-pub fn load_instructions(cwd: &Path, spec: &str) -> Option<Instructions> {
-    let path = resolve_instructions_path(cwd, spec)?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let text = truncate_instructions(text, MAX_INSTRUCTIONS_BYTES);
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(Instructions { path, text })
-}
-
-/// Resolve `spec` to an existing instruction file, discovering by walking up
-/// from `cwd` when `spec` is a bare name.
-fn resolve_instructions_path(cwd: &Path, spec: &str) -> Option<PathBuf> {
-    let p = Path::new(spec);
-    if p.is_absolute() {
-        return p.is_file().then(|| p.to_path_buf());
-    }
-    if spec.contains('/') || spec.contains(std::path::MAIN_SEPARATOR) {
-        let candidate = cwd.join(spec);
-        return candidate.is_file().then_some(candidate);
-    }
-    let mut dir = Some(cwd);
-    while let Some(d) = dir {
-        let candidate = d.join(spec);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if d.join(".git").exists() {
-            break; // repo root: don't search above it
-        }
-        dir = d.parent();
-    }
-    None
-}
-
-/// Truncate `text` to at most `max` bytes on a char boundary, appending a
-/// marker when it was cut.
-fn truncate_instructions(mut text: String, max: usize) -> String {
-    if text.len() <= max {
-        return text;
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    text.push_str("\n… [instructions truncated]");
-    text
-}
 
 /// System prompt derives from the registered tool set. The read/edit anchor
 /// contract is constant; grep/find are named only when those tools are
 /// actually registered (both are off by default — `bash` covers search).
-fn system_prompt(tools: &ToolsConfig, instructions: Option<&Instructions>) -> String {
+pub fn system_prompt(tools: &ToolsConfig, instructions: &InstructionSet) -> String {
     let inspect = match (tools.grep, tools.find) {
         (true, true) => "read, grep and find",
         (true, false) => "read and grep",
@@ -106,12 +42,8 @@ fn system_prompt(tools: &ToolsConfig, instructions: Option<&Instructions>) -> St
          read emits a 5-char anchor per line and edit targets lines by those anchors \
          (content-addressed, drift-proof). Be concise."
     );
-    match instructions {
-        Some(instr) => format!(
-            "{base}\n\n# Project instructions ({path})\n{text}",
-            path = instr.path.display(),
-            text = instr.text.trim_end(),
-        ),
+    match instructions.render() {
+        Some(block) => format!("{base}\n\n{block}"),
         None => base,
     }
 }
@@ -382,7 +314,7 @@ pub fn build_agent(
     session: Option<Session>,
     context: Vec<AgentMessage>,
     compaction: CompactionPolicy,
-    instructions: Option<&Instructions>,
+    instructions: &InstructionSet,
 ) -> Agent {
     Agent::new(AgentConfig {
         system: system_prompt(tools, instructions),
@@ -581,7 +513,7 @@ pub async fn run(
     hooks: HooksSet,
     tools: ToolsConfig,
     compaction: CompactionPolicy,
-    instructions: Option<Instructions>,
+    instructions: InstructionSet,
 ) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
@@ -615,8 +547,9 @@ pub async fn run(
         None => println!("(no session)"),
     }
 
-    if let Some(instr) = &instructions {
-        println!("instructions: {}", instr.path.display());
+    for instr in &instructions.files {
+        let scope = if instr.global { "global" } else { "project" };
+        println!("{scope} instructions: {}", instr.path.display());
     }
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -649,7 +582,7 @@ pub async fn run(
                                 session,
                                 Vec::new(),
                                 compaction,
-                                instructions.as_ref(),
+                                &instructions,
                             );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         match path {
@@ -728,7 +661,7 @@ pub async fn run(
                             Some(s),
                             messages,
                             compaction,
-                            instructions.as_ref(),
+                            &instructions,
                         );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
@@ -987,7 +920,7 @@ mod tests {
 
     #[test]
     fn system_prompt_names_only_registered_inspect_tools() {
-        let off = system_prompt(&ToolsConfig::default(), None);
+        let off = system_prompt(&ToolsConfig::default(), &crate::instructions::InstructionSet::default());
         assert!(off.contains("Inspect with read;"), "{off}");
         assert!(!off.contains("grep") && !off.contains("find"));
 
@@ -996,7 +929,7 @@ mod tests {
                 grep: true,
                 find: true,
             },
-            None,
+            &crate::instructions::InstructionSet::default(),
         );
         assert!(on.contains("Inspect with read, grep and find;"), "{on}");
 
@@ -1005,7 +938,7 @@ mod tests {
                 grep: true,
                 find: false,
             },
-            None,
+            &crate::instructions::InstructionSet::default(),
         );
         assert!(
             only_grep.contains("Inspect with read and grep;"),
@@ -1376,16 +1309,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod instructions_tests {
+mod system_prompt_tests {
     use super::*;
+    use crate::instructions::{InstructionSet, Instructions};
 
     #[test]
-    fn system_prompt_appends_project_instructions() {
-        let instr = Instructions {
-            path: PathBuf::from("/repo/AGENTS.md"),
-            text: "Build: cargo build\n".into(),
+    fn appends_project_instructions_and_omits_when_empty() {
+        let set = InstructionSet {
+            files: vec![Instructions {
+                path: PathBuf::from("/repo/AGENTS.md"),
+                text: "Build: cargo build\n".into(),
+                global: false,
+            }],
         };
-        let with = system_prompt(&ToolsConfig::default(), Some(&instr));
+        let with = system_prompt(&ToolsConfig::default(), &set);
         assert!(with.contains("You are wcode"), "{with}");
         assert!(
             with.contains("# Project instructions (/repo/AGENTS.md)"),
@@ -1393,58 +1330,7 @@ mod instructions_tests {
         );
         assert!(with.contains("Build: cargo build"), "{with}");
 
-        let base = system_prompt(&ToolsConfig::default(), None);
+        let base = system_prompt(&ToolsConfig::default(), &InstructionSet::default());
         assert!(!base.contains("Project instructions"), "{base}");
-    }
-
-    #[test]
-    fn load_instructions_finds_the_nearest_file_up_to_the_repo_root() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join(".git")).unwrap();
-        std::fs::write(root.path().join("AGENTS.md"), "ROOT").unwrap();
-        let sub = root.path().join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
-
-        // Nearest wins: a file in the deep dir shadows the repo-root one.
-        std::fs::write(sub.join("AGENTS.md"), "NEAR").unwrap();
-        assert_eq!(load_instructions(&sub, "AGENTS.md").unwrap().text, "NEAR");
-
-        // Without the nearer file, the walk climbs to the repo root.
-        std::fs::remove_file(sub.join("AGENTS.md")).unwrap();
-        let found = load_instructions(&sub, "AGENTS.md").unwrap();
-        assert_eq!(found.text, "ROOT");
-        assert_eq!(found.path, root.path().join("AGENTS.md"));
-    }
-
-    #[test]
-    fn load_instructions_stops_at_the_repo_root() {
-        let outer = tempfile::tempdir().unwrap();
-        std::fs::write(outer.path().join("AGENTS.md"), "OUTER").unwrap();
-        let repo = outer.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let sub = repo.join("sub");
-        std::fs::create_dir_all(&sub).unwrap();
-        // The repo root (`.git`) bounds the search, so OUTER is never seen.
-        assert!(load_instructions(&sub, "AGENTS.md").is_none());
-    }
-
-    #[test]
-    fn load_instructions_honors_an_explicit_path() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("docs")).unwrap();
-        std::fs::write(dir.path().join("docs/guide.md"), "hi").unwrap();
-        // A spec containing a separator is taken relative to cwd (no walk).
-        assert_eq!(load_instructions(dir.path(), "docs/guide.md").unwrap().text, "hi");
-        assert!(load_instructions(dir.path(), "docs/missing.md").is_none());
-    }
-
-    #[test]
-    fn load_instructions_truncates_large_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let big = "x".repeat(MAX_INSTRUCTIONS_BYTES + 5_000);
-        std::fs::write(dir.path().join("AGENTS.md"), &big).unwrap();
-        let found = load_instructions(dir.path(), "AGENTS.md").unwrap();
-        assert!(found.text.len() < big.len());
-        assert!(found.text.ends_with("[instructions truncated]"), "{}", &found.text[found.text.len() - 40..]);
     }
 }

@@ -179,10 +179,12 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 ## 5. Phased tasks
 
 **Phase 1 — References as a set (generalize).**
-- [ ] Move instruction loading to `instructions.rs` (pure move, tests pass).
-- [ ] Global file + ancestor-chain set; candidate names incl. `CLAUDE.md`.
-- [ ] Merge with headers, dedup by canonical path, per-file + total caps.
-- [ ] `--dump-system-prompt`; extend the `[instructions]` config + tests.
+- [x] Move instruction loading to `instructions.rs` (generalized + unit-tested).
+- [x] Global file + ancestor-chain set; candidates `AGENTS.override.md` →
+      `AGENTS.md` → `CLAUDE.md`.
+- [x] Merge with `# (Global|Project) instructions (<path>)` headers, dedup by
+      canonical path, per-file 32 KiB + total 64 KiB caps (drop least specific).
+- [x] `--dump-system-prompt`; `[instructions] file/names/global` + tests.
 
 **Phase 2 — Skills core.**
 - [ ] `skills.rs`: frontmatter parser + validation (warn/skip), unit tests.
@@ -240,6 +242,6 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 
 - [x] Settle parsing / roots / global file / `CLAUDE.md` / collision order /
       prompt / `name`-vs-dir (see §7).
-- [ ] Phase 1 (references as a set) — code + tests + `--dump-system-prompt`.
+- [x] Phase 1 (references as a set) — `instructions.rs`, config, `--dump-system-prompt`.
 - [ ] Phase 2 (skills core) — code + tests + live check.
 - [ ] Phase 3 (polish + docs).

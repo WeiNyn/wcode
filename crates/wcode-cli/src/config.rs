@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, RetryPolicy};
 
+use crate::instructions::Mode;
 use crate::rtk::RtkPreference;
 
 /// Hook integrations, loaded from the `[hooks]` config table.
@@ -31,28 +32,39 @@ pub struct ToolsConfig {
     pub find: bool,
 }
 
-/// Project instruction file, loaded from the `[instructions]` table.
+/// Instruction ("reference") files, loaded from the `[instructions]` table.
 ///
-/// Absent table = discover `AGENTS.md` from the working dir upward. `file`
-/// overrides the name/path; `"off"` (or empty) disables. Env: `WCODE_INSTRUCTIONS`.
+/// Absent table = discover the default candidate names from the working dir up
+/// to the repo root, plus a global file in the config directory. `file`
+/// overrides discovery with a single name/path; `"off"` (or empty) disables.
+/// Env: `WCODE_INSTRUCTIONS` (sets `file`).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct InstructionsConfig {
-    /// File name discovered in (and above) the working dir, or a path
-    /// (relative to it, or absolute). `"off"`/empty disables.
+    /// Explicit override: load exactly this name (walked up) or path, instead
+    /// of discovering the candidate names. `"off"`/empty disables.
     pub file: Option<String>,
+    /// Candidate names to discover per directory (default:
+    /// [`crate::instructions::DEFAULT_INSTRUCTION_NAMES`]).
+    pub names: Option<Vec<String>>,
+    /// Also load a candidate file from the config dir (default true).
+    pub global: Option<bool>,
 }
 
-/// Default instruction file name.
-pub const DEFAULT_INSTRUCTIONS_FILE: &str = "AGENTS.md";
-
 impl InstructionsConfig {
-    /// The file to load, or `None` when disabled. An absent `file` keeps the
-    /// default name; `"off"`/empty disables.
-    pub fn spec(&self) -> Option<String> {
+    /// Resolve to a discovery mode. `"off"`/empty `file` disables everything.
+    pub fn mode(&self) -> Mode {
         match self.file.as_deref().map(str::trim) {
-            None => Some(DEFAULT_INSTRUCTIONS_FILE.to_string()),
-            Some("") | Some("off") => None,
-            Some(name) => Some(name.to_string()),
+            Some("") | Some("off") => Mode::Off,
+            Some(name) => Mode::Explicit(name.to_string()),
+            None => Mode::Discover {
+                names: self.names.clone().unwrap_or_else(|| {
+                    crate::instructions::DEFAULT_INSTRUCTION_NAMES
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect()
+                }),
+                global: self.global.unwrap_or(true),
+            },
         }
     }
 }
@@ -294,10 +306,12 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             parse_count("retry.cap_ms", v).map_err(ConfigError::Io)?,
         );
     }
-    // Env beats toml: an explicit `WCODE_INSTRUCTIONS` (or `off`) wins.
-    let instructions = InstructionsConfig {
-        file: env.wcode_instructions.or(file.instructions.file),
-    };
+    // Env beats toml: an explicit `WCODE_INSTRUCTIONS` (or `off`) wins for the
+    // override; the discovery names/global come from the toml.
+    let mut instructions = file.instructions;
+    if let Some(v) = env.wcode_instructions {
+        instructions.file = Some(v);
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -323,6 +337,13 @@ pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
     }
 }
 
+/// wcode's config directory (`~/.config/wcode`): `config.toml` and the default
+/// global instruction file. The spec mandates this path even on macOS (not
+/// `dirs::config_dir()`).
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|p| p.join(".config/wcode"))
+}
+
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
         let file = match Self::default_path().map(std::fs::read_to_string) {
@@ -339,8 +360,7 @@ impl Config {
     }
 
     pub fn default_path() -> Option<PathBuf> {
-        // Spec mandates ~/.config/wcode/config.toml even on macOS (not dirs::config_dir()).
-        dirs::home_dir().map(|p| p.join(".config/wcode/config.toml"))
+        config_dir().map(|d| d.join("config.toml"))
     }
 
     pub fn to_llm_opts(&self) -> LlmOpts {
@@ -663,18 +683,28 @@ mod instructions_cfg_tests {
     use super::*;
 
     #[test]
-    fn spec_defaults_off_and_override() {
+    fn mode_defaults_to_discovery_and_honors_off_and_override() {
         assert_eq!(
-            InstructionsConfig::default().spec().as_deref(),
-            Some("AGENTS.md")
+            InstructionsConfig::default().mode(),
+            Mode::Discover {
+                names: crate::instructions::DEFAULT_INSTRUCTION_NAMES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                global: true,
+            }
         );
-        assert_eq!(InstructionsConfig { file: Some("off".into()) }.spec(), None);
-        assert_eq!(InstructionsConfig { file: Some("   ".into()) }.spec(), None);
         assert_eq!(
-            InstructionsConfig { file: Some("CLAUDE.md".into()) }
-                .spec()
-                .as_deref(),
-            Some("CLAUDE.md")
+            InstructionsConfig { file: Some("off".into()), ..Default::default() }.mode(),
+            Mode::Off
+        );
+        assert_eq!(
+            InstructionsConfig { file: Some("   ".into()), ..Default::default() }.mode(),
+            Mode::Off
+        );
+        assert_eq!(
+            InstructionsConfig { file: Some("CLAUDE.md".into()), ..Default::default() }.mode(),
+            Mode::Explicit("CLAUDE.md".into())
         );
     }
 
@@ -689,6 +719,7 @@ mod instructions_cfg_tests {
                 model: Some("m".into()),
                 instructions: InstructionsConfig {
                     file: Some("X.md".into()),
+                    ..Default::default()
                 },
                 ..FileConfig::default()
             },
