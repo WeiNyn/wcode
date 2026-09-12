@@ -69,6 +69,10 @@ Rust edition 2024, resolver 3.
   dir — and folded into the **system prompt at startup** (32 KiB per file, 64
   KiB total). `--no-instructions` / `"off"` / `WCODE_INSTRUCTIONS` control it;
   `--dump-system-prompt` prints the composed prompt and exits.
+- **Skills** (`SKILL.md`) are discovered project-first (`.wcode/skills`, then the
+  shared `.agents/skills`, falling back to `.claude/skills`) and globally; only
+  each skill's `name` + `description` enter the prompt — the body loads on demand
+  via `read`. `--no-skills` / `[skills]` control it.
 - **Verify against a real binary.** For local checks point at a keyless
   endpoint (`--base-url http://localhost:11434/v1`); for error/retry paths a
   refused port (`http://127.0.0.1:9/v1`) with `WCODE_RETRY_MAX=2`.

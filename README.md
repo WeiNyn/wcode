@@ -51,6 +51,14 @@ names = ["AGENTS.md"]       # optional; candidate names per directory
                             # (default: AGENTS.override.md, AGENTS.md, CLAUDE.md)
 global = true               # optional; also load one from ~/.config/wcode
 
+[skills]
+# Discover `SKILL.md` packages and fold their name + description into the system
+# prompt; the body loads on demand when the agent `read`s the path. An absent
+# table = discover from the standard roots.
+enabled = true              # optional; discover skills at all. Default true
+dirs = ["./team-skills"]    # optional; extra roots, scanned first
+disabled = ["noisy-skill"] # optional; names to skip
+
 [retry]
 # Retry the connect/handshake (and the first streamed item) on transient
 # failures — 429/5xx statuses and transport errors. An absent table = defaults.
@@ -65,7 +73,8 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
-`off`), and `WCODE_RETRY_MAX`, `WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS` (the
+`off`), `WCODE_SKILLS` (extra skill roots, or `off`), and `WCODE_RETRY_MAX`,
+`WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS` (the
 `[retry]` table).
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
@@ -88,6 +97,7 @@ wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
+wcode --no-skills            # run without discovering skills
 ```
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
@@ -158,6 +168,38 @@ following the hashline ideas in `pi-better-edit`:
 Structural search is a separate axis: `ast_search`/`ast_edit` shell out to an
 `ast-grep` binary (the legacy `sg` alias is the fallback; the same auto-detect
 pattern as the rtk hook).
+
+## Skills
+
+A skill is a directory with a `SKILL.md` — YAML frontmatter (`name`,
+`description`) plus a body:
+
+```markdown
+---
+name: pdf-tools
+description: Extract text and tables from PDFs. Use for PDF documents.
+---
+
+# PDF tools
+Run `scripts/extract.sh <file>`.
+```
+
+Only `name` and `description` enter the system prompt (as an `# Available
+skills` section); the body loads on demand — the agent `read`s the SKILL.md
+when a task matches. That is progressive disclosure: many skills cost many
+one-line entries, not many bodies. A skill may ship `scripts/`, `references/`,
+`assets/`; the body refers to them by relative path.
+
+Roots, highest priority first (first `name` wins):
+
+1. `[skills] dirs` / `WCODE_SKILLS` explicit roots,
+2. the working dir and its ancestors up to the repo root — `.wcode/skills/`,
+   then the shared dir `.agents/skills/` (falling back to `.claude/skills/`
+   where `.agents` is absent),
+3. global — `~/.local/share/wcode/skills/`, then the same shared pair.
+
+Malformed skills (bad name, missing description, invalid YAML) warn on stderr
+and are skipped. `--no-skills` disables discovery.
 
 ## Sessions
 

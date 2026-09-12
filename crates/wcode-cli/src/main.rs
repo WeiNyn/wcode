@@ -12,16 +12,20 @@ mod config;
 mod instructions;
 mod repl;
 mod rtk;
+mod skills;
 mod tools;
 
 use crate::config::{Config, ConfigError, EnvLike, FileConfig, config_dir, merge, parse_endpoint};
 use crate::instructions::{Mode, load as load_instructions};
-use crate::repl::{build_agent, default_hooks, list_sessions, resolve_session_path, session_dir};
+use crate::skills::{SkillSet, discover as discover_skills};
+use crate::repl::{
+    AgentSpec, build_agent, default_hooks, list_sessions, resolve_session_path, session_dir,
+};
 
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--dump-system-prompt]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -32,6 +36,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
+   --no-skills        don't discover skills (SKILL.md)
    --dump-system-prompt  print the composed system prompt and exit
    -h, --help         show this help
 
@@ -54,6 +59,11 @@ config: ~/.config/wcode/config.toml
   names = [...]      (optional; candidate names to discover per directory. Default: AGENTS.override.md, AGENTS.md, CLAUDE.md)
   global = true      (optional; also load the candidate file from ~/.config/wcode. Default true)
 
+  [skills]
+  enabled = true     (optional; discover SKILL.md packages. Default true)
+  dirs = [...]       (optional; extra skill roots, scanned first)
+  disabled = [...]   (optional; skill names to skip)
+
   [retry]
   max = 3            (optional; retry transient connect errors this many times; 0 disables)
   base_ms = 500      (optional; base backoff for the first retry)
@@ -63,6 +73,7 @@ env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml
 env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
+env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS override the toml retry table";
 
 #[derive(Debug, Default, PartialEq)]
@@ -79,6 +90,7 @@ struct Args {
     list_models: bool,
     no_instructions: bool,
     dump_system_prompt: bool,
+    no_skills: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -136,6 +148,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--list-models" => a.list_models = true,
             "--no-instructions" => a.no_instructions = true,
             "--dump-system-prompt" => a.dump_system_prompt = true,
+            "--no-skills" => a.no_skills = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -153,6 +166,19 @@ fn rescue(model: String, file: FileConfig, env: EnvLike) -> Result<Config, Confi
             ..file
         },
     )
+}
+
+/// Skills to fold into the system prompt: `--no-skills` and `[skills]
+/// enabled = false` disable discovery; otherwise the configured roots plus the
+/// standard ones are scanned.
+fn discover_skills_for(args: &Args, cfg: &Config, cwd: &std::path::Path) -> SkillSet {
+    if args.no_skills {
+        return SkillSet::default();
+    }
+    match cfg.skills.to_spec() {
+        Some(spec) => discover_skills(&spec, cwd, dirs::home_dir().as_deref()),
+        None => SkillSet::default(),
+    }
 }
 
 #[tokio::main]
@@ -238,7 +264,11 @@ async fn main() {
             cfg.instructions.mode()
         };
         let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
-        println!("{}", repl::system_prompt(&cfg.tools, &instructions));
+        let skills = discover_skills_for(&args, &cfg, &cwd);
+        println!(
+            "{}",
+            repl::system_prompt(&cfg.tools, &instructions, &skills, &cwd)
+        );
         std::process::exit(0);
     }
 
@@ -324,21 +354,25 @@ async fn main() {
         cfg.instructions.mode()
     };
     let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
+    let skills = discover_skills_for(&args, &cfg, &cwd);
 
     let hooks = default_hooks(&cfg.hooks);
     let mut agent = build_agent(
-        llm.clone(),
-        hooks.clone(),
-        &cfg.tools,
+        AgentSpec {
+            llm: llm.clone(),
+            hooks: hooks.clone(),
+            tools: &cfg.tools,
+            compaction: cfg.compaction,
+            instructions: &instructions,
+            skills: &skills,
+        },
         session,
         context,
-        cfg.compaction,
-        &instructions,
     );
 
     match args.prompt {
         Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
-        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions).await,
+        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions, skills).await,
     }
 }
 

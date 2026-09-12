@@ -187,13 +187,13 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - [x] `--dump-system-prompt`; `[instructions] file/names/global` + tests.
 
 **Phase 2 — Skills core.**
-- [ ] `skills.rs`: frontmatter parser + validation (warn/skip), unit tests.
-- [ ] Discovery: global + project roots (`.wcode`; `.agents` preferred,
-      `.claude` fallback), depth bound, collision = first wins.
-- [ ] Prompt section rendering with relative paths, clipping, cap.
-- [ ] `[skills]` config + `WCODE_SKILLS` + `--no-skills`; wire into startup.
-- [ ] Live check: temp repo skill, `--dump-system-prompt` shows it; a real
-      endpoint actually loads the body via `read`.
+- [x] `skills.rs`: `serde_yaml_ng` frontmatter + validation (warn/skip), unit tested.
+- [x] Discovery: project nearest-first (`.wcode`, then `.agents` preferred /
+      `.claude` fallback), global last, depth bound 4, first name wins.
+- [x] Prompt section with relative paths, description clipping, 16 KiB cap.
+- [x] `[skills] enabled/dirs/disabled` + `WCODE_SKILLS` + `--no-skills`; wired in.
+- [x] Live check: `--dump-system-prompt` shows the section; a real endpoint
+      loaded the body via `read` (see §8).
 
 **Phase 3 — Polish.**
 - [ ] `/skills` (list) and `/skill <name>` (force-load) REPL commands.
@@ -243,5 +243,5 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - [x] Settle parsing / roots / global file / `CLAUDE.md` / collision order /
       prompt / `name`-vs-dir (see §7).
 - [x] Phase 1 (references as a set) — `instructions.rs`, config, `--dump-system-prompt`.
-- [ ] Phase 2 (skills core) — code + tests + live check.
+- [x] Phase 2 (skills core) — verified end-to-end against a live model.
 - [ ] Phase 3 (polish + docs).

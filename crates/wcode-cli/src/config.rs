@@ -69,6 +69,41 @@ impl InstructionsConfig {
     }
 }
 
+/// Skills, loaded from the `[skills]` table.
+///
+/// Absent table = discover `SKILL.md` packages from the standard roots (see
+/// [`crate::skills::discover`]). Env: `WCODE_SKILLS` (`off` disables; otherwise
+/// a path-list of extra roots).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct SkillsConfig {
+    /// Discover skills at all (default true).
+    pub enabled: Option<bool>,
+    /// Extra skill roots, scanned before the standard ones.
+    pub dirs: Option<Vec<String>>,
+    /// Skill names to skip.
+    pub disabled: Option<Vec<String>>,
+}
+
+impl SkillsConfig {
+    /// The discovery spec, or `None` when discovery is disabled.
+    pub fn to_spec(&self) -> Option<crate::skills::Spec> {
+        if self.enabled == Some(false) {
+            return None;
+        }
+        Some(crate::skills::Spec {
+            roots: self
+                .dirs
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            global: true,
+            disabled: self.disabled.clone().unwrap_or_default(),
+        })
+    }
+}
+
 /// Retry policy, loaded from the `[retry]` table. Absent = defaults (3 retries,
 /// 500 ms base, 8 s cap); `max = 0` disables retrying.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -147,6 +182,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub instructions: InstructionsConfig,
     #[serde(default)]
+    pub skills: SkillsConfig,
+    #[serde(default)]
     pub retry: RetryConfig,
 }
 
@@ -161,6 +198,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub compaction: CompactionPolicy,
     pub instructions: InstructionsConfig,
+    pub skills: SkillsConfig,
     pub retry: RetryPolicy,
 }
 
@@ -181,6 +219,7 @@ pub struct EnvLike {
     pub wcode_compact_keep_recent_tokens: Option<String>,
     pub wcode_compact_keep_recent_turns: Option<String>,
     pub wcode_instructions: Option<String>,
+    pub wcode_skills: Option<String>,
     pub wcode_retry_max: Option<String>,
     pub wcode_retry_base_ms: Option<String>,
     pub wcode_retry_cap_ms: Option<String>,
@@ -203,6 +242,7 @@ impl EnvLike {
             wcode_compact_keep_recent_tokens: std::env::var("WCODE_COMPACT_KEEP_RECENT_TOKENS").ok(),
             wcode_compact_keep_recent_turns: std::env::var("WCODE_COMPACT_KEEP_RECENT_TURNS").ok(),
             wcode_instructions: std::env::var("WCODE_INSTRUCTIONS").ok(),
+            wcode_skills: std::env::var("WCODE_SKILLS").ok(),
             wcode_retry_max: std::env::var("WCODE_RETRY_MAX").ok(),
             wcode_retry_base_ms: std::env::var("WCODE_RETRY_BASE_MS").ok(),
             wcode_retry_cap_ms: std::env::var("WCODE_RETRY_CAP_MS").ok(),
@@ -312,6 +352,19 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     if let Some(v) = env.wcode_instructions {
         instructions.file = Some(v);
     }
+    // Skill roots: `WCODE_SKILLS=off` disables; otherwise a path-list of extra
+    // roots scanned before the standard ones.
+    let mut skills = file.skills;
+    if let Some(v) = env.wcode_skills.as_deref() {
+        let v = v.trim();
+        if v.is_empty() || v == "off" || v == "false" || v == "0" {
+            skills.enabled = Some(false);
+        } else {
+            let mut dirs = skills.dirs.unwrap_or_default();
+            dirs.extend(std::env::split_paths(v).map(|p| p.display().to_string()));
+            skills.dirs = Some(dirs);
+        }
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -322,6 +375,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         tools,
         compaction,
         instructions,
+        skills,
         retry,
     })
 }

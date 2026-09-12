@@ -20,6 +20,7 @@ use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
 use crate::config::{HooksConfig, ToolsConfig};
 use crate::instructions::InstructionSet;
+use crate::skills::SkillSet;
 use crate::rtk::RtkHooks;
 use crate::tools::default_tools;
 
@@ -29,7 +30,12 @@ const RESET: &str = "\x1b[0m";
 /// System prompt derives from the registered tool set. The read/edit anchor
 /// contract is constant; grep/find are named only when those tools are
 /// actually registered (both are off by default — `bash` covers search).
-pub fn system_prompt(tools: &ToolsConfig, instructions: &InstructionSet) -> String {
+pub fn system_prompt(
+    tools: &ToolsConfig,
+    instructions: &InstructionSet,
+    skills: &SkillSet,
+    cwd: &Path,
+) -> String {
     let inspect = match (tools.grep, tools.find) {
         (true, true) => "read, grep and find",
         (true, false) => "read and grep",
@@ -42,10 +48,15 @@ pub fn system_prompt(tools: &ToolsConfig, instructions: &InstructionSet) -> Stri
          read emits a 5-char anchor per line and edit targets lines by those anchors \
          (content-addressed, drift-proof). Be concise."
     );
-    match instructions.render() {
+    let mut prompt = match instructions.render() {
         Some(block) => format!("{base}\n\n{block}"),
         None => base,
+    };
+    if let Some(section) = skills.render(cwd) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&section);
     }
+    prompt
 }
 
 // ---------------------------------------------------------------------------
@@ -307,26 +318,34 @@ pub fn default_hooks(cfg: &HooksConfig) -> HooksSet {
     HooksSet::one(Arc::new(RtkHooks::new(cfg.rtk)))
 }
 
+/// The agent configuration that is fixed for a run; `/new` and `/resume`
+/// rebuild the agent from this plus a fresh session and context.
+pub struct AgentSpec<'a> {
+    pub llm: LlmOpts,
+    pub hooks: HooksSet,
+    pub tools: &'a ToolsConfig,
+    pub compaction: CompactionPolicy,
+    pub instructions: &'a InstructionSet,
+    pub skills: &'a SkillSet,
+}
+
 pub fn build_agent(
-    llm: LlmOpts,
-    hooks: HooksSet,
-    tools: &ToolsConfig,
+    spec: AgentSpec<'_>,
     session: Option<Session>,
     context: Vec<AgentMessage>,
-    compaction: CompactionPolicy,
-    instructions: &InstructionSet,
 ) -> Agent {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     Agent::new(AgentConfig {
-        system: system_prompt(tools, instructions),
-        tools: default_tools(tools),
-        llm,
+        system: system_prompt(spec.tools, spec.instructions, spec.skills, &cwd),
+        tools: default_tools(spec.tools),
+        llm: spec.llm,
         stream_fn: rig_stream_fn(),
-        hooks,
+        hooks: spec.hooks,
         session,
         context,
-        working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        working_dir: cwd,
         max_turns: DEFAULT_MAX_TURNS,
-        compaction,
+        compaction: spec.compaction,
     })
 }
 
@@ -514,6 +533,7 @@ pub async fn run(
     tools: ToolsConfig,
     compaction: CompactionPolicy,
     instructions: InstructionSet,
+    skills: SkillSet,
 ) {
     let in_flight = Arc::new(AtomicBool::new(false));
     // Ctrl-C lives on a separate task that must reach the token of whatever
@@ -551,6 +571,9 @@ pub async fn run(
         let scope = if instr.global { "global" } else { "project" };
         println!("{scope} instructions: {}", instr.path.display());
     }
+    if !skills.is_empty() {
+        println!("skills: {}", skills.skills.len());
+    }
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
@@ -576,13 +599,16 @@ pub async fn run(
                             .and_then(|s| s.path().map(Path::to_path_buf));
                         agent =
                             build_agent(
-                                llm.clone(),
-                                hooks.clone(),
-                                &tools,
+                                AgentSpec {
+                                    llm: llm.clone(),
+                                    hooks: hooks.clone(),
+                                    tools: &tools,
+                                    compaction,
+                                    instructions: &instructions,
+                                    skills: &skills,
+                                },
                                 session,
                                 Vec::new(),
-                                compaction,
-                                &instructions,
                             );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         match path {
@@ -655,13 +681,16 @@ pub async fn run(
                         }
                         let n = messages.len();
                         agent = build_agent(
-                            llm.clone(),
-                            hooks.clone(),
-                            &tools,
+                            AgentSpec {
+                                llm: llm.clone(),
+                                hooks: hooks.clone(),
+                                tools: &tools,
+                                compaction,
+                                instructions: &instructions,
+                                skills: &skills,
+                            },
                             Some(s),
                             messages,
-                            compaction,
-                            &instructions,
                         );
                         *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
                         println!("resumed {} ({n} messages)", path.display());
@@ -920,7 +949,12 @@ mod tests {
 
     #[test]
     fn system_prompt_names_only_registered_inspect_tools() {
-        let off = system_prompt(&ToolsConfig::default(), &crate::instructions::InstructionSet::default());
+        let off = system_prompt(
+            &ToolsConfig::default(),
+            &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            Path::new("/"),
+        );
         assert!(off.contains("Inspect with read;"), "{off}");
         assert!(!off.contains("grep") && !off.contains("find"));
 
@@ -930,6 +964,8 @@ mod tests {
                 find: true,
             },
             &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            Path::new("/"),
         );
         assert!(on.contains("Inspect with read, grep and find;"), "{on}");
 
@@ -939,6 +975,8 @@ mod tests {
                 find: false,
             },
             &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            Path::new("/"),
         );
         assert!(
             only_grep.contains("Inspect with read and grep;"),
@@ -1322,7 +1360,7 @@ mod system_prompt_tests {
                 global: false,
             }],
         };
-        let with = system_prompt(&ToolsConfig::default(), &set);
+        let with = system_prompt(&ToolsConfig::default(), &set, &SkillSet::default(), Path::new("/"));
         assert!(with.contains("You are wcode"), "{with}");
         assert!(
             with.contains("# Project instructions (/repo/AGENTS.md)"),
@@ -1330,7 +1368,12 @@ mod system_prompt_tests {
         );
         assert!(with.contains("Build: cargo build"), "{with}");
 
-        let base = system_prompt(&ToolsConfig::default(), &InstructionSet::default());
+        let base = system_prompt(
+            &ToolsConfig::default(),
+            &InstructionSet::default(),
+            &SkillSet::default(),
+            Path::new("/"),
+        );
         assert!(!base.contains("Project instructions"), "{base}");
     }
 }
