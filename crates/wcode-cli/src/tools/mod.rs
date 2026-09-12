@@ -19,7 +19,9 @@ use wcode_harness::tool::{Tool, erased};
 use crate::config::ToolsConfig;
 
 pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
-    // ponytail: full mutation queue when parallel exec lands
+    // Mutating tools share one lock: read-only tools may run concurrently with
+    // each other (see `TypedTool::parallel_safe`), but no two mutations and no
+    // read-vs-mutation interleave inside a batch.
     let lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut tools = vec![
         erased(read::Read),
