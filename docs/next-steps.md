@@ -1,8 +1,8 @@
 # Next steps — plan & progress tracker
 
-Five follow-ups identified after the compaction work landed. Ordered
-low-risk → high-risk; tick the boxes as each task completes and keep the
-status table current.
+Follow-ups identified after the compaction work landed, plus pointers to two
+larger projects (items 3 and 6). Ordered low-risk → high-risk; tick the boxes as
+each task completes and keep the status table current.
 
 | # | item | status |
 |---|------|--------|
@@ -11,6 +11,7 @@ status table current.
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☑ done |
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
+| 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☐ todo |
 
 Suggested commit per item. Reference files by function, not line number
 (they drift).
@@ -267,6 +268,23 @@ This entry stays as the pointer plus status only.
 
 ---
 
+## 6. Skills & references
+
+**New.** Two related capabilities: **skills** (`SKILL.md` packages whose
+name/description go into the system prompt, the body loaded on demand via
+`read`) and **references** (context files generalized from a single `AGENTS.md`
+to a global + ancestor set, plus the `references/` convention inside a skill).
+
+Agents/subagents are **not** part of this — they wait on an inter-agent
+communication protocol.
+
+> ➡️ **[`docs/skills-references-plan.md`](skills-references-plan.md)** — scope,
+> pi/jcode reference, design, phased tasks, open questions, progress.
+
+This entry stays as the pointer plus status only, like item 3.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -275,3 +293,5 @@ This entry stays as the pointer plus status only.
 3. **1** AGENTS.md — self-contained CLI + config feature; highest value.
 4. **4** retry — kernel robustness, no deps.
 5. **3** interface → TUI — its own project; see [`tui-plan.md`](tui-plan.md).
+6. **6** skills & references — prompt-surface feature; see
+   [`skills-references-plan.md`](skills-references-plan.md).
