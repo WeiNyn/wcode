@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -16,6 +19,152 @@ pub struct BashArgs {
 
 pub struct Bash;
 
+/// Buffered bytes above this spill to a file instead of growing unbounded.
+const MAX_INLINE_BYTES: usize = 24_000;
+/// Chars of a spilled stream kept inline — the first and the last, so both the
+/// command's opening output and its error tail stay visible in the result.
+const PREVIEW_HEAD_CHARS: usize = 12_000;
+const PREVIEW_TAIL_CHARS: usize = 6_000;
+/// Live `ToolExecutionUpdate` lines per stream before we stop streaming (a
+/// flooding command shouldn't spam the UI; the file still holds everything).
+const LIVE_LINE_CAP: usize = 200;
+
+/// Per-process counter so repeated/concurrent bash calls get distinct spill
+/// files even within the same millisecond.
+static SPILL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Directory for spilled output — under the OS temp dir, so it is absolute
+/// (the `read` tool resolves absolute paths) and the OS reaps it eventually.
+fn spill_root() -> PathBuf {
+    std::env::temp_dir().join("wcode")
+}
+
+/// A bounded preview of one stream with a lazy spill-to-file. Holds at most
+/// `MAX_INLINE_BYTES` before spilling and `PREVIEW_HEAD_CHARS` +
+/// `PREVIEW_TAIL_CHARS` after — never the whole stream. The full output is
+/// written to `spill_path` (created only once the inline budget is exceeded),
+/// so the model can `read` the rest after seeing the notice.
+struct Capture {
+    stream: &'static str,
+    spill_path: PathBuf,
+    /// Accumulated text before the spill threshold; emptied once spilled.
+    buf: String,
+    /// First `PREVIEW_HEAD_CHARS` chars, frozen when the spill begins.
+    head: String,
+    /// Rolling last `PREVIEW_TAIL_CHARS` chars, maintained while spilling.
+    tail: String,
+    /// Open spill file; `None` until the output outgrows the inline budget.
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    /// Total bytes seen on the stream (spilled or not).
+    total: u64,
+}
+
+impl Capture {
+    fn new(stream: &'static str, dir: &Path, seq: u64) -> Self {
+        let spill_path = dir.join(format!("bash-{}-{seq}-{stream}.log", std::process::id()));
+        Self {
+            stream,
+            spill_path,
+            buf: String::new(),
+            head: String::new(),
+            tail: String::new(),
+            file: None,
+            total: 0,
+        }
+    }
+
+    /// Feed one decoded line: accumulate while small, otherwise write through
+    /// to the spill file. `raw_len` is the line's byte length before any lossy
+    /// UTF-8 decoding, for an accurate total.
+    fn push(&mut self, text: &str, raw_len: usize) {
+        self.total += raw_len as u64;
+        match self.file.as_mut() {
+            Some(file) => {
+                let _ = file.write_all(text.as_bytes());
+                keep_tail(&mut self.tail, text, PREVIEW_TAIL_CHARS);
+            }
+            None => {
+                self.buf.push_str(text);
+                if self.buf.len() > MAX_INLINE_BYTES {
+                    self.spill();
+                }
+            }
+        }
+    }
+
+    /// Open the spill file and flush what's buffered. If the file can't be
+    /// opened we keep buffering (no data loss, just unbounded memory).
+    fn spill(&mut self) {
+        if let Some(parent) = self.spill_path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            return;
+        }
+        let Ok(file) = std::fs::File::create(&self.spill_path) else {
+            return;
+        };
+        let mut file = std::io::BufWriter::new(file);
+        let _ = file.write_all(self.buf.as_bytes());
+        self.head = head_chars(&self.buf, PREVIEW_HEAD_CHARS);
+        self.tail = tail_chars(&self.buf, PREVIEW_TAIL_CHARS);
+        self.buf.clear();
+        self.buf.shrink_to_fit();
+        self.file = Some(file);
+    }
+
+    /// The model-visible block for this stream: the whole text when it never
+    /// spilled, else a head+tail preview with a notice carrying the file path.
+    fn finish(mut self) -> String {
+        if self.file.is_none() {
+            return self.buf;
+        }
+        if let Some(mut file) = self.file.take() {
+            let _ = file.flush();
+        }
+        format!(
+            "{head}\n… [bash: {stream} output is {total} bytes; middle elided; \
+             full output at {path}] …\n{tail}",
+            head = self.head,
+            stream = self.stream,
+            total = self.total,
+            path = self.spill_path.display(),
+            tail = self.tail,
+        )
+    }
+}
+
+/// First `max` chars of `s`.
+fn head_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// Last `max` chars of `s`.
+fn tail_chars(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    s.chars().skip(n.saturating_sub(max)).collect()
+}
+
+/// Append `text` to `dst`, trimming from the front to keep at most `max` chars.
+fn keep_tail(dst: &mut String, text: &str, max: usize) {
+    dst.push_str(text);
+    if dst.len() > max {
+        let mut idx = dst.len() - max;
+        while idx < dst.len() && !dst.is_char_boundary(idx) {
+            idx += 1;
+        }
+        dst.drain(..idx);
+    }
+}
+
+/// Identity and labels for one streamed pipe, so `drain_lines` keeps a small
+/// signature.
+struct StreamLabel<'a> {
+    call_id: &'a str,
+    name: &'a str,
+    live_prefix: &'a str,
+    stream: &'static str,
+}
+
 /// Stream one output pipe line-by-line: each line is emitted as a live
 /// `ToolExecutionUpdate` (so the UI shows partial output as it arrives) and
 /// accumulated for the final `ToolOutput`. The `live_prefix` (`""` for stdout,
@@ -24,29 +173,35 @@ pub struct Bash;
 async fn drain_lines(
     reader: impl tokio::io::AsyncBufRead + Unpin,
     events: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-    call_id: &str,
-    name: &str,
-    live_prefix: &str,
+    label: StreamLabel<'_>,
+    spill_dir: &Path,
+    seq: u64,
 ) -> String {
     use tokio::io::AsyncBufReadExt;
     let mut reader = reader;
-    let mut buf = String::new();
+    let mut capture = Capture::new(label.stream, spill_dir, seq);
+    let mut live = 0usize;
+    let mut line: Vec<u8> = Vec::new();
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line).await {
+        line.clear();
+        match reader.read_until(b'\n', &mut line).await {
             Ok(0) => break, // EOF: pipe closed
             Ok(_) => {
-                buf.push_str(&line);
-                let _ = events.send(AgentEvent::ToolExecutionUpdate {
-                    call_id: call_id.to_string(),
-                    name: name.to_string(),
-                    partial: format!("{live_prefix}{line}"),
-                });
+                let text = String::from_utf8_lossy(&line);
+                if live < LIVE_LINE_CAP {
+                    let _ = events.send(AgentEvent::ToolExecutionUpdate {
+                        call_id: label.call_id.to_string(),
+                        name: label.name.to_string(),
+                        partial: format!("{}{text}", label.live_prefix),
+                    });
+                    live += 1;
+                }
+                capture.push(&text, line.len());
             }
             Err(_) => break,
         }
     }
-    buf
+    capture.finish()
 }
 
 /// Kill a spawned shell *and its descendants*.
@@ -75,7 +230,7 @@ impl TypedTool for Bash {
         "bash"
     }
     fn description(&self) -> &str {
-        "Run a shell command (`sh -c`) in the working directory. Returns stdout, labeled stderr and the exit code. Non-zero exit marks the result as an error."
+        "Run a shell command (`sh -c`) in the working directory. Returns stdout, labeled stderr and the exit code. Non-zero exit marks the result as an error. Output beyond ~24K is elided inline and the full output is saved to a file whose path is shown — read it (offset/limit, or from) to page the rest."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -109,6 +264,8 @@ impl TypedTool for Bash {
         // stdout/stderr are streamed line-by-line as ToolExecutionUpdate so
         // the UI renders output live; the same lines accumulate for the final
         // ToolOutput, so the LLM still sees the complete result.
+        let root = spill_root();
+        let seq = SPILL_SEQ.fetch_add(1, Ordering::Relaxed);
         let drained = async {
             let (out, err) = futures::join!(
                 async {
@@ -117,9 +274,14 @@ impl TypedTool for Bash {
                             drain_lines(
                                 tokio::io::BufReader::new(pipe),
                                 &events,
-                                &call_id,
-                                &name,
-                                "",
+                                StreamLabel {
+                                    call_id: &call_id,
+                                    name: &name,
+                                    live_prefix: "",
+                                    stream: "stdout",
+                                },
+                                &root,
+                                seq,
                             )
                             .await
                         }
@@ -132,9 +294,14 @@ impl TypedTool for Bash {
                             drain_lines(
                                 tokio::io::BufReader::new(pipe),
                                 &events,
-                                &call_id,
-                                &name,
-                                "[stderr] ",
+                                StreamLabel {
+                                    call_id: &call_id,
+                                    name: &name,
+                                    live_prefix: "[stderr] ",
+                                    stream: "stderr",
+                                },
+                                &root,
+                                seq,
                             )
                             .await
                         }
@@ -372,5 +539,119 @@ mod tests {
         // The final ToolOutput still labels stderr once in the standard block.
         assert!(out.output.contains("[stderr]"));
         assert!(out.output.contains("oops"));
+    }
+
+    #[tokio::test]
+    async fn small_output_stays_inline_without_spilling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Bash
+            .execute(
+                BashArgs {
+                    command: "echo hello".into(),
+                    timeout_secs: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+        assert!(out.output.contains("hello"));
+        assert!(
+            !out.output.contains("full output at"),
+            "small output must not spill: {}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
+    async fn large_output_spills_and_points_at_the_full_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        // ~100 KiB, well over MAX_INLINE_BYTES.
+        let out = Bash
+            .execute(
+                BashArgs {
+                    command: "seq 1 20000".into(),
+                    timeout_secs: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+        // The inline result stays bounded (head + notice + tail).
+        assert!(
+            out.output.len() < MAX_INLINE_BYTES + 2000,
+            "inline output bounded: {} bytes",
+            out.output.len()
+        );
+        // The notice carries the spill path...
+        let path = out
+            .output
+            .split("full output at ")
+            .nth(1)
+            .expect("spill notice")
+            .split(']')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(path.ends_with("-stdout.log"), "stdout spill path: {path}");
+        // ...and the file holds the whole stream, start to finish.
+        let full = std::fs::read_to_string(&path).expect("spill file readable");
+        assert!(full.starts_with("1\n"), "starts at the head");
+        assert!(full.trim_end().ends_with("20000"), "ends at the tail");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn stderr_spills_independently_of_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Bash
+            .execute(
+                BashArgs {
+                    command: "seq 1 20000 >&2".into(),
+                    timeout_secs: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+        assert!(out.output.contains("[stderr]"));
+        let path = out
+            .output
+            .split("full output at ")
+            .nth(1)
+            .expect("stderr spill notice")
+            .split(']')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(path.ends_with("-stderr.log"), "stderr spill path: {path}");
+        let full = std::fs::read_to_string(&path).expect("spill file readable");
+        assert!(full.contains("20000"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn live_updates_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut rx) = super::super::test_ctx(dir.path());
+        let out = Bash
+            .execute(
+                BashArgs {
+                    command: "seq 1 1000".into(),
+                    timeout_secs: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+        let mut updates = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AgentEvent::ToolExecutionUpdate { .. }) {
+                updates += 1;
+            }
+        }
+        assert_eq!(updates, LIVE_LINE_CAP, "live stream is capped");
     }
 }

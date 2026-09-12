@@ -7,7 +7,7 @@ status table current.
 | # | item | status |
 |---|------|--------|
 | 5 | README duplicated line | ☑ done |
-| 2 | `bash` output cap | ☐ todo |
+| 2 | `bash` output cap | ☑ done |
 | 1 | Project instructions (`AGENTS.md`) | ☐ todo |
 | 4 | Retry / backoff on transient errors | ☐ todo |
 | 3 | REPL line editing (history, completion, multiline) | ☐ todo |
@@ -58,32 +58,65 @@ through it.
 the whole file rides into the next request; the tail (where errors live)
 is drowned by the head.
 
-**Proposed fix.**
-- Cap the **accumulated** output per stream (stdout and stderr separately)
-  with a **head + tail** window — keep the first `HEAD` and last `TAIL`
-  chars, elide the middle with a marker:
-  `… [N chars elided] …`. Head-only loses the failure tail; head+tail keeps
-  both ends.
-- Cap the **live** `ToolExecutionUpdate` stream (e.g. first `LIVE_LINES`
-  lines); after that, stop emitting updates but keep draining the pipe.
-- **Per-line byte guard.** `read_line` buffers a full line before we can
-  cut it, so a single 10 MB line (no newlines) blows memory regardless of
-  the accumulator cap. Read with a byte budget per line; if exceeded,
-  truncate the line and discard to the next `\n`.
-- Module constants to start (`MAX_STREAM_CHARS`, `LIVE_LINES`); a later
-  config knob (`[tools] bash_max_chars`?) can follow if wanted.
+**Proposed fix.** Spill to a file rather than discard. The full stream is
+written to a temp file, and the model gets a bounded preview **plus the
+path**, so it can `read` the rest (paging with `offset`/`limit`/`from`) —
+nothing is lost, and the context stays small. (`read` resolves absolute
+paths, so a `/tmp` file is reachable.)
+
+- Per stream (stdout, stderr independently): buffer in memory while the
+  output is small. On crossing `MAX_INLINE_BYTES`, open a temp file, flush
+  the buffer, and write everything after there — **created lazily**, so a
+  small result never touches disk.
+- Return a bounded preview: first `PREVIEW_HEAD_CHARS` + last
+  `PREVIEW_TAIL_CHARS` (both ends — errors live at the tail), joined by an
+  elision notice carrying the byte count, the stream name, and the path. The
+  notice is part of the model-visible `output`.
+- **Location**: `{temp_dir}/wcode/bash-<pid>-<n>-<stdout|stderr>.log` —
+  absolute; written as UTF-8 (lossy) so `read` (`read_to_string`) can open
+  it. `read`'s own 1000-line page cap keeps paging cheap.
+- **Live updates**: keep the first `LIVE_LINE_CAP` lines as
+  `ToolExecutionUpdate`, then stop (UI flood guard) while still spilling.
+- Update the `bash` description so the model knows large output lands in a
+  file it can read.
+
+Starting constants (module-level; config knob later if wanted):
+`MAX_INLINE_BYTES = 24_000`, `PREVIEW_HEAD_CHARS = 12_000`,
+`PREVIEW_TAIL_CHARS = 6_000`, `LIVE_LINE_CAP = 200`.
+
+Output shape (stdout spilled, stderr small):
+
+```
+<first 12k of stdout>
+… [bash: 15164321 bytes of stdout elided; full output at
+   /tmp/wcode/bash-1234-3-stdout.log — use read (offset/limit or from) to
+   page it] …
+<last 6k of stdout>
+
+[stderr]
+build failed
+
+exit code: 1
+```
 
 **Tasks**
-- [ ] Head+tail cap in `drain_lines` with an elision marker.
-- [ ] Per-stream (stdout/stderr) independent caps.
-- [ ] Live-update line cap.
-- [ ] Per-line byte guard (bounded `read_line`).
-- [ ] Tests: `yes`/`seq` over the cap (marker present, output bounded);
-      a single giant no-newline line; stdout and stderr each capped.
+- [x] Lazy spill: buffer → on `MAX_INLINE_BYTES`, create file, flush, stream on.
+- [x] Head+tail preview + elision notice (path, byte count, stream name).
+- [x] Per-stream (stdout/stderr) independent files + notices.
+- [x] Live-update line cap.
+- [x] Update the `bash` description; note the spill behavior.
+- [x] Tests: over-cap output spills (notice carries a path; the file holds
+      the full output; inline text is bounded); small output stays inline
+      (no file); stderr spills independently; live updates capped.
 
 **Open questions.**
-- Constant vs config knob (start constant, revisit).
-- Head/tail sizes (start e.g. 15 KiB / 15 KiB).
+- Cleanup: v1 leans on the OS temp reaper. Follow-ups: a startup sweep of
+  stale `{temp}/wcode`, or a `ToolContext` scratch-dir field for
+  session-scoped lifetime.
+- A single pathological no-newline line still buffers one line in memory
+  (`read_until`); add a per-line byte cap in a follow-up if it bites.
+- A spill path noted in an early turn only survives as long as the temp
+  file (fine within a session).
 
 ---
 
