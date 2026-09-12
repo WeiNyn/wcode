@@ -458,7 +458,7 @@ in `README.md` §Philosophy.
 
 - ☑ **S0 — Types.** `Request` + `Frame`/`SessionId`/`PROTOCOL_VERSION` in
   `wcode-harness/src/protocol.rs`, serde round-trips. *No behavior change.*
-- ◐ **S1 — Actor.** `SessionActor`/`SessionHandle` in
+- ☑ **S1 — Actor.** `SessionActor`/`SessionHandle` in
   `wcode-harness/src/actor.rs`: the `Agent` moves onto a task, an inbox of
   `Request`, a `broadcast` outbox; `Submit`/`Steer`/`FollowUp`/`Cancel`/`SetModel`/
   `SetEffort`/`Compact` are serviced (a biased select keeps `Steer`/`Cancel`
@@ -473,12 +473,13 @@ in `README.md` §Philosophy.
   one-shot channel (the wire will use the envelope's `reply_to`). The actor's
   `dispatch` answers; `run` now returns its `StopReason` so `Submit` replies
   `Stopped`. Replies are never streamed.
-- ☐ **S1b-2 — Repoint the CLI.** Move the REPL/`-p` path onto a
-  `SessionHandle`: `run_turn` becomes `ask(Submit)` (the printer drains a
-  `subscribe()` and stops at `AgentEnd`), `/usage` becomes `ask(GetHistory)`,
-  `/model`/`/effort`/`/compact` become asks, and Ctrl-C targets a handle (a
-  small `CancelTarget` enum preserves Ctrl-C aborting the `/reload` build).
-  First stage with a live end-to-end CLI check.
+- ☑ **S1b-2 — Repoint the CLI.** The REPL and `-p` hold a `SessionHandle`:
+  `run_turn` subscribes and `ask(Submit)`s (the printer stops at `AgentEnd`);
+  `/usage` → `ask(GetHistory)`, `/model`/`/effort`/`/compact` → asks; `/new` and
+  `/resume` spawn a new actor and swap the handle; Ctrl-C sends `Cancel` to the
+  current handle. `/reload`'s build is *not* specially cancellable (a developer
+  path — Ctrl-C there is a non-case). Verified live end-to-end against a local
+  model.
 - **S2 — Transport.** `wcode-protocol`: NDJSON `Frame`, a client and a server
   helper, socket path. `wcode serve` (one session) + a client that reconnects and
   replays from the log. *(This is the jcode TUI architecture, minimal.)*
