@@ -12,6 +12,7 @@ each task completes and keep the status table current.
 | 4 | Retry / backoff on transient errors | ☑ done |
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ◐ phases 1–2 done |
+| 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -291,6 +292,20 @@ This entry stays as the pointer plus status only, like item 3.
 
 ---
 
+## 7. Parallel tool execution & `.gitignore` awareness
+
+**New.** Two independent harness gaps found by comparing against pi and jcode:
+our tool loop runs calls **sequentially** (pi defaults to parallel, with per-tool
+opt-in), and `grep`/`find` ignore files by a **hardcoded** list rather than the
+project's `.gitignore` (both references respect it).
+
+> ➡️ **[`docs/parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)** —
+> scope, pi/jcode reference, design, phased tasks, open questions, progress.
+
+This entry stays as the pointer plus status only, like items 3 and 6.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -301,3 +316,6 @@ This entry stays as the pointer plus status only, like item 3.
 5. **3** interface → TUI — its own project; see [`tui-plan.md`](tui-plan.md).
 6. **6** skills & references — prompt-surface feature; see
    [`skills-references-plan.md`](skills-references-plan.md).
+7. **7** parallel exec & `.gitignore` — harness/tool gaps; see
+   [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md). Phase 2
+   (ignore) is the smaller independent win; Phase 1 (parallel) touches the loop.
