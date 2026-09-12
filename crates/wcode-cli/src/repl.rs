@@ -85,6 +85,11 @@ pub enum Command {
     Usage,
     /// Summarize older messages now, optionally focused by <prompt>.
     Compact(Option<String>),
+    /// List the discovered skills (`/skills`).
+    Skills,
+    /// `/skill <name> [args]` — force-load a skill's body as a turn, for when
+    /// the model does not pick it up from the prompt section on its own.
+    Skill(Option<String>),
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -111,6 +116,8 @@ pub fn parse_command(line: &str) -> Option<Command> {
         },
         "usage" => Some(Command::Usage),
         "compact" => Some(Command::Compact(arg)),
+        "skills" => Some(Command::Skills),
+        "skill" => Some(Command::Skill(arg)),
         _ => None,
     }
 }
@@ -737,9 +744,58 @@ pub async fn run(
                 }) => println!("compacted: summarized {summarized}, kept {kept} (+ summary)"),
                 Err(e) => eprintln!("compact: {e}"),
             },
+            Some(Command::Skills) => print_skills(&skills),
+            Some(Command::Skill(arg)) => match arg.as_deref() {
+                None => println!("usage: /skill <name> [args]   (/skills lists them)"),
+                Some(arg) => {
+                    let (name, extra) = match arg.split_once(char::is_whitespace) {
+                        Some((n, rest)) => (n, Some(rest.trim())),
+                        None => (arg, None),
+                    };
+                    match skills.find(name) {
+                        None => eprintln!("no such skill: {name}   (/skills lists them)"),
+                        Some(skill) => match std::fs::read_to_string(&skill.path) {
+                            Err(e) => eprintln!("read {}: {e}", skill.path.display()),
+                            Ok(body) => {
+                                let input = skill_turn(&skill.name, &body, extra);
+                                run_turn(&mut agent, &input, &in_flight, &cancel_slot).await;
+                            }
+                        },
+                    }
+                }
+            },
             None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
         }
     }
+}
+
+/// `/skills`: what was discovered, one block per skill, with the file the
+/// model would `read`.
+fn print_skills(skills: &SkillSet) {
+    if skills.is_empty() {
+        println!("(no skills discovered)");
+        return;
+    }
+    for s in &skills.skills {
+        println!("  {} — {}", s.name, tool_output_note(&s.description));
+        println!("{DIM}    {}{RESET}", s.path.display());
+    }
+    println!(
+        "{DIM}  {} skill(s) — force one with /skill <name>{RESET}",
+        skills.skills.len()
+    );
+}
+
+/// Turn text for `/skill <name> [args]`. Framed as a directive so the model
+/// follows the skill rather than treating it as reference material; extra args
+/// become the task it applies them to.
+fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
+    let mut out = format!("# Skill: {name}\n\n{}", body.trim_end());
+    if let Some(args) = args {
+        out.push_str("\n\n## Task\n");
+        out.push_str(args);
+    }
+    out
 }
 
 /// One user turn: spawn the printer over a fresh sink, run, clean up.
@@ -945,6 +1001,28 @@ mod tests {
         assert_eq!(
             parse_command("/compact focus on the API"),
             Some(Command::Compact(Some("focus on the API".into())))
+        );
+        assert_eq!(parse_command("/skills"), Some(Command::Skills));
+        assert_eq!(parse_command("/skill"), Some(Command::Skill(None)));
+        assert_eq!(
+            parse_command("/skill pdf-tools"),
+            Some(Command::Skill(Some("pdf-tools".into())))
+        );
+        assert_eq!(
+            parse_command("/skill pdf-tools extract page 2"),
+            Some(Command::Skill(Some("pdf-tools extract page 2".into())))
+        );
+    }
+
+    #[test]
+    fn skill_turn_frames_the_body_and_appends_args() {
+        let plain = skill_turn("pdf-tools", "# PDF Tools\n\nRun extract.sh.\n", None);
+        assert_eq!(plain, "# Skill: pdf-tools\n\n# PDF Tools\n\nRun extract.sh.");
+
+        let with_args = skill_turn("pdf-tools", "body\n", Some("merge a.pdf b.pdf"));
+        assert!(
+            with_args.ends_with("\n\n## Task\nmerge a.pdf b.pdf"),
+            "{with_args}"
         );
     }
 

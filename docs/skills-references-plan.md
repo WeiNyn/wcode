@@ -198,10 +198,10 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
       loaded the body via `read` (see §8).
 
 **Phase 3 — Polish (remaining).**
-- [ ] `/skills` (list) and `/skill <name>` (force-load) REPL commands.
+- [x] `/skills` (list) and `/skill <name> [args]` (force-load) REPL commands.
 - [x] Extra roots (`[skills] dirs`) and `disabled` — landed early, in phase 2.
 - [x] Skill-asset (`references/`) convention documented (README + AGENTS.md).
-- [ ] Optional: accept `<root>/<name>.md` skills (pi's root-file rule) — see §8.
+- [x] ~~Optional: accept `<root>/<name>.md` skills~~ — **declined** (see §8).
 - [ ] Extra roots (`[skills] dirs`) and `disabled`.
 - [ ] Document the skill-asset (`references/`) convention + README + AGENTS.md.
 - [ ] Optional: accept `<root>/<name>.md` skills (pi's root-file rule).
@@ -238,10 +238,14 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - **`name` vs directory** — follow pi: the directory name need not match
   `name` (better for shared skill dirs).
 
-**Deferred.**
+**Deferred / declined.**
 
 - **Per-skill tool policy** (`allowed-tools`) — parsed and ignored in v1; a
   `Hooks` variant owns it later.
+- **`<root>/<name>.md` skills** (pi's root-file rule) — **declined**. It is a
+  deliberate deviation from the Agent Skills standard that pi permits only in its
+  own directories, and it makes discovery ambiguous (which `.md` files are
+  skills?). wcode follows the standard: a skill is a directory with `SKILL.md`.
 
 ## 8. Progress
 
@@ -250,3 +254,25 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - [x] Phase 1 (references as a set) — `instructions.rs`, config, `--dump-system-prompt`.
 - [x] Phase 2 (skills core) — verified end-to-end against a live model.
 - [ ] Phase 3 (polish + docs).
+
+## 12. Phase 3 result
+
+`/skills` lists what was discovered (name, description clipped to one line, and
+the file the model would `read`) plus a hint; `/skill <name> [args]` reads that
+file and sends it as a turn framed `# Skill: <name>` (+ `## Task` when args are
+given), so the human can force a skill the model passed over. `SkillSet::find`
+backs it. Neither touches the endpoint until a turn actually runs, so `/skills`
+works with no model.
+
+Verified live against a project skill whose body holds a token that exists
+nowhere else:
+
+| command | result |
+|---|---|
+| `/skills` | listed the skill (name, description, path), refused endpoint — no model needed |
+| `/skill` (no arg) | `usage: /skill <name> [args]   (/skills lists them)` |
+| `/skill nope` | `no such skill: nope   (/skills lists them)` |
+| `/skill token` | model replied `ZK9-QW3` **with no tool call** — the body was injected |
+
+The recorded user message for that turn opens with `# Skill: token`, confirming
+the framing.

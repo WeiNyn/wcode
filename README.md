@@ -116,6 +116,8 @@ REPL commands (unknown `/...` lines go to the LLM as prompt text):
 | `/sessions` | list sessions, `*` marks the current one |
 | `/usage` | print aggregate token usage for the current conversation (input/output, plus cache read/write when reported) |
 | `/compact [prompt]` | summarize older messages now, keeping the most recent; an optional `prompt` focuses the summary |
+| `/skills` | list the discovered `SKILL.md` packages (name, description, file) |
+| `/skill <name> [args]` | force-load a skill's body into a turn — for when the model doesn't pick it up from the prompt section on its own; extra `args` become the task |
 | `/reload [--no-session]` | `cargo build --bin wcode` then re-exec into the same session (`--no-session` starts fresh); a failed build keeps the current binary running |
 
 Effort fans out per endpoint: Chat sends `reasoning_effort`, Responses

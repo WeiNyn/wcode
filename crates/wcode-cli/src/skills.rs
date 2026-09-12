@@ -37,6 +37,11 @@ pub struct SkillSet {
 }
 
 impl SkillSet {
+    /// The skill with this name, if it was discovered.
+    pub fn find(&self, name: &str) -> Option<&Skill> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
@@ -415,6 +420,20 @@ mod tests {
 
         // Depth 6 below the root exceeds MAX_SCAN_DEPTH (4).
         assert!(discover(&Spec::default(), repo.path(), None).is_empty());
+    }
+
+    #[test]
+    fn find_returns_the_discovered_skill() {
+        let repo = repo();
+        let sub = repo.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_skill(&sub.join(".wcode/skills/one"), "alpha", "first");
+        write_skill(&sub.join(".wcode/skills/two"), "beta", "second");
+
+        let set = discover(&Spec::default(), &sub, None);
+        assert_eq!(set.find("alpha").map(|s| s.description.as_str()), Some("first"));
+        assert_eq!(set.find("beta").map(|s| s.description.as_str()), Some("second"));
+        assert!(set.find("missing").is_none());
     }
 
     #[test]
