@@ -153,6 +153,7 @@ mod tests {
         let n = names(&ToolsConfig {
             grep: true,
             find: true,
+            ..ToolsConfig::default()
         });
         assert!(n.iter().any(|s| s == "grep"));
         assert!(n.iter().any(|s| s == "find"));

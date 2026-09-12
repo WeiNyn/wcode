@@ -202,7 +202,7 @@ user text ──▶ Agent.run()
 
 | Want to… | Do this |
 |---|---|
-| Add a tool | `impl TypedTool` (Args: `Deserialize + JsonSchema`) + `erased()`; see `crates/wcode-cli/src/tools/read.rs` |
+| Add a tool | `impl TypedTool` (Args: `Deserialize + JsonSchema`) + `erased()`; read-only tools also override `parallel_safe() -> true` (see `tools/read.rs`) |
 | Change behavior (block/patch tools, rewrite context, early stop) | `impl Hooks` (all default no-ops); see `crates/wcode-harness/src/hooks.rs` |
 | Add an LLM provider / wire family | write a `StreamFn` (adapter from provider stream → `LlmStreamEvent`); default is `rig_stream_fn()` in `streamfn.rs` |
 | Build a different UI | consume `AgentEvent` from the sink channel; REPL's printer (`repl.rs`) is the reference |

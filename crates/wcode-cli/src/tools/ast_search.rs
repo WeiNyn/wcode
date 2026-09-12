@@ -39,6 +39,11 @@ impl TypedTool for AstSearch {
     fn description(&self) -> &str {
         "AST-structural search via ast-grep. Pattern is ordinary code with $UPPERCASE wildcards, e.g. await $X finds every await. Use when regex can't express the structure; regex is cheaper for text matches. Search-only — rewrites live in ast_edit."
     }
+
+    /// Read-only: safe to run alongside other calls in the same batch.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let Some(bin) = super::ast::find_bin() else {
             return ToolOutput {

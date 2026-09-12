@@ -30,6 +30,9 @@ pub struct AgentConfig {
     /// (see [`crate::loop_::LoopConfig::max_turns`]). Use
     /// [`crate::loop_::DEFAULT_MAX_TURNS`] for the kernel default.
     pub max_turns: usize,
+    /// Run concurrency-safe tool calls in one batch in parallel. `false`
+    /// restores strictly-sequential execution.
+    pub parallel_tools: bool,
     /// When to compact and how much recent context to keep
     /// (see [`crate::compaction`]). Use [`CompactionPolicy::default`].
     pub compaction: CompactionPolicy,
@@ -44,6 +47,7 @@ pub struct Agent {
     session: Option<Session>,
     working_dir: PathBuf,
     max_turns: usize,
+    parallel_tools: bool,
     compaction: CompactionPolicy,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
@@ -82,6 +86,7 @@ impl Agent {
             session: cfg.session,
             working_dir,
             max_turns: cfg.max_turns,
+            parallel_tools: cfg.parallel_tools,
             compaction: cfg.compaction,
             ctx: cfg.context,
             steer_tx,
@@ -192,6 +197,7 @@ impl Agent {
             cancel: self.cancel.clone(),
             working_dir: self.working_dir.clone(),
             max_turns: self.max_turns,
+            parallel: self.parallel_tools,
             compaction: self.compaction,
             session: self.session.as_mut(),
         };

@@ -119,6 +119,7 @@ fn agent_config(
         context: Vec::new(),
         working_dir: std::path::PathBuf::new(),
         max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+        parallel_tools: true,
         compaction: wcode_harness::compaction::CompactionPolicy::default(),
     }
 }

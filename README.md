@@ -31,6 +31,8 @@ rtk = "auto"           # optional; auto|true|false — route bash output through
 [tools]
 grep = true            # optional; true|false — register the grep tool (off by default)
 find = true            # optional; true|false — register the find tool (off by default)
+parallel = true        # optional; true|false — run independent tool calls from one batch
+                       # concurrently (default true; --sequential forces it off)
 
 [compaction]
 # Compact the conversation as it grows. An absent table = harness defaults.
@@ -98,6 +100,7 @@ wcode --list-models          # print GET {base_url}/models ids, exit
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --no-skills            # run without discovering skills
+wcode --sequential           # run each tool call one at a time
 ```
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
@@ -141,6 +144,12 @@ Output: text streams to stdout, thinking and tool output are dimmed
 
 `edit`/`replace`/`write` share a mutation lock and write via a temp file +
 rename, so concurrent file mutation can't interleave or truncate.
+
+When the model issues several tool calls in one message, the independent ones run
+**concurrently** — `read`/`grep`/`find`/`ast_search` are read-only and opt in;
+mutating tools and `bash` are barriers, so no read can race a write inside a
+batch. Results are still appended in call order. `--sequential` (or
+`[tools] parallel = false`) restores strictly one-at-a-time execution.
 
 ## Design: content-addressed editing
 

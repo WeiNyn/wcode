@@ -80,7 +80,9 @@ Rust edition 2024, resolver 3.
 ## Extending
 
 - **Tools** — implement `TypedTool` (typed args + schemars schema), wrap with
-  `erased()`, add to `default_tools()`.
+  `erased()`, add to `default_tools()`. Read-only tools should also override
+  `parallel_safe() -> true`; everything else (including `bash`) stays a barrier
+  and never runs concurrently with another call in the same batch.
 - **Policies** — implement `Hooks`; a reason from `before_tool_call` blocks the
   call and is fed back to the model as an error.
 - **Providers** — implement `StreamFn`; `rig_stream_fn()` is the built-in

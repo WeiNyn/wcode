@@ -21,6 +21,14 @@ pub trait TypedTool: Send + Sync + 'static {
     type Args: serde::de::DeserializeOwned + schemars::JsonSchema;
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+
+    /// Whether this tool may run concurrently with other calls in the same
+    /// batch. Default `false` — a tool opts in, so anything that mutates state
+    /// is a barrier unless it explicitly claims otherwise.
+    fn parallel_safe(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput;
 }
 
@@ -29,6 +37,7 @@ trait ErasedToolCore: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
+    fn parallel_safe(&self) -> bool;
     async fn execute(&self, args: serde_json::Value, ctx: ToolContext) -> ToolOutput;
 }
 
@@ -45,6 +54,10 @@ impl<T: TypedTool> ErasedToolCore for T {
     fn parameters(&self) -> serde_json::Value {
         serde_json::to_value(schemars::schema_for!(T::Args))
             .unwrap_or_else(|_| serde_json::json!({ "type": "object" }))
+    }
+
+    fn parallel_safe(&self) -> bool {
+        TypedTool::parallel_safe(self)
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ToolContext) -> ToolOutput {
@@ -78,6 +91,10 @@ pub fn erased<T: TypedTool>(t: T) -> Tool {
 }
 
 impl Tool {
+    pub fn parallel_safe(&self) -> bool {
+        self.0.parallel_safe()
+    }
+
     pub fn name(&self) -> &str {
         self.0.name()
     }

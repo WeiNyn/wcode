@@ -58,6 +58,11 @@ impl TypedTool for Read {
     fn description(&self) -> &str {
         "Read a text file. Each line renders as ANCHOR│content — the 5-char anchor is its content address and the target for edit. Anchors survive edits elsewhere and hash raw content, so indentation matters; re-read after a formatter reindents. Page with offset/limit, or pass from (an anchor from grep or a prior edit echo) plus context. plain:true prints cat -n style."
     }
+
+    /// Read-only: safe to run alongside other calls in the same batch.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let path = super::resolve(&ctx.working_dir, &args.path);
         let content = match std::fs::read_to_string(&path) {

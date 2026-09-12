@@ -30,6 +30,11 @@ pub struct ToolsConfig {
     /// Register the `find` tool (glob file/dir listing).
     #[serde(default)]
     pub find: bool,
+    /// Run concurrency-safe tool calls in one batch in parallel (default true;
+    /// `--sequential` forces it off). `Option` so an absent table keeps the
+    /// default ON rather than picking up `bool`'s `false`.
+    #[serde(default)]
+    pub parallel: Option<bool>,
 }
 
 /// Instruction ("reference") files, loaded from the `[instructions]` table.
@@ -639,6 +644,7 @@ mod tests {
                 tools: ToolsConfig {
                     grep: true,
                     find: false,
+                    ..ToolsConfig::default()
                 },
                 ..FileConfig::default()
             },

@@ -1,6 +1,6 @@
 # wcode — parallel tool execution & .gitignore awareness
 
-Status: **phase 2 shipped, phase 1 todo**. Companion to
+Status: **both phases shipped**. Companion to
 [`next-steps.md`](next-steps.md) (item 7).
 
 Two independent harness gaps identified by comparing against pi (`../wi/pi`) and
@@ -9,7 +9,7 @@ ignore files by a **hardcoded** list rather than the project's `.gitignore`.
 
 | phase | scope | status |
 |-------|-------|--------|
-| 1 | Parallel tool execution (kernel) | ☐ todo |
+| 1 | Parallel tool execution (kernel) | ☑ done |
 | 2 | `.gitignore` awareness in grep/find | ☑ done |
 
 The two are independent and land as separate commits.
@@ -188,11 +188,12 @@ must diagnose). Without it, gitignore-awareness becomes a wall.
 ## 6. Phased tasks
 
 **Phase 1 — parallel tool execution.**
-- [ ] `parallel_safe()` on `TypedTool` + `Tool`; mark read-only tools.
-- [ ] Loop: preflight, partition into groups, concurrent fan-out (capped).
-- [ ] Results appended in call order; events emitted per §3.
-- [ ] Concurrency cap + cancellation behaviour under a cancelled group.
-- [ ] `[tools] parallel` / `--sequential`; loop tests (overlap, barrier, order).
+- [x] `parallel_safe()` on `TypedTool` + `Tool`; read/grep/find/ast_search opt in.
+- [x] Loop: preflight → groups → fan-out (`buffer_unordered`, cap 8).
+- [x] Results appended in call order; Start/End emitted in call order per group.
+- [x] `parallel` on `LoopConfig`/`AgentConfig`; `[tools] parallel` + `--sequential`.
+- [x] Loop tests: overlap, barriers, call order under out-of-order completion,
+      `parallel=false`, plus the dead-sink pairing invariant.
 
 **Phase 2 — `.gitignore` awareness.**
 - [x] Add `ignore` (replacing `walkdir`); `walker()` in grep, used by find.
@@ -244,7 +245,7 @@ must diagnose). Without it, gitignore-awareness becomes a wall.
 ## 9. Progress
 
 - [ ] Settle the open questions above.
-- [ ] Phase 1 (parallel tool execution) — code + tests + live timing check.
+- [x] Phase 1 (parallel tool execution) — verified live (see §11).
 - [x] Phase 2 (`.gitignore` awareness) — verified end-to-end (see §10).
 
 ## 10. Phase 2 result
@@ -270,3 +271,45 @@ not evidence):
 
 **Still open for phase 2:** whether hidden files should keep being searched
 (current: yes, to avoid a silent narrowing) — revisit if it ever matters.
+
+## 11. Phase 1 result
+
+`Tool::parallel_safe()` (default `false`) gates concurrency; `read`, `grep`,
+`find` and `ast_search` opt in, everything else — including `bash` — stays a
+barrier. The loop preflights every call in order (`transform_tool_input`,
+`before_tool_call`, tool lookup), partitions into maximal runs of safe calls,
+fans each run out with `futures::stream::iter(..).buffer_unordered(8)`, and then
+emits End / records / pushes to ctx **in call order**. `parallel` on
+`LoopConfig` (set from `AgentConfig::parallel_tools`, from `[tools] parallel`)
+forces the old strictly-sequential path.
+
+Two things worth recording:
+
+- **`ToolExecutionStart` now follows preflight, not the block check.** It used to
+  be sent per call *before* `before_tool_call`; it is now sent for a whole group
+  once preflight has run (pi's contract: preflight sequentially, then fan out).
+  The observable difference is timing, not semantics — a blocked call still gets
+  Start + an error End. `dead_sink_mid_tool_loop_synthesizes_results` had
+  encoded the old timing, so it now asserts the invariant that actually matters:
+  every `ToolCall` has exactly one `ToolResult`, in order.
+- **End is emitted in call order, not completion order.** The REPL's ✓ line
+  carries no tool name, so out-of-order Ends would render as unattributable
+  results. Call order keeps the documented `⚙ name ✓ first-line` pairing exact.
+
+Live check (real binary, local model, three `grep` calls in one message):
+
+```
+--sequential            default (parallel)
+⚙ grep                  ⚙ grep
+ ✓ d12/f6.txt…          ⚙ grep
+⚙ grep                  ⚙ grep
+ ✓ d12/f35.txt…          ✓ d12/f6.txt…
+⚙ grep                   ✓ d12/f35.txt…
+ ✓ d12/f6.txt…           ✓ d12/f6.txt…
+⚙ bash                  ⚙ bash
+ ✓ .//                   ✓ .//
+```
+
+All three markers before any result = one group; `bash` still its own barrier
+afterwards. Wall-clock is not a clean signal here (model latency dominates), so
+the event interleaving is the evidence.

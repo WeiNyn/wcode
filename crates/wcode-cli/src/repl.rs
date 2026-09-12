@@ -345,6 +345,7 @@ pub fn build_agent(
         context,
         working_dir: cwd,
         max_turns: DEFAULT_MAX_TURNS,
+        parallel_tools: spec.tools.parallel.unwrap_or(true),
         compaction: spec.compaction,
     })
 }
@@ -962,6 +963,7 @@ mod tests {
             &ToolsConfig {
                 grep: true,
                 find: true,
+                ..ToolsConfig::default()
             },
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
@@ -973,6 +975,7 @@ mod tests {
             &ToolsConfig {
                 grep: true,
                 find: false,
+                ..ToolsConfig::default()
             },
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),

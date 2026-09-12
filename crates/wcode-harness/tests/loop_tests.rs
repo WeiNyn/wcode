@@ -230,6 +230,7 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             working_dir: std::path::PathBuf::from("."),
             session: None,
             max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+            parallel: true,
             compaction: CompactionPolicy::default(),
         },
         steer_tx,
@@ -1034,21 +1035,39 @@ async fn dead_sink_mid_tool_loop_synthesizes_results() {
     let res = run_loop(&mut ctx, cfg, tx).await.map(|r| r.stop_reason);
 
     assert_eq!(res.unwrap(), StopReason::Aborted);
-    assert_eq!(
-        ctx.len(),
-        4,
-        "User, Assistant(ToolUse), exactly one ToolResult per call — no dangling ToolCall"
+
+    // The contract is pairing, not a message count: whatever the sink-death
+    // detection timing (Start now follows preflight, so a whole group starts
+    // together), ctx must never keep a ToolCall without its ToolResult.
+    let calls: Vec<&str> = ctx
+        .iter()
+        .flat_map(|m| match m {
+            AgentMessage::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolCall { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let results: Vec<&str> = ctx
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!calls.is_empty(), "expected tool calls in ctx");
+    assert_eq!(calls, results, "every ToolCall must have its ToolResult, in order");
+    assert!(
+        ctx.iter().any(|m| matches!(
+            m,
+            AgentMessage::ToolResult { is_error: true, .. }
+        )),
+        "the dead sink must surface as an error ToolResult"
     );
-    assert!(matches!(
-        &ctx[2],
-        AgentMessage::ToolResult { tool_call_id, name, is_error: true, .. }
-            if tool_call_id == "c1" && name == "echo"
-    ));
-    assert!(matches!(
-        &ctx[3],
-        AgentMessage::ToolResult { tool_call_id, name, is_error: true, .. }
-            if tool_call_id == "c2" && name == "echo"
-    ));
 }
 
 #[tokio::test]
@@ -1305,5 +1324,202 @@ async fn auto_compacts_when_over_the_ceiling() {
         calls[1].ctx[0].as_text().contains("CONDENSED"),
         "the request carries the summary: {:?}",
         calls[1].ctx[0]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Parallel tool execution
+// ---------------------------------------------------------------------------
+
+/// A tool that sleeps, logs when it starts and ends, and opts in or out of
+/// concurrent execution. The log is `(name, "start"|"end")` in real order.
+#[derive(Clone)]
+struct TimedTool {
+    name: &'static str,
+    delay_ms: u64,
+    parallel: bool,
+    log: Arc<Mutex<Vec<(&'static str, &'static str)>>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct TimedArgs {
+    #[serde(default)]
+    tag: String,
+}
+
+#[async_trait::async_trait]
+impl TypedTool for TimedTool {
+    type Args = TimedArgs;
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "timed test tool"
+    }
+    fn parallel_safe(&self) -> bool {
+        self.parallel
+    }
+    async fn execute(&self, args: TimedArgs, _ctx: &ToolContext) -> ToolOutput {
+        self.log.lock().unwrap().push((self.name, "start"));
+        tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        self.log.lock().unwrap().push((self.name, "end"));
+        ToolOutput {
+            output: format!("{}:{}", self.name, args.tag),
+            is_error: false,
+        }
+    }
+}
+
+fn timed(name: &'static str, delay_ms: u64, parallel: bool, log: &Log) -> Tool {
+    erased(TimedTool {
+        name,
+        delay_ms,
+        parallel,
+        log: Arc::clone(log),
+    })
+}
+
+type Log = Arc<Mutex<Vec<(&'static str, &'static str)>>>;
+
+fn log_of(log: &Log) -> Vec<(&'static str, &'static str)> {
+    log.lock().unwrap().clone()
+}
+
+fn at(events: &[(&'static str, &'static str)], name: &str, ev: &str) -> usize {
+    events
+        .iter()
+        .position(|(n, e)| *n == name && *e == ev)
+        .unwrap_or_else(|| panic!("missing {name}/{ev} in {events:?}"))
+}
+
+/// Script one turn issuing `calls` (id, name), then a plain final turn.
+fn script_batches(rec: &Recorder, calls: &[(&str, &'static str)]) {
+    let mut first = Vec::new();
+    for (id, name) in calls {
+        first.push(LlmStreamEvent::ToolCall {
+            id: (*id).into(),
+            name: (*name).into(),
+            arguments: serde_json::json!({ "tag": id }),
+        });
+    }
+    first.push(LlmStreamEvent::Done {
+        stop_reason: StopReason::ToolUse,
+        usage: None,
+    });
+    rec.push(first);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("done".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+}
+
+fn tool_outputs(ctx: &[AgentMessage]) -> Vec<String> {
+    ctx.iter()
+        .filter_map(|m| match m {
+            AgentMessage::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn concurrent_safe_calls_in_one_batch_overlap() {
+    let rec = Recorder::default();
+    script_batches(&rec, &[("c1", "a"), ("c2", "b")]);
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![timed("a", 60, true, &log), timed("b", 60, true, &log)],
+        HooksSet::default(),
+    );
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _) = run(cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+
+    // Both started before either ended: the sleeps overlapped.
+    assert_eq!(
+        log_of(&log),
+        vec![("a", "start"), ("b", "start"), ("a", "end"), ("b", "end")],
+        "expected both tools to start before either ended"
+    );
+}
+
+#[tokio::test]
+async fn non_safe_calls_never_overlap() {
+    let rec = Recorder::default();
+    script_batches(&rec, &[("c1", "a"), ("c2", "b")]);
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![timed("a", 30, false, &log), timed("b", 30, false, &log)],
+        HooksSet::default(),
+    );
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _) = run(cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+
+    assert_eq!(
+        log_of(&log),
+        vec![("a", "start"), ("a", "end"), ("b", "start"), ("b", "end")],
+        "a non-parallel-safe call must not overlap its neighbours"
+    );
+}
+
+#[tokio::test]
+async fn safe_run_between_barriers_overlaps_and_keeps_call_order() {
+    // a (barrier) | b, c (safe pair; c finishes first) | d (barrier)
+    let rec = Recorder::default();
+    script_batches(&rec, &[("c1", "a"), ("c2", "b"), ("c3", "c"), ("c4", "d")]);
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let tools = vec![
+        timed("a", 5, false, &log),
+        timed("b", 60, true, &log),
+        timed("c", 10, true, &log),
+        timed("d", 5, false, &log),
+    ];
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), tools, HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _) = run(cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+
+    // Results land in CALL order even though c completed before b.
+    assert_eq!(tool_outputs(&ctx), vec!["a:c1", "b:c2", "c:c3", "d:c4"]);
+
+    let events = log_of(&log);
+    assert!(at(&events, "b", "start") < at(&events, "c", "start"), "{events:?}");
+    assert!(at(&events, "c", "end") < at(&events, "b", "end"), "c is faster: {events:?}");
+    assert!(at(&events, "a", "end") < at(&events, "b", "start"), "{events:?}");
+    assert!(at(&events, "b", "end") < at(&events, "d", "start"), "{events:?}");
+}
+
+#[tokio::test]
+async fn parallel_false_forces_sequential_execution() {
+    let rec = Recorder::default();
+    script_batches(&rec, &[("c1", "a"), ("c2", "b")]);
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![timed("a", 20, true, &log), timed("b", 20, true, &log)],
+        HooksSet::default(),
+    );
+    let cfg = LoopConfig {
+        parallel: false,
+        ..cfg
+    };
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _) = run(cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+
+    assert_eq!(
+        log_of(&log),
+        vec![("a", "start"), ("a", "end"), ("b", "start"), ("b", "end")],
+        "parallel=false must restore sequential execution"
     );
 }

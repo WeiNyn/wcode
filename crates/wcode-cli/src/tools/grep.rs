@@ -41,6 +41,11 @@ impl TypedTool for Grep {
     fn description(&self) -> &str {
         "Regex-search files. Every result line carries its `read`-style anchor so it can be targeted directly with `edit`. Output: `path:lineno  ANCHOR│content`. Match lines are marked ` <--`; context lines are unmarked. Respects .gitignore and skips .git/target/node_modules and binary files by default (pass no_ignore:true to search ignored files too). For AST-structural search use ast_search."
     }
+
+    /// Read-only: safe to run alongside other calls in the same batch.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let base = match &args.path {
             Some(p) => super::resolve(&ctx.working_dir, p),

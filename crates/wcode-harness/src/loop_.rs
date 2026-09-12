@@ -14,6 +14,10 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// unbounded. Unlike cancellation, hitting it is a clean, resumable stop.
 pub const DEFAULT_MAX_TURNS: usize = 100;
 
+/// Cap on tools executing concurrently inside one group. The model chooses the
+/// batch size, but a runaway batch should not open unbounded file handles.
+const MAX_PARALLEL_TOOLS: usize = 8;
+
 pub struct LoopConfig<'a> {
     pub system: String,
     pub tools: Vec<Tool>,
@@ -33,6 +37,10 @@ pub struct LoopConfig<'a> {
     /// the run ends on a completed turn boundary with `StopReason::MaxTurns`.
     /// Counts every turn in the run, including follow-up-triggered ones.
     pub max_turns: usize,
+    /// Run concurrency-safe tool calls in one batch in parallel (see
+    /// [`crate::tool::TypedTool::parallel_safe`]). `false` forces the old
+    /// strictly-sequential behaviour.
+    pub parallel: bool,
     /// When to auto-summarize the older prefix, and how much recent context to
     /// keep (see [`crate::compaction`]).
     pub compaction: CompactionPolicy,
@@ -350,9 +358,14 @@ pub async fn run_loop(
                 break; // outer loop handles follow-ups
             }
 
-            // Tool execution (sequential).
-            let mut pending = calls.into_iter();
-            while let Some((id, name, mut arguments)) = pending.next() {
+            // Tool execution. Preflight every call in order (transform, block,
+            // tool lookup), then run each *group* of concurrency-safe calls in
+            // parallel. A call that is not `parallel_safe` is a barrier — it
+            // runs alone, so no read can race a mutation inside one batch.
+            // Results land in ctx in call order whatever the completion order.
+            let all_calls = calls.clone();
+            let mut plan: Vec<Planned> = Vec::with_capacity(calls.len());
+            for (id, name, mut arguments) in calls {
                 let mut hook_call = HookToolCall {
                     id: id.clone(),
                     name: name.clone(),
@@ -362,73 +375,151 @@ pub async fn run_loop(
                 // executes, blocks and is logged is the final command.
                 cfg.hooks.transform_tool_input(&mut hook_call).await;
                 arguments = hook_call.arguments.clone();
-                let start_sent = sink
-                    .send(AgentEvent::ToolExecutionStart {
-                        call_id: id.clone(),
-                        name: name.clone(),
-                    })
-                    .is_ok();
-                if !start_sent {
-                    aborted = true;
+
+                let planned = match cfg.hooks.before_tool_call(&hook_call).await {
+                    Some(reason) => Planned::fail(id, name, format!("blocked: {reason}")),
+                    None => match cfg.tools.iter().find(|t| t.name() == name).cloned() {
+                        Some(tool) => {
+                            let parallel_safe = cfg.parallel && tool.parallel_safe();
+                            Planned {
+                                id,
+                                name,
+                                run: Some(PlannedRun { tool, arguments }),
+                                fail: None,
+                                parallel_safe,
+                            }
+                        }
+                        None => {
+                            let msg = format!("unknown tool: {name}");
+                            Planned::fail(id, name, msg)
+                        }
+                    },
+                };
+                plan.push(planned);
+            }
+
+            // Partition into groups: a maximal run of concurrency-safe calls
+            // fans out; anything else is a single-call barrier.
+            let mut groups: Vec<Vec<Planned>> = Vec::new();
+            let mut run: Vec<Planned> = Vec::new();
+            for p in plan {
+                if p.parallel_safe {
+                    run.push(p);
+                } else {
+                    if !run.is_empty() {
+                        groups.push(std::mem::take(&mut run));
+                    }
+                    groups.push(vec![p]);
                 }
-                let out = if !start_sent {
-                    // Dead sink: the tool never runs. Synthesize its error
-                    // output so the ToolResult still lands in ctx.
-                    ToolOutput {
+            }
+            if !run.is_empty() {
+                groups.push(run);
+            }
+
+            let mut processed = 0usize;
+            for group in groups {
+                let width = group.len();
+                let mut started = vec![false; width];
+                let mut results: Vec<Option<ToolOutput>> = (0..width).map(|_| None).collect();
+
+                // Start events first, in call order, so the display pairs each
+                // ✓ with the ⚙ marker above it.
+                for (i, c) in group.iter().enumerate() {
+                    let sent = sink
+                        .send(AgentEvent::ToolExecutionStart {
+                            call_id: c.id.clone(),
+                            name: c.name.clone(),
+                        })
+                        .is_ok();
+                    started[i] = sent;
+                    if !sent {
+                        // Dead sink: the tool never runs. Synthesize its error
+                        // output so the ToolResult still lands in ctx.
+                        aborted = true;
+                        results[i] = Some(ToolOutput {
+                            output: "aborted before execution".to_string(),
+                            is_error: true,
+                        });
+                    }
+                }
+
+                // Fan out the runnable calls of this group. `after_tool_call`
+                // runs inside the task so a tool's hooks stay with its result.
+                let mut running = Vec::new();
+                for (i, c) in group.iter().enumerate() {
+                    if !started[i] {
+                        continue;
+                    }
+                    let Some(run) = &c.run else {
+                        results[i] = c.fail.clone();
+                        continue;
+                    };
+                    let tool = run.tool.clone();
+                    let arguments = run.arguments.clone();
+                    let hook_call = HookToolCall {
+                        id: c.id.clone(),
+                        name: c.name.clone(),
+                        arguments: arguments.clone(),
+                    };
+                    let tctx = ToolContext {
+                        call_id: c.id.clone(),
+                        name: c.name.clone(),
+                        working_dir: cfg.working_dir.clone(),
+                        cancel: cfg.cancel.clone(),
+                        events: sink.clone(),
+                    };
+                    let hooks = cfg.hooks.clone();
+                    running.push(async move {
+                        let mut out = tool.execute(arguments, tctx).await;
+                        hooks.after_tool_call(&hook_call, &mut out).await;
+                        (i, out)
+                    });
+                }
+                for (i, out) in futures::stream::iter(running)
+                    .buffer_unordered(MAX_PARALLEL_TOOLS)
+                    .collect::<Vec<_>>()
+                    .await
+                {
+                    results[i] = Some(out);
+                }
+
+                // End events, session records and ctx pushes in call order.
+                for (i, c) in group.iter().enumerate() {
+                    let out = results[i].take().unwrap_or_else(|| ToolOutput {
                         output: "aborted before execution".to_string(),
                         is_error: true,
-                    }
-                } else if let Some(reason) = cfg.hooks.before_tool_call(&hook_call).await {
-                    ToolOutput {
-                        output: format!("blocked: {reason}"),
-                        is_error: true,
-                    }
-                } else {
-                    match cfg.tools.iter().find(|t| t.name() == name) {
-                        Some(tool) => {
-                            let tctx = ToolContext {
-                                call_id: id.clone(),
-                                name: name.clone(),
-                                working_dir: cfg.working_dir.clone(),
-                                cancel: cfg.cancel.clone(),
-                                events: sink.clone(),
-                            };
-                            let mut out = tool.execute(arguments, tctx).await;
-                            cfg.hooks.after_tool_call(&hook_call, &mut out).await;
-                            out
-                        }
-                        None => ToolOutput {
-                            output: format!("unknown tool: {name}"),
-                            is_error: true,
-                        },
-                    }
-                };
-                let sent = sink
-                    .send(AgentEvent::ToolExecutionEnd {
-                        call_id: id.clone(),
-                        name: name.clone(),
-                        output: out.output.clone(),
+                    });
+                    let sent = started[i]
+                        && sink
+                            .send(AgentEvent::ToolExecutionEnd {
+                                call_id: c.id.clone(),
+                                name: c.name.clone(),
+                                output: out.output.clone(),
+                                is_error: out.is_error,
+                            })
+                            .is_ok();
+                    // Push the result before honoring a dead sink so ctx never
+                    // keeps a ToolCall without its ToolResult.
+                    let result = AgentMessage::ToolResult {
+                        tool_call_id: c.id.clone(),
+                        name: c.name.clone(),
+                        output: out.output,
                         is_error: out.is_error,
-                    })
-                    .is_ok();
-                // Push the result before honoring a dead sink so ctx never
-                // keeps a ToolCall without its ToolResult.
-                let result = AgentMessage::ToolResult {
-                    tool_call_id: id,
-                    name,
-                    output: out.output,
-                    is_error: out.is_error,
-                };
-                record_session(&mut cfg, &result)?;
-                ctx.push(result);
-                if !sent {
-                    aborted = true;
+                    };
+                    record_session(&mut cfg, &result)?;
+                    ctx.push(result);
+                    if !sent {
+                        aborted = true;
+                    }
                 }
+
+                processed += width;
                 if aborted {
                     // Sink died mid-tool-loop: synthesize an error ToolResult
                     // for every unexecuted call (event sends are best-effort;
                     // the abort path already returns Aborted).
-                    if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, pending) {
+                    let rest = all_calls.iter().skip(processed).cloned();
+                    if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, rest) {
                         let _ = sink.send(AgentEvent::AgentEnd);
                         return Err(e);
                     }
@@ -500,6 +591,40 @@ fn assistant(
 /// never keeps a ToolCall without its ToolResult. Event sends are
 /// best-effort (the sink may already be dead). Pushes are persisted to the
 /// session like every other produced message.
+/// One tool call after preflight: either ready to run, or already failed
+/// (blocked by a hook, unknown tool, dead sink).
+struct Planned {
+    id: String,
+    name: String,
+    /// `Some` = ready to execute.
+    run: Option<PlannedRun>,
+    /// `Some` = the result to record without executing.
+    fail: Option<ToolOutput>,
+    /// May run concurrently with its group peers.
+    parallel_safe: bool,
+}
+
+impl Planned {
+    fn fail(id: String, name: String, output: String) -> Self {
+        Planned {
+            id,
+            name,
+            run: None,
+            fail: Some(ToolOutput {
+                output,
+                is_error: true,
+            }),
+            parallel_safe: false,
+        }
+    }
+}
+
+/// A prepared execution: the resolved tool plus its hook-transformed input.
+struct PlannedRun {
+    tool: Tool,
+    arguments: serde_json::Value,
+}
+
 fn synthesize_unexecuted(
     cfg: &mut LoopConfig<'_>,
     sink: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,

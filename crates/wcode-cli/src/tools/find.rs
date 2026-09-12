@@ -28,6 +28,11 @@ impl TypedTool for Find {
     fn description(&self) -> &str {
         "List files and directories matching globs, one path per stdout line (relative to the working directory). Respects .gitignore; also skips .git/target/node_modules (pass no_ignore:true to list ignored entries). Use grep to search inside files; use find to locate them."
     }
+
+    /// Read-only: safe to run alongside other calls in the same batch.
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let base = match &args.path {
             Some(p) => super::resolve(&ctx.working_dir, p),

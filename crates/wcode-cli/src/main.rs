@@ -35,6 +35,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --endpoint <e>     override the configured endpoint (chat|responses)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
+   --sequential       run tool calls one at a time (default: independent calls in a
+                      batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
    --dump-system-prompt  print the composed system prompt and exit
@@ -91,6 +93,7 @@ struct Args {
     no_instructions: bool,
     dump_system_prompt: bool,
     no_skills: bool,
+    sequential: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -149,6 +152,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--no-instructions" => a.no_instructions = true,
             "--dump-system-prompt" => a.dump_system_prompt = true,
             "--no-skills" => a.no_skills = true,
+            "--sequential" => a.sequential = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -251,6 +255,10 @@ async fn main() {
     }
     if let Some(effort) = args.effort.clone() {
         cfg.effort = effort;
+    }
+    // `--sequential` wins over `[tools] parallel`.
+    if args.sequential {
+        cfg.tools.parallel = Some(false);
     }
     let mut llm = cfg.to_llm_opts();
 
