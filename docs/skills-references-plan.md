@@ -111,10 +111,12 @@ description: Extract text/tables from PDFs and fill forms. Use for PDF documents
 ```
 
 - Required: `name` (lowercase `a-z0-9-`, ≤64), `description` (non-empty, ≤1024).
-- Parsed by a **small hand-rolled reader** for the leading `---` block —
-  `key: value` scalars, single/double quotes stripped, a value continued on
-  subsequent indented/non-`key:` lines joined. No YAML dependency (see open
-  questions); unknown keys (`license`, `allowed-tools`, …) are ignored.
+- Parsed with **`serde` + a YAML frontmatter deserializer** — not hand-rolled
+  (block scalars and quoted values containing `:` otherwise bite). Crate:
+  **`serde_yaml_ng`**, the maintained fork — upstream `serde_yaml` was archived
+  by dtolnay. It pulls `unsafe-libyaml` (a pure-Rust libyaml port, no system C
+  library). Deserialize into a struct of optional fields; unknown keys
+  (`license`, `allowed-tools`, …) are ignored.
 - Malformed frontmatter or a missing `name`/`description` → **warn to stderr and
   skip** (lenient, like pi); never fatal.
 
@@ -158,6 +160,8 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 
 - **New module `crates/wcode-cli/src/skills.rs`** — `Skill`, frontmatter parse,
   discovery, `prompt_section(&[Skill])`. Pure, unit-testable.
+- **New dep (`wcode-cli`)**: the YAML frontmatter parser (`serde_yaml_ng`) — the
+  only new dependency this plan introduces.
 - **New module `crates/wcode-cli/src/instructions.rs`** — move the existing
   `Instructions` / `load_instructions` / `truncate_instructions` out of `repl.rs`
   and generalize to the set (a plain move + extend; keeps `repl.rs` about the
@@ -204,24 +208,32 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 
 ## 7. Decisions & open questions
 
-- **Frontmatter parsing** — hand-rolled two-field reader (recommended: no dep) vs
-  `serde_yaml`/`serde_yml`. Risk of hand-rolling: block scalars (`|`), quoted
-  values containing `:`. Scope v1 to flat scalars + line continuation; document
-  the limit.
-- **Global context file location** — `~/.config/wcode/AGENTS.md` (beside config)
-  vs `~/.local/share/wcode/AGENTS.md` (beside sessions). Lean config dir.
-- **Include `.claude/skills` by default?** pi and jcode both read Claude
-  directories. Recommend reading `.agents/skills` for sure; `.claude` as a
-  default root is the portability call — confirm.
-- **Collision order** — nearest project wins vs global wins. pi keeps first
-  found; recommend project-over-global, nearest-project-first.
+**Decided.**
+
+- **Frontmatter parsing** — a real YAML deserializer, not hand-rolled. Use
+  `serde_yaml_ng` (upstream `serde_yaml` is archived; this is the maintained
+  fork).
+- **Skill roots** — `.agents/skills` is the shared convention. **`.claude/skills`
+  is *not* a default root.**
+- **Global context file** — `~/.config/wcode/AGENTS.md`, beside `config.toml`.
+
+**Still open.**
+
+- **Collision order** — project-over-global with nearest-project-first
+  (recommended) vs pi's first-found.
 - **Skills: prompt vs message** — system prompt (recommended, stable) vs a
   per-turn message.
+- **Context-file candidates** — keep `CLAUDE.md` in the default list (cheap
+  portability) or AGENTS-only.
 - **`name` vs directory** — follow pi: allow a mismatch (shared dirs).
+- **Per-skill tool policy** (`allowed-tools`) — parsed and ignored in v1; a
+  `Hooks` variant owns it later.
 
 ## 8. Progress
 
-- [ ] Settle the open questions above.
+- [x] Settle parsing / roots / global-file location (see §7).
+- [ ] Settle the remaining questions (collision order, prompt-vs-message,
+      `CLAUDE.md` candidate).
 - [ ] Phase 1 (references as a set) — code + tests + `--dump-system-prompt`.
 - [ ] Phase 2 (skills core) — code + tests + live check.
 - [ ] Phase 3 (polish + docs).
