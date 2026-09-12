@@ -1,0 +1,87 @@
+# wcode — repository guidelines
+
+wcode is a minimal, pi-like coding agent for the terminal: a small kernel
+(`wcode-harness`) that runs an LLM tool-loop against any OpenAI-compatible
+chat-completions endpoint, plus a thin CLI (`wcode-cli`, binary `wcode`).
+Presentation code streams and styles `AgentEvent`s; the kernel owns the loop.
+
+## Layout
+
+`crates/wcode-harness` — the kernel (no CLI/presentation concerns):
+
+- `agent.rs` — `Agent`: `run`, `cancel`/`cancel_token`, `messages`, `compact`,
+  `steer`/`follow_up`, `set_model`, `set_effort`, `session_path`.
+- `loop_.rs` — the tool-calling loop (`run_loop`, `LoopConfig`, `RunResult`)
+  that emits `AgentEvent`s.
+- `streamfn.rs` — `StreamFn` trait + the `rig` OpenAI-compatible adapter
+  (`rig_stream_fn`) with retry/backoff.
+- `tool.rs` — `Tool` / `TypedTool` + `erased()`.
+- `hooks.rs` — `Hooks`: `transform_tool_input`, `before_tool_call`,
+  `after_tool_call`, `transform_context`, `should_stop_after_turn`.
+- `event.rs` — `AgentEvent` / `LlmStreamEvent` (the UI seam).
+- `compaction.rs`, `session.rs`, `message.rs`, `limits.rs`.
+
+`crates/wcode-cli` — the client:
+
+- `main.rs` — arg parsing, config load, agent construction, one-shot vs REPL.
+- `repl.rs` — REPL loop, `/`-commands, event printing, system prompt, the
+  project-instruction file.
+- `config.rs` — `config.toml` + env resolution.
+- `tools/` — concrete tools: read, grep, find, bash, ast_search, ast_edit,
+  edit, edits, replace, write.
+- `rtk.rs` — optional rtk hook (bash-output proxy).
+
+## Commands
+
+- Build: `cargo build` (or `cargo build --bin wcode`)
+- Test: `cargo test --workspace`
+- Lint: `cargo clippy --workspace --all-targets` — must be clean
+- Run: `cargo run -p wcode-cli -- -p "..."`, or `wcode` once installed
+- Install: `cargo install --path crates/wcode-cli`
+
+Rust edition 2024, resolver 3.
+
+## Conventions
+
+- **One logical change per commit.** Imperative subject, area prefix
+  (`harness:`, `cli:`, `docs:`).
+- **Every change: tests + clippy clean.** Prefer a **live end-to-end check**
+  (run against a real or local endpoint) over unit tests alone — `cargo build`
+  proves nothing about behavior.
+- **Track multi-step work in `docs/next-steps.md`.** Larger efforts get their
+  own doc (e.g. `docs/tui-plan.md`); the tracker keeps a pointer + status.
+- **Minimalism is the point.** Absent by design: MCP, subagents, permission
+  prompts, approval flows, config files for behavior. That logic belongs in
+  code, via `Hooks` — build the variant you want instead of configuring one.
+- Keep the kernel free of presentation concerns; the CLI is a thin client.
+
+## Gotchas
+
+- **Content-addressed anchors.** `read` prints `ANCHOR│line`; `edit` targets
+  `from`/`to` anchors. An anchor is a hash of the line's raw content, so
+  indentation is part of the address and a reformatter that reindents *moves*
+  anchors — re-read after formatting. Identical lines share an anchor; `edit`
+  rejects ambiguous targets unless `old_string` pins one. Edits never shift
+  lines above them.
+- **The project instruction file** (this `AGENTS.md`, default name) is
+  discovered from the working dir up to the repo root and folded into the
+  **system prompt at startup** (32 KiB cap), `--no-instructions` / `"off"` /
+  `WCODE_INSTRUCTIONS` to control it.
+- **Verify against a real binary.** For local checks point at a keyless
+  endpoint (`--base-url http://localhost:11434/v1`); for error/retry paths a
+  refused port (`http://127.0.0.1:9/v1`) with `WCODE_RETRY_MAX=2`.
+
+## Extending
+
+- **Tools** — implement `TypedTool` (typed args + schemars schema), wrap with
+  `erased()`, add to `default_tools()`.
+- **Policies** — implement `Hooks`; a reason from `before_tool_call` blocks the
+  call and is fed back to the model as an error.
+- **Providers** — implement `StreamFn`; `rig_stream_fn()` is the built-in
+  OpenAI-compatible adapter.
+
+## Further reading
+
+- `README.md` — config, commands, tools, and the content-addressed editing design.
+- `docs/next-steps.md` — current work tracker.
+- `docs/tui-plan.md` — planned full-screen TUI.
