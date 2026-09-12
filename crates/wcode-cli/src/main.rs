@@ -2,10 +2,11 @@
 
 use std::io::Write as _;
 
-use tokio::sync::mpsc;
+use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::Agent;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
+use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
 
 mod config;
@@ -365,7 +366,7 @@ async fn main() {
     let skills = discover_skills_for(&args, &cfg, &cwd);
 
     let hooks = default_hooks(&cfg.hooks);
-    let mut agent = build_agent(
+    let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
             hooks: hooks.clone(),
@@ -379,56 +380,66 @@ async fn main() {
     );
 
     match args.prompt {
-        Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
+        Some(prompt) => std::process::exit(one_shot(agent, &prompt).await),
         None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions, skills).await,
     }
 }
 
 /// `-p` mode: no streaming output; print the final assistant text.
-async fn one_shot(agent: &mut Agent, prompt: &str) -> i32 {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    // Draining keeps the channel from growing; the run dies without a reader.
-    // The last stream error is kept so a failed run can show why.
+async fn one_shot(agent: Agent, prompt: &str) -> i32 {
+    let handle = SessionActor::spawn(agent);
+    let mut rx = handle.subscribe();
+    // Draining keeps the subscription live and captures what the reply does not
+    // carry: the last stream error and the final assistant text.
     let drain = tokio::spawn(async move {
         let mut last_error: Option<String> = None;
-        while let Some(ev) = rx.recv().await {
-            if let AgentEvent::Error { message } = ev {
-                last_error = Some(message);
+        let mut last_text = String::new();
+        loop {
+            match rx.recv().await {
+                Ok(AgentEvent::Error { message }) => last_error = Some(message),
+                Ok(AgentEvent::MessageEnd { message }) => last_text = message.as_text(),
+                Ok(AgentEvent::AgentEnd) => break,
+                Ok(_) => {}
+                Err(_) => break,
             }
         }
-        last_error
+        (last_error, last_text)
     });
-    let res = agent.run(prompt, tx).await;
-    let last_error = drain.await.unwrap_or(None);
-    match res {
-        Ok(StopReason::Error) => {
+    let reply = handle
+        .ask(Request::Submit {
+            text: prompt.to_string(),
+        })
+        .await;
+    let (last_error, last_text) = drain.await.unwrap_or((None, String::new()));
+    match reply {
+        Ok(AgentEvent::Stopped {
+            stop_reason: StopReason::Error,
+        }) => {
             match last_error {
                 Some(msg) => eprintln!("error: {msg}"),
                 None => eprintln!("run failed"),
             }
             1
         }
-        Ok(StopReason::MaxTurns) => {
+        Ok(AgentEvent::Stopped {
+            stop_reason: StopReason::MaxTurns,
+        }) => {
             eprintln!("error: hit maximum turns; task may be incomplete");
             1
         }
-        Ok(_) => {
-            let text = agent
-                .messages()
-                .iter()
-                .rev()
-                .find_map(|m| match m {
-                    AgentMessage::Assistant { .. } => Some(m.as_text()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            if !text.trim().is_empty() {
-                println!("{text}");
+        Ok(AgentEvent::Stopped { .. }) => {
+            if !last_text.trim().is_empty() {
+                println!("{last_text}");
             }
             0
         }
-        Err(e) => {
-            eprintln!("error: {e}");
+        Ok(AgentEvent::Error { message }) => {
+            eprintln!("error: {message}");
+            1
+        }
+        Ok(_) => 1,
+        Err(_) => {
+            eprintln!("error: session closed");
             1
         }
     }

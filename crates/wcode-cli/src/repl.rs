@@ -6,15 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
-use wcode_harness::compaction::{CompactOutcome, CompactionPolicy};
+use tokio::sync::broadcast;
+use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
+use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::limits::model_limit;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 
@@ -419,14 +420,9 @@ fn build_dir() -> Option<PathBuf> {
 /// `/reload [--no-session]`: `cargo build --bin wcode` first — a failed
 /// build keeps the old binary running. On success re-exec the (possibly
 /// replaced) binary with `--resume <current>` so the session continues.
-/// Ctrl-C during the build kills it and stays in the REPL.
-async fn reload(
-    agent: &Agent,
-    llm: &LlmOpts,
-    no_session: bool,
-    in_flight: &AtomicBool,
-    cancel_slot: &Mutex<CancellationToken>,
-) {
+/// build is not specially cancellable — Ctrl-C is a developer-session
+/// non-case, so a build is simply awaited to completion.
+async fn reload(llm: &LlmOpts, session: Option<&Path>, no_session: bool, in_flight: &AtomicBool) {
     use std::sync::atomic::Ordering;
     let Some(dir) = build_dir() else {
         eprintln!("reload: no Cargo.toml above cwd or binary");
@@ -440,49 +436,30 @@ async fn reload(
         }
     };
     println!("rebuilding in {} ...", dir.display());
-    // Build-scoped token: Ctrl-C during the build must not poison the
-    // agent's own cancel token (shared with the next `run()`).
-    let build_cancel = CancellationToken::new();
-    *lock_cancel_slot(cancel_slot) = build_cancel.clone();
+    // Swallow Ctrl-C for the duration of the build (`in_flight` routes it to
+    // the actor as a `Cancel`, a no-op while idle) so a stray Ctrl-C does not
+    // kill the session mid-build.
     in_flight.store(true, Ordering::SeqCst);
-    let mut child = match tokio::process::Command::new("cargo")
+    let status = tokio::process::Command::new("cargo")
         .arg("build")
         .arg("--bin")
         .arg("wcode")
         .current_dir(&dir)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            in_flight.store(false, Ordering::SeqCst);
-            *lock_cancel_slot(cancel_slot) = agent.cancel_token();
-            eprintln!("reload: cargo: {e}");
-            return;
-        }
-    };
-    let status = tokio::select! {
-        biased;
-        _ = build_cancel.cancelled() => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            None
-        }
-        s = child.wait() => s.ok(),
-    };
+        .status()
+        .await;
     in_flight.store(false, Ordering::SeqCst);
-    *lock_cancel_slot(cancel_slot) = agent.cancel_token();
     match status {
-        Some(s) if s.success() => {}
-        Some(s) => {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
             eprintln!("reload: build failed ({s}); staying on current binary");
             return;
         }
-        None => {
-            println!("(reload cancelled)");
+        Err(e) => {
+            eprintln!("reload: cargo: {e}");
             return;
         }
     }
-    let args = reload_args(llm, agent.session_path(), no_session);
+    let args = reload_args(llm, session, no_session);
     println!("reloading {} ...", exe.display());
     let _ = io::stdout().flush();
     #[cfg(unix)]
@@ -525,17 +502,15 @@ async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
 // REPL
 // ---------------------------------------------------------------------------
 
-/// Lock the shared cancel slot, tolerating a poisoned mutex: a panic elsewhere
-/// while the lock was held must not take down the REPL's Ctrl-C / run plumbing.
-fn lock_cancel_slot(
-    slot: &Mutex<CancellationToken>,
-) -> std::sync::MutexGuard<'_, CancellationToken> {
+/// Lock a shared slot, tolerating a poisoned mutex: a panic elsewhere while the
+/// lock was held must not take down the REPL's Ctrl-C / run plumbing.
+fn lock_slot<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     slot.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub async fn run(
-    mut agent: Agent,
+    agent: Agent,
     mut llm: LlmOpts,
     hooks: HooksSet,
     tools: ToolsConfig,
@@ -544,16 +519,19 @@ pub async fn run(
     skills: SkillSet,
 ) {
     let in_flight = Arc::new(AtomicBool::new(false));
-    // Ctrl-C lives on a separate task that must reach the token of whatever
-    // run is active; the slot is refreshed after each run / agent swap.
-    let cancel_slot: Arc<Mutex<CancellationToken>> = Arc::new(Mutex::new(agent.cancel_token()));
+    let mut session_path = agent.session_path().map(Path::to_path_buf);
+    let mut handle = SessionActor::spawn(agent);
+    // Ctrl-C lives on a separate task. The slot holds the *current* handle
+    // (swapped by `/new`/`/resume`) so Ctrl-C always reaches the live run; when
+    // idle it exits.
+    let handle_slot: Arc<Mutex<SessionHandle>> = Arc::new(Mutex::new(handle.clone()));
     {
         let in_flight = in_flight.clone();
-        let cancel_slot = cancel_slot.clone();
+        let handle_slot = handle_slot.clone();
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
                 if in_flight.load(Ordering::SeqCst) {
-                    lock_cancel_slot(&cancel_slot).cancel();
+                    let _ = lock_slot(&handle_slot).send(Request::Cancel);
                 } else {
                     println!();
                     std::process::exit(0);
@@ -570,7 +548,7 @@ pub async fn run(
     if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
         println!("context: {} tokens", limit.context);
     }
-    match agent.session_path() {
+    match &session_path {
         Some(p) => println!("session: {}", p.display()),
         None => println!("(no session)"),
     }
@@ -597,7 +575,8 @@ pub async fn run(
         match parse_command(line) {
             Some(Command::Exit) => break,
             Some(Command::New) => {
-                let session = (agent.session_path().is_some())
+                let session = session_path
+                    .is_some()
                     .then(|| Session::create(&session_dir()))
                     .transpose();
                 match session {
@@ -605,21 +584,22 @@ pub async fn run(
                         let path = session
                             .as_ref()
                             .and_then(|s| s.path().map(Path::to_path_buf));
-                        agent =
-                            build_agent(
-                                AgentSpec {
-                                    llm: llm.clone(),
-                                    hooks: hooks.clone(),
-                                    tools: &tools,
-                                    compaction,
-                                    instructions: &instructions,
-                                    skills: &skills,
-                                },
-                                session,
-                                Vec::new(),
-                            );
-                        *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
-                        match path {
+                        let new_agent = build_agent(
+                            AgentSpec {
+                                llm: llm.clone(),
+                                hooks: hooks.clone(),
+                                tools: &tools,
+                                compaction,
+                                instructions: &instructions,
+                                skills: &skills,
+                            },
+                            session,
+                            Vec::new(),
+                        );
+                        handle = SessionActor::spawn(new_agent);
+                        *lock_slot(&handle_slot) = handle.clone();
+                        session_path = path;
+                        match &session_path {
                             Some(p) => println!("new session: {}", p.display()),
                             None => println!("new conversation"),
                         }
@@ -628,12 +608,14 @@ pub async fn run(
                 }
             }
             Some(Command::Model(arg)) => match arg {
-                Some(id) => match agent.set_model(id.clone()) {
-                    Ok(()) => {
+                Some(id) => match handle.ask(Request::SetModel { model: id.clone() }).await {
+                    Ok(AgentEvent::Ack) => {
                         llm.model = id;
                         println!("model: {}", llm.model);
                     }
-                    Err(e) => eprintln!("model: {e}"),
+                    Ok(AgentEvent::Error { message }) => eprintln!("model: {message}"),
+                    Ok(_) => eprintln!("model: unexpected reply"),
+                    Err(_) => eprintln!("model: session closed"),
                 },
                 // Bare `/model` lists available models (same as `/models`).
                 None => print_models(&llm, None).await,
@@ -646,20 +628,33 @@ pub async fn run(
                     None => println!("(no effort)"),
                 },
                 // `/effort -` clears back to send-nothing.
-                Some("-") | Some("none") | Some("off") => match agent.set_effort(None) {
-                    Ok(()) => {
-                        llm.effort = None;
-                        println!("(no effort)");
+                Some("-") | Some("none") | Some("off") => {
+                    match handle.ask(Request::SetEffort { effort: None }).await {
+                        Ok(AgentEvent::Ack) => {
+                            llm.effort = None;
+                            println!("(no effort)");
+                        }
+                        Ok(AgentEvent::Error { message }) => eprintln!("effort: {message}"),
+                        Ok(_) => eprintln!("effort: unexpected reply"),
+                        Err(_) => eprintln!("effort: session closed"),
                     }
-                    Err(e) => eprintln!("effort: {e}"),
-                },
-                Some(level) => match agent.set_effort(Some(level.to_string())) {
-                    Ok(()) => {
-                        llm.effort = Some(level.to_string());
-                        println!("effort: {level}");
+                }
+                Some(level) => {
+                    match handle
+                        .ask(Request::SetEffort {
+                            effort: Some(level.to_string()),
+                        })
+                        .await
+                    {
+                        Ok(AgentEvent::Ack) => {
+                            llm.effort = Some(level.to_string());
+                            println!("effort: {level}");
+                        }
+                        Ok(AgentEvent::Error { message }) => eprintln!("effort: {message}"),
+                        Ok(_) => eprintln!("effort: unexpected reply"),
+                        Err(_) => eprintln!("effort: session closed"),
                     }
-                    Err(e) => eprintln!("effort: {e}"),
-                },
+                }
             },
             Some(Command::Resume(arg)) => {
                 let path = match arg {
@@ -688,7 +683,7 @@ pub async fn run(
                             llm.effort = e;
                         }
                         let n = messages.len();
-                        agent = build_agent(
+                        let new_agent = build_agent(
                             AgentSpec {
                                 llm: llm.clone(),
                                 hooks: hooks.clone(),
@@ -700,7 +695,9 @@ pub async fn run(
                             Some(s),
                             messages,
                         );
-                        *lock_cancel_slot(&cancel_slot) = agent.cancel_token();
+                        handle = SessionActor::spawn(new_agent);
+                        *lock_slot(&handle_slot) = handle.clone();
+                        session_path = Some(path.clone());
                         println!("resumed {} ({n} messages)", path.display());
                     }
                     Err(e) => eprintln!("open {}: {e}", path.display()),
@@ -711,7 +708,7 @@ pub async fn run(
                     println!("no sessions in {}", session_dir().display())
                 }
                 Ok(list) => {
-                    let current = agent.session_path();
+                    let current = session_path.as_deref();
                     for p in list {
                         let mark = if current == Some(p.as_path()) {
                             "*"
@@ -727,23 +724,31 @@ pub async fn run(
                 Err(e) => eprintln!("list sessions: {e}"),
             },
             Some(Command::Reload { no_session }) => {
-                reload(&agent, &llm, no_session, &in_flight, &cancel_slot).await
+                reload(&llm, session_path.as_deref(), no_session, &in_flight).await
             }
-            Some(Command::Usage) => {
-                println!("{}", format_usage(&usage_totals(agent.messages())));
-                if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
-                    let used = last_input_tokens(agent.messages()).unwrap_or(0);
-                    let pct = used * 100 / limit.context.max(1);
-                    println!("context: {used}/{} ({pct}%)", limit.context);
+            Some(Command::Usage) => match handle.ask(Request::GetHistory).await {
+                Ok(AgentEvent::History { messages }) => {
+                    println!("{}", format_usage(&usage_totals(&messages)));
+                    if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
+                        let used = last_input_tokens(&messages).unwrap_or(0);
+                        let pct = used * 100 / limit.context.max(1);
+                        println!("context: {used}/{} ({pct}%)", limit.context);
+                    }
+                }
+                Ok(_) => eprintln!("usage: unexpected reply"),
+                Err(_) => eprintln!("usage: session closed"),
+            },
+            Some(Command::Compact(arg)) => {
+                match handle.ask(Request::Compact { instructions: arg }).await {
+                    Ok(AgentEvent::Compaction { summarized, kept }) => {
+                        println!("compacted: summarized {summarized}, kept {kept} (+ summary)")
+                    }
+                    Ok(AgentEvent::Ack) => println!("(nothing to compact)"),
+                    Ok(AgentEvent::Error { message }) => eprintln!("compact: {message}"),
+                    Ok(_) => eprintln!("compact: unexpected reply"),
+                    Err(_) => eprintln!("compact: session closed"),
                 }
             }
-            Some(Command::Compact(arg)) => match agent.compact(arg.as_deref()).await {
-                Ok(CompactOutcome::NothingToDo) => println!("(nothing to compact)"),
-                Ok(CompactOutcome::Done {
-                    summarized, kept, ..
-                }) => println!("compacted: summarized {summarized}, kept {kept} (+ summary)"),
-                Err(e) => eprintln!("compact: {e}"),
-            },
             Some(Command::Skills) => print_skills(&skills),
             Some(Command::Skill(arg)) => match arg.as_deref() {
                 None => println!("usage: /skill <name> [args]   (/skills lists them)"),
@@ -758,13 +763,13 @@ pub async fn run(
                             Err(e) => eprintln!("read {}: {e}", skill.path.display()),
                             Ok(body) => {
                                 let input = skill_turn(&skill.name, &body, extra);
-                                run_turn(&mut agent, &input, &in_flight, &cancel_slot).await;
+                                run_turn(&handle, &input, &in_flight).await;
                             }
                         },
                     }
                 }
             },
-            None => run_turn(&mut agent, line, &in_flight, &cancel_slot).await,
+            None => run_turn(&handle, line, &in_flight).await,
         }
     }
 }
@@ -798,33 +803,41 @@ fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
     out
 }
 
-/// One user turn: spawn the printer over a fresh sink, run, clean up.
-async fn run_turn(
-    agent: &mut Agent,
-    input: &str,
-    in_flight: &AtomicBool,
-    cancel_slot: &Mutex<CancellationToken>,
-) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let printer = tokio::spawn(print_events(rx));
+/// One user turn: subscribe for the printer, submit, and await the run's stop
+/// reason.
+async fn run_turn(handle: &SessionHandle, input: &str, in_flight: &AtomicBool) {
+    let mut rx = handle.subscribe();
+    let printer = tokio::spawn(async move { print_events(&mut rx).await });
     in_flight.store(true, Ordering::SeqCst);
-    let res = agent.run(input, tx).await;
+    let reply = handle
+        .ask(Request::Submit {
+            text: input.to_string(),
+        })
+        .await;
     in_flight.store(false, Ordering::SeqCst);
-    *lock_cancel_slot(cancel_slot) = agent.cancel_token();
     let _ = printer.await;
-    match res {
-        Ok(StopReason::Aborted) => println!("{DIM}(aborted){RESET}"),
-        Ok(StopReason::Error) => eprintln!("{DIM}✗ run failed{RESET}"),
-        Ok(StopReason::MaxTurns) => println!("{DIM}(hit max turns){RESET}"),
+    match reply {
+        Ok(AgentEvent::Stopped { stop_reason }) => match stop_reason {
+            StopReason::Aborted => println!("{DIM}(aborted){RESET}"),
+            StopReason::Error => eprintln!("{DIM}✗ run failed{RESET}"),
+            StopReason::MaxTurns => println!("{DIM}(hit max turns){RESET}"),
+            _ => {}
+        },
         Ok(_) => {}
-        Err(e) => eprintln!("{DIM}error: {e}{RESET}"),
+        Err(_) => eprintln!("{DIM}error: session closed{RESET}"),
     }
 }
 
-async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
+async fn print_events(rx: &mut broadcast::Receiver<AgentEvent>) {
     let mut p = MessagePrinter::default();
     let mut st = PrintState::default();
-    while let Some(ev) = rx.recv().await {
+    loop {
+        let ev = match rx.recv().await {
+            Ok(ev) => ev,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+        let done = matches!(ev, AgentEvent::AgentEnd);
         match ev {
             AgentEvent::MessageStart { .. } => {
                 p.reset();
@@ -874,6 +887,9 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                 ));
             }
             _ => {}
+        }
+        if done {
+            break;
         }
     }
     close_blocks(&mut p, &mut st);
@@ -1114,17 +1130,16 @@ mod tests {
     }
 
     #[test]
-    fn lock_cancel_slot_tolerates_poisoning() {
-        let m = Mutex::new(CancellationToken::new());
+    fn lock_slot_tolerates_poisoning() {
+        let m = Mutex::new(0);
         // Poison the mutex by panicking while the lock is held.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = m.lock().unwrap();
             panic!("poison on purpose");
         }));
         // The helper must still hand back the guard rather than panicking.
-        let guard = lock_cancel_slot(&m);
-        guard.cancel();
-        assert!(guard.is_cancelled());
+        let guard = lock_slot(&m);
+        assert_eq!(*guard, 0);
     }
 
     #[test]
