@@ -10,7 +10,7 @@ status table current.
 | 2 | `bash` output cap | ☑ done |
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☑ done |
-| 3 | REPL line editing (history, completion, multiline) | ☐ todo |
+| 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 
 Suggested commit per item. Reference files by function, not line number
 (they drift).
@@ -251,59 +251,19 @@ scratch. A bounded retry with backoff would ride it out silently.
 
 ---
 
-## 3. REPL line editing (history, completion, multiline)
+## 3. Interface redesign → full-screen TUI
 
-**Problem.** `repl.rs` reads input with
-`tokio::io::BufReader::new(tokio::io::stdin()).lines()` — no up-arrow
-history, no tab completion, no multiline. Editing is limited to the
-terminal's cooked-mode line discipline. A pasted multi-line block is split
-into separate prompts; a multi-line prompt submits on the first `Enter`.
+**Reframed.** This was scoped as a line editor (rustyline / hand-rolled). The
+actual goal is larger: a **complete TUI** — full-screen transcript, streaming
+render, input box, status line, scrollback — consuming the same `AgentEvent`
+stream the REPL prints today.
 
-**Example.**
-- Re-running the previous prompt needs a full retype (no history).
-- Pasting a 5-line snippet to discuss fires 5 independent turns.
-- Typing a 3-line prompt executes the first line before the rest is typed.
+That is its own project, so the detail moved out of this list:
 
-**Proposed fix.** Introduce a real line editor, **branched on
-`std::io::stdin().is_terminal()`**: TTY → editor, non-TTY (pipes, `-p`,
-tests) → the current `BufReader` loop unchanged. The non-TTY branch is
-non-negotiable — CI and piping depend on it.
+> ➡️ **[`docs/tui-plan.md`](tui-plan.md)** — problem, architecture, crate
+> layout, terminal handling, phased tasks, open questions, progress tracker.
 
-Options considered:
-- **(a) `rustyline`** — mature, history file, completion, hints,
-  multiline via validator. Sync API → run each prompt in
-  `tokio::task::spawn_blocking`, editor behind `Arc<Mutex<_>>`. *Recommended*:
-  smallest well-scoped dep with the features we want.
-- **(b) `reedline`** — richer (menus, hilite); heavier.
-- **(c) hand-rolled raw mode** — zero deps, fits "minimal", but ~200+
-  lines of ANSI/termios edge cases (wcode already touches `libc` for
-  process groups, so not alien).
-
-Behaviors:
-- **History**: persist to `~/.local/share/wcode/history` (beside
-  sessions); dedup consecutive, bounded length.
-- **Completion**: start with `/`-command completion at line start; later
-  `/model <tab>` (model ids) and `/resume <tab>` (session files).
-- **Multiline**: trailing `\` continues the line (cheap, predictable);
-  rely on rustyline bracketed-paste for pasted blocks.
-- **Ctrl-C / Ctrl-D**: map `ReadlineError::Interrupted` / `Eof` to
-  today's semantics — in-flight → cancel; idle → exit.
-- Output during a run happens *after* the line is submitted, so prompt
-  clobbering isn't a concern.
-
-**Tasks**
-- [ ] Add the dep + `is_terminal()` branch; keep the piped path covered.
-- [ ] History file + load/save; dedup + cap.
-- [ ] `/`-command completion.
-- [ ] Backslash multiline.
-- [ ] Ctrl-C / Ctrl-D semantics preserved.
-- [ ] Manual TTY smoke + README note.
-
-**Open questions.**
-- rustyline vs hand-rolled — the one real dependency decision; confirm
-  before starting.
-- History file location/name and retention.
-- Extend completion to model ids / session paths now or later?
+This entry stays as the pointer plus status only.
 
 ---
 
@@ -314,5 +274,4 @@ Behaviors:
    compaction manages.
 3. **1** AGENTS.md — self-contained CLI + config feature; highest value.
 4. **4** retry — kernel robustness, no deps.
-5. **3** line editor — new dependency and interactive surface; do last,
-   confirm the rustyline-vs-hand-rolled call first.
+5. **3** interface → TUI — its own project; see [`tui-plan.md`](tui-plan.md).
