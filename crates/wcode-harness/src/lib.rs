@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod agent;
 pub mod compaction;
 pub mod event;

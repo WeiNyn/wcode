@@ -150,6 +150,13 @@ impl Agent {
         let _ = self.follow_tx.send(m);
     }
 
+    /// Sender clone for injecting a follow-up while `run` holds the `&mut`
+    /// borrow (the mirror of [`Agent::steer_sender`], for a UI/actor task that
+    /// cannot reach `follow_up` directly).
+    pub fn follow_up_sender(&self) -> UnboundedSender<AgentMessage> {
+        self.follow_tx.clone()
+    }
+
     pub fn cancel(&self) {
         self.cancel.cancel();
     }

@@ -1,0 +1,601 @@
+//! In-process session actor — one mailbox, one stream.
+//!
+//! [`SessionActor`] turns an [`Agent`] into a task with an inbox and a
+//! subscribable outbox, so a caller drives the session entirely through
+//! [`Request`]s and observes it through [`AgentEvent`]s — never by holding the
+//! `Agent` itself:
+//!
+//! ```text
+//!   caller  (REPL / TUI / future peer session — all identical here)
+//!     │  send(Request)                          ▲  subscribe() → recv()
+//!     ▼                                         │  (own cursor per subscriber)
+//!   inbox: mpsc::Unbounded<Request>       outbox: broadcast<AgentEvent>
+//!     │                                         ▲  events.send(ev)
+//!     └───────────► SessionActor task ◄─────────┘
+//!                   owns the Agent; serves one Request at a time;
+//!                   `deferred: VecDeque<Request>` parks mid-run commands
+//! ```
+//!
+//! This is the seam the whole protocol design hangs on. A REPL, a TUI, and
+//! (later) a peer session are all just callers that hold a [`SessionHandle`];
+//! they differ only in how they render the stream and which address they hold,
+//! not in the mechanism they speak. Today the inbox and outbox are in-process
+//! channels; the shapes are chosen so that a socket ([`Frame`]s over NDJSON,
+//! stage S2) can replace the transport without changing this API.
+//!
+//! ## Flow
+//!
+//! `serve()` — no run in flight: pull ONE Request, service it, repeat.
+//!
+//! ```text
+//!   deferred non-empty? ──yes──► take from deferred (FIFO, order kept)
+//!        │ no
+//!        ▼
+//!   inbox.recv().await ──► match Request:
+//!        Submit   {..} ─► run(...)             → enters the in-run map below
+//!        Steer    {..} ─► agent.steer(msg)     → queued for the next run
+//!        FollowUp {..} ─► agent.follow_up(msg) → queued for the next run
+//!        Cancel        ─► (no-op — nothing is running)
+//!        SetModel {..} ─► agent.set_model(..)
+//!        SetEffort{..} ─► agent.set_effort(..)
+//!        Compact  {..} ─► agent.compact(..).await
+//!        Unknown       ─► (ignored)
+//! ```
+//!
+//! `run()` — the Agent is borrowed for the whole run, so it is reached only
+//! through clones taken *before* the borrow.
+//!
+//! ```text
+//!   steer     = agent.steer_sender()
+//!   follow_up = agent.follow_up_sender()
+//!   cancel    = agent.cancel_token()
+//!
+//!   loop { tokio::select! { biased; ... } }   ← biased: inbox polled FIRST
+//!        ├─ Some(req) = inbox.recv() ─► Cancel   ─► cancel.cancel()         ┐ to the
+//!        │                              Steer    ─► steer.send(msg)         │ live run
+//!        │                              FollowUp ─► follow_up.send(msg)     │
+//!        │                              other    ─► deferred.push_back(req) ┘ waits
+//!        ├─ result  = &mut run  ──────► run finished → break
+//!        └─ Some(ev) = sink_rx.recv() ► events.send(ev)  (fan-out to subscribers)
+//!   }
+//!   then: drain leftover sink_rx → events.send ; on Err(run) → Error event
+//! ```
+//!
+//! [`Frame`]: crate::protocol::Frame
+//!
+//! ## Delivery rules
+//!
+//! A run holds the agent's `&mut` for its whole life, so the actor splits the
+//! inbox by what each request needs:
+//!
+//! | request | while a run is in flight |
+//! |---------|--------------------------|
+//! | `Cancel` | delivered at once — the token is cancelled; the loop aborts |
+//! | `Steer` / `FollowUp` | forwarded to the run's channels at once |
+//! | `SetModel` / `SetEffort` / `Compact` | deferred, applied when the run ends |
+//! | another `Submit` | deferred, becomes the next run |
+//!
+//! The interactive path therefore never waits on a run. The deferred set is
+//! exactly the requests that need `&mut Agent` — you cannot swap the model or
+//! compact the context out from under a run — and deferring them is also the
+//! documented meaning: `set_model`/`set_effort` "take effect on the next run".
+//!
+//! One caveat lives in the kernel, not here — the actor hands a `Cancel` over at
+//! once, but the *loop* is what acts on it, and its latency depends on where the
+//! run is:
+//!
+//! ```text
+//! where the run is when Cancel arrives          when it stops
+//! ---------------------------------------------  -----------------------
+//! model streaming     (loop races the token)     immediately
+//! between turns       (checked at turn start)    immediately
+//! inside a tool call  (no race on the future)    when the tool returns *
+//! ```
+//!
+//! `*` unless the tool watches `ToolContext::cancel` itself (e.g. `bash` kills
+//! its child) — then it can stop early.
+//!
+//! Scope (stage S1): the actor services the request variants that map onto an
+//! existing [`Agent`] method — [`Request::Submit`], [`Request::Steer`],
+//! [`Request::FollowUp`], [`Request::Cancel`], [`Request::SetModel`],
+//! [`Request::SetEffort`], [`Request::Compact`]. Read-back requests
+//! (`GetHistory`) and their reply events are not here yet: they need a
+//! request/reply correlation the wire (S2) will define, and the CLI is not yet
+//! pointed at the actor. `SetModel`/`SetEffort`/`Compact` failures are currently
+//! dropped, for the same reason.
+
+use std::collections::VecDeque;
+use std::fmt;
+
+use tokio::sync::{broadcast, mpsc};
+
+use crate::agent::Agent;
+use crate::event::AgentEvent;
+use crate::message::AgentMessage;
+use crate::protocol::Request;
+
+/// Default outbox buffer: how far a subscriber may lag before it starts losing
+/// events (`broadcast` semantics — the slowest reader drops, it never blocks the
+/// run).
+pub const EVENT_BUFFER: usize = 1024;
+
+/// Handle to a running [`SessionActor`].
+///
+/// Cloning gives another caller the same mailbox and stream. When the last
+/// handle drops, the session shuts down and its [`Agent`] is dropped.
+#[derive(Clone)]
+pub struct SessionHandle {
+    inbox: mpsc::UnboundedSender<Request>,
+    events: broadcast::Sender<AgentEvent>,
+}
+
+impl SessionHandle {
+    /// Submit a request to the session's inbox.
+    ///
+    /// Fails only if the session has shut down (every handle was dropped and the
+    /// actor task has ended). A `Submit` runs to completion before the next
+    /// non-interrupt request is serviced, but `Steer`/`FollowUp`/`Cancel` sent
+    /// during a run are handled immediately (see the actor's delivery rules).
+    pub fn send(&self, request: Request) -> Result<(), SessionClosed> {
+        self.inbox.send(request).map_err(|_| SessionClosed)
+    }
+
+    /// Subscribe to the session's event stream. Each subscriber gets its own
+    /// receiver; a lagging subscriber drops events rather than stalling the run.
+    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+        self.events.subscribe()
+    }
+}
+
+/// Returned when a [`SessionHandle::send`] targets a session that has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionClosed;
+
+impl fmt::Display for SessionClosed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("session actor has shut down")
+    }
+}
+
+impl std::error::Error for SessionClosed {}
+
+/// Spawns the actor task that owns an [`Agent`].
+///
+/// The `Agent` moves into a background task; all interaction returns through the
+/// [`SessionHandle`]. The task exits when the last handle drops.
+pub struct SessionActor;
+
+impl SessionActor {
+    pub fn spawn(agent: Agent) -> SessionHandle {
+        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        let (events_tx, _) = broadcast::channel(EVENT_BUFFER);
+        let events = events_tx.clone();
+        tokio::spawn(serve(agent, inbox_rx, events_tx));
+        SessionHandle {
+            inbox: inbox_tx,
+            events,
+        }
+    }
+}
+
+/// The actor loop: pull one request at a time, service it, repeat.
+async fn serve(
+    mut agent: Agent,
+    mut inbox: mpsc::UnboundedReceiver<Request>,
+    events: broadcast::Sender<AgentEvent>,
+) {
+    // Requests that arrive *during* a run but cannot be applied to it (a
+    // second `Submit`, a model swap) wait here and are serviced once the run
+    // ends, preserving their order.
+    let mut deferred: VecDeque<Request> = VecDeque::new();
+
+    loop {
+        let request = match deferred.pop_front() {
+            Some(request) => request,
+            None => match inbox.recv().await {
+                Some(request) => request,
+                None => break, // every handle dropped: shut down
+            },
+        };
+
+        match request {
+            Request::Submit { text } => {
+                run(&mut agent, &text, &mut inbox, &events, &mut deferred).await
+            }
+            Request::Steer { content } => agent.steer(AgentMessage::user_text(content)),
+            Request::FollowUp { content } => agent.follow_up(AgentMessage::user_text(content)),
+            // A cancel with no run in flight is a no-op, not a queued kill: the
+            // token is minted fresh at the end of each run, so cancelling an idle
+            // session would otherwise abort the *next* run on its first poll.
+            Request::Cancel => {}
+            Request::SetModel { model } => {
+                let _ = agent.set_model(model);
+            }
+            Request::SetEffort { effort } => {
+                let _ = agent.set_effort(effort);
+            }
+            Request::Compact { instructions } => {
+                let _ = agent.compact(instructions.as_deref()).await;
+            }
+            Request::Unknown => {}
+        }
+    }
+}
+
+/// Drive one `Agent::run`, forwarding its events to the outbox while still
+/// servicing the inbox so `Steer`/`FollowUp`/`Cancel` reach the in-flight run.
+async fn run(
+    agent: &mut Agent,
+    text: &str,
+    inbox: &mut mpsc::UnboundedReceiver<Request>,
+    events: &broadcast::Sender<AgentEvent>,
+    deferred: &mut VecDeque<Request>,
+) {
+    let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // Sender/token clones taken *before* `run` borrows the agent: steering and
+    // cancelling the in-flight run must not need the `&mut`.
+    let steer = agent.steer_sender();
+    let follow_up = agent.follow_up_sender();
+    let cancel = agent.cancel_token();
+
+    let mut run = Box::pin(agent.run(text, sink_tx));
+    let result = loop {
+        // Biased: service the inbox *before* advancing the run. A `Steer` must
+        // be in the agent's steering channel before the run reaches its next
+        // turn-boundary drain, or it is silently a turn late. Polling the run
+        // first would let it cross that boundary while the request still sits
+        // here.
+        tokio::select! {
+            biased;
+            Some(request) = inbox.recv() => match request {
+                Request::Cancel => cancel.cancel(),
+                Request::Steer { content } => {
+                    let _ = steer.send(AgentMessage::user_text(content));
+                }
+                Request::FollowUp { content } => {
+                    let _ = follow_up.send(AgentMessage::user_text(content));
+                }
+                other => deferred.push_back(other),
+            },
+            result = &mut run => break result,
+            Some(event) = sink_rx.recv() => {
+                let _ = events.send(event);
+            }
+        }
+    };
+
+    // The run dropped its sink on completion; forward whatever is still buffered
+    // so the last events (e.g. `AgentEnd`) are never stranded.
+    while let Ok(event) = sink_rx.try_recv() {
+        let _ = events.send(event);
+    }
+
+    // A session-write error inside the run is a `LoopError`; the run's own
+    // `AgentEvent::Error` covers stream failures, so surface this one the same
+    // way rather than dropping it silently.
+    if let Err(e) = result {
+        let _ = events.send(AgentEvent::Error {
+            message: e.to_string(),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{Agent, AgentConfig};
+    use crate::compaction::CompactionPolicy;
+    use crate::event::LlmStreamEvent;
+    use crate::hooks::HooksSet;
+    use crate::message::StopReason;
+    use crate::streamfn::{LlmOpts, LlmStream, StreamFn};
+    use crate::tool::{ToolContext, ToolOutput, TypedTool, erased};
+    use futures::StreamExt as _;
+    use serde::Deserialize;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[derive(Clone, Default)]
+    struct Recorder {
+        script: Arc<Mutex<VecDeque<Vec<LlmStreamEvent>>>>,
+        calls: Arc<Mutex<Vec<Vec<AgentMessage>>>>,
+        models: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Recorder {
+        fn push(&self, events: Vec<LlmStreamEvent>) {
+            self.script.lock().unwrap().push_back(events);
+        }
+        fn calls(&self) -> Vec<Vec<AgentMessage>> {
+            self.calls.lock().unwrap().clone()
+        }
+        fn models(&self) -> Vec<String> {
+            self.models.lock().unwrap().clone()
+        }
+    }
+
+    fn fake_stream_fn(rec: &Recorder) -> StreamFn {
+        let rec = rec.clone();
+        Arc::new(
+            move |ctx: &[AgentMessage], _system, _tools, opts: &LlmOpts| {
+                rec.calls.lock().unwrap().push(ctx.to_vec());
+                rec.models.lock().unwrap().push(opts.model.clone());
+                let events = rec.script.lock().unwrap().pop_front().unwrap_or_default();
+                Box::pin(futures::stream::iter(events)) as LlmStream
+            },
+        )
+    }
+
+    fn agent_config(stream_fn: StreamFn, tools: Vec<crate::tool::Tool>) -> AgentConfig {
+        AgentConfig {
+            system: "sys".into(),
+            tools,
+            llm: LlmOpts {
+                model: "m1".into(),
+                ..LlmOpts::default()
+            },
+            stream_fn,
+            hooks: HooksSet::default(),
+            session: None,
+            context: Vec::new(),
+            working_dir: std::path::PathBuf::new(),
+            max_turns: crate::loop_::DEFAULT_MAX_TURNS,
+            parallel_tools: true,
+            compaction: CompactionPolicy::default(),
+        }
+    }
+
+    /// Block until the run ends, panicking if it stalls.
+    async fn wait_for_end(rx: &mut broadcast::Receiver<AgentEvent>) {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event within the timeout")
+                .expect("the outbox stays open");
+            if matches!(event, AgentEvent::AgentEnd) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_streams_events_to_a_subscriber() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("hello".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+
+        let mut saw_text = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event")
+                .expect("open");
+            match event {
+                AgentEvent::MessageUpdate { message } if message.as_text() == "hello" => {
+                    saw_text = true;
+                }
+                AgentEvent::AgentEnd => break,
+                _ => {}
+            }
+        }
+        assert!(saw_text, "the streamed text reached the subscriber");
+    }
+
+    #[tokio::test]
+    async fn idle_cancel_does_not_poison_the_next_run() {
+        let rec = Recorder::default();
+        for text in ["one", "two"] {
+            rec.push(vec![
+                LlmStreamEvent::TextDelta(text.into()),
+                LlmStreamEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                },
+            ]);
+        }
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+        wait_for_end(&mut rx).await;
+
+        // No run in flight: this must be swallowed, not arm a kill for run two.
+        handle.send(Request::Cancel).unwrap();
+        handle.send(Request::Submit { text: "b".into() }).unwrap();
+
+        let mut saw_two = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event")
+                .expect("open");
+            match event {
+                AgentEvent::MessageUpdate { message } if message.as_text() == "two" => {
+                    saw_two = true;
+                }
+                AgentEvent::AgentEnd => break,
+                _ => {}
+            }
+        }
+        assert!(saw_two, "the second run completed despite the idle cancel");
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_an_in_flight_run() {
+        // One delta, then the stream hangs: only a working cancel ends the run.
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            let head = futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())]);
+            Box::pin(head.chain(futures::stream::pending())) as LlmStream
+        });
+        let handle = SessionActor::spawn(Agent::new(agent_config(stream_fn, vec![])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event")
+                .expect("open");
+            if matches!(event, AgentEvent::MessageUpdate { .. }) {
+                handle.send(Request::Cancel).unwrap();
+                break;
+            }
+        }
+        // Without a live cancel this would time out on the pending stream.
+        wait_for_end(&mut rx).await;
+    }
+
+    #[derive(Deserialize, schemars::JsonSchema)]
+    struct GateArgs {
+        text: String,
+    }
+
+    /// Blocks until released, so the actor can be steered while a run is inside
+    /// a tool call.
+    struct GateTool {
+        entered: mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl TypedTool for GateTool {
+        type Args = GateArgs;
+        fn name(&self) -> &str {
+            "gate"
+        }
+        fn description(&self) -> &str {
+            "blocks until released"
+        }
+        async fn execute(&self, args: GateArgs, _ctx: &ToolContext) -> ToolOutput {
+            self.entered.send(()).ok();
+            self.release.notified().await;
+            ToolOutput {
+                output: format!("released:{}", args.text),
+                is_error: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_reaches_the_next_turn_while_a_tool_is_blocked() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("after steer".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // the tool is now blocked
+        handle
+            .send(Request::Steer {
+                content: "mid-run steer".into(),
+            })
+            .unwrap();
+        release.notify_one();
+
+        wait_for_end(&mut rx).await;
+
+        let calls = rec.calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "two stream calls: the tool turn and the next"
+        );
+        assert!(
+            calls[1]
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { .. }) && m.as_text() == "mid-run steer"),
+            "the steer drained into the next turn: {:?}",
+            calls[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn config_request_during_a_run_is_deferred_to_after_it() {
+        // Run one: turn 1 blocks in the gate, turn 2 finishes — both on the
+        // run's own model. Run two is a fresh request and must see the swap.
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        for text in ["turn two", "run two"] {
+            rec.push(vec![
+                LlmStreamEvent::TextDelta(text.into()),
+                LlmStreamEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                },
+            ]);
+        }
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // run one is inside the tool
+        handle
+            .send(Request::SetModel { model: "m2".into() })
+            .unwrap(); // must not take effect until run one is done
+        release.notify_one();
+        wait_for_end(&mut rx).await; // run one ends on m1
+
+        handle.send(Request::Submit { text: "b".into() }).unwrap();
+        wait_for_end(&mut rx).await; // run two
+
+        assert_eq!(
+            rec.models(),
+            ["m1", "m1", "m2"],
+            "the swap waited for the run, then applied to the next one"
+        );
+    }
+}
