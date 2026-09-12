@@ -82,7 +82,7 @@ stop at the first dir containing `.git`), capped at 32 KiB. Target shape:
   stop-at-`.git` rule.
 - **Candidate names** per directory, first hit wins:
   `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md` (default list; configurable).
-  Adding `CLAUDE.md` is the cheap portability win pi/jcode both take.
+  `CLAUDE.md` is in the default list (portability, as pi/jcode do).
 - **Merge**: each file rendered as `# Project instructions (<path>)` + body,
   deduped by canonical path, each capped at 32 KiB, the whole block at 64 KiB.
 - Controls: keep `--no-instructions`; `WCODE_INSTRUCTIONS` and
@@ -218,6 +218,8 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - **Skill roots** — the shared `.agents/skills` convention takes **priority**;
   `.claude/skills` is a **fallback**, read only where `.agents/skills` is absent.
 - **Global context file** — `~/.config/wcode/AGENTS.md`, beside `config.toml`.
+- **Context-file candidates** — `AGENTS.override.md` → `AGENTS.md` → `CLAUDE.md`
+  (first hit per directory); `CLAUDE.md` stays in the default list for portability.
 
 **Still open.**
 
@@ -225,17 +227,15 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
   (recommended) vs pi's first-found.
 - **Skills: prompt vs message** — system prompt (recommended, stable) vs a
   per-turn message.
-- **Context-file candidates** — keep `CLAUDE.md` in the default list (cheap
-  portability) or AGENTS-only.
 - **`name` vs directory** — follow pi: allow a mismatch (shared dirs).
 - **Per-skill tool policy** (`allowed-tools`) — parsed and ignored in v1; a
   `Hooks` variant owns it later.
 
 ## 8. Progress
 
-- [x] Settle parsing / roots / global-file location (see §7).
+- [x] Settle parsing / roots / global-file / `CLAUDE.md` candidate (see §7).
 - [ ] Settle the remaining questions (collision order, prompt-vs-message,
-      `CLAUDE.md` candidate).
+      `name`-vs-dir).
 - [ ] Phase 1 (references as a set) — code + tests + `--dump-system-prompt`.
 - [ ] Phase 2 (skills core) — code + tests + live check.
 - [ ] Phase 3 (polish + docs).
