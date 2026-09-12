@@ -20,6 +20,13 @@ pub enum LlmStreamEvent {
         stop_reason: StopReason,
         usage: Option<Usage>,
     },
+    /// The adapter is about to retry a failed connect after a transient error.
+    /// `attempt` is 1-based; advisory — the loop only surfaces it.
+    Retrying {
+        attempt: u32,
+        max: u32,
+        reason: String,
+    },
     Error {
         message: String,
     },
@@ -61,6 +68,12 @@ pub enum AgentEvent {
     Compaction {
         summarized: usize,
         kept: usize,
+    },
+    /// The adapter retried a failed connect after a transient error.
+    Retrying {
+        attempt: u32,
+        max: u32,
+        reason: String,
     },
     /// Stream-level failure; the run ends with `StopReason::Error`.
     Error {
@@ -156,6 +169,14 @@ mod tests {
                 kept: 2,
             },
             "compaction",
+        );
+        roundtrip(
+            AgentEvent::Retrying {
+                attempt: 2,
+                max: 3,
+                reason: "503".into(),
+            },
+            "retrying",
         );
         roundtrip(AgentEvent::AgentEnd, "agent_end");
     }

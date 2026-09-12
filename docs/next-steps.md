@@ -9,7 +9,7 @@ status table current.
 | 5 | README duplicated line | ☑ done |
 | 2 | `bash` output cap | ☑ done |
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
-| 4 | Retry / backoff on transient errors | ☐ todo |
+| 4 | Retry / backoff on transient errors | ☑ done |
 | 3 | REPL line editing (history, completion, multiline) | ☐ todo |
 
 Suggested commit per item. Reference files by function, not line number
@@ -217,16 +217,31 @@ scratch. A bounded retry with backoff would ride it out silently.
   `retrying (2/3) after 503 …` dimmed.
 
 **Tasks**
-- [ ] Extract a generic `with_retry(policy, classify, op)` helper
+- [x] Extract a generic `with_retry(policy, classify, op)` helper
       (rig-free; unit-tested with synthetic errors: succeeds after N
       transient failures, gives up after `max`, ignores fatal).
-- [ ] Restructure `adapt` to rebuild the future per attempt; wire the
+- [x] Restructure `adapt` to rebuild the future per attempt; wire the
       helper around the connect step.
-- [ ] Classifier from rig's `provider_response_status()` + `HttpError`.
-- [ ] Cancellable backoff.
-- [ ] Config `[retry]` + `WCODE_RETRY_*` (+ `to_policy`-style fold).
-- [ ] Retry notice event → dim REPL line.
-- [ ] README.
+- [x] Classifier from rig's `provider_response_status()` + `HttpError`.
+- [x] Cancellable backoff.
+- [x] Config `[retry]` + `WCODE_RETRY_*` (+ `to_policy`-style fold).
+- [x] Retry notice event → dim REPL line.
+- [x] README.
+
+**Result.** `RetryPolicy` + `retryable`/`is_transient_status`/`backoff` +
+`connect_with_retry` in `streamfn.rs`, wired into `adapt`; config in the
+`[retry]` table (+ `WCODE_RETRY_*`); `LlmStreamEvent::Retrying` /
+`AgentEvent::Retrying` → a dim REPL line. Two findings during the build:
+
+- **Retry must cover the first streamed item, not just the connect.** rig's
+  OpenAI path defers the HTTP request *into* the stream, so a connection
+  failure surfaces on the first poll — confirmed live (the error arrived from
+  the stream phase, not `stream().await`). `connect_with_retry` peeks the first
+  item and retries it; after any content is forwarded, mid-stream errors pass
+  through unchanged.
+- **Transport failures arrive as `ProviderError(String)`, not `HttpError`** on
+  the OpenAI path, so the classifier also matches connect/DNS/timeout wording
+  (`is_transient_message`) when no status is preserved.
 
 **Open questions.**
 - Is `provider_response_status()` publicly reachable from our rig version

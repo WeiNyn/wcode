@@ -239,6 +239,9 @@ pub async fn run_loop(
                                                 }
                                                 // A stream Error behaves like Done{Error}: capture, end run.
                                                 // The message is surfaced first so consumers can show it.
+                                                Some(LlmStreamEvent::Retrying { attempt, max, reason }) => {
+                                                    let _ = sink.send(AgentEvent::Retrying { attempt, max, reason });
+                                                }
                                                 Some(LlmStreamEvent::Error { message }) => {
                                                     let _ = sink.send(AgentEvent::Error { message });
                                                     captured = Some(StopReason::Error);

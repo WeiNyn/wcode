@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::streamfn::{LlmEndpoint, LlmOpts};
+use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, RetryPolicy};
 
 use crate::rtk::RtkPreference;
 
@@ -57,6 +57,36 @@ impl InstructionsConfig {
     }
 }
 
+/// Retry policy, loaded from the `[retry]` table. Absent = defaults (3 retries,
+/// 500 ms base, 8 s cap); `max = 0` disables retrying.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct RetryConfig {
+    /// Retries after the first attempt (`0` disables).
+    pub max: Option<u32>,
+    /// Base backoff, in milliseconds.
+    pub base_ms: Option<u64>,
+    /// Cap on a single backoff wait, in milliseconds.
+    pub cap_ms: Option<u64>,
+}
+
+impl RetryConfig {
+    /// Fold the configured overrides over the harness defaults.
+    pub fn to_policy(self) -> RetryPolicy {
+        let d = RetryPolicy::default();
+        RetryPolicy {
+            max: self.max.unwrap_or(d.max),
+            base: self
+                .base_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(d.base),
+            cap: self
+                .cap_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(d.cap),
+        }
+    }
+}
+
 /// Compaction policy, loaded from the `[compaction]` table. Every field is
 /// optional so an absent table (or key) keeps the harness defaults; see
 /// [`CompactionPolicy`].
@@ -104,6 +134,8 @@ pub struct FileConfig {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub instructions: InstructionsConfig,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +149,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub compaction: CompactionPolicy,
     pub instructions: InstructionsConfig,
+    pub retry: RetryPolicy,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -136,6 +169,9 @@ pub struct EnvLike {
     pub wcode_compact_keep_recent_tokens: Option<String>,
     pub wcode_compact_keep_recent_turns: Option<String>,
     pub wcode_instructions: Option<String>,
+    pub wcode_retry_max: Option<String>,
+    pub wcode_retry_base_ms: Option<String>,
+    pub wcode_retry_cap_ms: Option<String>,
 }
 
 impl EnvLike {
@@ -155,6 +191,9 @@ impl EnvLike {
             wcode_compact_keep_recent_tokens: std::env::var("WCODE_COMPACT_KEEP_RECENT_TOKENS").ok(),
             wcode_compact_keep_recent_turns: std::env::var("WCODE_COMPACT_KEEP_RECENT_TURNS").ok(),
             wcode_instructions: std::env::var("WCODE_INSTRUCTIONS").ok(),
+            wcode_retry_max: std::env::var("WCODE_RETRY_MAX").ok(),
+            wcode_retry_base_ms: std::env::var("WCODE_RETRY_BASE_MS").ok(),
+            wcode_retry_cap_ms: std::env::var("WCODE_RETRY_CAP_MS").ok(),
         }
     }
 }
@@ -241,6 +280,20 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         compaction.keep_recent_turns = parse_count("compaction.keep_recent_turns", v)
             .map_err(ConfigError::Io)? as usize;
     }
+    let mut retry = file.retry.to_policy();
+    if let Some(v) = env.wcode_retry_max.as_deref() {
+        retry.max = parse_count("retry.max", v).map_err(ConfigError::Io)? as u32;
+    }
+    if let Some(v) = env.wcode_retry_base_ms.as_deref() {
+        retry.base = std::time::Duration::from_millis(
+            parse_count("retry.base_ms", v).map_err(ConfigError::Io)?,
+        );
+    }
+    if let Some(v) = env.wcode_retry_cap_ms.as_deref() {
+        retry.cap = std::time::Duration::from_millis(
+            parse_count("retry.cap_ms", v).map_err(ConfigError::Io)?,
+        );
+    }
     // Env beats toml: an explicit `WCODE_INSTRUCTIONS` (or `off`) wins.
     let instructions = InstructionsConfig {
         file: env.wcode_instructions.or(file.instructions.file),
@@ -255,6 +308,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         tools,
         compaction,
         instructions,
+        retry,
     })
 }
 
@@ -298,6 +352,7 @@ impl Config {
             endpoint: self.endpoint,
             effort: self.effort.clone(),
             session_id: None,
+            retry: self.retry,
         }
     }
 }

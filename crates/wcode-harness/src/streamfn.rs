@@ -7,6 +7,7 @@
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{Stream, StreamExt};
 use rig::client::{CompletionClient, ModelListingClient};
@@ -50,6 +51,9 @@ pub struct LlmOpts {
     /// against `none|minimal|low|medium|high|xhigh|max` (rig's typed enum) — a
     /// value outside that set fails with a clear error before the request.
     pub effort: Option<String>,
+    /// Retry policy for the connect phase (transient failures). See
+    /// [`RetryPolicy`].
+    pub retry: RetryPolicy,
 }
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
@@ -201,31 +205,21 @@ fn adapt(
 
     // Both wires yield the same normalized StreamingCompletionResponse, so
     // only model construction branches; the forwarding loop below is shared.
-    let stream_fut: std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>>
-                + Send,
-        >,
-    > = match opts.endpoint {
-        LlmEndpoint::Chat => {
-            let model = client
-                .completions_api()
-                .completion_model(opts.model.clone());
-            Box::pin(async move { model.stream(request).await })
-        }
-        LlmEndpoint::Responses => {
-            let model = client.completion_model(opts.model.clone());
-            Box::pin(async move { model.stream(request).await })
-        }
-    };
-
+    // Retry the connect (and the first item — rig defers the request into the
+    // stream). Once output is forwarded a mid-stream error is surfaced as-is. A
+    // fresh model per attempt is cheap — it just wraps the pooled client;
+    // `request` is cloned per attempt and `policy` is `Copy`.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<LlmStreamEvent>();
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return error_stream("StreamFn requires a tokio runtime".to_string());
     };
+    let policy = opts.retry;
+    let endpoint = opts.endpoint;
+    let model = opts.model.clone();
     runtime.spawn(async move {
-        let mut stream = match stream_fut.await {
-            Ok(stream) => stream,
+        let open = || open_stream(client.clone(), endpoint, &model, request.clone());
+        let (mut stream, first) = match connect_with_retry(&policy, open, &tx).await {
+            Ok(pair) => pair,
             Err(e) => {
                 let _ = tx.send(LlmStreamEvent::Error {
                     message: e.to_string(),
@@ -234,13 +228,17 @@ fn adapt(
             }
         };
         let mut errored = false;
+        let mut pending = first;
         loop {
-            let item = tokio::select! {
-                biased;
-                _ = tx.closed() => break,
-                item = stream.next() => match item {
-                    Some(item) => item,
-                    None => break,
+            let item = match pending.take() {
+                Some(item) => item,
+                None => tokio::select! {
+                    biased;
+                    _ = tx.closed() => break,
+                    item = stream.next() => match item {
+                        Some(item) => item,
+                        None => break,
+                    },
                 },
             };
             let events = match item {
@@ -273,6 +271,166 @@ fn error_stream(message: String) -> LlmStream {
     Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
         message,
     }]))
+}
+
+/// Retry policy for the connect phase of a stream call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Retries after the first attempt (0 disables retrying).
+    pub max: u32,
+    /// Base backoff: attempt `n` waits `base * 2^(n-1)`, capped at `cap`.
+    pub base: Duration,
+    /// Upper bound on a single backoff wait.
+    pub cap: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max: 3,
+            base: Duration::from_millis(500),
+            cap: Duration::from_secs(8),
+        }
+    }
+}
+
+/// Transient HTTP statuses worth retrying: request timeout/conflict, rate
+/// limiting, and the 5xx family. Client errors (400/401/403/404/422) are not.
+fn is_transient_status(code: u16) -> bool {
+    matches!(code, 408 | 409 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Whether a failed connect is worth retrying. A preserved provider status is
+/// authoritative (transient statuses retry, client errors don't); with no
+/// status, a transport failure retries and a build/parse error does not.
+fn retryable(error: &CompletionError) -> bool {
+    if let Some(status) = error.provider_response_status() {
+        return is_transient_status(status.as_u16());
+    }
+    match error {
+        // Transport failure with no status (connect refused / reset / timeout).
+        CompletionError::HttpError(_) => true,
+        // rig's OpenAI path folds some transport failures into a
+        // `ProviderError(String)` (reqwest's "error sending request …"); retry
+        // those, but not provider rejections that share the variant.
+        CompletionError::ProviderError(message) => is_transient_message(message),
+        _ => false,
+    }
+}
+
+/// Heuristic for transport failures that arrive as `ProviderError` strings:
+/// connect/DNS/timeout/reset wording, not provider rejections.
+fn is_transient_message(message: &str) -> bool {
+    const NEEDLES: [&str; 10] = [
+        "error sending request",
+        "error trying to connect",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "timed out",
+        "timeout",
+        "unreachable",
+        "dns error",
+        "temporary failure",
+    ];
+    let m = message.to_ascii_lowercase();
+    NEEDLES.iter().any(|needle| m.contains(needle))
+}
+
+/// Exponential backoff for `attempt` (1-based), capped, with jitter in
+/// [75%, 100%] so repeated retries don't align on the same instant.
+fn backoff(attempt: u32, base: Duration, cap: Duration) -> Duration {
+    let shift = attempt.saturating_sub(1).min(16);
+    let capped = base.saturating_mul(1u32 << shift).min(cap);
+    let millis = capped.as_millis() as u64;
+    if millis <= 1 {
+        return capped;
+    }
+    let jitter = clock_nanos() % (millis / 4 + 1);
+    Duration::from_millis(millis - jitter)
+}
+
+/// A cheap clock seed for backoff jitter.
+fn clock_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0)
+}
+
+/// Build one connect attempt: a fresh future per call, so the handshake can be
+/// retried. Once the response is in hand a mid-stream error is not retried.
+fn open_stream(
+    client: rig::providers::openai::Client,
+    endpoint: LlmEndpoint,
+    model: &str,
+    request: CompletionRequest,
+) -> Pin<Box<dyn std::future::Future<Output = Result<StreamingCompletionResponse, CompletionError>> + Send>> {
+    match endpoint {
+        LlmEndpoint::Chat => {
+            let model = client.completions_api().completion_model(model.to_string());
+            Box::pin(async move { model.stream(request).await })
+        }
+        LlmEndpoint::Responses => {
+            let model = client.completion_model(model.to_string());
+            Box::pin(async move { model.stream(request).await })
+        }
+    }
+}
+
+/// Open a stream, retrying transient failures on both the connect and the
+/// **first** item. rig's OpenAI path defers the HTTP request into the stream, so
+/// a connection failure surfaces on the first poll; retrying only the connect
+/// would miss it. `open` is re-invoked per attempt (a fresh future). Once any
+/// content has been forwarded a mid-stream error is surfaced as-is — retrying
+/// would duplicate output. Each backoff is abandoned if the consumer drops `tx`.
+async fn connect_with_retry<S, F>(
+    policy: &RetryPolicy,
+    mut open: F,
+    tx: &tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>,
+) -> Result<(S, Option<Result<StreamedAssistantContent, CompletionError>>), CompletionError>
+where
+    F: FnMut() -> Pin<Box<dyn std::future::Future<Output = Result<S, CompletionError>> + Send>>,
+    S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin + Send,
+{
+    let mut attempt = 0u32;
+    loop {
+        let error = match open().await {
+            Ok(mut stream) => match stream.next().await {
+                Some(Err(error)) => error,
+                first => return Ok((stream, first)),
+            },
+            Err(error) => error,
+        };
+        attempt += 1;
+        if attempt > policy.max || !retryable(&error) {
+            return Err(error);
+        }
+        if !retry_wait(tx, policy, attempt, &error).await {
+            return Err(error);
+        }
+    }
+}
+
+/// Emit a retry notice and sleep the backoff. Returns false if the consumer
+/// dropped `tx` (cancellation) during the wait.
+async fn retry_wait(
+    tx: &tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>,
+    policy: &RetryPolicy,
+    attempt: u32,
+    error: &CompletionError,
+) -> bool {
+    let delay = backoff(attempt, policy.base, policy.cap);
+    let _ = tx.send(LlmStreamEvent::Retrying {
+        attempt,
+        max: policy.max,
+        reason: error.to_string(),
+    });
+    tokio::select! {
+        biased;
+        _ = tx.closed() => false,
+        _ = tokio::time::sleep(delay) => true,
+    }
 }
 
 fn build_request(
@@ -746,6 +904,7 @@ mod tests {
             endpoint: LlmEndpoint::Chat,
             effort: None,
             session_id: None,
+            retry: RetryPolicy::default(),
         };
         assert_eq!(opts.endpoint, LlmEndpoint::Chat);
         assert_eq!(LlmOpts::default().endpoint, LlmEndpoint::Chat);
@@ -1026,6 +1185,7 @@ mod tests {
             endpoint: LlmEndpoint::Responses,
             effort: None,
             session_id: None,
+            retry: RetryPolicy::default(),
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(&[], "sys", &[], &opts);
@@ -1096,5 +1256,169 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, LlmStreamEvent::Error { .. }))
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type Chunks =
+        futures::stream::Iter<std::vec::IntoIter<Result<StreamedAssistantContent, CompletionError>>>;
+
+    /// A transient transport failure as rig surfaces it on the OpenAI path.
+    fn transient() -> CompletionError {
+        CompletionError::ProviderError(
+            "Http client error: error sending request for url (http://x)".into(),
+        )
+    }
+
+    fn fatal() -> CompletionError {
+        CompletionError::ProviderError("invalid_request_error: bad tool schema".into())
+    }
+
+    fn empty() -> Chunks {
+        futures::stream::iter(Vec::new())
+    }
+
+    fn first_item_err(e: CompletionError) -> Chunks {
+        futures::stream::iter(vec![Err(e)])
+    }
+
+    #[test]
+    fn transient_statuses_retry_client_errors_do_not() {
+        for code in [408, 409, 429, 500, 502, 503, 504] {
+            assert!(is_transient_status(code), "{code} should retry");
+        }
+        for code in [200, 400, 401, 403, 404, 422] {
+            assert!(!is_transient_status(code), "{code} must not retry");
+        }
+    }
+
+    #[test]
+    fn retryable_classifies_transport_vs_rejections() {
+        assert!(retryable(&CompletionError::HttpError(
+            rig::http_client::Error::StreamEnded
+        )));
+        assert!(retryable(&transient()));
+        assert!(!retryable(&fatal()));
+        assert!(!retryable(&CompletionError::ResponseError("bad".into())));
+    }
+
+    #[test]
+    fn backoff_grows_and_never_exceeds_the_cap() {
+        let base = Duration::from_millis(100);
+        let cap = Duration::from_millis(400);
+        let d1 = backoff(1, base, cap);
+        assert!(d1 <= base && d1 >= base * 3 / 4, "attempt 1 = {d1:?}");
+        for n in 1..12 {
+            assert!(backoff(n, base, cap) <= cap, "attempt {n} exceeds cap");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_retries_transient_failures_then_succeeds() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy {
+            max: 3,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(50),
+        };
+        let c = calls.clone();
+        let out = connect_with_retry(
+            &policy,
+            move || {
+                let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    if n <= 2 {
+                        Err(transient())
+                    } else {
+                        Ok(empty())
+                    }
+                })
+            },
+            &tx,
+        )
+        .await;
+        assert!(out.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(LlmStreamEvent::Retrying { attempt: 1, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(LlmStreamEvent::Retrying { attempt: 2, .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_retries_a_first_item_transport_error() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy {
+            max: 2,
+            base: Duration::from_millis(5),
+            cap: Duration::from_millis(5),
+        };
+        let c = calls.clone();
+        let out = connect_with_retry(
+            &policy,
+            move || {
+                let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    if n == 1 {
+                        Ok(first_item_err(transient()))
+                    } else {
+                        Ok(empty())
+                    }
+                })
+            },
+            &tx,
+        )
+        .await;
+        assert!(out.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "first-item error retried");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_gives_up_after_max_and_skips_non_retryable() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max: 1,
+            base: Duration::from_millis(1),
+            cap: Duration::from_millis(1),
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out = connect_with_retry(
+            &policy,
+            move || {
+                c.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err::<Chunks, CompletionError>(transient()) })
+            },
+            &tx,
+        )
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "one attempt + one retry");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let out = connect_with_retry(
+            &policy,
+            move || {
+                c.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err::<Chunks, CompletionError>(fatal()) })
+            },
+            &tx,
+        )
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "non-retryable returns at once");
     }
 }

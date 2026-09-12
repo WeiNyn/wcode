@@ -848,6 +848,12 @@ async fn print_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
                     "{DIM}⋯ compacted {summarized} messages, kept {kept}{RESET}\n"
                 ));
             }
+            AgentEvent::Retrying { attempt, max, reason } => {
+                close_blocks(&mut p, &mut st);
+                out(&format!(
+                    "{DIM}⋯ retrying ({attempt}/{max}): {reason}{RESET}\n"
+                ));
+            }
             _ => {}
         }
     }
@@ -1017,6 +1023,7 @@ mod tests {
             endpoint: LlmEndpoint::Chat,
             effort: Some("high".to_string()),
             session_id: None,
+            retry: wcode_harness::streamfn::RetryPolicy::default(),
         };
         assert_eq!(
             reload_args(&llm, Some(Path::new("/s/a.jsonl")), false),

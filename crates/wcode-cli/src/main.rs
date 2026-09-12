@@ -48,11 +48,17 @@ config: ~/.config/wcode/config.toml
 
   [instructions]
   file = \"...\"       (optional; instruction file name/path loaded into the system prompt. \"off\" disables. Default: AGENTS.md)
+
+  [retry]
+  max = 3            (optional; retry transient connect errors this many times; 0 disables)
+  base_ms = 500      (optional; base backoff for the first retry)
+  cap_ms = 8000      (optional; cap on a single backoff wait)
 env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
 env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort
 env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
-env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")";
+env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
+env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS override the toml retry table";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {

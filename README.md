@@ -45,6 +45,13 @@ keep_recent_turns = 2      # complete turns always kept, whatever their size
 # A project instruction file folded into the system prompt. Default: discover
 # AGENTS.md from the working dir upward (stopping at the repo root); "off" disables.
 file = "AGENTS.md"
+
+[retry]
+# Retry the connect/handshake (and the first streamed item) on transient
+# failures — 429/5xx statuses and transport errors. An absent table = defaults.
+max = 3                    # optional; retries after the first attempt (0 disables)
+base_ms = 500              # optional; base backoff for the first retry
+cap_ms = 8000              # optional; cap on a single backoff wait
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
@@ -53,7 +60,8 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
-`off`).
+`off`), and `WCODE_RETRY_MAX`, `WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS` (the
+`[retry]` table).
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with

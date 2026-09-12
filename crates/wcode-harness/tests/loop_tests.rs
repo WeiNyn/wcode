@@ -263,6 +263,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::TurnEnd { .. } => "turn_end",
         AgentEvent::Error { .. } => "error",
         AgentEvent::Compaction { .. } => "compaction",
+        AgentEvent::Retrying { .. } => "retrying",
         AgentEvent::AgentEnd => "agent_end",
     }
 }
