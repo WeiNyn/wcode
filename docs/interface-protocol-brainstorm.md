@@ -464,14 +464,21 @@ in `README.md` §Philosophy.
   `SetEffort`/`Compact` are serviced (a biased select keeps `Steer`/`Cancel`
   timely during a run; other requests arriving mid-run are deferred in order).
   **Landed: the actor core, exercised by in-module integration tests.** Deferred
-  to **S1b**: read-back requests (`GetHistory`) and their reply events — they
+  to **S1b-1/S1b-2** (below): read-back requests and their reply events — they
   need the request/reply correlation the envelope defines — and pointing the CLI
   at the actor. `Agent::run` stays as the low-level method the actor calls.
-- **S1b — Read-back + repoint.** Add the reply events (`History`, `Ack`,
-  `Error`) and their in-process correlation; answer them from the actor. Then
-  move the REPL/`-p` path onto a `SessionHandle` (each still owning a
-  composition root that builds agents and swaps handles on `/new`/`/resume`).
-  This is the first stage with a live end-to-end CLI check.
+- ☑ **S1b-1 — Replies.** `Request::GetHistory` and the reply variants
+  (`AgentEvent::{History, Ack, Stopped}`, reusing `Error`/`Compaction`);
+  `SessionHandle::ask(request) -> AgentEvent`, correlated in-process by a
+  one-shot channel (the wire will use the envelope's `reply_to`). The actor's
+  `dispatch` answers; `run` now returns its `StopReason` so `Submit` replies
+  `Stopped`. Replies are never streamed.
+- ☐ **S1b-2 — Repoint the CLI.** Move the REPL/`-p` path onto a
+  `SessionHandle`: `run_turn` becomes `ask(Submit)` (the printer drains a
+  `subscribe()` and stops at `AgentEnd`), `/usage` becomes `ask(GetHistory)`,
+  `/model`/`/effort`/`/compact` become asks, and Ctrl-C targets a handle (a
+  small `CancelTarget` enum preserves Ctrl-C aborting the `/reload` build).
+  First stage with a live end-to-end CLI check.
 - **S2 — Transport.** `wcode-protocol`: NDJSON `Frame`, a client and a server
   helper, socket path. `wcode serve` (one session) + a client that reconnects and
   replays from the log. *(This is the jcode TUI architecture, minimal.)*
