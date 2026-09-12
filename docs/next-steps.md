@@ -13,6 +13,7 @@ each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S1 landed; S1b next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -307,6 +308,27 @@ This entry stays as the pointer plus status only, like items 3 and 6.
 
 ---
 
+## 8. Unified interface & protocol
+
+**New.** The TUI's client/kernel seam and multi-agent communication are the
+same seam, so they should be one protocol: a session is a peer with a mailbox —
+a `Request` in, an `AgentEvent` out — and the TUI, a script, and another session
+differ only in the address they hold. This reframes the TUI rework (item 3) and
+the deferred inter-agent protocol as one workstream.
+
+> ➡️ **[`docs/interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)** —
+> thesis, jcode reference, the `Request`/`Frame` shape, a staged roadmap
+> (S0 types → S1 actor → S1b read-back + repoint → S2 transport → S3 TUI → S4 A2A),
+> open questions, decisions.
+
+**Status.** S0 (`protocol.rs`: `Request`, `Frame`, `SessionId`) and the S1 actor
+core (`actor.rs`: `SessionActor`/`SessionHandle`, inbox + broadcast outbox) have
+landed. Next is S1b — reply events + pointing the CLI at a handle.
+
+This entry stays as the pointer plus status only, like items 3, 6, and 7.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -320,3 +342,5 @@ This entry stays as the pointer plus status only, like items 3 and 6.
 7. **7** parallel exec & `.gitignore` — harness/tool gaps; see
    [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md). Phase 2
    (ignore) is the smaller independent win; Phase 1 (parallel) touches the loop.
+8. **8** interface & protocol — subsumes item 3 (the TUI is one client of it);
+   see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md).

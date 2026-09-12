@@ -4,6 +4,12 @@ Status: **planning**. Companion to [`next-steps.md`](next-steps.md) (item 3,
 which this replaces). This is a project, not a task — the detail lives here so
 it can be picked up as its own workstream.
 
+> **See also:** [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
+> — the TUI is one client of a protocol shared with agent-to-agent communication.
+> That doc reframes this plan: the TUI should be a client of `Request`/`Event`
+> over a backend, never of the `Agent` directly (§12 there). The phases below
+> still stand; only the seam is redrawn.
+
 | phase | scope | status |
 |-------|-------|--------|
 | P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
