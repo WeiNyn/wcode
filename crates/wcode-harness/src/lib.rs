@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod limits;
 pub mod loop_;
 pub mod message;
+pub mod protocol;
 pub mod session;
 pub mod streamfn;
 pub mod tool;
