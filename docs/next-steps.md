@@ -11,7 +11,9 @@ each task completes and keep the status table current.
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☑ done |
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
-| 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☐ todo |
+| 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ◐ phases 1–2 done |
+
+Legend: ☑ done · ◐ in progress · ☐ todo.
 
 Suggested commit per item. Reference files by function, not line number
 (they drift).
@@ -280,6 +282,10 @@ communication protocol.
 
 > ➡️ **[`docs/skills-references-plan.md`](skills-references-plan.md)** — scope,
 > pi/jcode reference, design, phased tasks, open questions, progress.
+
+**Status.** Phases 1–2 shipped — references as a set (`instructions.rs`) and the
+skills core (`skills.rs`, verified end-to-end against a live model). Phase 3
+(polish: `/skills`, `/skill <name>`, `references/` docs) remains.
 
 This entry stays as the pointer plus status only, like item 3.
 

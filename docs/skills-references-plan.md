@@ -1,6 +1,7 @@
 # wcode — skills & references plan
 
-Status: **planning**. Companion to [`next-steps.md`](next-steps.md) (item 6).
+Status: **phases 1–2 shipped, phase 3 todo**. Companion to
+[`next-steps.md`](next-steps.md) (item 6).
 Covers **skills** (on-demand capability packages) and **references** (the
 context/reference material folded into the prompt). **Agents/subagents are out
 of scope** — deferred until we have an agent-to-agent communication protocol
@@ -8,9 +9,11 @@ worth designing against.
 
 | phase | scope | status |
 |-------|-------|--------|
-| 1 | References as a *set*: global + ancestor context files (AGENTS.md/CLAUDE.md) | ☐ todo |
-| 2 | Skills: discovery, frontmatter, prompt section, load-on-demand | ☐ todo |
-| 3 | Skills polish: `/skills`, `/skill`, extra roots, docs | ☐ todo |
+| 1 | References as a *set*: global + ancestor context files (AGENTS.md/CLAUDE.md) | ☑ done |
+| 2 | Skills: discovery, frontmatter, prompt section, load-on-demand | ☑ done |
+| 3 | Skills polish: `/skills`, `/skill`, `references/` docs, root-file form | ☐ todo |
+
+Legend: ☑ done · ☐ todo. §4 records the shape as built; §5 the task list.
 
 ---
 
@@ -160,21 +163,20 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 **Controls**: `--no-skills`; `[skills] enabled = false`, `dirs = [...]`,
 `disabled = ["name", …]`; env `WCODE_SKILLS`.
 
-## 4. Where the code goes
+## 4. As built
 
-- **New module `crates/wcode-cli/src/skills.rs`** — `Skill`, frontmatter parse,
-  discovery, `prompt_section(&[Skill])`. Pure, unit-testable.
-- **New dep (`wcode-cli`)**: the YAML frontmatter parser (`serde_yaml_ng`) — the
-  only new dependency this plan introduces.
-- **New module `crates/wcode-cli/src/instructions.rs`** — move the existing
-  `Instructions` / `load_instructions` / `truncate_instructions` out of `repl.rs`
-  and generalize to the set (a plain move + extend; keeps `repl.rs` about the
-  loop). `repl.rs::system_prompt` composes instructions + skills.
-- **`config.rs`** — `SkillsConfig`, extend `InstructionsConfig` (candidate
-  names, global on/off), env plumbing.
-- **`main.rs`** — discover once at startup, pass both into `build_agent`; add a
-  **`--dump-system-prompt`** flag (print the composed prompt and exit) so the
-  section is verifiable from a real binary without a model.
+- **`crates/wcode-cli/src/instructions.rs`** — `Mode` (`Off` / `Explicit` /
+  `Discover`), `Instructions`, `InstructionSet::render`; discovery, dedup, caps.
+- **`crates/wcode-cli/src/skills.rs`** — `Spec`, `Skill`, `SkillSet::render`,
+  `discover`; frontmatter parse + validation.
+- **New dep (`wcode-cli`)**: `serde_yaml_ng` — the only new dependency.
+- **`config.rs`** — `config_dir()`; `InstructionsConfig` (`file`/`names`/`global`)
+  and `SkillsConfig` (`enabled`/`dirs`/`disabled`); env plumbing.
+- **`main.rs`** — discovers both at startup, passes them to `build_agent` via
+  `AgentSpec`; `--no-instructions` / `--no-skills`; `--dump-system-prompt`
+  prints the composed prompt and exits (no model needed).
+- **`repl.rs`** — `system_prompt(tools, instructions, skills, cwd)` composes the
+  prompt; `build_agent(spec, session, context)`.
 
 ## 5. Phased tasks
 
