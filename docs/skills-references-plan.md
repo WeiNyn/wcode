@@ -197,8 +197,11 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - [x] Live check: `--dump-system-prompt` shows the section; a real endpoint
       loaded the body via `read` (see §8).
 
-**Phase 3 — Polish.**
+**Phase 3 — Polish (remaining).**
 - [ ] `/skills` (list) and `/skill <name>` (force-load) REPL commands.
+- [x] Extra roots (`[skills] dirs`) and `disabled` — landed early, in phase 2.
+- [x] Skill-asset (`references/`) convention documented (README + AGENTS.md).
+- [ ] Optional: accept `<root>/<name>.md` skills (pi's root-file rule) — see §8.
 - [ ] Extra roots (`[skills] dirs`) and `disabled`.
 - [ ] Document the skill-asset (`references/`) convention + README + AGENTS.md.
 - [ ] Optional: accept `<root>/<name>.md` skills (pi's root-file rule).
