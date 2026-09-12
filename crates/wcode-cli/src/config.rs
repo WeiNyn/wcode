@@ -31,6 +31,32 @@ pub struct ToolsConfig {
     pub find: bool,
 }
 
+/// Project instruction file, loaded from the `[instructions]` table.
+///
+/// Absent table = discover `AGENTS.md` from the working dir upward. `file`
+/// overrides the name/path; `"off"` (or empty) disables. Env: `WCODE_INSTRUCTIONS`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct InstructionsConfig {
+    /// File name discovered in (and above) the working dir, or a path
+    /// (relative to it, or absolute). `"off"`/empty disables.
+    pub file: Option<String>,
+}
+
+/// Default instruction file name.
+pub const DEFAULT_INSTRUCTIONS_FILE: &str = "AGENTS.md";
+
+impl InstructionsConfig {
+    /// The file to load, or `None` when disabled. An absent `file` keeps the
+    /// default name; `"off"`/empty disables.
+    pub fn spec(&self) -> Option<String> {
+        match self.file.as_deref().map(str::trim) {
+            None => Some(DEFAULT_INSTRUCTIONS_FILE.to_string()),
+            Some("") | Some("off") => None,
+            Some(name) => Some(name.to_string()),
+        }
+    }
+}
+
 /// Compaction policy, loaded from the `[compaction]` table. Every field is
 /// optional so an absent table (or key) keeps the harness defaults; see
 /// [`CompactionPolicy`].
@@ -76,6 +102,8 @@ pub struct FileConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub instructions: InstructionsConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +116,7 @@ pub struct Config {
     pub hooks: HooksConfig,
     pub tools: ToolsConfig,
     pub compaction: CompactionPolicy,
+    pub instructions: InstructionsConfig,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -106,6 +135,7 @@ pub struct EnvLike {
     pub wcode_compact_min_remaining: Option<String>,
     pub wcode_compact_keep_recent_tokens: Option<String>,
     pub wcode_compact_keep_recent_turns: Option<String>,
+    pub wcode_instructions: Option<String>,
 }
 
 impl EnvLike {
@@ -124,6 +154,7 @@ impl EnvLike {
             wcode_compact_min_remaining: std::env::var("WCODE_COMPACT_MIN_REMAINING").ok(),
             wcode_compact_keep_recent_tokens: std::env::var("WCODE_COMPACT_KEEP_RECENT_TOKENS").ok(),
             wcode_compact_keep_recent_turns: std::env::var("WCODE_COMPACT_KEEP_RECENT_TURNS").ok(),
+            wcode_instructions: std::env::var("WCODE_INSTRUCTIONS").ok(),
         }
     }
 }
@@ -133,7 +164,7 @@ impl EnvLike {
 /// (unreadable/corrupt file) is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    MissingModel(FileConfig),
+    MissingModel(Box<FileConfig>),
     Io(String),
 }
 
@@ -173,11 +204,10 @@ fn parse_tool_flag(tool: &str, value: &str) -> Result<bool, String> {
     }
 }
 
-#[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = match file.model.clone() {
         Some(m) => m,
-        None => return Err(ConfigError::MissingModel(file)),
+        None => return Err(ConfigError::MissingModel(Box::new(file))),
     };
     let endpoint = parse_endpoint(env.wcode_endpoint.as_deref().or(file.endpoint.as_deref()))
         .map_err(ConfigError::Io)?;
@@ -211,6 +241,10 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         compaction.keep_recent_turns = parse_count("compaction.keep_recent_turns", v)
             .map_err(ConfigError::Io)? as usize;
     }
+    // Env beats toml: an explicit `WCODE_INSTRUCTIONS` (or `off`) wins.
+    let instructions = InstructionsConfig {
+        file: env.wcode_instructions.or(file.instructions.file),
+    };
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -220,6 +254,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         hooks,
         tools,
         compaction,
+        instructions,
     })
 }
 
@@ -235,7 +270,6 @@ pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
 }
 
 impl Config {
-    #[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
     pub fn load() -> Result<Config, ConfigError> {
         let file = match Self::default_path().map(std::fs::read_to_string) {
             Some(Ok(text)) => Some(
@@ -566,5 +600,45 @@ mod compaction_cfg_tests {
             panic!("wrong error: {err:?}")
         };
         assert!(msg.contains("compaction.budget"), "got: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod instructions_cfg_tests {
+    use super::*;
+
+    #[test]
+    fn spec_defaults_off_and_override() {
+        assert_eq!(
+            InstructionsConfig::default().spec().as_deref(),
+            Some("AGENTS.md")
+        );
+        assert_eq!(InstructionsConfig { file: Some("off".into()) }.spec(), None);
+        assert_eq!(InstructionsConfig { file: Some("   ".into()) }.spec(), None);
+        assert_eq!(
+            InstructionsConfig { file: Some("CLAUDE.md".into()) }
+                .spec()
+                .as_deref(),
+            Some("CLAUDE.md")
+        );
+    }
+
+    #[test]
+    fn env_instructions_overrides_file() {
+        let cfg = merge(
+            EnvLike {
+                wcode_instructions: Some("off".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                instructions: InstructionsConfig {
+                    file: Some("X.md".into()),
+                },
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.instructions.file.as_deref(), Some("off"));
     }
 }

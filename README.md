@@ -40,6 +40,11 @@ window = 200000            # optional; context-window override for unknown model
 min_remaining = 16384      # compact once fewer than this many tokens remain
 keep_recent_tokens = 20000 # recent verbatim context kept after compacting, in tokens
 keep_recent_turns = 2      # complete turns always kept, whatever their size
+
+[instructions]
+# A project instruction file folded into the system prompt. Default: discover
+# AGENTS.md from the working dir upward (stopping at the repo root); "off" disables.
+file = "AGENTS.md"
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
@@ -47,11 +52,13 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
 `tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
-`WCODE_COMPACT_KEEP_RECENT_TURNS`.
+`WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
+`off`).
 `--model` / `--base-url` / `--endpoint` / `--effort` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
 an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
+`--no-instructions` skips the instruction file.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a
@@ -65,6 +72,7 @@ wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
+wcode --no-instructions      # run without loading AGENTS.md
 ```
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):

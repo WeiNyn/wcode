@@ -29,6 +29,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --endpoint <e>     override the configured endpoint (chat|responses)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
+   --no-instructions  don't load a project instruction file (AGENTS.md)
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -44,10 +45,14 @@ config: ~/.config/wcode/config.toml
   [tools]
   grep = \"...\"       (optional, true|false; register the grep tool. Off by default — bash can search)
   find = \"...\"       (optional, true|false; register the find tool. Off by default — bash can list files)
+
+  [instructions]
+  file = \"...\"       (optional; instruction file name/path loaded into the system prompt. \"off\" disables. Default: AGENTS.md)
 env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
 env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort
 env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
-env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)";
+env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
+env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
@@ -61,6 +66,7 @@ struct Args {
     /// None = flag absent; Some(None) = clear; Some(Some(level)) = set.
     effort: Option<Option<String>>,
     list_models: bool,
+    no_instructions: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -116,6 +122,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 });
             }
             "--list-models" => a.list_models = true,
+            "--no-instructions" => a.no_instructions = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -125,7 +132,6 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
 /// MissingModel rescue: re-run merge() with the parsed file config so env
 /// AND toml base_url/api_key survive a file that lacks `model`; the flag
 /// model fills the gap. Flag overrides are applied by the caller below.
-#[allow(clippy::result_large_err)] // ConfigError carries FileConfig for the --model rescue
 fn rescue(model: String, file: FileConfig, env: EnvLike) -> Result<Config, ConfigError> {
     merge(
         env,
@@ -167,7 +173,7 @@ async fn main() {
             // as a clean error here — not a panic.
             match rescue(
                 args.model.clone().expect("--model"),
-                file,
+                *file,
                 EnvLike::from_env(),
             ) {
                 Ok(c) => c,
@@ -281,6 +287,17 @@ async fn main() {
         },
     };
 
+    // Project instructions: discover the configured file (default AGENTS.md)
+    // from the working dir upward, unless --no-instructions disables it.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let instructions = if args.no_instructions {
+        None
+    } else {
+        cfg.instructions
+            .spec()
+            .and_then(|spec| repl::load_instructions(&cwd, &spec))
+    };
+
     let hooks = default_hooks(&cfg.hooks);
     let mut agent = build_agent(
         llm.clone(),
@@ -289,11 +306,12 @@ async fn main() {
         session,
         context,
         cfg.compaction,
+        instructions.as_ref(),
     );
 
     match args.prompt {
         Some(prompt) => std::process::exit(one_shot(&mut agent, &prompt).await),
-        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction).await,
+        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions).await,
     }
 }
 
@@ -529,5 +547,20 @@ mod tests {
         assert_eq!(resolve_session_path("/"), PathBuf::from("/"));
         let fallback = resolve_session_path("no-such-session-file.jsonl");
         assert!(fallback.starts_with(session_dir()));
+    }
+}
+
+#[cfg(test)]
+mod instructions_flag_tests {
+    use super::*;
+
+    #[test]
+    fn parse_no_instructions_flag() {
+        let argv: Vec<String> = ["--no-instructions"].iter().map(|s| s.to_string()).collect();
+        let Parsed::Args(a) = parse_args(&argv).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.no_instructions);
+        assert!(!Args::default().no_instructions);
     }
 }

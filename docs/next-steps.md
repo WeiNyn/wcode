@@ -8,7 +8,7 @@ status table current.
 |---|------|--------|
 | 5 | README duplicated line | ☑ done |
 | 2 | `bash` output cap | ☑ done |
-| 1 | Project instructions (`AGENTS.md`) | ☐ todo |
+| 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☐ todo |
 | 3 | REPL line editing (history, completion, multiline) | ☐ todo |
 
@@ -162,14 +162,14 @@ it and the model follows the conventions without being told again.
   so it re-reads.
 
 **Tasks**
-- [ ] `discover_instructions(cwd, cfg) -> Option<(PathBuf, String)>` +
+- [x] `load_instructions(cwd, spec) -> Option<Instructions>` +
       size cap (pure, unit-tested: nearest wins, `.git` boundary, missing
       file, `off`).
-- [ ] `system_prompt(tools, instructions)` + test (block appended when
+- [x] `system_prompt(tools, instructions)` + test (block appended when
       `Some`, absent when `None`).
-- [ ] `build_agent` threads the loaded contents; banner line.
-- [ ] Config `[instructions]` + `WCODE_INSTRUCTIONS` + `--no-instructions`.
-- [ ] README.
+- [x] `build_agent` threads the loaded contents; banner line.
+- [x] Config `[instructions]` + `WCODE_INSTRUCTIONS` + `--no-instructions`.
+- [x] README.
 
 **Open questions.**
 - Walk-up boundary: `.git` root only, or all the way to `/`?
