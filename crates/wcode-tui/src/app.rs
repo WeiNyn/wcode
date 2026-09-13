@@ -25,6 +25,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Enter,
+    /// Shift-Enter: insert a newline instead of submitting.
+    Newline,
     Esc,
     /// A control chord, e.g. `Ctrl('c')` for Ctrl-C.
     Ctrl(char),
@@ -186,6 +188,10 @@ impl App {
                 self.dirty = true;
             }
             Key::Enter => self.submit(),
+            Key::Newline => {
+                self.history_index = None;
+                self.insert_char('\n');
+            }
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
             Key::PageUp => self.scroll_up(),
             Key::PageDown => self.scroll_down(),
@@ -872,6 +878,18 @@ mod tests {
         assert_eq!(app.input(), "second");
         app.handle(AppEvent::Key(Key::Down));
         assert_eq!(app.input(), "drafty");
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline() {
+        let mut app = App::new();
+        typed(&mut app, "a");
+        app.handle(AppEvent::Key(Key::Newline));
+        typed(&mut app, "b");
+        assert_eq!(app.input(), "a\nb");
+
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.transcript()[0], Block::User("a\nb".into()));
     }
 
     #[test]

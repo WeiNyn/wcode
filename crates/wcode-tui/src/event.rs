@@ -34,6 +34,7 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
         KeyCode::End => Key::End,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
+        KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => Key::Newline,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         _ => return None,

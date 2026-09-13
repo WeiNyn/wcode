@@ -21,10 +21,12 @@ const THINK_CONT: &str = "       ";
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // The input grows with its line count (Shift-Enter adds a line).
+    let input_height = (app.input().matches('\n').count() + 1).clamp(1, 6) as u16;
     let [body, rule, input, status] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -209,13 +211,27 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let (before, after) = split_at_char(app.input(), app.cursor());
-    let line = Line::from(vec![
-        Span::styled(" ❯ ", accent()),
-        Span::raw(before),
-        Span::styled("▌", accent()),
-        Span::raw(after),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    let before: Vec<&str> = before.split('\n').collect();
+    let after: Vec<&str> = after.split('\n').collect();
+
+    let mut lines: Vec<Line> = Vec::new();
+    let last = before.len() - 1;
+    for (i, segment) in before.iter().enumerate() {
+        let prefix = if i == 0 { " ❯ " } else { "   " };
+        let mut spans = vec![
+            Span::styled(prefix, if i == 0 { accent() } else { dim() }),
+            Span::raw((*segment).to_string()),
+        ];
+        if i == last {
+            spans.push(Span::styled("▌", accent()));
+            spans.push(Span::raw(after[0].to_string()));
+        }
+        lines.push(Line::from(spans));
+    }
+    for segment in &after[1..] {
+        lines.push(Line::from(Span::raw(format!("   {segment}"))));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -382,6 +398,21 @@ mod tests {
         assert_eq!(format_tokens(272_000), "272k");
         assert_eq!(format_tokens(1_000_000), "1M");
         assert_eq!(format_tokens(1_050_000), "1.1M");
+    }
+
+    #[test]
+    fn input_shows_multiple_lines() {
+        let mut app = App::new();
+        for c in "one".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Newline));
+        for c in "two".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        let text = buffer_text(&render(&mut app, 40, 6));
+        assert!(text.contains("one"), "first line missing: {text}");
+        assert!(text.contains("two"), "second line missing: {text}");
     }
 
     #[test]
