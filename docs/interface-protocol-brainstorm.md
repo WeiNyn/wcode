@@ -480,9 +480,19 @@ in `README.md` §Philosophy.
   current handle. `/reload`'s build is *not* specially cancellable (a developer
   path — Ctrl-C there is a non-case). Verified live end-to-end against a local
   model.
-- **S2 — Transport.** `wcode-protocol`: NDJSON `Frame`, a client and a server
-  helper, socket path. `wcode serve` (one session) + a client that reconnects and
-  replays from the log. *(This is the jcode TUI architecture, minimal.)*
+- ◐ **S2 — Transport.** New `wcode-protocol` crate: NDJSON `read_frame`/
+  `write_frame`, `bind`/`connect` (Unix), a `serve` that bridges a session
+  `SessionHandle` to sockets (a writer + an event fan + a per-request reply
+  task, correlated by `reply_to`), a `Client` that mirrors the handle
+  (`send`/`ask`/`subscribe`), and a `Backend` enum that makes local and remote
+  interchangeable.
+  - ☑ **S2-1** — the crate, with a real-socket round-trip test (a client
+    `ask`s, streams the run, reads history back; two clients share one session).
+  - ☑ **S2-2a** — `wcode serve [--socket P]` owns and serves the session;
+    `wcode --socket P -p "..."` runs one shot through a remote `Backend`.
+  - ☐ **S2-2b** — the *interactive* remote REPL (`/new`/`/resume`/`/reload`
+    gated: the server owns the session) and reconnect/replay from the log.
+  *(This is the jcode TUI architecture, minimal.)*
 - **S3 — TUI.** Per `tui-plan.md`, but as a `wcode-protocol` client. P0 skeleton
   first; single surface; then multi-surface on the same connection (`session` in
   the frame).

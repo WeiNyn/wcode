@@ -13,7 +13,7 @@ each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
-| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S1b landed; S2 next |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S1b + S2-1/S2-2a landed |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -324,7 +324,9 @@ the deferred inter-agent protocol as one workstream.
 **Status.** S0 (`protocol.rs`: `Request`, `Frame`, `SessionId`) and the S1 actor
 core (`actor.rs`: `SessionActor`/`SessionHandle`, inbox + broadcast outbox) have
 landed, plus the reply path (`GetHistory` + `ask`) and the CLI repoint: the REPL
-and `-p` now drive a `SessionHandle`. Next is S2 (the socket transport).
+and `-p` now drive a `SessionHandle`. S2 adds the `wcode-protocol` crate (NDJSON
+frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wires
+`wcode serve` + `wcode --socket -p`. Next: the interactive remote REPL + replay.
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 
