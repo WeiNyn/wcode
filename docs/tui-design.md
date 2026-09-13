@@ -145,10 +145,13 @@ gutter is also the natural home for a `▌` selection bar (P3, copy).
 **Input** — 1 line at P0, grows to N at P1 (Shift-Enter newline, `\`
 continuation). `❯ ` prefix; block cursor `▌`. History on Up/Down (P1).
 
-**Status** — one dim "chrome" row, full width. Left: model · effort · tokens.
-Right: session · state. The state glyph is the single source of "am I running";
+**Status** — one dim "chrome" row, full width, left-aligned:
+`model · effort · tokens · session · state`, where tokens is `used / limit`
+(e.g. `14.2k / 1M`, shown once a turn has reported usage) and state is
+`⏸ idle` / `⠹ running`. The state glyph is the single source of "am I running";
 the spinner also rides the active tool line, so a long tool never looks frozen.
-Truncation priority when narrow: **model → state → tokens → effort → session**.
+When narrow, fields drop least-important-first: **session, then effort, then
+tokens** (model and state always stay). The session id is shortened to 8 chars.
 
 ## 5. Decisions
 

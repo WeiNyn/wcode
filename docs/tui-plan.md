@@ -238,6 +238,8 @@ Still open:
       `Cancel` on Esc/Ctrl-C, wire the status line. (`run(backend, status)`.)
 - [x] P0 wired into `wcode-cli`: the TUI on a TTY (or `--tui`), the REPL for
       `--no-tui`/pipes/`-p`.
+- [x] Status line: `model · effort · tokens` (used/limit) `· session · state`,
+      with narrow-width field dropping.
 - [ ] P1 transcript + commands + history.
 - [ ] P2 markdown + status + resize + copy.
 - [ ] P3 panels + pickers.
