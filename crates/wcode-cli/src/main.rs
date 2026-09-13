@@ -9,7 +9,6 @@ use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::rig_stream_fn;
-use wcode_harness::tool::erased;
 use wcode_protocol::Backend;
 
 mod agents;
@@ -387,6 +386,7 @@ async fn main() {
                     cfg.compaction,
                     InstructionSet::default(),
                     SkillSet::default(),
+                    None,
                 )
                 .await;
                 std::process::exit(0);
@@ -463,10 +463,10 @@ async fn main() {
     let skills = discover_skills_for(&args, &cfg, &cwd);
 
     let hooks = default_hooks(&cfg.hooks);
-    // A2A (opt-in): a session factory + the `spawn` tool. Only this root session
-    // gets the tool, so only it spawns (§10.1).
-    let mut extra_tools: Vec<wcode_harness::tool::Tool> = Vec::new();
-    if args.agents {
+    // A2A (opt-in): an orchestrator wiring — the registry + factory + the root's
+    // `spawn`/`message` tools. Only the root gets them, so only it spawns
+    // (§10.1).
+    let orchestrator = args.agents.then(|| {
         let template = crate::agents::WorkerTemplate {
             system: system_prompt(&cfg.tools, &instructions, &skills, &cwd),
             llm: llm.clone(),
@@ -476,13 +476,12 @@ async fn main() {
             compaction: cfg.compaction,
             working_dir: cwd.clone(),
         };
-        let factory =
-            crate::agents::SessionFactory::new(wcode_protocol::Registry::new(), template);
-        extra_tools.push(erased(crate::tools::spawn::Spawn::new(
-            factory,
-            SessionId::agent("orchestrator"),
-        )));
-    }
+        crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
+    });
+    let extra_tools = orchestrator
+        .as_ref()
+        .map(|o| o.tools())
+        .unwrap_or_default();
     let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
@@ -508,6 +507,10 @@ async fn main() {
                 .map(PathBuf::from)
                 .unwrap_or_else(default_socket_path);
             let handle = SessionActor::spawn(agent);
+            if let Some(o) = &orchestrator {
+                o.register_root(handle.clone());
+            }
+            println!("serving session on {}", path.display());
             println!("serving session on {}", path.display());
             let _ = std::io::stdout().flush();
             if let Err(e) = wcode_protocol::serve_at(handle, session_id, &path).await {
@@ -525,7 +528,11 @@ async fn main() {
 
     match args.prompt {
         Some(prompt) => {
-            std::process::exit(one_shot(Backend::from(SessionActor::spawn(agent)), &prompt).await)
+            let handle = SessionActor::spawn(agent);
+            if let Some(o) = &orchestrator {
+                o.register_root(handle.clone());
+            }
+            std::process::exit(one_shot(Backend::from(handle), &prompt).await)
         }
         None => {
             if choose_tui(&args, is_tty()) {
@@ -545,7 +552,11 @@ async fn main() {
                     sessions: session_items(),
                     history: Some(repl::history_path()),
                 };
-                match wcode_tui::run(Backend::from(SessionActor::spawn(agent)), options).await {
+                let handle = SessionActor::spawn(agent);
+                if let Some(o) = &orchestrator {
+                    o.register_root(handle.clone());
+                }
+                match wcode_tui::run(Backend::from(handle), options).await {
                     Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
@@ -567,6 +578,7 @@ async fn main() {
                 cfg.compaction,
                 instructions,
                 skills,
+                orchestrator,
             )
             .await
         }

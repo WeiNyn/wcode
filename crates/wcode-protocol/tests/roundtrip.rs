@@ -262,7 +262,7 @@ async fn a_notify_crosses_the_socket() {
         panic!("expected a History reply, got {reply:?}");
     };
     assert!(
-        messages.iter().any(|m| m.as_text() == "ping"),
+        messages.iter().any(|m| m.as_text() == "[message from user]\nping"),
         "the notify landed in the context: {messages:?}"
     );
 }

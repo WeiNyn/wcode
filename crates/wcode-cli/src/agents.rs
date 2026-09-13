@@ -15,17 +15,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use wcode_harness::actor::SessionActor;
+use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::protocol::SessionId;
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
+use wcode_harness::tool::{Tool, erased};
 use wcode_protocol::Registry;
 
 use crate::config::ToolsConfig;
 use crate::tools::default_tools;
+use crate::tools::message::Message;
+use crate::tools::spawn::Spawn;
 
 /// The fixed configuration a worker inherits from its orchestrator. Owned (not
 /// borrowed) so a [`SessionFactory`] can be shared across tool calls.
@@ -94,9 +97,15 @@ impl SessionFactory {
              Complete the task you are given and report your result back to `{owner}`.",
             t.system
         );
+        let mut tools = default_tools(&t.tools);
+        tools.push(erased(Message::new(
+            self.registry.clone(),
+            id.clone(),
+            Some(owner.clone()),
+        )));
         Agent::new(AgentConfig {
             system,
-            tools: default_tools(&t.tools),
+            tools,
             llm: t.llm.clone(),
             stream_fn: t.stream_fn.clone(),
             hooks: t.hooks.clone(),
@@ -107,6 +116,39 @@ impl SessionFactory {
             parallel_tools: true,
             compaction: t.compaction,
         })
+    }
+}
+
+/// The root session's A2A wiring: the address book, the factory, and the root's
+/// own address. Cloneable — shared into the root's tools and, via `repl`, across
+/// `/new`.
+#[derive(Clone)]
+pub struct Orchestrator {
+    registry: Registry,
+    factory: Arc<SessionFactory>,
+    id: SessionId,
+}
+
+impl Orchestrator {
+    pub fn new(registry: Registry, template: WorkerTemplate) -> Self {
+        Self {
+            factory: SessionFactory::new(registry.clone(), template),
+            registry,
+            id: SessionId::agent("orchestrator"),
+        }
+    }
+
+    /// The root's A2A tools — `spawn` and `message`.
+    pub fn tools(&self) -> Vec<Tool> {
+        vec![
+            erased(Spawn::new(self.factory.clone(), self.id.clone())),
+            erased(Message::new(self.registry.clone(), self.id.clone(), None)),
+        ]
+    }
+
+    /// Register the root's mailbox so a worker can report back to it.
+    pub fn register_root(&self, handle: SessionHandle) {
+        self.registry.register(self.id.clone(), handle);
     }
 }
 
@@ -187,6 +229,67 @@ mod tests {
         assert!(
             matches!(&event, AgentEvent::MessageReceived { from, content }
                 if from == &orch && content == "hello"),
+            "{event:?}"
+        );
+    }
+
+    fn session() -> SessionHandle {
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        SessionActor::spawn(Agent::new(AgentConfig {
+            system: "sys".into(),
+            tools: Vec::new(),
+            llm: LlmOpts::default(),
+            stream_fn,
+            hooks: HooksSet::default(),
+            session: None,
+            context: Vec::new(),
+            working_dir: std::env::temp_dir(),
+            max_turns: DEFAULT_MAX_TURNS,
+            parallel_tools: true,
+            compaction: CompactionPolicy::default(),
+        }))
+    }
+
+    /// A worker's `message` tool (with `to` omitted) reaches its orchestrator.
+    #[tokio::test]
+    async fn a_worker_reports_to_its_orchestrator() {
+        let registry = Registry::new();
+        let orch = SessionId::agent("orch");
+        let root = session();
+        registry.register(orch.clone(), root.clone());
+
+        let worker = SessionId::agent("w1");
+        registry.set_owner(worker.clone(), orch.clone());
+
+        let tool = erased(Message::new(
+            registry.clone(),
+            worker.clone(),
+            Some(orch.clone()),
+        ));
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = wcode_harness::tool::ToolContext {
+            call_id: "m1".into(),
+            name: "message".into(),
+            working_dir: std::env::temp_dir(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            events,
+        };
+
+        let mut root_rx = root.subscribe();
+        let out = tool
+            .execute(serde_json::json!({ "content": "done" }), ctx)
+            .await;
+        assert!(!out.is_error, "{out:?}");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), root_rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        assert!(
+            matches!(&event, AgentEvent::MessageReceived { from, content }
+                if from == &worker && content == "done"),
             "{event:?}"
         );
     }

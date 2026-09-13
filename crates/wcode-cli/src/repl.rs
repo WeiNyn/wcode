@@ -544,6 +544,9 @@ pub enum SessionSource {
     Remote(Client),
 }
 
+// The rebuild inputs (llm/hooks/tools/…/orchestrator) are threaded positionally;
+// grouping them into a struct would not earn its keep yet.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     source: SessionSource,
     mut llm: LlmOpts,
@@ -552,6 +555,7 @@ pub async fn run(
     compaction: CompactionPolicy,
     instructions: InstructionSet,
     skills: SkillSet,
+    orchestrator: Option<crate::agents::Orchestrator>,
 ) {
     #[cfg(unix)]
     let remote = matches!(source, SessionSource::Remote(_));
@@ -564,7 +568,11 @@ pub async fn run(
     match source {
         SessionSource::Local(agent) => {
             session_path = agent.session_path().map(Path::to_path_buf);
-            backend = Backend::from(SessionActor::spawn(*agent));
+            let handle = SessionActor::spawn(*agent);
+            if let Some(o) = &orchestrator {
+                o.register_root(handle.clone());
+            }
+            backend = Backend::from(handle);
         }
         #[cfg(unix)]
         SessionSource::Remote(client) => {
@@ -655,9 +663,16 @@ pub async fn run(
                             },
                             session,
                             Vec::new(),
-                            vec![],
+                            orchestrator
+                                .as_ref()
+                                .map(|o| o.tools())
+                                .unwrap_or_default(),
                         );
-                        backend = Backend::from(SessionActor::spawn(new_agent));
+                        let handle = SessionActor::spawn(new_agent);
+                        if let Some(o) = &orchestrator {
+                            o.register_root(handle.clone());
+                        }
+                        backend = Backend::from(handle);
                         *lock_slot(&backend_slot) = backend.clone();
                         session_path = path;
                         match &session_path {
@@ -760,9 +775,16 @@ pub async fn run(
                             },
                             Some(s),
                             messages,
-                            vec![],
+                            orchestrator
+                                .as_ref()
+                                .map(|o| o.tools())
+                                .unwrap_or_default(),
                         );
-                        backend = Backend::from(SessionActor::spawn(new_agent));
+                        let handle = SessionActor::spawn(new_agent);
+                        if let Some(o) = &orchestrator {
+                            o.register_root(handle.clone());
+                        }
+                        backend = Backend::from(handle);
                         *lock_slot(&backend_slot) = backend.clone();
                         session_path = Some(path.clone());
                         println!("resumed {} ({n} messages)", path.display());

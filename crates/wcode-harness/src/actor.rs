@@ -277,6 +277,12 @@ async fn serve(
     }
 }
 
+/// Prefix an inbound peer message with its sender, so the model sees who sent
+/// it and knows the address to reply to (§13.13).
+fn tag(sender: &SessionId, content: &str) -> String {
+    format!("[message from {sender}]\n{content}")
+}
+
 /// Run the inbound policy on an A2A message (the mirror of
 /// `before_tool_call`). Returns `Some(reason)` if the message was dropped; the
 /// request may have been rewritten in place by the hook either way.
@@ -325,7 +331,7 @@ async fn dispatch(
         },
         // A2A delivery verbs (S4-1). `Notify` appends with no turn;
         // `Interrupt`/`Wake` are the canonical interrupt/continue forms.
-        Request::Notify { content } => match agent.notify(content.clone()) {
+        Request::Notify { content } => match agent.notify(tag(&sender, &content)) {
             Ok(_) => {
                 let _ = events.send(AgentEvent::MessageReceived {
                     from: sender.clone(),
@@ -338,7 +344,7 @@ async fn dispatch(
             },
         },
         Request::Interrupt { content } => {
-            agent.steer(AgentMessage::user_text(content.clone()));
+            agent.steer(AgentMessage::user_text(tag(&sender, &content)));
             let _ = events.send(AgentEvent::MessageReceived {
                 from: sender.clone(),
                 content,
@@ -346,7 +352,7 @@ async fn dispatch(
             AgentEvent::Ack
         }
         Request::Wake { content } => {
-            agent.follow_up(AgentMessage::user_text(content.clone()));
+            agent.follow_up(AgentMessage::user_text(tag(&sender, &content)));
             let _ = events.send(AgentEvent::MessageReceived {
                 from: sender.clone(),
                 content,
@@ -431,9 +437,10 @@ async fn run(
                         request: Request::Notify { content } | Request::Interrupt { content },
                         from,
                     } => {
-                        let _ = steer.send(AgentMessage::user_text(content.clone()));
+                        let from = from.unwrap_or_else(SessionId::user);
+                        let _ = steer.send(AgentMessage::user_text(tag(&from, &content)));
                         let _ = events.send(AgentEvent::MessageReceived {
-                            from: from.unwrap_or_else(SessionId::user),
+                            from,
                             content,
                         });
                     }
@@ -441,9 +448,10 @@ async fn run(
                         request: Request::Wake { content },
                         from,
                     } => {
-                        let _ = follow_up.send(AgentMessage::user_text(content.clone()));
+                        let from = from.unwrap_or_else(SessionId::user);
+                        let _ = follow_up.send(AgentMessage::user_text(tag(&from, &content)));
                         let _ = events.send(AgentEvent::MessageReceived {
-                            from: from.unwrap_or_else(SessionId::user),
+                            from,
                             content,
                         });
                     }
@@ -857,7 +865,9 @@ mod tests {
             panic!("expected History");
         };
         assert!(
-            messages.iter().any(|m| m.as_text() == "ping"),
+            messages
+                .iter()
+                .any(|m| m.as_text() == "[message from user]\nping"),
             "{messages:?}"
         );
 
@@ -922,7 +932,7 @@ mod tests {
             "the dropped message never landed: {texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t == "keep me!"),
+            texts.iter().any(|t| t == "[message from user]\nkeep me!"),
             "the rewrite landed: {texts:?}"
         );
     }
@@ -976,7 +986,8 @@ mod tests {
         assert!(
             calls[1]
                 .iter()
-                .any(|m| matches!(m, AgentMessage::User { .. }) && m.as_text() == "mid-run interrupt"),
+                .any(|m| matches!(m, AgentMessage::User { .. })
+                    && m.as_text() == "[message from user]\nmid-run interrupt"),
             "the interrupt drained into the next turn: {:?}",
             calls[1]
         );
@@ -1059,7 +1070,12 @@ mod tests {
             panic!("expected History");
         };
         let texts: Vec<String> = messages.iter().map(|m| m.as_text()).collect();
-        assert!(texts.iter().any(|t| t == "hello"), "{texts:?}");
-        assert!(!texts.iter().any(|t| t == "let me in"), "{texts:?}");
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "[message from agent:friend]\nhello"),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("let me in")), "{texts:?}");
     }
 }
