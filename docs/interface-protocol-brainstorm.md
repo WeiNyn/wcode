@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
 Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2
-(registry + sender + verbs) landed; S4-3 next** (see §14).
+(registry + sender + verbs) landed; S4-3a landed; S4-3b next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -638,8 +638,10 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     - Future customization (`spawn { system?, tools?, write?, read? }`, a
       `WorkerSpec`): v1 fills defaults (inherit the parent) and uses only `name`;
       the tool/path restrictions become a child `Hooks` impl — no config.
-    Split: **S4-3a** factory + `spawn` tool + registry wiring; **S4-3b** the
-    `message` tool + sender tagging; **S4-3c** completion auto-forward.
+    - ☑ **S4-3a** — `SessionFactory` + `spawn { task, name? }` + registry wiring,
+      opt-in `--agents`. Landed; verified live.
+    - ☐ **S4-3b** — the `message` tool + sender tagging.
+    - ☐ **S4-3c** — completion auto-forward (a "run-ended" hook).
     - `message { to?, content, mode? }`, `mode` ∈ `notify` (default) / `ask` /
       `interrupt` / `wake`, mapping 1:1 onto the wire verbs. `to` **defaults to the
       sender's `report_back_to`** — a worker has exactly one place to send. One
