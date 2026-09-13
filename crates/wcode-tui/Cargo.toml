@@ -1,0 +1,15 @@
+[package]
+name = "wcode-tui"
+description = "Full-screen TUI for wcode — a client of the wcode-protocol Backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

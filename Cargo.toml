@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/wcode-harness", "crates/wcode-protocol", "crates/wcode-cli"]
+members = ["crates/wcode-harness", "crates/wcode-protocol", "crates/wcode-tui", "crates/wcode-cli"]
 
 [workspace.package]
 version = "0.1.0"
