@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2 sender +
-verbs landed, registry/addressing next** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2
+(registry + sender + verbs) landed; S4-3 next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -238,7 +238,7 @@ over direction.)
 | REPL `Command::{Model,Effort,Compact,Resume,…}` | `SetModel`, `SetEffort`, `Compact`, `Resume`, … | the command enum lifted into the protocol |
 | `Agent::messages()` | `GetHistory` | reply: `Event::History` |
 | `Session` open/list | `ListSessions`, `AttachSession`, `ForkSession` | multi-session TUI |
-| (nothing) | `Ask { to, content }`, `Notify { to, content }` | A2A — addressed to a peer |
+| (nothing) | `Notify`/`Interrupt`/`Wake`, a peer addressed by the router | A2A — delivered to a peer |
 
 The `Event` side is what `AgentEvent` already carries, plus request replies
 (`History`, `Ack`, `Error { reply_to }`) and, for A2A, `MessageReceived { from }`.
@@ -493,10 +493,11 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
    #2 only when the TUI needs it; #3 only when a second agent exists.
 8. **Wire event shape?** Recommended: decide before the socket — deltas vs whole
    messages (the O(n²) issue in §9).
-9. **A2A delivery vocabulary?** Decided: canonical `Notify`/`Interrupt`/
-   `Wake`/`Ask`; `Steer`/`FollowUp` kept as serde aliases (`steer`/`follow_up`)
-   for back-compat. Mapping: `Interrupt`→steer, `Wake`→follow_up, `Notify`→
-   append-no-turn, `Ask`→request/reply.
+9. **A2A delivery vocabulary?** Decided: the kernel's target-side verbs are
+   `Notify`/`Interrupt`/`Wake`; `Steer`/`FollowUp` are serde aliases
+   (`steer`/`follow_up`). Mapping: `Interrupt`→steer, `Wake`→follow_up,
+   `Notify`→append-no-turn. `ask` is a *tool mode* (deliver + expect a report),
+   not a kernel variant; addressing is the router's (`to`, §10.1).
 10. **A2A policy?** Decided: `before_inbound(from, request)` — a hook that may
     drop or rewrite by *who* sent it; ownership by `report_back_to`; no ACL, no
     config. A local handle leaves `from` unset ("the human").
@@ -569,10 +570,11 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
   model, `/changes`, and `/resume` pickers), tool-diff rendering, a per-run
   changeset, and a session picker that hands off by re-exec. Single surface;
   multi-surface on the same connection (`session` in the frame) is not started.
-- ◐ **S4 — A2A.** Reuse the socket as the peer transport; add `Ask`/`Notify`
-  addressed at a peer; a registry for addresses; ownership from `report_back_to`;
-  a `before_inbound` hook for policy. DM + report-back only. Too large for one
-  step, so it splits like S1 did (`S1 → S1b-1 → S1b-2`); each slice stands alone.
+- ◐ **S4 — A2A.** Route `Notify`/`Interrupt`/`Wake` to a peer (the router
+  resolves `to`); a registry for addresses; ownership from `report_back_to`;
+  a `before_inbound` hook for policy. Orchestrator v1 (§10.1); DM + report-back
+  only. Too large for one step, so it splits like S1 did
+  (`S1 → S1b-1 → S1b-2`); each slice stands alone.
   - ☑ **S4-1 — Delivery vocabulary + policy seam (in-process, self-addressed).**
     The A2A verbs and the policy hook, exercised by a session sending to its own
     handle — no registry, no second session, no socket yet.
@@ -605,10 +607,21 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       `MessageReceived.from` is no longer a constant.
     - ☑ `Hooks::before_inbound(from: Option<&SessionId>, request: &mut Request)`
       — policy can decide by *who* sent it (ownership from `report_back_to`).
-    - ☐ `Request::{Ask { to, content }, Notify { to, content }, …}` resolved
-      against the registry. The registry enforces the **permitted set** (§10.1):
-      an orchestrator resolves only its workers, a worker only its orchestrator.
-      The completion report is auto-forwarded on turn end along `report_back_to`.
+    - ☑ Registry — the in-process bus (`wcode_protocol::Registry`): an address
+      book (`SessionId` → `SessionHandle`) plus the ownership map
+      (`report_back_to`), with `permitted`/`resolve`/`deliver` enforcing the
+      **permitted set** (§10.1): an orchestrator resolves its workers, a worker
+      its orchestrator, nothing lateral.
+    - **Addressing lives at the router, not in `Request`.** A `Request` is
+      target-side and names no peer; the router turns a `to` into a mailbox. This
+      supersedes the earlier `Request::Ask { to, content }` sketch — a `to` in the
+      kernel was redundant with the frame's `session` on the wire and with the
+      held handle in-process.
+    - ☐ Wire a spawn to `register`/`set_owner` (S4-3) and the `message` tool to
+      `deliver`; auto-forward the worker's completion report on turn end along
+      `report_back_to`.
+    - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
+      event — not a subscription to the peer's stream, and not a blocking reply.
     - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
       event — not a subscription to the peer's stream, and not a blocking reply.
   - **S4-3 — Spawn (bounded fan-out) + the `message` tool.** Only the root

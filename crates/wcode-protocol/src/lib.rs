@@ -8,7 +8,9 @@
 //! - a [`serve`] function that re-exposes a session [`SessionHandle`] to remote
 //!   clients over a Unix socket,
 //! - a [`Client`] that mirrors the handle's `send`/`ask`/`subscribe` API,
-//! - a [`Backend`] that makes the local and remote paths interchangeable.
+//! - a [`Backend`] that makes the local and remote paths interchangeable,
+//! - a [`Registry`] — the in-process A2A bus (§8 #3, §10.1): an address book
+//!   plus the permitted-set routing that scopes who may message whom.
 //!
 //! The point (design: `docs/interface-protocol-brainstorm.md`, §8): a caller —
 //! the REPL today, the TUI next, another session later — talks to a [`Backend`]
@@ -20,9 +22,11 @@
 
 mod backend;
 mod frame;
+mod registry;
 
 pub use backend::{Backend, Closed};
 pub use frame::{read_frame, write_frame};
+pub use registry::{Registry, RouteError};
 
 #[cfg(unix)]
 mod client;
