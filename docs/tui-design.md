@@ -142,8 +142,11 @@ while streaming; scroll-lock when the user scrolls up (P1).
 continuation lines align under the text, as in draft B's `···` block). The
 gutter is also the natural home for a `▌` selection bar (P3, copy).
 
-**Input** — 1 line at P0, grows to N at P1 (Shift-Enter newline, `\`
-continuation). `❯ ` prefix; block cursor `▌`. History on Up/Down (P1).
+**Input** — `❯ ` prefix, block cursor `▌`. One line, growing with its content
+(Shift-Enter inserts a newline; the band is capped at 6 lines). Up/Down recall
+prompts, saving the draft and restoring it at the bottom; history persists one
+prompt per line beside the sessions. (Shift-Enter needs a terminal that reports
+the modifier — kitty/xterm-`modifyOtherKeys`; elsewhere it is Enter.)
 
 **Status** — one dim "chrome" row, full width, left-aligned:
 `model · effort · tokens · session · state`, where tokens is `used / limit`
@@ -152,6 +155,10 @@ continuation). `❯ ` prefix; block cursor `▌`. History on Up/Down (P1).
 the spinner also rides the active tool line, so a long tool never looks frozen.
 When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
+
+**Keys** — `Enter` submit · `Shift-Enter` newline · `Up`/`Down` history ·
+`PgUp`/`PgDn` scroll the transcript (`↑ N` in the status while scrolled) ·
+`Esc`/`Ctrl-C` cancel a run, quit when idle.
 
 ## 5. Decisions
 

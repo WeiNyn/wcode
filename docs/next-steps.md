@@ -329,7 +329,8 @@ frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wir
 `wcode serve` + `wcode --socket` (one-shot and interactive). Next: the TUI (S3) as
 another `wcode-protocol` client. S3's P0 skeleton has landed: `wcode-tui` runs a
 session through a `Backend`, locally or over `--socket`, and `wcode` picks the
-TUI on a TTY (`--tui`/`--no-tui`). Next: P1 (scrollback + `/`-commands).
+TUI on a TTY (`--tui`/`--no-tui`). P1 has landed too — scrollback,
+`/`-commands, prompt history, multiline. Next: P2 (markdown, resize, copy).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

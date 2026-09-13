@@ -240,7 +240,9 @@ Still open:
       `--no-tui`/pipes/`-p`.
 - [x] Status line: `model · effort · tokens` (used/limit) `· session · state`,
       with narrow-width field dropping.
-- [ ] P1 transcript + commands + history.
+- [x] P1: scrollback (PgUp/PgDn, pinned view), `/`-commands (`/exit /model
+      /effort /compact /usage /help`), prompt history (Up/Down, persisted),
+      multiline (Shift-Enter).
 - [ ] P2 markdown + status + resize + copy.
 - [ ] P3 panels + pickers.
 - [ ] P4 stretch.
