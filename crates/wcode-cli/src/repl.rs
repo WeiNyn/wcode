@@ -293,6 +293,11 @@ pub fn session_dir() -> PathBuf {
         .join(".local/share/wcode/sessions")
 }
 
+/// Prompt-history file, alongside the session files.
+pub fn history_path() -> PathBuf {
+    session_dir().join("history")
+}
+
 /// Session files, newest first. Names are `{millis}_{hex}.jsonl`, so
 /// lexicographic order is chronological.
 pub fn list_sessions(dir: &Path) -> io::Result<Vec<PathBuf>> {

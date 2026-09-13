@@ -28,6 +28,8 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
         KeyCode::Delete => Key::Delete,
         KeyCode::Left => Key::Left,
         KeyCode::Right => Key::Right,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
         KeyCode::PageUp => Key::PageUp,

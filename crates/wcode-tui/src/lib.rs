@@ -17,6 +17,7 @@ mod terminal;
 mod ui;
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::EventStream;
@@ -33,10 +34,22 @@ pub use crate::app::{Action, App, AppEvent, Block, Key, Status, Tool};
 const TICK: Duration = Duration::from_millis(120);
 
 /// Run the TUI against `backend` until the user quits. Enters the alternate
-/// screen; restores it on every exit path.
-pub async fn run(backend: Backend, status: Status) -> io::Result<()> {
+/// screen; restores it on every exit path. `history` is where prompt history is
+/// persisted (`None` keeps it in memory only).
+pub async fn run(backend: Backend, status: Status, history: Option<PathBuf>) -> io::Result<()> {
     let (guard, mut terminal) = terminal::enter()?;
-    let result = event_loop(&mut terminal, backend, status).await;
+
+    let mut app = App::new();
+    app.set_status(status);
+    if let Some(path) = &history {
+        app.load_history(read_history(path));
+    }
+
+    let result = event_loop(&mut terminal, backend, &mut app).await;
+
+    if let Some(path) = &history {
+        write_history(path, app.history());
+    }
     // Drop the terminal (flush) before leaving the alternate screen.
     drop(terminal);
     drop(guard);
@@ -46,10 +59,8 @@ pub async fn run(backend: Backend, status: Status) -> io::Result<()> {
 async fn event_loop(
     terminal: &mut terminal::Tui,
     backend: Backend,
-    status: Status,
+    app: &mut App,
 ) -> io::Result<()> {
-    let mut app = App::new();
-    app.set_status(status);
     let mut events = EventStream::new();
     let mut session = backend.subscribe();
     // Replies to `ask`ed requests (e.g. `/usage`) arrive here as app events.
@@ -58,7 +69,7 @@ async fn event_loop(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
 
-    draw(terminal, &mut app)?;
+    draw(terminal, app)?;
 
     loop {
         tokio::select! {
@@ -97,7 +108,7 @@ async fn event_loop(
         }
 
         if app.dirty() {
-            draw(terminal, &mut app)?;
+            draw(terminal, app)?;
         }
         if app.should_quit() {
             break;
@@ -120,6 +131,21 @@ fn spawn_ask(backend: &Backend, reply_tx: &mpsc::UnboundedSender<AppEvent>, requ
         };
         let _ = reply_tx.send(AppEvent::Agent(event));
     });
+}
+
+/// One prompt per line; a missing/unreadable file is an empty history.
+fn read_history(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Persist prompt history, best effort (a failure is not worth a crash).
+fn write_history(path: &Path, lines: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, lines.join("\n"));
 }
 
 fn draw(terminal: &mut terminal::Tui, app: &mut App) -> io::Result<()> {

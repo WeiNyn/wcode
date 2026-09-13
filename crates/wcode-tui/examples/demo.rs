@@ -57,5 +57,5 @@ async fn main() -> std::io::Result<()> {
         compaction: CompactionPolicy::default(),
     };
     let handle = SessionActor::spawn(Agent::new(config));
-    wcode_tui::run(Backend::Local(handle), Status::new("demo")).await
+    wcode_tui::run(Backend::Local(handle), Status::new("demo"), None).await
 }

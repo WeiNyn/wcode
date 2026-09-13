@@ -349,7 +349,9 @@ async fn main() {
                         )
                         .map(|l| l.context),
                     };
-                    if let Err(e) = wcode_tui::run(Backend::from(client), status).await {
+                    if let Err(e) =
+                        wcode_tui::run(Backend::from(client), status, Some(repl::history_path())).await
+                    {
                         eprintln!("tui: {e}");
                         std::process::exit(1);
                     }
@@ -497,7 +499,12 @@ async fn main() {
                     .map(|l| l.context),
                 };
                 if let Err(e) =
-                    wcode_tui::run(Backend::from(SessionActor::spawn(agent)), status).await
+                    wcode_tui::run(
+                        Backend::from(SessionActor::spawn(agent)),
+                        status,
+                        Some(repl::history_path()),
+                    )
+                    .await
                 {
                     eprintln!("tui: {e}");
                     std::process::exit(1);

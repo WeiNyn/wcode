@@ -18,6 +18,8 @@ pub enum Key {
     Delete,
     Left,
     Right,
+    Up,
+    Down,
     Home,
     End,
     PageUp,
@@ -109,6 +111,12 @@ pub struct App {
     input: String,
     /// Cursor position as a *character* index into `input`.
     cursor: usize,
+    /// Submitted prompts, oldest first, for Up/Down recall.
+    history: Vec<String>,
+    /// Index into `history` while browsing; `None` edits the draft.
+    history_index: Option<usize>,
+    /// The in-progress line, saved while browsing history.
+    draft: String,
     status: Status,
     /// Provider-reported input tokens of the last turn: how full the context was.
     context_used: Option<u64>,
@@ -148,8 +156,14 @@ impl App {
 
     fn on_key(&mut self, key: Key) {
         match key {
-            Key::Char(c) => self.insert_char(c),
-            Key::Backspace => self.backspace(),
+            Key::Char(c) => {
+                self.history_index = None;
+                self.insert_char(c);
+            }
+            Key::Backspace => {
+                self.history_index = None;
+                self.backspace();
+            }
             Key::Delete => {}
             Key::Left => {
                 self.cursor = self.cursor.saturating_sub(1);
@@ -161,6 +175,8 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Key::Up => self.history_up(),
+            Key::Down => self.history_down(),
             Key::Home => {
                 self.cursor = 0;
                 self.dirty = true;
@@ -196,6 +212,8 @@ impl App {
         self.scroll = 0;
         self.dirty = true;
         let text = text.trim().to_string();
+        self.history_index = None;
+        self.draft.clear();
         if text.is_empty() {
             return;
         }
@@ -208,6 +226,7 @@ impl App {
                 .push(Block::Notice("a turn is already running — Esc to cancel".into()));
             return;
         }
+        self.history.push(text.clone());
         self.transcript.push(Block::User(text.clone()));
         self.running = true;
         self.cancelled = false;
@@ -443,6 +462,51 @@ impl App {
             .nth(n)
             .map(|(i, _)| i)
             .unwrap_or(self.input.len())
+    }
+
+    /// Recall the previous prompt (saving the draft on the way up).
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_index {
+            None => {
+                self.draft = std::mem::take(&mut self.input);
+                self.history.len() - 1
+            }
+            Some(0) => return,
+            Some(i) => i - 1,
+        };
+        self.history_index = Some(next);
+        self.input = self.history[next].clone();
+        self.cursor = self.input.chars().count();
+        self.dirty = true;
+    }
+
+    /// Recall the next prompt, or restore the draft at the bottom.
+    fn history_down(&mut self) {
+        let Some(i) = self.history_index else {
+            return;
+        };
+        if i + 1 < self.history.len() {
+            self.history_index = Some(i + 1);
+            self.input = self.history[i + 1].clone();
+        } else {
+            self.history_index = None;
+            self.input = std::mem::take(&mut self.draft);
+        }
+        self.cursor = self.input.chars().count();
+        self.dirty = true;
+    }
+
+    /// Seed the prompt history (oldest first), e.g. loaded from disk.
+    pub fn load_history(&mut self, lines: Vec<String>) {
+        self.history = lines;
+    }
+
+    /// The prompt history, oldest first, for persistence.
+    pub fn history(&self) -> &[String] {
+        &self.history
     }
 
     pub fn transcript(&self) -> &[Block] {
@@ -785,6 +849,29 @@ mod tests {
             app.transcript().last(),
             Some(Block::Notice(text)) if text.contains("1 turn")
         ));
+    }
+
+    #[test]
+    fn history_recalls_and_restores_the_draft() {
+        let mut app = App::new();
+        submit(&mut app, "first");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd)); // the run finished
+        submit(&mut app, "second");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+
+        typed(&mut app, "drafty");
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "second");
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "first");
+        app.handle(AppEvent::Key(Key::Up)); // oldest: stays put
+        assert_eq!(app.input(), "first");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.input(), "second");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.input(), "drafty");
     }
 
     #[test]
