@@ -7,6 +7,7 @@
 
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, ContentBlock};
+use wcode_harness::protocol::Request;
 
 /// A key the app understands — decoupled from crossterm so this module stays
 /// terminal-free (`event.rs` translates).
@@ -42,6 +43,8 @@ pub enum AppEvent {
 pub enum Action {
     Submit(String),
     Cancel,
+    /// Send a request and route its reply back as an [`AppEvent::Agent`].
+    Ask(Request),
 }
 
 /// A committed transcript block. Thinking and prose share [`Block::Assistant`]
@@ -192,7 +195,12 @@ impl App {
         self.cursor = 0;
         self.scroll = 0;
         self.dirty = true;
-        if text.trim().is_empty() {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if text.starts_with('/') {
+            self.command(&text);
             return;
         }
         if self.running {
@@ -204,6 +212,90 @@ impl App {
         self.running = true;
         self.cancelled = false;
         self.actions.push(Action::Submit(text));
+    }
+
+    /// Parse and act on a `/`-command typed at the prompt.
+    fn command(&mut self, line: &str) {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or("");
+        let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
+        self.notice(line);
+        match name {
+            "/exit" | "/quit" => self.should_quit = true,
+            "/model" => match arg {
+                Some(m) => self.actions.push(Action::Ask(Request::SetModel {
+                    model: m.to_string(),
+                })),
+                None => self.notice("usage: /model <id>"),
+            },
+            "/effort" => match arg {
+                Some(level) => {
+                    let effort = match level {
+                        "-" | "none" | "off" => None,
+                        _ => Some(level.to_string()),
+                    };
+                    self.actions.push(Action::Ask(Request::SetEffort { effort }));
+                }
+                None => self.notice("usage: /effort <level> ('-' clears)"),
+            },
+            "/compact" => self.actions.push(Action::Ask(Request::Compact {
+                instructions: arg.map(str::to_string),
+            })),
+            "/usage" => self.actions.push(Action::Ask(Request::GetHistory)),
+            "/help" => self.notice(
+                "commands: /exit /model <id> /effort [level] /compact [text] /usage /help",
+            ),
+            other => self.notice(format!("unknown command: {other}")),
+        }
+        self.dirty = true;
+    }
+
+    fn notice(&mut self, text: impl Into<String>) {
+        self.transcript.push(Block::Notice(text.into()));
+        self.dirty = true;
+    }
+
+    /// Render a `GetHistory` reply as a one-line usage summary.
+    fn render_usage(&mut self, messages: &[AgentMessage]) {
+        let mut turns = 0u64;
+        let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
+        let mut last_input = None;
+        for message in messages {
+            if let AgentMessage::Assistant {
+                usage: Some(u), ..
+            } = message
+            {
+                turns += 1;
+                input += u.input_tokens;
+                output += u.output_tokens;
+                cache_read += u.cache_read_tokens.unwrap_or(0);
+                cache_write += u.cache_write_tokens.unwrap_or(0);
+                last_input = Some(u.input_tokens);
+            }
+        }
+        if let Some(used) = last_input {
+            self.context_used = Some(used);
+        }
+        if turns == 0 {
+            self.notice("usage: no usage reported");
+        } else {
+            let mut parts = vec![
+                format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
+                format!("{input} in"),
+                format!("{output} out"),
+            ];
+            if cache_read > 0 {
+                parts.push(format!("{cache_read} cache read"));
+            }
+            if cache_write > 0 {
+                parts.push(format!("{cache_write} cache write"));
+            }
+            if let (Some(used), Some(limit)) = (last_input, self.status.context_limit) {
+                parts.push(format!("context {used}/{limit}"));
+            }
+            self.notice(format!("usage: {}", parts.join(", ")));
+        }
+        self.dirty = true;
     }
 
     fn on_agent(&mut self, event: AgentEvent) {
@@ -284,6 +376,7 @@ impl App {
                 self.dirty = true;
             }
             AgentEvent::TurnEnd { message } => self.record_usage(&message),
+            AgentEvent::History { messages } => self.render_usage(&messages),
             // Start and non-streamed replies need no state.
             _ => {}
         }
@@ -637,6 +730,61 @@ mod tests {
         assert_eq!(app.scroll(), 9);
         submit(&mut app, "go");
         assert_eq!(app.scroll(), 0);
+    }
+
+    #[test]
+    fn slash_commands_emit_actions() {
+        let mut app = App::new();
+        submit(&mut app, "/model gpt-x");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "gpt-x".into()
+            })]
+        );
+
+        submit(&mut app, "/effort -");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetEffort { effort: None })]
+        );
+
+        submit(&mut app, "/usage");
+        assert_eq!(app.take_actions(), vec![Action::Ask(Request::GetHistory)]);
+
+        submit(&mut app, "/nonsense");
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn exit_command_quits_without_an_action() {
+        let mut app = App::new();
+        submit(&mut app, "/exit");
+        assert!(app.should_quit());
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_history_reply_updates_usage() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(AgentEvent::History {
+            messages: vec![AgentMessage::Assistant {
+                content: vec![ContentBlock::Text { text: "x".into() }],
+                stop_reason: StopReason::Stop,
+                usage: Some(wcode_harness::message::Usage {
+                    input_tokens: 500,
+                    output_tokens: 20,
+                    cache_read_tokens: Some(3),
+                    cache_write_tokens: None,
+                }),
+                model: None,
+            }],
+        }));
+        assert_eq!(app.context_used(), Some(500));
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(text)) if text.contains("1 turn")
+        ));
     }
 
     #[test]
