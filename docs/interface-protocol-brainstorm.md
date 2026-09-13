@@ -385,6 +385,55 @@ transformation are `Hooks`.** A `before_inbound` hook (the mirror of
 the wcode-native way to express policy *without* config — exactly the philosophy
 in `README.md` §Philosophy.
 
+### 10.1 Communication rules: orchestrator (v1) → group (later)
+
+Two modes, one protocol. **v1 is the orchestrator:** one agent initiates, a star of
+workers answers. A later **group** mode (mesh) is reserved, not built.
+
+| | **orchestrator** (v1) | **group** (later) |
+|---|---|---|
+| Who initiates | the orchestrator only | any member |
+| Topology | star (one hub, N workers) | mesh / graph |
+| A worker may reach | its orchestrator only | any member |
+| Extra capability | — | shared context ("all can *know*") |
+
+**The rule — request-down / report-up.** An edge is one-directional *per role*: the
+orchestrator **requests down**, a worker **reports up**. No lateral (worker → worker)
+edges, no worker → a foreign orchestrator. Ownership is the `report_back_to` edge
+collapsed to one level — only the root spawns, so no recursion → a star.
+
+**Permissions = `to`-resolution scope.** No new protocol: the rule only bounds which
+address a `to` may resolve to (the registry enforces it, §14 S4-2):
+
+- an **orchestrator** may resolve its **workers** (its children);
+- a **worker** may resolve its **orchestrator** only (`report_back_to`).
+
+**Async reports, not blocking asks.** The orchestrator `message`s a worker and moves
+on; the worker's **report arrives later as an inbound message** (`MessageReceived`,
+injected into the orchestrator's context tagged with its sender). It never blocks on
+a worker. `Request::Ask` (a correlated reply) stays for a *synchronous* caller — a
+tool that wants a result now — but the default orchestration loop is
+request → report-as-inbound-message. This answers §14 S4-2's open question: the reply
+is **not** a subscription to the peer's stream; it is a message back.
+
+**One tool, no new verb.** `message { to?, content, mode? }`, with `to` *defaulting to
+the sender's `report_back_to`*: the orchestrator passes `to` (many workers), a worker
+omits it (one place to go). The default *is* the topology. A *report* is just
+`message` to the owner — no `report` tool; and no `Ack` verb (§13.13/§13.14). Note
+"tell" collides with `Message::Tell` (the fire-and-forget mailbox item in the code),
+so call the answer a **report**.
+
+**Enforcement, three layers, cheapest first.** (1) *Construction* — a worker is
+handed only its orchestrator's handle (ideal, but the model addresses by name, so it
+cannot hold alone). (2) *Resolution* — the registry refuses a `to` outside the
+sender's permitted set (the real gate for v1). (3) *`before_inbound`* — the
+receiver-side backstop and the seam a user extends. No ACL, no config.
+
+**Reserved for the group mode.** Only the permitted set changes (any member, not
+owner/children), plus a **shared context** — which the *Leave* list above already
+defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
+`MessageReceived`, `send_from`) is discarded; the scope check just widens.
+
 ---
 
 ## 11. Tensions & risks (to decide against, explicitly)
@@ -463,6 +512,11 @@ in `README.md` §Philosophy.
     handshake, no delivery receipt.
 15. **Address book?** Later (S4-5): a `phonebook` (name → address) above the
     registry, so a sender can say `to: "reviewer"` instead of `agent:<id>`.
+16. **Communication rule (topology)?** Decided (§10.1): **orchestrator** v1 — one
+    agent requests down, workers report up, no lateral edges, a star (only the
+    root spawns). A **group** (mesh + shared context) mode is reserved for later.
+    The registry enforces the permitted set; the default loop is **async** (a
+    report arrives as an inbound message, not a blocking reply).
 
 ---
 
@@ -552,16 +606,18 @@ in `README.md` §Philosophy.
     - ☑ `Hooks::before_inbound(from: Option<&SessionId>, request: &mut Request)`
       — policy can decide by *who* sent it (ownership from `report_back_to`).
     - ☐ `Request::{Ask { to, content }, Notify { to, content }, …}` resolved
-      against the registry; the completion report auto-forwarded on turn end
-      along `report_back_to`.
-    - Open: is a peer's `Ask` reply the correlated reply, or a subscription to
-      the peer's event stream?
+      against the registry. The registry enforces the **permitted set** (§10.1):
+      an orchestrator resolves only its workers, a worker only its orchestrator.
+      The completion report is auto-forwarded on turn end along `report_back_to`.
+    - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
+      event — not a subscription to the peer's stream, and not a blocking reply.
   - **S4-3 — Spawn (bounded fan-out) + the `message` tool.** Only the root
     spawns (a depth cap bounds fan-out); the child reports its result back on
     turn end. The model talks to peers through **one** tool:
-    - `message { to, content, mode }`, `mode` ∈ `notify` (default) / `ask` /
-      `interrupt` / `wake`, mapping 1:1 onto the wire verbs. One tool, one
-      concept — the mode is data (§13.13).
+    - `message { to?, content, mode? }`, `mode` ∈ `notify` (default) / `ask` /
+      `interrupt` / `wake`, mapping 1:1 onto the wire verbs. `to` **defaults to the
+      sender's `report_back_to`** — a worker has exactly one place to send. One
+      tool, one concept: the mode is data (§13.13).
     - An inbound message is injected into the model's context **tagged with its
       sender** (`[message from agent:abc] …`), so the model knows the address to
       reply to. **`Ack` is not a verb**: reply = `message` to the `from` you
