@@ -108,7 +108,7 @@ impl std::fmt::Display for SessionId {
 /// | `Submit` | `Agent::run` |
 /// | `Notify` | `Agent::notify` (append, no turn) |
 /// | `Interrupt` | `Agent::steer` |
-/// | `Wake` | `Agent::follow_up` |
+/// | `Wake` | run — a turn even when idle |
 /// | `Cancel` | `Agent::cancel` |
 /// | `SetModel` | `Agent::set_model` |
 /// | `SetEffort` | `Agent::set_effort` |
@@ -142,7 +142,9 @@ pub enum Request {
     #[serde(alias = "steer")]
     Interrupt { content: String },
 
-    /// Run `content` after the loop would otherwise stop. Formerly `FollowUp`;
+    /// Wake the session: run `content` as a turn **even if it is idle** (mid-run
+    /// it rides the follow-up channel instead). Formerly `FollowUp`;
+    /// `"follow_up"` still deserializes here.
     /// `"follow_up"` still deserializes here.
     #[serde(alias = "follow_up")]
     Wake { content: String },

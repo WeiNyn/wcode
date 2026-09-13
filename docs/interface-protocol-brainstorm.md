@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
 Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2
-(registry + sender + verbs) landed; S4-3a landed; S4-3b next** (see §14).
+(registry + sender + verbs) landed; S4-3a/b landed; S4-3c next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -589,7 +589,9 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       TUI) surfaces an arriving message.
     - Decision taken: `Notify` *idle* appends to `ctx` + session directly
       (`Agent::notify`, no turn); `Notify`/`Interrupt` *mid-run* ride the steering
-      channel (`Wake` → the follow-up channel). The actor picks by run state, and
+      channel). A `Wake` **starts a turn even when idle** (otherwise a worker
+      handed a task would only queue and never act); mid-run it rides the
+      follow-up channel. The actor picks by run state, and
       every accepted verb emits `MessageReceived`.
     - `SessionEntry::{Sent, Received}` deferred to S4-2, where frames exist to
       carry (§9).
@@ -640,7 +642,9 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       the tool/path restrictions become a child `Hooks` impl — no config.
     - ☑ **S4-3a** — `SessionFactory` + `spawn { task, name? }` + registry wiring,
       opt-in `--agents`. Landed; verified live.
-    - ☐ **S4-3b** — the `message` tool + sender tagging.
+    - ☑ **S4-3b** — the `message` tool (`to` defaults to the owner) + sender
+      tagging (`[message from <addr>]`), threaded through `repl` so `/new` keeps
+      `spawn`+`message`. Landed; the report round-trip is model-driven.
     - ☐ **S4-3c** — completion auto-forward (a "run-ended" hook).
     - `message { to?, content, mode? }`, `mode` ∈ `notify` (default) / `ask` /
       `interrupt` / `wake`, mapping 1:1 onto the wire verbs. `to` **defaults to the

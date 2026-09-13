@@ -32,14 +32,16 @@
 //!        │ no
 //!        ▼
 //!   inbox.recv().await ──► match Request:
-//!        Submit   {..} ─► run(...)             → enters the in-run map below
-//!        Steer    {..} ─► agent.steer(msg)     → queued for the next run
-//!        FollowUp {..} ─► agent.follow_up(msg) → queued for the next run
-//!        Cancel        ─► (no-op — nothing is running)
-//!        SetModel {..} ─► agent.set_model(..)
-//!        SetEffort{..} ─► agent.set_effort(..)
-//!        Compact  {..} ─► agent.compact(..).await
-//!        Unknown       ─► (ignored)
+//!        Submit    {..} ─► run(...)              → enters the in-run map below
+//!        Notify    {..} ─► agent.notify(tagged)  → append, no turn
+//!        Interrupt {..} ─► agent.steer(tagged)   → queued for the next turn
+//!        Wake      {..} ─► run(tagged)           → a turn even when idle
+//!        Cancel         ─► (no-op — nothing is running)
+//!        SetModel  {..} ─► agent.set_model(..)
+//!        SetEffort {..} ─► agent.set_effort(..)
+//!        Compact   {..} ─► agent.compact(..).await
+//!        GetHistory     ─► reply with the context
+//!        Unknown        ─► (ignored)
 //! ```
 //!
 //! `run()` — the Agent is borrowed for the whole run, so it is reached only
@@ -351,13 +353,20 @@ async fn dispatch(
             });
             AgentEvent::Ack
         }
+        // A `Wake` runs even when idle: start a turn with the (tagged) content,
+        // like `Submit` — otherwise a worker handed a task would only queue a
+        // follow-up and never act on it.
         Request::Wake { content } => {
-            agent.follow_up(AgentMessage::user_text(tag(&sender, &content)));
             let _ = events.send(AgentEvent::MessageReceived {
                 from: sender.clone(),
-                content,
+                content: content.clone(),
             });
-            AgentEvent::Ack
+            match run(agent, &tag(&sender, &content), inbox, events, deferred).await {
+                Ok(stop_reason) => AgentEvent::Stopped { stop_reason },
+                Err(e) => AgentEvent::Error {
+                    message: e.to_string(),
+                },
+            }
         }
         // An idle cancel is a no-op (see the delivery rules): the token is
         // minted fresh at the end of each run, so cancelling an idle session
@@ -873,6 +882,47 @@ mod tests {
 
         // ...and no turn ran (the loop was never entered).
         assert!(rec.calls().is_empty(), "notify must not run the loop");
+    }
+
+    #[tokio::test]
+    async fn wake_starts_a_run_when_idle() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("acted".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+
+        let reply = handle
+            .ask(Request::Wake {
+                content: "do the task".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                reply,
+                AgentEvent::Stopped {
+                    stop_reason: StopReason::Stop
+                }
+            ),
+            "{reply:?}"
+        );
+        wait_for_end(&mut rx).await;
+
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 1, "Wake ran the loop once");
+        assert!(
+            calls[0]
+                .iter()
+                .any(|m| m.as_text() == "[message from user]\ndo the task"),
+            "the tagged task is the prompt: {:?}",
+            calls[0]
+        );
     }
 
     struct InboundPolicy;
