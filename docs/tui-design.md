@@ -1,6 +1,6 @@
 # wcode TUI — design (visual spec)
 
-Status: **draft, agreed**. Companion to [`tui-plan.md`](tui-plan.md) (the
+Status: **agreed; implemented through P3**. Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.

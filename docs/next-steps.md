@@ -10,7 +10,7 @@ each task completes and keep the status table current.
 | 2 | `bash` output cap | ☑ done |
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☑ done |
-| 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
+| 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☑ done |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) next |
@@ -327,10 +327,12 @@ landed, plus the reply path (`GetHistory` + `ask`) and the CLI repoint: the REPL
 and `-p` now drive a `SessionHandle`. S2 adds the `wcode-protocol` crate (NDJSON
 frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wires
 `wcode serve` + `wcode --socket` (one-shot and interactive). The TUI (S3) is
-another `wcode-protocol` client, and has landed P0–P2: `wcode-tui` runs a session
+another `wcode-protocol` client, and has landed P0–P3d: `wcode-tui` runs a session
 through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 (`--tui`/`--no-tui`) — three bands, streaming, scrollback, `/`-commands, prompt
-history, multiline, markdown (tables included), a context bar, resize, `/copy`.
+history, multiline, markdown (tables included), a context bar, resize, `/copy`,
+then overlays (the model, `/changes`, and `/resume` pickers), tool-diff
+rendering, a per-run changeset, and a session picker that hands off by re-exec.
 Next: S4 (agent-to-agent) — the TUI's P0–P3d are done.
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.

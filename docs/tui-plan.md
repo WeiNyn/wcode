@@ -1,6 +1,6 @@
 # wcode TUI — interface redesign plan
 
-Status: **planning**. Companion to [`next-steps.md`](next-steps.md) (item 3,
+Status: **P0–P3 done; P4 (stretch) open**. Companion to [`next-steps.md`](next-steps.md) (item 3,
 which this replaces). This is a project, not a task — the detail lives here so
 it can be picked up as its own workstream.
 
@@ -15,9 +15,9 @@ it can be picked up as its own workstream.
 
 | phase | scope | status |
 |-------|-------|--------|
-| P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
-| P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☐ todo |
-| P2 | polish: markdown, usage status, resize, copy | ☐ todo |
+| P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☑ done |
+| P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☑ done |
+| P2 | polish: markdown, usage status, resize, copy | ☑ done |
 | P3 | extras: overlays + pickers, diff rendering, run changeset, session picker | ☑ P3 done |
 | P4 | stretch: images, mermaid, theming | ☐ todo |
 
@@ -134,7 +134,7 @@ CAPABILITIES.md` §recommendations).
 ```
 crates/wcode-tui/
   src/
-    lib.rs         // the event loop; `run(backend, status, history)`
+    lib.rs         // the event loop; `run(backend, Options)`
     app.rs         // App state + pure reducers (AgentEvent / key) + Actions
     event.rs       // crossterm events → AppEvent
     terminal.rs    // raw mode / alt screen / restore guard
@@ -144,7 +144,7 @@ crates/wcode-tui/
 ```
 
 `wcode-cli` gains a dependency on `wcode-tui` and calls
-`wcode_tui::run(backend, status, history)` when the TTY branch is chosen; the
+`wcode_tui::run(backend, Options)` when the TTY branch is chosen; the
 `repl.rs` remains for pipes. The look (bands, glyphs, mockups) is specified in
 [`tui-design.md`](tui-design.md).
 
@@ -160,9 +160,9 @@ crates/wcode-tui/
 **P1 — transcript & commands.**
 - Scrollback (offset into the rendered transcript), follow-tail while streaming.
 - Thinking + tool blocks styled and collapsible.
-- `/`-commands: the TUI ships `/exit /model /effort /compact /usage /copy
-  /help`; the session-lifecycle ones (`/new /resume /sessions /reload`) stay in
-  the REPL (they need the composition root).
+- `/`-commands: the TUI ships `/exit /model /effort /compact /changes /resume
+  /usage /copy /help`; the session-lifecycle ones (`/new /sessions /reload`) stay
+  in the REPL (they need the composition root).
 - Prompt history (persisted beside sessions); multiline (Shift-Enter — the `\`
   continuation is not implemented).
 
@@ -187,7 +187,7 @@ not protocol growth. Two forks, both resolved the conservative way:
   when the socket TUI needs it (the same reasoning that defers the O(n²) wire
   deltas).
 - **The session picker is a re-exec handoff.** The TUI cannot rebuild an agent;
-  a picker selection emits an Action ("quit and `--resume <path>`") the CLI maps
+  a picker selection returns an `Outcome("resume <path>")` the CLI maps
   through the existing `repl::reload_args`, keeping the TUI a pure client.
 
 Slices, ascending in coupling (each independently shippable — tests + clippy +
@@ -220,9 +220,9 @@ keys swallowed while open; the changeset's accumulate/reset), `TestBackend`
 snapshots (overlay box, diff styling, the changeset picker), and a live check
 per slice.
 
-Open: dedicated picker chords vs. the `/`-palette; `NO_COLOR`/narrow-width
-behaviour for overlays; pickers under `Backend::Remote` (no session dir, no model
-list).
+Resolved: pickers are `/`-commands (no dedicated chords); overlays degrade under
+`NO_COLOR` and narrow widths; a remote client has no session dir, so `/resume` is
+local-only (the model list is still fetched from the endpoint).
 
 **P4 — stretch.** Inline images (kitty/iTerm), mermaid, configurable theming.
 
@@ -276,6 +276,9 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 - **P3 capabilities** — injected from the composition root, *not* new protocol
   requests (`ListModels`/`ListSessions`); the session picker is a `--resume`
   re-exec handoff. Revisit when the socket client needs them.
+- **The run seam** — `run(backend, Options)` takes the injected state (`status`,
+  `models`, `sessions`, `history`) and returns `Outcome::{Quit, Resume}`; the
+  event loop stays a pure reducer over `AgentEvent`s.
 
 Still open:
 

@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **design settled; implementation started** (S0–S1 landed — see §14).
-Status: **landed through S2; S3 (TUI) P0–P2 shipped** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped** (see §14).
+Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
 This doc asks one question and follows it where it goes:
@@ -498,8 +498,10 @@ in `README.md` §Philosophy.
     though an in-flight `ask` whose reply was lost fails with `Closed`.
   *(This is the jcode TUI architecture, minimal.)*
 - ◐ **S3 — TUI.** Landed as a `wcode-protocol` client (per `tui-plan.md`):
-  P0–P2 — three bands, streaming, scrollback, `/`-commands, prompt history,
-  multiline, markdown, context bar, resize, `/copy`. Single surface;
+  P0–P3d — three bands, streaming, scrollback, `/`-commands, prompt history,
+  multiline, markdown, context bar, resize, `/copy`; then the overlay layer (the
+  model, `/changes`, and `/resume` pickers), tool-diff rendering, a per-run
+  changeset, and a session picker that hands off by re-exec. Single surface;
   multi-surface on the same connection (`session` in the frame) is not started.
 - **S4 — A2A.** Reuse the socket as the peer transport; add `Ask`/`Notify`
   addressed at a peer; a registry for addresses; ownership from `report_back_to`;

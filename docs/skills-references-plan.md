@@ -1,6 +1,6 @@
 # wcode — skills & references plan
 
-Status: **phases 1–2 shipped, phase 3 todo**. Companion to
+Status: **all three phases shipped** (the `<root>/<name>.md` form declined). Companion to
 [`next-steps.md`](next-steps.md) (item 6).
 Covers **skills** (on-demand capability packages) and **references** (the
 context/reference material folded into the prompt). **Agents/subagents are out
@@ -11,7 +11,7 @@ worth designing against.
 |-------|-------|--------|
 | 1 | References as a *set*: global + ancestor context files (AGENTS.md/CLAUDE.md) | ☑ done |
 | 2 | Skills: discovery, frontmatter, prompt section, load-on-demand | ☑ done |
-| 3 | Skills polish: `/skills`, `/skill`, `references/` docs, root-file form | ☐ todo |
+| 3 | Skills polish: `/skills`, `/skill`, `references/` docs, root-file form | ☑ done |
 
 Legend: ☑ done · ☐ todo. §4 records the shape as built; §5 the task list.
 
@@ -197,14 +197,11 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
 - [x] Live check: `--dump-system-prompt` shows the section; a real endpoint
       loaded the body via `read` (see §8).
 
-**Phase 3 — Polish (remaining).**
+**Phase 3 — Polish (landed).**
 - [x] `/skills` (list) and `/skill <name> [args]` (force-load) REPL commands.
 - [x] Extra roots (`[skills] dirs`) and `disabled` — landed early, in phase 2.
 - [x] Skill-asset (`references/`) convention documented (README + AGENTS.md).
 - [x] ~~Optional: accept `<root>/<name>.md` skills~~ — **declined** (see §8).
-- [ ] Extra roots (`[skills] dirs`) and `disabled`.
-- [ ] Document the skill-asset (`references/`) convention + README + AGENTS.md.
-- [ ] Optional: accept `<root>/<name>.md` skills (pi's root-file rule).
 
 ## 6. Testing & verification
 
@@ -253,7 +250,7 @@ skill (injects its body as a user turn) for when the model doesn't bite, and
       prompt / `name`-vs-dir (see §7).
 - [x] Phase 1 (references as a set) — `instructions.rs`, config, `--dump-system-prompt`.
 - [x] Phase 2 (skills core) — verified end-to-end against a live model.
-- [ ] Phase 3 (polish + docs).
+- [x] Phase 3 (polish + docs) — `/skills`, `/skill`, the docs; the `<root>/<name>.md` form declined (see §7).
 
 ## 12. Phase 3 result
 
