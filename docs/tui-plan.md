@@ -232,9 +232,11 @@ Still open:
 
 - [x] Decide open questions (versions, alt-screen, crate split, seam).
 - [x] Visual spec drafted: [`tui-design.md`](tui-design.md).
-- [ ] Scaffold `wcode-tui`; `ratatui`+`crossterm`; terminal enter/restore guard.
-- [ ] `App` + reducers over `AgentEvent`; headless tests.
-- [ ] P0 skeleton wired into `wcode-cli` behind the TTY branch.
+- [x] Scaffold `wcode-tui`; `ratatui`+`crossterm`; terminal enter/restore guard.
+- [x] `App` + reducers; headless reducer + render-snapshot tests. (P0a/P0b.)
+- [ ] P0c: subscribe a `Backend`, `Submit` a turn, stream into the transcript,
+      `Cancel` on Ctrl-C, wire the status line.
+- [ ] P0 wired into `wcode-cli` behind the TTY branch (`--tui`/`--no-tui`).
 - [ ] P1 transcript + commands + history.
 - [ ] P2 markdown + status + resize + copy.
 - [ ] P3 panels + pickers.
