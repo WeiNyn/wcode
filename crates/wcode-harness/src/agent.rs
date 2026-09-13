@@ -228,6 +228,9 @@ impl Agent {
                 // never drained — reaches the next run.
                 self.steer_rx = Some(result.steering);
                 self.follow_rx = Some(result.follow_ups);
+                // An `after_run` hook may act on the finished run (the A2A
+                // auto-report forwards a worker's result to its orchestrator).
+                self.hooks.after_run(&self.ctx, result.stop_reason).await;
                 Ok(result.stop_reason)
             }
             Err(e) => {

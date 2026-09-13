@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::message::AgentMessage;
+use crate::message::{AgentMessage, StopReason};
 use crate::protocol::{Request, SessionId};
 use crate::tool::ToolOutput;
 
@@ -49,6 +49,11 @@ pub trait Hooks: Send + Sync {
     async fn should_stop_after_turn(&self, _ctx: &[AgentMessage]) -> bool {
         false
     }
+
+    /// Runs once when a `run` finishes, with the final context and why it
+    /// stopped. The A2A auto-report rides this (a worker forwards its result to
+    /// its orchestrator); a no-op by default.
+    async fn after_run(&self, _ctx: &[AgentMessage], _stop: StopReason) {}
 }
 
 /// Ordered set of hook implementations run at every hook point.
@@ -133,6 +138,13 @@ impl HooksSet {
             }
         }
         false
+    }
+
+    /// Runs every hook's `after_run` in order, once per run.
+    pub async fn after_run(&self, ctx: &[AgentMessage], stop: StopReason) {
+        for hook in &self.0 {
+            hook.after_run(ctx, stop).await;
+        }
     }
 }
 
@@ -277,5 +289,30 @@ mod tests {
         // A local command is never gated by the inbound policy.
         let mut plain = Request::Cancel;
         assert!(set.before_inbound(None, &mut plain).await.is_none());
+    }
+
+    #[derive(Default)]
+    struct RunLog {
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for RunLog {
+        async fn after_run(&self, ctx: &[AgentMessage], _stop: StopReason) {
+            self.calls.lock().unwrap().push(ctx.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn after_run_runs_every_hook() {
+        let a = Arc::new(RunLog::default());
+        let b = Arc::new(RunLog::default());
+        let set = HooksSet::from_iter(vec![a.clone() as Arc<dyn Hooks>, b.clone()]);
+
+        let ctx = vec![AgentMessage::user_text("hi")];
+        set.after_run(&ctx, StopReason::Stop).await;
+
+        assert_eq!(*a.calls.lock().unwrap(), vec![1]);
+        assert_eq!(*b.calls.lock().unwrap(), vec![1]);
     }
 }

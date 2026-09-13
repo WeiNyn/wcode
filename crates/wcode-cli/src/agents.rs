@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::hooks::HooksSet;
+use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
-use wcode_harness::protocol::SessionId;
+use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
 use wcode_harness::tool::{Tool, erased};
 use wcode_protocol::Registry;
@@ -90,11 +91,14 @@ impl SessionFactory {
 
     fn build(&self, id: &SessionId, owner: &SessionId) -> Agent {
         let t = &self.template;
-        // The worker is told who it is and who it reports to, so it can address
-        // its orchestrator once it has a way to send (the `message` tool, S4-3b).
+        // A worker is told who it is; its result is forwarded to the orchestrator
+        // automatically when its run ends (the `ReportBack` hook), so it is not
+        // asked to report by hand.
         let system = format!(
-            "{}\n\n# You are a worker\nYou are the session `{id}`, spawned by `{owner}`. \
-             Complete the task you are given and report your result back to `{owner}`.",
+            "{}\n\n# You are a worker\nYou are the session `{id}`, spawned by \
+             `{owner}`. Complete the task you are given. When you finish, your \
+             final message is reported back to `{owner}` automatically — you do \
+             not need to send it yourself.",
             t.system
         );
         let mut tools = default_tools(&t.tools);
@@ -108,7 +112,15 @@ impl SessionFactory {
             tools,
             llm: t.llm.clone(),
             stream_fn: t.stream_fn.clone(),
-            hooks: t.hooks.clone(),
+            hooks: {
+                let mut hooks = t.hooks.clone();
+                hooks.push(Arc::new(ReportBack {
+                    registry: self.registry.clone(),
+                    me: id.clone(),
+                    owner: owner.clone(),
+                }));
+                hooks
+            },
             session: None,
             context: Vec::new(),
             working_dir: t.working_dir.clone(),
@@ -117,6 +129,51 @@ impl SessionFactory {
             compaction: t.compaction,
         })
     }
+}
+
+/// Forwards a worker's result to its orchestrator when its run ends, so the
+/// report does not depend on the model remembering to send it (§10.1). Added to
+/// a worker's hooks by [`SessionFactory::build`]; the root has no owner, so it
+/// has none.
+struct ReportBack {
+    registry: Registry,
+    me: SessionId,
+    owner: SessionId,
+}
+
+#[async_trait::async_trait]
+impl Hooks for ReportBack {
+    async fn after_run(&self, ctx: &[AgentMessage], _stop: StopReason) {
+        if let Some(text) = last_assistant_text(ctx) {
+            // A `Wake`, so the report runs the orchestrator's turn even if idle.
+            let _ = self.registry.deliver(
+                &self.me,
+                &self.owner,
+                Request::Wake { content: text },
+            );
+        }
+    }
+}
+
+/// The text of the last assistant message, if the run ended with one (a run
+/// that stopped on a bare tool call has none).
+fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
+    let message = ctx
+        .iter()
+        .rev()
+        .find(|m| matches!(m, AgentMessage::Assistant { .. }))?;
+    let AgentMessage::Assistant { content, .. } = message else {
+        return None;
+    };
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// The root session's A2A wiring: the address book, the factory, and the root's
@@ -164,10 +221,14 @@ mod tests {
     /// A factory whose workers run on a never-streaming model — enough to prove
     /// spawn/registration, since the messages we deliver are `Notify` (no turn).
     fn factory() -> (Arc<SessionFactory>, Registry) {
-        let registry = Registry::new();
         let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
             Box::pin(futures::stream::empty()) as LlmStream
         });
+        factory_with(stream_fn)
+    }
+
+    fn factory_with(stream_fn: StreamFn) -> (Arc<SessionFactory>, Registry) {
+        let registry = Registry::new();
         let template = WorkerTemplate {
             system: "sys".into(),
             llm: LlmOpts::default(),
@@ -290,6 +351,52 @@ mod tests {
         assert!(
             matches!(&event, AgentEvent::MessageReceived { from, content }
                 if from == &worker && content == "done"),
+            "{event:?}"
+        );
+    }
+
+    /// The `ReportBack` hook forwards a worker's final text to its orchestrator
+    /// when the worker's run ends — no model cooperation required.
+    #[tokio::test]
+    async fn a_worker_auto_reports_when_its_run_ends() {
+        use wcode_harness::event::LlmStreamEvent;
+
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::iter(vec![
+                LlmStreamEvent::TextDelta("the answer is 56".into()),
+                LlmStreamEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                },
+            ])) as LlmStream
+        });
+        let (factory, registry) = factory_with(stream_fn);
+        let orch = SessionId::agent("orch");
+        let root = session();
+        registry.register(orch.clone(), root.clone());
+
+        let worker = factory.spawn(&orch, WorkerSpec::default());
+        let mut root_rx = root.subscribe();
+
+        // Hand the worker a task — a `Wake` starts its run.
+        registry
+            .deliver(
+                &orch,
+                &worker.id,
+                Request::Wake {
+                    content: "do it".into(),
+                },
+            )
+            .unwrap();
+
+        // The run ends → the worker reports to the orchestrator on its own.
+        let event = tokio::time::timeout(Duration::from_secs(3), root_rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        assert!(
+            matches!(&event, AgentEvent::MessageReceived { from, content }
+                if from == &worker.id && content == "the answer is 56"),
             "{event:?}"
         );
     }
