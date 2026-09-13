@@ -177,8 +177,8 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
     }
 
     // Shrink the widest column until the row (with ` │ ` joins and the gutter)
-    // fits, never below 3 cells.
-    let overhead = GUTTER.chars().count() + 3 * cols.saturating_sub(1);
+    // fits, never below 3 cells; longer cells then wrap within the column.
+    let overhead = disp(GUTTER) + 3 * cols.saturating_sub(1);
     let budget = width.saturating_sub(overhead);
     let mut total: usize = widths.iter().sum();
     while total > budget {
@@ -192,7 +192,7 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         total -= 1;
     }
 
-    let mut out = vec![row_line(
+    let mut out = vec![row_lines(
         &table.header,
         &widths,
         &table.aligns,
@@ -203,21 +203,73 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         .map(|w| "─".repeat(*w))
         .collect::<Vec<_>>()
         .join("─┼─");
-    out.push(Line::from(Span::styled(format!("{GUTTER}{rule}"), dim())));
+    out.push(vec![Line::from(Span::styled(
+        format!("{GUTTER}{rule}"),
+        dim(),
+    ))]);
     for row in &table.rows {
-        out.push(row_line(row, &widths, &table.aligns, Style::default()));
+        out.push(row_lines(row, &widths, &table.aligns, Style::default()));
+    }
+    out.into_iter().flatten().collect()
+}
+
+/// One table row, wrapping each cell to its column width and emitting as many
+/// physical lines as the tallest cell needs.
+fn row_lines(cells: &[String], widths: &[usize], aligns: &[Align], style: Style) -> Vec<Line<'static>> {
+    let wrapped: Vec<Vec<String>> = widths
+        .iter()
+        .enumerate()
+        .map(|(c, w)| wrap_cell(cells.get(c).map(String::as_str).unwrap_or(""), *w))
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
+    let mut out = Vec::with_capacity(height);
+    for i in 0..height {
+        let parts: Vec<String> = widths
+            .iter()
+            .enumerate()
+            .map(|(c, w)| {
+                let segment = wrapped[c].get(i).map(String::as_str).unwrap_or("");
+                let align = aligns.get(c).copied().unwrap_or(Align::Left);
+                pad(segment, *w, align)
+            })
+            .collect();
+        out.push(Line::from(Span::styled(
+            format!("{GUTTER}{}", parts.join(" │ ")),
+            style,
+        )));
     }
     out
 }
 
-fn row_line(cells: &[String], widths: &[usize], aligns: &[Align], style: Style) -> Line<'static> {
-    let mut parts = Vec::with_capacity(widths.len());
-    for (c, w) in widths.iter().enumerate() {
-        let cell = cells.get(c).map(String::as_str).unwrap_or("");
-        let align = aligns.get(c).copied().unwrap_or(Align::Left);
-        parts.push(pad(&truncate(cell, *w), *w, align));
+/// Wrap a cell's text to `width`; a cell that fits stays on one line.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut atoms = Vec::new();
+    for word in text.split_whitespace() {
+        atoms.extend(hard_break(word, width));
     }
-    Line::from(Span::styled(format!("{GUTTER}{}", parts.join(" │ ")), style))
+    if atoms.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for atom in atoms {
+        if cur.is_empty() {
+            cur = atom;
+        } else if disp(&cur) + 1 + disp(&atom) <= width {
+            cur.push(' ');
+            cur.push_str(&atom);
+        } else {
+            out.push(std::mem::take(&mut cur));
+            cur = atom;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn pad(text: &str, width: usize, align: Align) -> String {
@@ -232,12 +284,22 @@ fn pad(text: &str, width: usize, align: Align) -> String {
     }
 }
 
-fn truncate(text: &str, width: usize) -> String {
-    if disp(text) <= width {
-        return text.to_string();
+/// Split `word` into `width`-wide pieces so it can wrap instead of overflowing.
+fn hard_break(word: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if disp(word) <= width {
+        return vec![word.to_string()];
     }
-    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
-    out.push('…');
+    let mut out = Vec::new();
+    let mut rest = word;
+    while disp(rest) > width {
+        let chunk: String = rest.chars().take(width).collect();
+        rest = &rest[chunk.len()..];
+        out.push(chunk);
+    }
+    if !rest.is_empty() {
+        out.push(rest.to_string());
+    }
     out
 }
 
@@ -306,32 +368,37 @@ fn wrap(
     let mut spans: Vec<Span> = Vec::new();
     let mut used = 0usize;
     let mut prefix = first.to_string();
-    let mut avail = width.saturating_sub(prefix.chars().count()).max(1);
+    let mut avail = width.saturating_sub(disp(&prefix)).max(1);
+    // Break oversized words to the *narrowest* line so a piece always fits.
+    let max_word = width
+        .saturating_sub(disp(first).max(disp(cont)))
+        .max(1);
 
     for (word, style) in words {
-        let width_of = word.chars().count();
-        let gap = usize::from(!spans.is_empty());
-        if used + gap + width_of > avail && !spans.is_empty() {
-            lines.push(line_with(prefix, spans, base));
-            prefix = cont.to_string();
-            avail = width.saturating_sub(prefix.chars().count()).max(1);
-            spans = Vec::new();
-            used = 0;
+        for piece in hard_break(&word, max_word) {
+            let width_of = disp(&piece);
+            let gap = usize::from(!spans.is_empty());
+            if used + gap + width_of > avail && !spans.is_empty() {
+                lines.push(line_with(&prefix, std::mem::take(&mut spans), base));
+                prefix = cont.to_string();
+                avail = width.saturating_sub(disp(&prefix)).max(1);
+                used = 0;
+            }
+            if !spans.is_empty() {
+                spans.push(Span::styled(" ", style));
+                used += 1;
+            }
+            spans.push(Span::styled(piece, style));
+            used += width_of;
         }
-        if !spans.is_empty() {
-            spans.push(Span::styled(" ", style));
-            used += 1;
-        }
-        spans.push(Span::styled(word, style));
-        used += width_of;
     }
-    lines.push(line_with(prefix, spans, base));
+    lines.push(line_with(&prefix, spans, base));
     lines
 }
 
-fn line_with(prefix: String, spans: Vec<Span<'static>>, base: Style) -> Line<'static> {
+fn line_with(prefix: &str, spans: Vec<Span<'static>>, base: Style) -> Line<'static> {
     let mut all = Vec::with_capacity(spans.len() + 1);
-    all.push(Span::styled(prefix, dim()));
+    all.push(Span::styled(prefix.to_string(), dim()));
     all.extend(spans.into_iter().map(|s| Span {
         style: if s.style == Style::default() {
             base
@@ -392,12 +459,34 @@ mod tests {
     }
 
     #[test]
-    fn wide_tables_shrink_to_fit() {
-        let md = "| aaaaaaaa | bbbbbbbb |\n|---|---|\n| 1 | 2 |";
-        let lines = render(md, 20);
+    fn long_cells_wrap_instead_of_truncating() {
+        let md = "| key | value |\n|---|---|\n| a | one two three four five |";
+        let lines = render(md, 24);
+        for line in &lines {
+            assert!(width_of(line) <= 24, "too long: {line:?}");
+        }
+        // Every word survives across the row's wrapped lines.
+        let row: Vec<String> = text_of(&lines)[2..]
+            .iter()
+            .flat_map(|s| s.split_whitespace().map(str::to_string))
+            .collect();
+        for word in ["a", "one", "two", "three", "four", "five"] {
+            assert!(row.iter().any(|w| w == word), "lost {word} in {row:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_hard_breaks() {
+        let long = "a".repeat(50);
+        let lines = render(&long, 20);
         for line in &lines {
             assert!(width_of(line) <= 20, "too long: {}", width_of(line));
         }
+        let joined: String = text_of(&lines)
+            .iter()
+            .map(|l| l.trim_start().to_string())
+            .collect();
+        assert_eq!(joined, long);
     }
 
     #[test]
