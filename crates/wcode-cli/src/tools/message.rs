@@ -14,9 +14,10 @@ pub struct MessageArgs {
     to: Option<String>,
     /// What to send.
     content: String,
-    /// Delivery mode: `notify` (default — append, no turn), `wake` (run even if
-    /// idle), `interrupt` (soft interrupt at the next turn), or `ask` (like
-    /// `wake`, but you expect a report back).
+    /// Delivery mode: `wake` (**default** — run a turn even if the recipient is
+    /// idle, so it processes your message), `notify` (append, no turn),
+    /// `interrupt` (soft interrupt at the next turn), or `ask` (like `wake`, but
+    /// you expect a report back).
     #[serde(default)]
     mode: Option<String>,
 }
@@ -54,7 +55,7 @@ fn address(to: &str) -> SessionId {
 /// Map a tool `mode` onto a target-side request verb. `ask` rides `wake` (the
 /// report comes back asynchronously as an inbound message, §10.1).
 fn request(mode: Option<&str>, content: String) -> Result<Request, String> {
-    match mode.unwrap_or("notify") {
+    match mode.unwrap_or("wake") {
         "notify" => Ok(Request::Notify { content }),
         "wake" | "ask" => Ok(Request::Wake { content }),
         "interrupt" => Ok(Request::Interrupt { content }),
@@ -74,8 +75,9 @@ impl TypedTool for Message {
 
     fn description(&self) -> &str {
         "Send a message to another agent session. `to` is the recipient's \
-         address; omit it to message your orchestrator. `mode` is `notify` \
-         (default), `wake`, `interrupt`, or `ask`."
+         address; omit it to message your orchestrator. `mode` is `wake` \
+         (default; the recipient processes it even if idle), `notify`, \
+         `interrupt`, or `ask`."
     }
 
     async fn execute(&self, args: MessageArgs, _ctx: &ToolContext) -> ToolOutput {

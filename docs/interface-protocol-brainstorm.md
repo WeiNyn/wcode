@@ -410,7 +410,8 @@ address a `to` may resolve to (the registry enforces it, §14 S4-2):
 
 **Async reports, not blocking asks.** The orchestrator `message`s a worker and moves
 on; the worker's **report arrives later as an inbound message** (`MessageReceived`,
-injected into the orchestrator's context tagged with its sender). It never blocks on
+injected into the orchestrator's context tagged with its sender, and it **wakes
+the orchestrator if it is idle** — a report is not left sitting). It never blocks on
 a worker. `Request::Ask` (a correlated reply) stays for a *synchronous* caller — a
 tool that wants a result now — but the default orchestration loop is
 request → report-as-inbound-message. This answers §14 S4-2's open question: the reply
@@ -506,7 +507,9 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
 12. **Does the line REPL change?** Recommended: no behavior change; it becomes a
     second client of the same protocol (as jcode's `harness_repl` example is).
 13. **The model's A2A surface?** Decided: **one** `message { to, content, mode }`
-    tool, `mode` ∈ `notify`/`ask`/`interrupt`/`wake`; an inbound message is
+    tool, `mode` ∈ `wake` (default) / `notify` / `ask` / `interrupt`; an inbound
+    message is rendered in the model's context tagged with its sender. `wake` is
+    the default so a report wakes an idle recipient. No per-mode tools.
     rendered in the model's context tagged with its sender. No per-mode tools.
 14. **Is there an `Ack` verb?** Decided: no. Receiving a message *is* the ack (it
     lands in the context, tagged); a reply is just `message` to the `from`. No
@@ -646,10 +649,13 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       tagging (`[message from <addr>]`), threaded through `repl` so `/new` keeps
       `spawn`+`message`. Landed; the report round-trip is model-driven.
     - ☐ **S4-3c** — completion auto-forward (a "run-ended" hook).
-    - `message { to?, content, mode? }`, `mode` ∈ `notify` (default) / `ask` /
-      `interrupt` / `wake`, mapping 1:1 onto the wire verbs. `to` **defaults to the
-      sender's `report_back_to`** — a worker has exactly one place to send. One
-      tool, one concept: the mode is data (§13.13).
+    - `message { to?, content, mode? }`, `mode` ∈ `wake` (**default**) / `notify` /
+      `interrupt` / `ask`, mapping 1:1 onto the wire verbs. The default is
+      `wake`, so a message (a task, or a worker's report) **runs a turn even if
+      the recipient is idle** — otherwise a report would sit unread until the
+      next human prompt. `to` **defaults to the sender's `report_back_to`** — a
+      worker has exactly one place to send. One tool, one concept: the mode is
+      data (§13.13).
     - An inbound message is injected into the model's context **tagged with its
       sender** (`[message from agent:abc] …`), so the model knows the address to
       reply to. **`Ack` is not a verb**: reply = `message` to the `from` you
