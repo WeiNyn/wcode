@@ -282,16 +282,8 @@ async fn dispatch(
                 message: e.to_string(),
             },
         },
-        Request::Steer { content } => {
-            agent.steer(AgentMessage::user_text(content));
-            AgentEvent::Ack
-        }
-        Request::FollowUp { content } => {
-            agent.follow_up(AgentMessage::user_text(content));
-            AgentEvent::Ack
-        }
-        // A2A delivery verbs (S4-1). `Interrupt`/`Wake` are the peer-named
-        // forms of `Steer`/`FollowUp`; `Notify` appends with no turn.
+        // A2A delivery verbs (S4-1). `Notify` appends with no turn;
+        // `Interrupt`/`Wake` are the canonical interrupt/continue forms.
         Request::Notify { content } => match agent.notify(content.clone()) {
             Ok(_) => {
                 let _ = events.send(AgentEvent::MessageReceived {
@@ -391,12 +383,6 @@ async fn run(
                 }
                 match message {
                     Message::Tell(Request::Cancel) => cancel.cancel(),
-                    Message::Tell(Request::Steer { content }) => {
-                        let _ = steer.send(AgentMessage::user_text(content));
-                    }
-                    Message::Tell(Request::FollowUp { content }) => {
-                        let _ = follow_up.send(AgentMessage::user_text(content));
-                    }
                     Message::Tell(Request::Notify { content })
                     | Message::Tell(Request::Interrupt { content }) => {
                         let _ = steer.send(AgentMessage::user_text(content.clone()));
@@ -644,65 +630,6 @@ mod tests {
                 path: None,
             }
         }
-    }
-
-    #[tokio::test]
-    async fn steer_reaches_the_next_turn_while_a_tool_is_blocked() {
-        let rec = Recorder::default();
-        rec.push(vec![
-            LlmStreamEvent::ToolCall {
-                id: "c1".into(),
-                name: "gate".into(),
-                arguments: json!({ "text": "hi" }),
-            },
-            LlmStreamEvent::Done {
-                stop_reason: StopReason::ToolUse,
-                usage: None,
-            },
-        ]);
-        rec.push(vec![
-            LlmStreamEvent::TextDelta("after steer".into()),
-            LlmStreamEvent::Done {
-                stop_reason: StopReason::Stop,
-                usage: None,
-            },
-        ]);
-
-        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
-        let release = Arc::new(tokio::sync::Notify::new());
-        let gate = erased(GateTool {
-            entered: entered_tx,
-            release: release.clone(),
-        });
-
-        let handle =
-            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
-        let mut rx = handle.subscribe();
-        handle.send(Request::Submit { text: "hi".into() }).unwrap();
-
-        entered_rx.recv().await.unwrap(); // the tool is now blocked
-        handle
-            .send(Request::Steer {
-                content: "mid-run steer".into(),
-            })
-            .unwrap();
-        release.notify_one();
-
-        wait_for_end(&mut rx).await;
-
-        let calls = rec.calls();
-        assert_eq!(
-            calls.len(),
-            2,
-            "two stream calls: the tool turn and the next"
-        );
-        assert!(
-            calls[1]
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { .. }) && m.as_text() == "mid-run steer"),
-            "the steer drained into the next turn: {:?}",
-            calls[1]
-        );
     }
 
     #[tokio::test]

@@ -96,11 +96,9 @@ impl std::fmt::Display for SessionId {
 /// | `Request` | today |
 /// |-----------|-------|
 /// | `Submit` | `Agent::run` |
-/// | `Steer` | `Agent::steer` |
-/// | `FollowUp` | `Agent::follow_up` |
 /// | `Notify` | `Agent::notify` (append, no turn) |
-/// | `Interrupt` | `Agent::steer` (peer-named) |
-/// | `Wake` | `Agent::follow_up` (peer-named) |
+/// | `Interrupt` | `Agent::steer` |
+/// | `Wake` | `Agent::follow_up` |
 /// | `Cancel` | `Agent::cancel` |
 /// | `SetModel` | `Agent::set_model` |
 /// | `SetEffort` | `Agent::set_effort` |
@@ -123,25 +121,20 @@ pub enum Request {
     /// it stops. The run's progress and result stream back as [`AgentEvent`]s.
     Submit { text: String },
 
-    /// Inject content at the next turn boundary of the in-flight run — a soft
-    /// interrupt that does not cancel the run.
-    Steer { content: String },
-
-    /// Run this content after the loop would otherwise stop.
-    FollowUp { content: String },
-
-    /// **A2A delivery:** append `content` to the conversation *without* starting
-    /// a turn (the recipient records it now if idle, or at the next turn
-    /// boundary if a run is in flight). The peer-named form of "tell, don't
-    /// ask" — `Agent::notify`.
+    /// Append `content` to the conversation *without* starting a turn (recorded
+    /// now if idle, or at the next turn boundary if a run is in flight). The
+    /// "tell, don't ask" delivery mode — `Agent::notify`.
     Notify { content: String },
 
-    /// **A2A delivery:** a soft interrupt to a running (or next) turn — the
-    /// peer-named form of [`Request::Steer`].
+    /// Inject `content` at the next turn boundary of the in-flight run — a soft
+    /// interrupt that does not cancel the run. Formerly `Steer`; `"steer"`
+    /// still deserializes here.
+    #[serde(alias = "steer")]
     Interrupt { content: String },
 
-    /// **A2A delivery:** run this content even if the session is idle — the
-    /// peer-named form of [`Request::FollowUp`].
+    /// Run `content` after the loop would otherwise stop. Formerly `FollowUp`;
+    /// `"follow_up"` still deserializes here.
+    #[serde(alias = "follow_up")]
     Wake { content: String },
 
     /// Cancel the in-flight run (and any retry/backoff wait). Idempotent.
@@ -228,18 +221,6 @@ mod tests {
     #[test]
     fn request_roundtrip_all_variants() {
         roundtrip(Request::Submit { text: "hi".into() }, "submit");
-        roundtrip(
-            Request::Steer {
-                content: "s".into(),
-            },
-            "steer",
-        );
-        roundtrip(
-            Request::FollowUp {
-                content: "f".into(),
-            },
-            "follow_up",
-        );
         roundtrip(Request::Cancel, "cancel");
         roundtrip(Request::SetModel { model: "m1".into() }, "set_model");
         roundtrip(
@@ -262,6 +243,14 @@ mod tests {
     }
 
     #[test]
+    fn legacy_verb_tags_deserialize_to_canonical_variants() {
+        let steer: Request = serde_json::from_str(r#"{"type":"steer","content":"s"}"#).unwrap();
+        assert_eq!(steer, Request::Interrupt { content: "s".into() });
+        let follow: Request = serde_json::from_str(r#"{"type":"follow_up","content":"f"}"#).unwrap();
+        assert_eq!(follow, Request::Wake { content: "f".into() });
+    }
+
+    #[test]
     fn request_unknown_tag_is_caught_not_fatal() {
         let back: Request = serde_json::from_str(r#"{"type":"from_the_future"}"#).unwrap();
         assert_eq!(back, Request::Unknown);
@@ -273,7 +262,7 @@ mod tests {
         assert!(is_inbound(&Request::Interrupt { content: "x".into() }));
         assert!(is_inbound(&Request::Wake { content: "x".into() }));
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
-        assert!(!is_inbound(&Request::Steer { content: "x".into() }));
+        assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::Cancel));
     }
 
