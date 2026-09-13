@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 wcode-harness = { path = "../wcode-harness" }
+wcode-protocol = { path = "../wcode-protocol" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

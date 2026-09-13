@@ -6775,6 +6775,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "wcode-harness",
+ "wcode-protocol",
 ]
 
 [[package]]

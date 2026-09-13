@@ -266,6 +266,12 @@ impl Agent {
     pub fn session_path(&self) -> Option<&Path> {
         self.session.as_ref().and_then(|s| s.path())
     }
+
+    /// The session's stable id (from its `Header`), if a session is open. The
+    /// address a [`SessionHandle`](crate::actor::SessionHandle)'s frames carry.
+    pub fn session_id(&self) -> Option<String> {
+        self.session.as_ref().and_then(session_header_id)
+    }
 }
 
 /// Process cwd, used only when `AgentConfig.working_dir` is left empty.

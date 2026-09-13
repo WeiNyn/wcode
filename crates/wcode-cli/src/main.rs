@@ -1,13 +1,14 @@
 //! CLI entry: arg parsing, config → LlmOpts → Agent, one-shot or REPL.
 
 use std::io::Write as _;
+use std::path::PathBuf;
 
 use wcode_harness::actor::SessionActor;
-use wcode_harness::agent::Agent;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
-use wcode_harness::protocol::Request;
+use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
+use wcode_protocol::Backend;
 
 mod config;
 mod instructions;
@@ -26,7 +27,7 @@ use crate::repl::{
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [serve] [--socket <path>]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -40,7 +41,9 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
-   --dump-system-prompt  print the composed system prompt and exit
+  --dump-system-prompt  print the composed system prompt and exit
+  serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
+  --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -95,6 +98,10 @@ struct Args {
     dump_system_prompt: bool,
     no_skills: bool,
     sequential: bool,
+    /// `wcode serve`: own the session and serve it over a socket.
+    serve: bool,
+    /// Connect to a session served elsewhere instead of running one locally.
+    socket: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -154,6 +161,11 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--dump-system-prompt" => a.dump_system_prompt = true,
             "--no-skills" => a.no_skills = true,
             "--sequential" => a.sequential = true,
+            "serve" => a.serve = true,
+            "--socket" => {
+                a.socket = Some(args.get(i).ok_or("--socket requires a path")?.clone());
+                i += 1;
+            }
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -302,6 +314,32 @@ async fn main() {
         std::process::exit(0);
     }
 
+    // `--socket`: connect to a session served elsewhere. No local session is
+    // created — the server owns it.
+    #[cfg(unix)]
+    if let Some(sock) = args.socket.clone().filter(|_| !args.serve) {
+        let path = PathBuf::from(&sock);
+        let client = match wcode_protocol::Client::connect(&path).await {
+            Ok(client) => client,
+            Err(e) => {
+                eprintln!("connect {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        };
+        match args.prompt.clone() {
+            Some(prompt) => std::process::exit(one_shot(Backend::from(client), &prompt).await),
+            None => {
+                eprintln!("error: `--socket` currently supports `-p` only");
+                std::process::exit(2);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if !args.serve && args.socket.is_some() {
+        eprintln!("error: `--socket` is not supported on this platform");
+        std::process::exit(2);
+    }
+
     let (session, context): (Option<Session>, Vec<AgentMessage>) = match args.resume.clone() {
         Some(path) => {
             let p = match path {
@@ -379,16 +417,51 @@ async fn main() {
         context,
     );
 
+    if args.serve {
+        #[cfg(unix)]
+        {
+            let session_id =
+                SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
+            let path = args
+                .socket
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(default_socket_path);
+            let handle = SessionActor::spawn(agent);
+            println!("serving session on {}", path.display());
+            let _ = std::io::stdout().flush();
+            if let Err(e) = wcode_protocol::serve_at(handle, session_id, &path).await {
+                eprintln!("serve: {e}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        #[cfg(not(unix))]
+        {
+            eprintln!("error: `serve` is not supported on this platform");
+            std::process::exit(2);
+        }
+    }
+
     match args.prompt {
-        Some(prompt) => std::process::exit(one_shot(agent, &prompt).await),
+        Some(prompt) => {
+            std::process::exit(one_shot(Backend::from(SessionActor::spawn(agent)), &prompt).await)
+        }
         None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions, skills).await,
     }
 }
 
+/// Default socket for `serve`/`--socket`: alongside the config, so both ends
+/// agree without an argument.
+fn default_socket_path() -> PathBuf {
+    config_dir()
+        .map(|d| d.join("wcode.sock"))
+        .unwrap_or_else(|| std::env::temp_dir().join("wcode.sock"))
+}
+
 /// `-p` mode: no streaming output; print the final assistant text.
-async fn one_shot(agent: Agent, prompt: &str) -> i32 {
-    let handle = SessionActor::spawn(agent);
-    let mut rx = handle.subscribe();
+async fn one_shot(backend: Backend, prompt: &str) -> i32 {
+    let mut rx = backend.subscribe();
     // Draining keeps the subscription live and captures what the reply does not
     // carry: the last stream error and the final assistant text.
     let drain = tokio::spawn(async move {
@@ -405,7 +478,7 @@ async fn one_shot(agent: Agent, prompt: &str) -> i32 {
         }
         (last_error, last_text)
     });
-    let reply = handle
+    let reply = backend
         .ask(Request::Submit {
             text: prompt.to_string(),
         })
