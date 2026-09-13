@@ -64,6 +64,16 @@ impl SessionId {
         Self(id.into())
     }
 
+    /// The well-known address of the human peer (see [`USER`]).
+    pub fn user() -> Self {
+        Self(USER.to_string())
+    }
+
+    /// A peer session's address: `"agent:<id>"` (§5.2).
+    pub fn agent(id: impl AsRef<str>) -> Self {
+        Self(format!("agent:{}", id.as_ref()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -307,5 +317,7 @@ mod tests {
         assert_eq!(SessionId::new("abc").as_str(), "abc");
         assert_eq!(SessionId::new("abc").to_string(), "abc");
         assert_eq!(SessionId::from("x"), SessionId(String::from("x")));
+        assert_eq!(SessionId::user().as_str(), USER);
+        assert_eq!(SessionId::agent("abc").as_str(), "agent:abc");
     }
 }

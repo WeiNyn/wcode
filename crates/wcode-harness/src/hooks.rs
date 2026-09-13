@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::message::AgentMessage;
-use crate::protocol::Request;
+use crate::protocol::{Request, SessionId};
 use crate::tool::ToolOutput;
 
 /// Loop-local view of `ContentBlock::ToolCall`.
@@ -33,7 +33,11 @@ pub trait Hooks: Send + Sync {
     /// place (the rewrite is what is delivered); `Some(reason)` drops it — the
     /// reason is returned to the sender when it is an `ask`. A message dropped
     /// here never reaches the context or starts a turn.
-    async fn before_inbound(&self, _request: &mut Request) -> Option<String> {
+    async fn before_inbound(
+        &self,
+        _from: Option<&SessionId>,
+        _request: &mut Request,
+    ) -> Option<String> {
         None
     }
 
@@ -96,9 +100,13 @@ impl HooksSet {
     /// First `Some(reason)` wins: a dropping hook prevents delivery (the request
     /// is not serviced). `request` may have been rewritten in place by earlier
     /// hooks — the rewrite is what would be delivered.
-    pub async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+    pub async fn before_inbound(
+        &self,
+        from: Option<&SessionId>,
+        request: &mut Request,
+    ) -> Option<String> {
         for hook in &self.0 {
-            if let Some(reason) = hook.before_inbound(request).await {
+            if let Some(reason) = hook.before_inbound(from, request).await {
                 return Some(reason);
             }
         }
@@ -227,7 +235,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Hooks for GatingHooks {
-        async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+        async fn before_inbound(
+            &self,
+            _from: Option<&SessionId>,
+            request: &mut Request,
+        ) -> Option<String> {
             let Request::Notify { content } = request else {
                 return None;
             };
@@ -246,7 +258,7 @@ mod tests {
         let mut kept = Request::Notify {
             content: "hello".into(),
         };
-        assert!(set.before_inbound(&mut kept).await.is_none());
+        assert!(set.before_inbound(None, &mut kept).await.is_none());
         assert_eq!(
             kept,
             Request::Notify {
@@ -258,12 +270,12 @@ mod tests {
             content: "drop me".into(),
         };
         assert_eq!(
-            set.before_inbound(&mut dropped).await.as_deref(),
+            set.before_inbound(None, &mut dropped).await.as_deref(),
             Some("not allowed")
         );
 
         // A local command is never gated by the inbound policy.
         let mut plain = Request::Cancel;
-        assert!(set.before_inbound(&mut plain).await.is_none());
+        assert!(set.before_inbound(None, &mut plain).await.is_none());
     }
 }

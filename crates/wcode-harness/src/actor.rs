@@ -71,7 +71,7 @@
 //! | request | while a run is in flight |
 //! |---------|--------------------------|
 //! | `Cancel` | delivered at once — the token is cancelled; the loop aborts |
-//! | `Steer` / `FollowUp` | forwarded to the run's channels at once |
+//! | `Interrupt` / `Wake` | forwarded to the run's channels at once |
 //! | `SetModel` / `SetEffort` / `Compact` | deferred, applied when the run ends |
 //! | another `Submit` | deferred, becomes the next run |
 //!
@@ -118,7 +118,7 @@ use crate::event::AgentEvent;
 use crate::hooks::HooksSet;
 use crate::loop_::LoopError;
 use crate::message::{AgentMessage, StopReason};
-use crate::protocol::{Request, SessionId, USER};
+use crate::protocol::{Request, SessionId};
 
 /// Default outbox buffer: how far a subscriber may lag before it starts losing
 /// events (`broadcast` semantics — the slowest reader drops, it never blocks the
@@ -140,11 +140,22 @@ impl SessionHandle {
     ///
     /// Fails only if the session has shut down (every handle was dropped and the
     /// actor task has ended). A `Submit` runs to completion before the next
-    /// non-interrupt request is serviced, but `Steer`/`FollowUp`/`Cancel` sent
+    /// non-interrupt request is serviced, but `Interrupt`/`Wake`/`Cancel` sent
     /// during a run are handled immediately (see the actor's delivery rules).
     pub fn send(&self, request: Request) -> Result<(), SessionClosed> {
+        self.tell(None, request)
+    }
+
+    /// Like [`SessionHandle::send`], but attributed to a sender address so the
+    /// recipient can attribute and policy-check the message (a peer session
+    /// passes its own `"agent:<id>"` address).
+    pub fn send_from(&self, from: SessionId, request: Request) -> Result<(), SessionClosed> {
+        self.tell(Some(from), request)
+    }
+
+    fn tell(&self, from: Option<SessionId>, request: Request) -> Result<(), SessionClosed> {
         self.inbox
-            .send(Message::Tell(request))
+            .send(Message::Tell { from, request })
             .map_err(|_| SessionClosed)
     }
 
@@ -155,14 +166,35 @@ impl SessionHandle {
     /// or [`AgentEvent::Error`]), `Compact` (→ [`AgentEvent::Compaction`],
     /// [`AgentEvent::Ack`], or [`AgentEvent::Error`]). It also works for
     /// `Submit`, replying when the run completes. Interrupts
-    /// (`Steer`/`FollowUp`/`Cancel`) want no reply — use `send`; an `ask` on one
+    /// (`Interrupt`/`Wake`/`Cancel`) want no reply — use `send`; an `ask` on one
     /// is deferred like any command while a run is in flight.
     ///
     /// Fails only if the session has shut down.
     pub async fn ask(&self, request: Request) -> Result<AgentEvent, SessionClosed> {
+        self.question(None, request).await
+    }
+
+    /// Like [`SessionHandle::ask`], attributed to a sender address.
+    pub async fn ask_from(
+        &self,
+        from: SessionId,
+        request: Request,
+    ) -> Result<AgentEvent, SessionClosed> {
+        self.question(Some(from), request).await
+    }
+
+    async fn question(
+        &self,
+        from: Option<SessionId>,
+        request: Request,
+    ) -> Result<AgentEvent, SessionClosed> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.inbox
-            .send(Message::Ask(request, reply_tx))
+            .send(Message::Ask {
+                from,
+                request,
+                reply: reply_tx,
+            })
             .map_err(|_| SessionClosed)?;
         reply_rx.await.map_err(|_| SessionClosed)
     }
@@ -188,10 +220,18 @@ impl std::error::Error for SessionClosed {}
 
 /// A mailbox item: fire-and-forget, or a request that expects a reply.
 enum Message {
-    /// No reply wanted.
-    Tell(Request),
+    /// No reply wanted. `from` is the sender's address — `None` for a local
+    /// caller (the human), `Some(peer)` when another session sends.
+    Tell {
+        from: Option<SessionId>,
+        request: Request,
+    },
     /// The reply to the request is sent here when it is serviced.
-    Ask(Request, oneshot::Sender<AgentEvent>),
+    Ask {
+        from: Option<SessionId>,
+        request: Request,
+        reply: oneshot::Sender<AgentEvent>,
+    },
 }
 
 /// Spawns the actor task that owns an [`Agent`].
@@ -241,13 +281,13 @@ async fn serve(
 /// `before_tool_call`). Returns `Some(reason)` if the message was dropped; the
 /// request may have been rewritten in place by the hook either way.
 async fn gate_inbound(hooks: &HooksSet, message: &mut Message) -> Option<String> {
-    let request = match message {
-        Message::Tell(request) | Message::Ask(request, _) => request,
+    let (from, request) = match message {
+        Message::Tell { from, request } | Message::Ask { from, request, .. } => (from, request),
     };
     if !crate::protocol::is_inbound(request) {
         return None;
     }
-    hooks.before_inbound(request).await
+    hooks.before_inbound(from.as_ref(), request).await
 }
 
 /// Service one mailbox item: run the request, then answer an `Ask` with the
@@ -262,7 +302,7 @@ async fn dispatch(
     // Inbound peer-message policy (S4-1): a drop skips delivery entirely; a
     // rewrite (in place) is what gets serviced.
     if let Some(reason) = gate_inbound(agent.hooks(), &mut message).await {
-        if let Message::Ask(_, reply) = message {
+        if let Message::Ask { reply, .. } = message {
             let _ = reply.send(AgentEvent::Error {
                 message: format!("inbound blocked: {reason}"),
             });
@@ -270,10 +310,11 @@ async fn dispatch(
         return;
     }
 
-    let (request, reply) = match message {
-        Message::Tell(request) => (request, None),
-        Message::Ask(request, reply) => (request, Some(reply)),
+    let (from, request, reply) = match message {
+        Message::Tell { from, request } => (from, request, None),
+        Message::Ask { from, request, reply } => (from, request, Some(reply)),
     };
+    let sender = from.unwrap_or_else(SessionId::user);
 
     let event = match request {
         Request::Submit { text } => match run(agent, &text, inbox, events, deferred).await {
@@ -287,7 +328,7 @@ async fn dispatch(
         Request::Notify { content } => match agent.notify(content.clone()) {
             Ok(_) => {
                 let _ = events.send(AgentEvent::MessageReceived {
-                    from: SessionId::new(USER),
+                    from: sender.clone(),
                     content,
                 });
                 AgentEvent::Ack
@@ -299,7 +340,7 @@ async fn dispatch(
         Request::Interrupt { content } => {
             agent.steer(AgentMessage::user_text(content.clone()));
             let _ = events.send(AgentEvent::MessageReceived {
-                from: SessionId::new(USER),
+                from: sender.clone(),
                 content,
             });
             AgentEvent::Ack
@@ -307,7 +348,7 @@ async fn dispatch(
         Request::Wake { content } => {
             agent.follow_up(AgentMessage::user_text(content.clone()));
             let _ = events.send(AgentEvent::MessageReceived {
-                from: SessionId::new(USER),
+                from: sender.clone(),
                 content,
             });
             AgentEvent::Ack
@@ -347,7 +388,7 @@ async fn dispatch(
 }
 
 /// Drive one `Agent::run`, forwarding its events to the outbox while still
-/// servicing the inbox so `Steer`/`FollowUp`/`Cancel` reach the in-flight run.
+/// servicing the inbox so `Interrupt`/`Wake`/`Cancel` reach the in-flight run.
 async fn run(
     agent: &mut Agent,
     text: &str,
@@ -365,7 +406,7 @@ async fn run(
 
     let mut run = Box::pin(agent.run(text, sink_tx));
     let result = loop {
-        // Biased: service the inbox *before* advancing the run. A `Steer` must
+        // Biased: service the inbox *before* advancing the run. An `Interrupt` must
         // be in the agent's steering channel before the run reaches its next
         // turn-boundary drain, or it is silently a turn late. Polling the run
         // first would let it cross that boundary while the request still sits
@@ -374,7 +415,7 @@ async fn run(
             biased;
             Some(mut message) = inbox.recv() => {
                 if let Some(reason) = gate_inbound(&hooks, &mut message).await {
-                    if let Message::Ask(_, reply) = message {
+                    if let Message::Ask { reply, .. } = message {
                         let _ = reply.send(AgentEvent::Error {
                             message: format!("inbound blocked: {reason}"),
                         });
@@ -382,19 +423,27 @@ async fn run(
                     continue;
                 }
                 match message {
-                    Message::Tell(Request::Cancel) => cancel.cancel(),
-                    Message::Tell(Request::Notify { content })
-                    | Message::Tell(Request::Interrupt { content }) => {
+                    Message::Tell {
+                        request: Request::Cancel,
+                        ..
+                    } => cancel.cancel(),
+                    Message::Tell {
+                        request: Request::Notify { content } | Request::Interrupt { content },
+                        from,
+                    } => {
                         let _ = steer.send(AgentMessage::user_text(content.clone()));
                         let _ = events.send(AgentEvent::MessageReceived {
-                            from: SessionId::new(USER),
+                            from: from.unwrap_or_else(SessionId::user),
                             content,
                         });
                     }
-                    Message::Tell(Request::Wake { content }) => {
+                    Message::Tell {
+                        request: Request::Wake { content },
+                        from,
+                    } => {
                         let _ = follow_up.send(AgentMessage::user_text(content.clone()));
                         let _ = events.send(AgentEvent::MessageReceived {
-                            from: SessionId::new(USER),
+                            from: from.unwrap_or_else(SessionId::user),
                             content,
                         });
                     }
@@ -820,7 +869,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::hooks::Hooks for InboundPolicy {
-        async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+        async fn before_inbound(
+            &self,
+            _from: Option<&SessionId>,
+            request: &mut Request,
+        ) -> Option<String> {
             let Request::Notify { content } = request else {
                 return None;
             };
@@ -927,5 +980,86 @@ mod tests {
             "the interrupt drained into the next turn: {:?}",
             calls[1]
         );
+    }
+
+    #[tokio::test]
+    async fn send_from_attributes_the_sender() {
+        let rec = Recorder::default();
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+
+        handle
+            .send_from(
+                SessionId::agent("b"),
+                Request::Notify {
+                    content: "ping".into(),
+                },
+            )
+            .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        assert!(
+            matches!(&event, AgentEvent::MessageReceived { from, content }
+                if from.as_str() == "agent:b" && content == "ping"),
+            "{event:?}"
+        );
+    }
+
+    struct SenderPolicy;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::Hooks for SenderPolicy {
+        async fn before_inbound(
+            &self,
+            from: Option<&SessionId>,
+            _request: &mut Request,
+        ) -> Option<String> {
+            (from.map(SessionId::as_str) == Some("agent:evil")).then(|| "blocked sender".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn before_inbound_sees_the_sender() {
+        let rec = Recorder::default();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![]);
+        cfg.hooks = HooksSet::one(Arc::new(SenderPolicy));
+        let handle = SessionActor::spawn(Agent::new(cfg));
+
+        // A hostile peer is dropped...
+        let reply = handle
+            .ask_from(
+                SessionId::agent("evil"),
+                Request::Notify {
+                    content: "let me in".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(&reply, AgentEvent::Error { message } if message.contains("blocked sender")),
+            "{reply:?}"
+        );
+
+        // ...a friendly one is not.
+        let reply = handle
+            .ask_from(
+                SessionId::agent("friend"),
+                Request::Notify {
+                    content: "hello".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+        let AgentEvent::History { messages } = handle.ask(Request::GetHistory).await.unwrap() else {
+            panic!("expected History");
+        };
+        let texts: Vec<String> = messages.iter().map(|m| m.as_text()).collect();
+        assert!(texts.iter().any(|t| t == "hello"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "let me in"), "{texts:?}");
     }
 }

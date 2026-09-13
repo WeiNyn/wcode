@@ -13,7 +13,7 @@ each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☑ done |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
-| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P3d; S4-1 landed; S4-2 (registry) next |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P3d; S4-1 landed; S4-2 sender + verbs landed, registry next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

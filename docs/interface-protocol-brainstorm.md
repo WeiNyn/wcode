@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4 (A2A) split, S4-1
-landed, S4-2 next** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2 sender +
+verbs landed, registry/addressing next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -539,19 +539,19 @@ in `README.md` §Philosophy.
       carry (§9).
     - **Landed.** Verified by the in-module actor tests and a socket round-trip
       (`a_notify_crosses_the_socket`); the CLI is unchanged (no surface yet).
-  - **S4-2 — Registry, addressing, and the sender.** A `Registry` mapping
-    `SessionId` → `SessionHandle`; the mailbox carries the **sender**, so a
-    message can be attributed and policy can branch on it. Concretely:
-    - Canonical verbs: `Notify`/`Interrupt`/`Wake`/`Ask`. `Steer`/`FollowUp`
-      become serde **aliases** (`#[serde(alias = "steer")]` / `"follow_up"`) so
-      old frames still parse; the kernel methods keep their names. One delivery
-      vocabulary, no duplicate spellings (§13.9).
-    - The actor's inbox item grows a sender: `Message::{Tell, Ask}` carry
-      `from: Option<SessionId>` (a local handle defaults it; a peer fills it in).
-      `MessageReceived.from` stops being a constant.
-    - `Hooks::before_inbound(from: Option<&SessionId>, request: &mut Request)` —
-      policy can now decide by *who* sent it (ownership from `report_back_to`).
-    - `Request::{Ask { to, content }, Notify { to, content }, …}` resolved
+  - ◐ **S4-2 — Registry, addressing, and the sender.** The mailbox carries the
+    **sender** (landed), and a `Registry` (`SessionId` → `SessionHandle`) lets
+    an addressed `Request::Ask { to, content }` reach a peer (next). Concretely:
+    - ☑ Canonical verbs: `Notify`/`Interrupt`/`Wake`/`Ask`. `Steer`/`FollowUp`
+      became serde **aliases** (`#[serde(alias = "steer")]` / `"follow_up"`) so
+      old frames still parse; the kernel methods keep their names (§13.9).
+    - ☑ The actor's inbox item carries a sender: `Message::{Tell, Ask}` hold
+      `from: Option<SessionId>`, set through `SessionHandle::{send_from,
+      ask_from}` (`None` = the local human, emitted as `SessionId::user()`).
+      `MessageReceived.from` is no longer a constant.
+    - ☑ `Hooks::before_inbound(from: Option<&SessionId>, request: &mut Request)`
+      — policy can decide by *who* sent it (ownership from `report_back_to`).
+    - ☐ `Request::{Ask { to, content }, Notify { to, content }, …}` resolved
       against the registry; the completion report auto-forwarded on turn end
       along `report_back_to`.
     - Open: is a peer's `Ask` reply the correlated reply, or a subscription to
