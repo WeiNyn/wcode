@@ -1,12 +1,15 @@
-//! Terminal lifecycle: alt-screen + raw mode in, full restore on *every* exit
-//! path (normal, error, panic). The RAII guard is the contract — nothing else
-//! in the crate may leave the terminal dirty.
+//! Terminal lifecycle: alt-screen, raw mode, bracketed paste, mouse capture on
+//! the way in; full restore on *every* exit path (normal, error, panic). The
+//! RAII guard is the contract — nothing else in the crate may leave the
+//! terminal dirty.
 
 use std::io::{self, Stdout};
 use std::sync::Once;
 
 use crossterm::cursor::Show;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -24,7 +27,12 @@ pub struct TerminalGuard;
 pub fn enter() -> io::Result<(TerminalGuard, Tui)> {
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     install_panic_hook();
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
     Ok((TerminalGuard, terminal))
@@ -35,7 +43,13 @@ pub fn enter() -> io::Result<(TerminalGuard, Tui)> {
 fn restore() {
     let _ = disable_raw_mode();
     let mut out = io::stdout();
-    let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        out,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    );
 }
 
 impl Drop for TerminalGuard {

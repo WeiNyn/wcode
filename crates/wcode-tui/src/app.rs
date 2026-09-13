@@ -9,6 +9,9 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, ContentBlock};
 use wcode_harness::protocol::Request;
 
+/// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
+const WHEEL_LINES: usize = 3;
+
 /// A key the app understands — decoupled from crossterm so this module stays
 /// terminal-free (`event.rs` translates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +27,10 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    /// One mouse-wheel notch up (translated from a `ScrollUp` mouse event).
+    ScrollUp,
+    /// One mouse-wheel notch down.
+    ScrollDown,
     Enter,
     /// Shift-Enter: insert a newline instead of submitting.
     Newline,
@@ -203,8 +210,10 @@ impl App {
             }
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
             Key::Ctrl('y') => self.copy_last(),
-            Key::PageUp => self.scroll_up(),
-            Key::PageDown => self.scroll_down(),
+            Key::PageUp => self.scroll_up(self.page()),
+            Key::PageDown => self.scroll_down(self.page()),
+            Key::ScrollUp => self.scroll_up(WHEEL_LINES),
+            Key::ScrollDown => self.scroll_down(WHEEL_LINES),
             _ => {}
         }
     }
@@ -580,13 +589,15 @@ impl App {
         self.viewport.saturating_sub(1).max(1)
     }
 
-    fn scroll_up(&mut self) {
-        self.scroll = (self.scroll + self.page()).min(self.max_scroll);
+    /// Scroll up by `lines`, clamped to the top of the transcript.
+    fn scroll_up(&mut self, lines: usize) {
+        self.scroll = (self.scroll + lines).min(self.max_scroll);
         self.dirty = true;
     }
 
-    fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_sub(self.page());
+    /// Scroll down by `lines`; `0` is the tail.
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
         self.dirty = true;
     }
 
@@ -640,6 +651,7 @@ impl App {
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
     }
+
 }
 
 #[cfg(test)]
@@ -830,6 +842,30 @@ mod tests {
         // PageDown past the bottom lands at 0.
         for _ in 0..20 {
             app.handle(AppEvent::Key(Key::PageDown));
+        }
+        assert_eq!(app.scroll(), 0);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_a_few_lines_and_clamps_at_both_ends() {
+        let mut app = App::new();
+        app.sync_scroll(100, 10, 80); // max 90
+        app.clear_dirty();
+
+        app.handle(AppEvent::Key(Key::ScrollUp));
+        assert_eq!(app.scroll(), WHEEL_LINES);
+        assert!(app.dirty());
+
+        app.handle(AppEvent::Key(Key::ScrollDown));
+        assert_eq!(app.scroll(), 0);
+
+        // The top and the tail are hard stops, not wraps.
+        for _ in 0..50 {
+            app.handle(AppEvent::Key(Key::ScrollUp));
+        }
+        assert_eq!(app.scroll(), 90);
+        for _ in 0..50 {
+            app.handle(AppEvent::Key(Key::ScrollDown));
         }
         assert_eq!(app.scroll(), 0);
     }

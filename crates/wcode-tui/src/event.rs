@@ -3,7 +3,9 @@
 //! The only module that knows crossterm's input types; the app sees our own
 //! [`Key`] instead, so it stays terminal-free.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 use crate::app::{AppEvent, Key};
 
@@ -14,6 +16,10 @@ pub fn translate(event: Event) -> Vec<AppEvent> {
         Event::Key(k) if k.kind != KeyEventKind::Release => {
             translate_key(k).map(AppEvent::Key).into_iter().collect()
         }
+        Event::Mouse(mouse) => translate_mouse(mouse)
+            .map(AppEvent::Key)
+            .into_iter()
+            .collect(),
         Event::Paste(text) => vec![AppEvent::Paste(text)],
         Event::Resize(_, _) => vec![AppEvent::Resize],
         _ => Vec::new(),
@@ -42,12 +48,31 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
     })
 }
 
+/// The mouse has no click targets (P3 panels will add them); only the wheel
+/// matters — it scrolls the transcript.
+fn translate_mouse(m: MouseEvent) -> Option<Key> {
+    match m.kind {
+        MouseEventKind::ScrollUp => Some(Key::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Key::ScrollDown),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn mouse(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     /// `AppEvent` carries `AgentEvent` (not `PartialEq`), so compare on `Key`.
@@ -71,6 +96,20 @@ mod tests {
             keys(translate(key(KeyCode::Char('c'), KeyModifiers::CONTROL))),
             vec![Key::Ctrl('c')]
         );
+    }
+
+    #[test]
+    fn the_wheel_is_a_scroll_and_other_mouse_events_are_ignored() {
+        assert_eq!(
+            keys(translate(mouse(MouseEventKind::ScrollUp))),
+            vec![Key::ScrollUp]
+        );
+        assert_eq!(
+            keys(translate(mouse(MouseEventKind::ScrollDown))),
+            vec![Key::ScrollDown]
+        );
+        // No click targets yet: a click must not reach the app at all.
+        assert!(translate(mouse(MouseEventKind::Moved)).is_empty());
     }
 
     #[test]
