@@ -13,6 +13,7 @@ use ratatui::widgets::Paragraph;
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::app::{App, Block, Tool};
+use crate::markdown;
 
 /// First/continuation prefixes for a thinking block (`···` then an aligned
 /// continuation column).
@@ -83,7 +84,11 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
     for block in content {
         match block {
             ContentBlock::Text { text } => {
-                lines.extend(wrap(text, width, "   ", "   ", Style::default()));
+                if live {
+                    lines.extend(wrap(text, width, "   ", "   ", Style::default()));
+                } else {
+                    lines.extend(markdown::render(text, width));
+                }
             }
             ContentBlock::Thinking { text } => {
                 lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, dim()));
@@ -362,11 +367,11 @@ fn split_at_char(text: &str, n: usize) -> (String, String) {
     (text[..idx].to_string(), text[idx..].to_string())
 }
 
-fn dim() -> Style {
+pub(crate) fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
-fn accent() -> Style {
+pub(crate) fn accent() -> Style {
     if no_color() {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
@@ -382,8 +387,17 @@ fn error_style() -> Style {
     }
 }
 
+/// Inline code and code blocks.
+pub(crate) fn code_style() -> Style {
+    if no_color() {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Yellow)
+    }
+}
+
 /// Honor `NO_COLOR` (https://no-color.org) — resolved once.
-fn no_color() -> bool {
+pub(crate) fn no_color() -> bool {
     static NO_COLOR: OnceLock<bool> = OnceLock::new();
     *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some())
 }

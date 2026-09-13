@@ -13,6 +13,7 @@
 pub mod app;
 
 mod event;
+mod markdown;
 mod terminal;
 mod ui;
 
