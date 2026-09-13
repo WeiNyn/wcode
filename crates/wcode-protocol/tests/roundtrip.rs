@@ -217,3 +217,52 @@ async fn a_client_reconnects_after_the_connection_drops() {
     }
     assert!(saw_text, "the request went through after reconnecting");
 }
+
+/// S4-1: the A2A delivery verbs cross the wire like any other request — a remote
+/// `Notify` is answered, surfaced as a streamed event, and recorded, with no
+/// turn run.
+#[tokio::test]
+async fn a_notify_crosses_the_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("wcode.sock");
+
+    let handle = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        handle,
+        SessionId::new("test"),
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+
+    let reply = client
+        .ask(Request::Notify {
+            content: "ping".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+    // The recipient surfaced the message on its stream...
+    let mut saw_message = false;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+        if let AgentEvent::MessageReceived { content, .. } = event {
+            assert_eq!(content, "ping");
+            saw_message = true;
+            break;
+        }
+    }
+    assert!(saw_message, "the remote client saw the inbound message");
+
+    // ...and the read-back carries it.
+    let reply = client.ask(Request::GetHistory).await.unwrap();
+    let AgentEvent::History { messages } = reply else {
+        panic!("expected a History reply, got {reply:?}");
+    };
+    assert!(
+        messages.iter().any(|m| m.as_text() == "ping"),
+        "the notify landed in the context: {messages:?}"
+    );
+}

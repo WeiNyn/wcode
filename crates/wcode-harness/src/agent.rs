@@ -167,6 +167,12 @@ impl Agent {
         self.cancel.clone()
     }
 
+    /// The hook set, exposed so the actor can run the inbound policy
+    /// ([`HooksSet::before_inbound`]) while `run` holds the `&mut` borrow.
+    pub fn hooks(&self) -> &HooksSet {
+        &self.hooks
+    }
+
     pub async fn run(
         &mut self,
         user_text: &str,
@@ -241,6 +247,24 @@ impl Agent {
 
     pub fn messages(&self) -> &[AgentMessage] {
         &self.ctx
+    }
+
+    /// Record an inbound peer message into the conversation *without* starting a
+    /// turn (the `Request::Notify` semantic): persist it as a user message and
+    /// push it onto the context, so the next run sees it. Returns the recorded
+    /// message so the actor can surface it. Idle-only — the actor routes a
+    /// `Notify` that arrives mid-run through steering instead.
+    pub fn notify(&mut self, content: String) -> std::io::Result<AgentMessage> {
+        let message = AgentMessage::user_text(content);
+        if let Some(session) = &mut self.session {
+            session.append(SessionEntry::Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                parent_id: None,
+                message: message.clone(),
+            })?;
+        }
+        self.ctx.push(message.clone());
+        Ok(message)
     }
 
     /// Summarize the older part of the conversation in place: keep the newest

@@ -83,6 +83,14 @@ pub enum AgentEvent {
         max: u32,
         reason: String,
     },
+    /// A peer delivered a message to this session (`Request::Notify`/
+    /// `Interrupt`/`Wake`). `from` is the sender's address (§5.2 — the human is
+    /// [`crate::protocol::USER`]); streamed, so a UI can surface an inbound
+    /// message. Not a reply.
+    MessageReceived {
+        from: crate::protocol::SessionId,
+        content: String,
+    },
     /// Stream-level failure; the run ends with `StopReason::Error`.
     Error {
         message: String,
@@ -215,6 +223,13 @@ mod tests {
                 messages: vec![AgentMessage::user_text("hi")],
             },
             "history",
+        );
+        roundtrip(
+            AgentEvent::MessageReceived {
+                from: crate::protocol::SessionId::new("user"),
+                content: "ping".into(),
+            },
+            "message_received",
         );
         roundtrip(AgentEvent::AgentEnd, "agent_end");
     }

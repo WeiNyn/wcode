@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4 (A2A) split into
-S4-1…S4-4, S4-1 in progress** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4 (A2A) split, S4-1
+landed, S4-2 next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -508,21 +508,26 @@ in `README.md` §Philosophy.
   addressed at a peer; a registry for addresses; ownership from `report_back_to`;
   a `before_inbound` hook for policy. DM + report-back only. Too large for one
   step, so it splits like S1 did (`S1 → S1b-1 → S1b-2`); each slice stands alone.
-  - **S4-1 — Delivery vocabulary + policy seam (in-process, self-addressed).**
+  - ☑ **S4-1 — Delivery vocabulary + policy seam (in-process, self-addressed).**
     The A2A verbs and the policy hook, exercised by a session sending to its own
     handle — no registry, no second session, no socket yet.
     - `Request::{Notify { content }, Interrupt { content }, Wake { content }}`
       (§13.9): `Interrupt` → `Steer`, `Wake` → `FollowUp`, `Notify` → *append to
-      context, no turn* (the one genuinely new semantic).
-    - `Hooks::before_inbound(&Frame<Request>) -> Option<String>` (§13.10) — the
-      mirror of `before_tool_call`: `Some(reason)` drops the message; the hook may
-      rewrite the payload. No config.
+      context, no turn* (the one genuinely new semantic). `is_inbound`
+      names the three.
+    - `Hooks::before_inbound(&mut Request) -> Option<String>` (§13.10) — the
+      mirror of `before_tool_call`: `Some(reason)` drops the message (an `ask` is
+      answered `Error`); the hook may rewrite the request in place. No config.
     - `AgentEvent::MessageReceived { from, content }` so the recipient (and the
-      TUI) surfaces an arriving message; `SessionEntry::{Sent, Received}` so an
-      A2A run is one replayable transcript (§9).
-    - Decision it forces: `Notify` *idle* must append to `ctx` + session directly
-      (`Agent::notify`), while `Notify` *mid-run* must ride the steering channel
-      (turn-boundary delivery) — the actor picks by whether a run is in flight.
+      TUI) surfaces an arriving message.
+    - Decision taken: `Notify` *idle* appends to `ctx` + session directly
+      (`Agent::notify`, no turn); `Notify`/`Interrupt` *mid-run* ride the steering
+      channel (`Wake` → the follow-up channel). The actor picks by run state, and
+      every accepted verb emits `MessageReceived`.
+    - `SessionEntry::{Sent, Received}` deferred to S4-2, where frames exist to
+      carry (§9).
+    - **Landed.** Verified by the in-module actor tests and a socket round-trip
+      (`a_notify_crosses_the_socket`); the CLI is unchanged (no surface yet).
   - **S4-2 — Registry + addressing.** A `Registry` mapping `SessionId` →
     `SessionHandle`; `Request::{Ask { to, content }, Notify { to, content }}`
     resolved against it; the completion report auto-forwarded on turn end along

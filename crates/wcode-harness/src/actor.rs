@@ -115,9 +115,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::agent::Agent;
 use crate::compaction::CompactOutcome;
 use crate::event::AgentEvent;
+use crate::hooks::HooksSet;
 use crate::loop_::LoopError;
 use crate::message::{AgentMessage, StopReason};
-use crate::protocol::Request;
+use crate::protocol::{Request, SessionId, USER};
 
 /// Default outbox buffer: how far a subscriber may lag before it starts losing
 /// events (`broadcast` semantics — the slowest reader drops, it never blocks the
@@ -236,15 +237,39 @@ async fn serve(
     }
 }
 
+/// Run the inbound policy on an A2A message (the mirror of
+/// `before_tool_call`). Returns `Some(reason)` if the message was dropped; the
+/// request may have been rewritten in place by the hook either way.
+async fn gate_inbound(hooks: &HooksSet, message: &mut Message) -> Option<String> {
+    let request = match message {
+        Message::Tell(request) | Message::Ask(request, _) => request,
+    };
+    if !crate::protocol::is_inbound(request) {
+        return None;
+    }
+    hooks.before_inbound(request).await
+}
+
 /// Service one mailbox item: run the request, then answer an `Ask` with the
 /// reply it produced (a `Tell` drops the reply on the floor).
 async fn dispatch(
     agent: &mut Agent,
-    message: Message,
+    mut message: Message,
     inbox: &mut mpsc::UnboundedReceiver<Message>,
     events: &broadcast::Sender<AgentEvent>,
     deferred: &mut VecDeque<Message>,
 ) {
+    // Inbound peer-message policy (S4-1): a drop skips delivery entirely; a
+    // rewrite (in place) is what gets serviced.
+    if let Some(reason) = gate_inbound(agent.hooks(), &mut message).await {
+        if let Message::Ask(_, reply) = message {
+            let _ = reply.send(AgentEvent::Error {
+                message: format!("inbound blocked: {reason}"),
+            });
+        }
+        return;
+    }
+
     let (request, reply) = match message {
         Message::Tell(request) => (request, None),
         Message::Ask(request, reply) => (request, Some(reply)),
@@ -263,6 +288,36 @@ async fn dispatch(
         }
         Request::FollowUp { content } => {
             agent.follow_up(AgentMessage::user_text(content));
+            AgentEvent::Ack
+        }
+        // A2A delivery verbs (S4-1). `Interrupt`/`Wake` are the peer-named
+        // forms of `Steer`/`FollowUp`; `Notify` appends with no turn.
+        Request::Notify { content } => match agent.notify(content.clone()) {
+            Ok(_) => {
+                let _ = events.send(AgentEvent::MessageReceived {
+                    from: SessionId::new(USER),
+                    content,
+                });
+                AgentEvent::Ack
+            }
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
+        Request::Interrupt { content } => {
+            agent.steer(AgentMessage::user_text(content.clone()));
+            let _ = events.send(AgentEvent::MessageReceived {
+                from: SessionId::new(USER),
+                content,
+            });
+            AgentEvent::Ack
+        }
+        Request::Wake { content } => {
+            agent.follow_up(AgentMessage::user_text(content.clone()));
+            let _ = events.send(AgentEvent::MessageReceived {
+                from: SessionId::new(USER),
+                content,
+            });
             AgentEvent::Ack
         }
         // An idle cancel is a no-op (see the delivery rules): the token is
@@ -314,6 +369,7 @@ async fn run(
     let steer = agent.steer_sender();
     let follow_up = agent.follow_up_sender();
     let cancel = agent.cancel_token();
+    let hooks = agent.hooks().clone();
 
     let mut run = Box::pin(agent.run(text, sink_tx));
     let result = loop {
@@ -324,15 +380,40 @@ async fn run(
         // here.
         tokio::select! {
             biased;
-            Some(message) = inbox.recv() => match message {
-                Message::Tell(Request::Cancel) => cancel.cancel(),
-                Message::Tell(Request::Steer { content }) => {
-                    let _ = steer.send(AgentMessage::user_text(content));
+            Some(mut message) = inbox.recv() => {
+                if let Some(reason) = gate_inbound(&hooks, &mut message).await {
+                    if let Message::Ask(_, reply) = message {
+                        let _ = reply.send(AgentEvent::Error {
+                            message: format!("inbound blocked: {reason}"),
+                        });
+                    }
+                    continue;
                 }
-                Message::Tell(Request::FollowUp { content }) => {
-                    let _ = follow_up.send(AgentMessage::user_text(content));
+                match message {
+                    Message::Tell(Request::Cancel) => cancel.cancel(),
+                    Message::Tell(Request::Steer { content }) => {
+                        let _ = steer.send(AgentMessage::user_text(content));
+                    }
+                    Message::Tell(Request::FollowUp { content }) => {
+                        let _ = follow_up.send(AgentMessage::user_text(content));
+                    }
+                    Message::Tell(Request::Notify { content })
+                    | Message::Tell(Request::Interrupt { content }) => {
+                        let _ = steer.send(AgentMessage::user_text(content.clone()));
+                        let _ = events.send(AgentEvent::MessageReceived {
+                            from: SessionId::new(USER),
+                            content,
+                        });
+                    }
+                    Message::Tell(Request::Wake { content }) => {
+                        let _ = follow_up.send(AgentMessage::user_text(content.clone()));
+                        let _ = events.send(AgentEvent::MessageReceived {
+                            from: SessionId::new(USER),
+                            content,
+                        });
+                    }
+                    other => deferred.push_back(other),
                 }
-                other => deferred.push_back(other),
             },
             result = &mut run => break result,
             Some(event) = sink_rx.recv() => {
@@ -768,6 +849,156 @@ mod tests {
                 }
             ),
             "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_appends_without_starting_a_turn() {
+        let rec = Recorder::default();
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+
+        let reply = handle
+            .ask(Request::Notify {
+                content: "ping".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+        // The message was surfaced to subscribers...
+        let surfaced = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        assert!(
+            matches!(&surfaced, AgentEvent::MessageReceived { content, .. } if content == "ping"),
+            "{surfaced:?}"
+        );
+
+        // ...the conversation carries it...
+        let AgentEvent::History { messages } = handle.ask(Request::GetHistory).await.unwrap() else {
+            panic!("expected History");
+        };
+        assert!(
+            messages.iter().any(|m| m.as_text() == "ping"),
+            "{messages:?}"
+        );
+
+        // ...and no turn ran (the loop was never entered).
+        assert!(rec.calls().is_empty(), "notify must not run the loop");
+    }
+
+    struct InboundPolicy;
+
+    #[async_trait::async_trait]
+    impl crate::hooks::Hooks for InboundPolicy {
+        async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+            let Request::Notify { content } = request else {
+                return None;
+            };
+            if content.starts_with("drop:") {
+                return Some("policy".into());
+            }
+            *content = format!("{content}!");
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn before_inbound_drops_and_rewrites_a_notify() {
+        let rec = Recorder::default();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![]);
+        cfg.hooks = HooksSet::one(Arc::new(InboundPolicy));
+        let handle = SessionActor::spawn(Agent::new(cfg));
+
+        // Dropped: an `ask` is answered with an Error, and nothing lands.
+        let reply = handle
+            .ask(Request::Notify {
+                content: "drop: me".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(&reply, AgentEvent::Error { message } if message.contains("policy")),
+            "{reply:?}"
+        );
+
+        // Rewritten: the hook's edit is what is recorded.
+        let reply = handle
+            .ask(Request::Notify {
+                content: "keep me".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+        let AgentEvent::History { messages } = handle.ask(Request::GetHistory).await.unwrap() else {
+            panic!("expected History");
+        };
+        let texts: Vec<String> = messages.iter().map(|m| m.as_text()).collect();
+        assert!(
+            !texts.iter().any(|t| t == "drop: me"),
+            "the dropped message never landed: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "keep me!"),
+            "the rewrite landed: {texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_reaches_the_next_turn_while_a_tool_is_blocked() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("after interrupt".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // the tool is now blocked
+        handle
+            .send(Request::Interrupt {
+                content: "mid-run interrupt".into(),
+            })
+            .unwrap();
+        release.notify_one();
+
+        wait_for_end(&mut rx).await;
+
+        let calls = rec.calls();
+        assert_eq!(calls.len(), 2, "two stream calls: the tool turn and the next");
+        assert!(
+            calls[1]
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { .. }) && m.as_text() == "mid-run interrupt"),
+            "the interrupt drained into the next turn: {:?}",
+            calls[1]
         );
     }
 }

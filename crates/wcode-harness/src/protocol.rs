@@ -33,6 +33,21 @@ use crate::event::AgentEvent;
 /// handled rather than silently dropped.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The well-known address of the human peer (brainstorm §5.2): the sender an
+/// in-process actor attributes an inbound message to until addressing lands
+/// (S4-2).
+pub const USER: &str = "user";
+
+/// Whether `request` is an A2A inbound message — the delivery verbs a peer sends
+/// (`Notify`/`Interrupt`/`Wake`), as opposed to a local command. The actor runs
+/// its `before_inbound` policy on exactly these.
+pub fn is_inbound(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Notify { .. } | Request::Interrupt { .. } | Request::Wake { .. }
+    )
+}
+
 /// A session's stable address.
 ///
 /// Reuses the id already written in `SessionEntry::Header`, so a session is
@@ -83,6 +98,9 @@ impl std::fmt::Display for SessionId {
 /// | `Submit` | `Agent::run` |
 /// | `Steer` | `Agent::steer` |
 /// | `FollowUp` | `Agent::follow_up` |
+/// | `Notify` | `Agent::notify` (append, no turn) |
+/// | `Interrupt` | `Agent::steer` (peer-named) |
+/// | `Wake` | `Agent::follow_up` (peer-named) |
 /// | `Cancel` | `Agent::cancel` |
 /// | `SetModel` | `Agent::set_model` |
 /// | `SetEffort` | `Agent::set_effort` |
@@ -111,6 +129,20 @@ pub enum Request {
 
     /// Run this content after the loop would otherwise stop.
     FollowUp { content: String },
+
+    /// **A2A delivery:** append `content` to the conversation *without* starting
+    /// a turn (the recipient records it now if idle, or at the next turn
+    /// boundary if a run is in flight). The peer-named form of "tell, don't
+    /// ask" — `Agent::notify`.
+    Notify { content: String },
+
+    /// **A2A delivery:** a soft interrupt to a running (or next) turn — the
+    /// peer-named form of [`Request::Steer`].
+    Interrupt { content: String },
+
+    /// **A2A delivery:** run this content even if the session is idle — the
+    /// peer-named form of [`Request::FollowUp`].
+    Wake { content: String },
 
     /// Cancel the in-flight run (and any retry/backoff wait). Idempotent.
     Cancel,
@@ -224,12 +256,25 @@ mod tests {
             "compact",
         );
         roundtrip(Request::Compact { instructions: None }, "compact");
+        roundtrip(Request::Notify { content: "n".into() }, "notify");
+        roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
+        roundtrip(Request::Wake { content: "w".into() }, "wake");
     }
 
     #[test]
     fn request_unknown_tag_is_caught_not_fatal() {
         let back: Request = serde_json::from_str(r#"{"type":"from_the_future"}"#).unwrap();
         assert_eq!(back, Request::Unknown);
+    }
+
+    #[test]
+    fn is_inbound_marks_only_the_delivery_verbs() {
+        assert!(is_inbound(&Request::Notify { content: "x".into() }));
+        assert!(is_inbound(&Request::Interrupt { content: "x".into() }));
+        assert!(is_inbound(&Request::Wake { content: "x".into() }));
+        assert!(!is_inbound(&Request::Submit { text: "x".into() }));
+        assert!(!is_inbound(&Request::Steer { content: "x".into() }));
+        assert!(!is_inbound(&Request::Cancel));
     }
 
     #[test]

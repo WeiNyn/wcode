@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::message::AgentMessage;
+use crate::protocol::Request;
 use crate::tool::ToolOutput;
 
 /// Loop-local view of `ContentBlock::ToolCall`.
@@ -26,6 +27,15 @@ pub trait Hooks: Send + Sync {
     /// Runs after every tool execution; may mutate the output before it is
     /// recorded and sent to the LLM.
     async fn after_tool_call(&self, _call: &ToolCall, _out: &mut ToolOutput) {}
+
+    /// Policy for an inbound peer message (an A2A `Notify`/`Interrupt`/`Wake`):
+    /// the mirror of [`Hooks::before_tool_call`]. May rewrite the request in
+    /// place (the rewrite is what is delivered); `Some(reason)` drops it — the
+    /// reason is returned to the sender when it is an `ask`. A message dropped
+    /// here never reaches the context or starts a turn.
+    async fn before_inbound(&self, _request: &mut Request) -> Option<String> {
+        None
+    }
 
     /// Runs at every turn start, after steering is drained, before streaming.
     async fn transform_context(&self, _msgs: &mut Vec<AgentMessage>) {}
@@ -77,6 +87,18 @@ impl HooksSet {
     pub async fn before_tool_call(&self, call: &ToolCall) -> Option<String> {
         for hook in &self.0 {
             if let Some(reason) = hook.before_tool_call(call).await {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    /// First `Some(reason)` wins: a dropping hook prevents delivery (the request
+    /// is not serviced). `request` may have been rewritten in place by earlier
+    /// hooks — the rewrite is what would be delivered.
+    pub async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+        for hook in &self.0 {
+            if let Some(reason) = hook.before_inbound(request).await {
                 return Some(reason);
             }
         }
@@ -199,5 +221,49 @@ mod tests {
             set.before_tool_call(&call).await.as_deref(),
             Some("blocked")
         );
+    }
+
+    struct GatingHooks;
+
+    #[async_trait::async_trait]
+    impl Hooks for GatingHooks {
+        async fn before_inbound(&self, request: &mut Request) -> Option<String> {
+            let Request::Notify { content } = request else {
+                return None;
+            };
+            if content == "drop me" {
+                return Some("not allowed".into());
+            }
+            content.push_str(" (seen)");
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn before_inbound_gates_and_rewrites() {
+        let set = HooksSet::one(Arc::new(GatingHooks));
+
+        let mut kept = Request::Notify {
+            content: "hello".into(),
+        };
+        assert!(set.before_inbound(&mut kept).await.is_none());
+        assert_eq!(
+            kept,
+            Request::Notify {
+                content: "hello (seen)".into()
+            }
+        );
+
+        let mut dropped = Request::Notify {
+            content: "drop me".into(),
+        };
+        assert_eq!(
+            set.before_inbound(&mut dropped).await.as_deref(),
+            Some("not allowed")
+        );
+
+        // A local command is never gated by the inbound policy.
+        let mut plain = Request::Cancel;
+        assert!(set.before_inbound(&mut plain).await.is_none());
     }
 }
