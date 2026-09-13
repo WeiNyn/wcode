@@ -1,13 +1,13 @@
 //! wcode-tui — the full-screen client.
 //!
-//! A thin, immediate-mode front-end over a session. In P0c it consumes a
-//! `wcode-protocol` `Backend` (`Local`/`Remote`); for now it is the skeleton —
-//! terminal lifecycle, input, and the event loop. See `docs/tui-plan.md` and
+//! A thin, immediate-mode front-end over a session. It consumes a
+//! `wcode-protocol` [`Backend`] (`Local`/`Remote`) — never an `Agent` — so
+//! local and socket sessions are the same code. See `docs/tui-plan.md` and
 //! `docs/tui-design.md`.
 //!
 //! The loop is one `select!` over three sources (terminal input, session
-//! events, a run-only tick) feeding a pure reducer, drawing only when the
-//! reducer reports a change.
+//! events, a run-only tick) feeding a pure reducer; the reducer's [`Action`]s
+//! are drained back to the backend, and a draw happens only on a state change.
 
 pub mod app;
 
@@ -20,27 +20,32 @@ use std::time::Duration;
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
+use tokio::sync::broadcast;
 use tokio::time::{MissedTickBehavior, interval};
+use wcode_harness::protocol::Request;
+use wcode_protocol::Backend;
 
-use crate::app::{App, AppEvent};
+pub use crate::app::{Action, App, AppEvent, Block, Key, Status, Tool};
 
 /// Spinner/status refresh cadence, only consulted while a run is in flight.
 const TICK: Duration = Duration::from_millis(120);
 
-/// Run the TUI until the user quits. Enters the alternate screen; restores it
-/// on every exit path.
-pub async fn run() -> io::Result<()> {
+/// Run the TUI against `backend` until the user quits. Enters the alternate
+/// screen; restores it on every exit path.
+pub async fn run(backend: Backend, status: Status) -> io::Result<()> {
     let (guard, mut terminal) = terminal::enter()?;
-    let result = event_loop(&mut terminal).await;
+    let result = event_loop(&mut terminal, backend, status).await;
     // Drop the terminal (flush) before leaving the alternate screen.
     drop(terminal);
     drop(guard);
     result
 }
 
-async fn event_loop(terminal: &mut terminal::Tui) -> io::Result<()> {
+async fn event_loop(terminal: &mut terminal::Tui, backend: Backend, status: Status) -> io::Result<()> {
     let mut app = App::new();
+    app.set_status(status);
     let mut events = EventStream::new();
+    let mut session = backend.subscribe();
     let mut tick = interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
@@ -58,9 +63,23 @@ async fn event_loop(terminal: &mut terminal::Tui) -> io::Result<()> {
                 // Stream ended or errored: the terminal is gone; bail.
                 Some(Err(_)) | None => break,
             },
+            event = session.recv() => match event {
+                Ok(event) => app.handle(AppEvent::Agent(event)),
+                // A lagging subscriber drops events rather than stalling.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // The session is gone; keep the UI up (the user can still quit).
+                Err(broadcast::error::RecvError::Closed) => {}
+            },
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
             _ = tick.tick(), if app.running() => app.handle(AppEvent::Tick),
+        }
+
+        for action in app.take_actions() {
+            let _ = match action {
+                Action::Submit(text) => backend.send(Request::Submit { text }),
+                Action::Cancel => backend.send(Request::Cancel),
+            };
         }
 
         if app.dirty() {

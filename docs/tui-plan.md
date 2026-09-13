@@ -234,8 +234,8 @@ Still open:
 - [x] Visual spec drafted: [`tui-design.md`](tui-design.md).
 - [x] Scaffold `wcode-tui`; `ratatui`+`crossterm`; terminal enter/restore guard.
 - [x] `App` + reducers; headless reducer + render-snapshot tests. (P0a/P0b.)
-- [ ] P0c: subscribe a `Backend`, `Submit` a turn, stream into the transcript,
-      `Cancel` on Ctrl-C, wire the status line.
+- [x] P0c: subscribe a `Backend`, `Submit` a turn, stream into the transcript,
+      `Cancel` on Esc/Ctrl-C, wire the status line. (`run(backend, status)`.)
 - [ ] P0 wired into `wcode-cli` behind the TTY branch (`--tui`/`--no-tui`).
 - [ ] P1 transcript + commands + history.
 - [ ] P2 markdown + status + resize + copy.

@@ -10,8 +10,14 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use wcode_harness::message::{AgentMessage, ContentBlock};
 
-use crate::app::{App, Block};
+use crate::app::{App, Block, Tool};
+
+/// First/continuation prefixes for a thinking block (`···` then an aligned
+/// continuation column).
+const THINK_FIRST: &str = "   ··· ";
+const THINK_CONT: &str = "       ";
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -38,6 +44,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
         }
         lines.extend(block_lines(block, width));
     }
+    // The in-flight message trails the committed transcript.
+    if let Some(message) = app.live() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        if let AgentMessage::Assistant { content, .. } = message {
+            lines.extend(content_lines(content, width, true));
+        }
+    }
     // Follow the tail: keep the most recent lines when they overflow.
     let height = area.height as usize;
     if lines.len() > height {
@@ -49,19 +64,101 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
 fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", accent()),
+        Block::Assistant(content) => content_lines(content, width, false),
+        Block::Tool(tool) => tool_lines(tool),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
+        Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
     }
 }
 
+/// Render an assistant message's blocks in order, dropping tool calls (their
+/// own line carries them). `live` appends a cursor to the last line.
+fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for block in content {
+        match block {
+            ContentBlock::Text { text } => {
+                lines.extend(wrap(text, width, "   ", "   ", Style::default()));
+            }
+            ContentBlock::Thinking { text } => {
+                lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, dim()));
+            }
+            ContentBlock::ToolCall { .. } => {}
+        }
+    }
+    if live {
+        match lines.last_mut() {
+            Some(last) => last.spans.push(Span::styled("▌", accent())),
+            None => lines.push(Line::from(Span::styled("   ▌", accent()))),
+        }
+    }
+    lines
+}
+
+fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
+    if !tool.done {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("   ⚙ ", dim()),
+            Span::styled(tool.name.clone(), dim()),
+        ])];
+        if let Some(tail) = last_line(&tool.output) {
+            lines.push(Line::from(vec![
+                Span::styled("     ", dim()),
+                Span::styled(tail, dim()),
+            ]));
+        }
+        return lines;
+    }
+
+    let (mark, style) = if tool.is_error {
+        ("✗", error_style())
+    } else {
+        ("✓", dim())
+    };
+    let mut spans = vec![
+        Span::styled(format!("   {mark} "), style),
+        Span::styled(tool.name.clone(), style),
+    ];
+    let note = first_line(&tool.output);
+    if !note.is_empty() {
+        spans.push(Span::styled(format!(" · {note}"), dim()));
+    }
+    vec![Line::from(spans)]
+}
+
+/// First non-blank line, truncated — the one-line tool summary.
+fn first_line(text: &str) -> String {
+    text.lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| truncate(l, 80))
+        .unwrap_or_default()
+}
+
+/// Last non-blank line, truncated — the live tail of a running tool.
+fn last_line(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| truncate(l, 80))
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 /// Greedy word-wrap `text` to `width`, prefixing the first line with `first`
-/// and continuations with `cont` (kept the same length so text stays aligned).
+/// and continuations with `cont` (same length, so text stays aligned).
 fn wrap(text: &str, width: usize, first: &str, cont: &str, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut first_line = true;
     for raw in text.split('\n') {
         let prefix = if first_line { first } else { cont };
-        let indent = prefix.chars().count();
-        let avail = width.saturating_sub(indent).max(1);
+        let avail = width.saturating_sub(prefix.chars().count()).max(1);
         let segments = greedy_wrap(raw, avail);
         let mut iter = segments.into_iter();
         let head = iter.next().unwrap_or_default();
@@ -104,10 +201,7 @@ fn greedy_wrap(text: &str, width: usize) -> Vec<String> {
 
 fn draw_rule(frame: &mut Frame, area: Rect) {
     let rule = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(rule, dim()))),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(Span::styled(rule, dim()))), area);
 }
 
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -150,6 +244,14 @@ fn accent() -> Style {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    }
+}
+
+fn error_style() -> Style {
+    if no_color() {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Red)
     }
 }
 
@@ -205,6 +307,24 @@ mod tests {
         let text = buffer_text(&render(&app, 40, 8));
         assert!(text.contains("ping"), "transcript block missing: {text}");
         assert!(text.contains("❯ ping"));
+    }
+
+    #[test]
+    fn draws_a_streaming_assistant_message() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(wcode_harness::event::AgentEvent::MessageStart {
+            message: AgentMessage::Assistant {
+                content: vec![ContentBlock::Text {
+                    text: "streamed".into(),
+                }],
+                stop_reason: wcode_harness::message::StopReason::Stop,
+                usage: None,
+                model: None,
+            },
+        }));
+        let text = buffer_text(&render(&app, 40, 6));
+        assert!(text.contains("streamed"), "live block missing: {text}");
+        assert!(text.contains("▌"), "live cursor missing: {text}");
     }
 
     #[test]

@@ -44,24 +44,35 @@ mod tests {
         Event::Key(KeyEvent::new(code, modifiers))
     }
 
+    /// `AppEvent` carries `AgentEvent` (not `PartialEq`), so compare on `Key`.
+    fn keys(mut events: Vec<AppEvent>) -> Vec<Key> {
+        events
+            .drain(..)
+            .filter_map(|e| match e {
+                AppEvent::Key(k) => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn plain_char_and_ctrl_chord() {
         assert_eq!(
-            translate(key(KeyCode::Char('a'), KeyModifiers::NONE)),
-            vec![AppEvent::Key(Key::Char('a'))]
+            keys(translate(key(KeyCode::Char('a'), KeyModifiers::NONE))),
+            vec![Key::Char('a')]
         );
         assert_eq!(
-            translate(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            vec![AppEvent::Key(Key::Ctrl('c'))]
+            keys(translate(key(KeyCode::Char('c'), KeyModifiers::CONTROL))),
+            vec![Key::Ctrl('c')]
         );
     }
 
     #[test]
     fn paste_and_unknown_events() {
-        assert_eq!(
-            translate(Event::Paste("hi".into())),
-            vec![AppEvent::Paste("hi".into())]
-        );
+        assert!(matches!(
+            translate(Event::Paste("hi".into())).as_slice(),
+            [AppEvent::Paste(t)] if t == "hi"
+        ));
         assert!(translate(Event::Resize(1, 1)).is_empty());
     }
 }
