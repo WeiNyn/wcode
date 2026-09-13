@@ -20,7 +20,7 @@ const THINK_FIRST: &str = "   ··· ";
 const THINK_CONT: &str = "       ";
 
 /// Draw the full frame. Stateless: everything comes from `app`.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let [body, rule, input, status] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -35,7 +35,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_status(frame, status, app);
 }
 
-fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width as usize;
     let mut lines: Vec<Line> = Vec::new();
     for (i, block) in app.transcript().iter().enumerate() {
@@ -53,12 +53,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
             lines.extend(content_lines(content, width, true));
         }
     }
-    // Follow the tail: keep the most recent lines when they overflow.
+    // Follow the tail unless the user has scrolled up; the renderer measures
+    // the transcript and reconciles the scroll window.
     let height = area.height as usize;
-    if lines.len() > height {
-        lines.drain(0..lines.len() - height);
-    }
-    frame.render_widget(Paragraph::new(lines), area);
+    let total = lines.len();
+    app.sync_scroll(total, height);
+    let end = total.saturating_sub(app.scroll());
+    let start = end.saturating_sub(height);
+    let window: Vec<Line> = lines.drain(start..end).collect();
+    frame.render_widget(Paragraph::new(window), area);
 }
 
 fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
@@ -235,6 +238,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             parts.push(format!("session {}", short_id(session)));
         }
         parts.push(state.to_string());
+        if app.scroll() > 0 {
+            parts.push(format!("↑ {}", app.scroll()));
+        }
         let candidate = format!(" {} ", parts.join(" · "));
         if candidate.chars().count() <= width || !(show_tokens || show_effort || show_session) {
             break candidate;
@@ -324,7 +330,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &App, width: u16, height: u16) -> Terminal<TestBackend> {
+    fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         terminal
@@ -364,7 +370,7 @@ mod tests {
                 model: None,
             },
         }));
-        let text = buffer_text(&render(&app, 80, 3));
+        let text = buffer_text(&render(&mut app, 80, 3));
         assert!(text.contains("14.2k / 1M"), "tokens missing: {text}");
         assert!(text.contains("session abcdef01"), "session missing: {text}");
     }
@@ -384,7 +390,7 @@ mod tests {
         for c in "hi".chars() {
             app.handle(AppEvent::Key(Key::Char(c)));
         }
-        let text = buffer_text(&render(&app, 40, 6));
+        let text = buffer_text(&render(&mut app, 40, 6));
         assert!(text.contains("❯ hi"));
         assert!(text.contains("idle"), "status line missing: {text}");
     }
@@ -396,7 +402,7 @@ mod tests {
             app.handle(AppEvent::Key(Key::Char(c)));
         }
         app.handle(AppEvent::Key(Key::Enter));
-        let text = buffer_text(&render(&app, 40, 8));
+        let text = buffer_text(&render(&mut app, 40, 8));
         assert!(text.contains("ping"), "transcript block missing: {text}");
         assert!(text.contains("❯ ping"));
     }
@@ -414,7 +420,7 @@ mod tests {
                 model: None,
             },
         }));
-        let text = buffer_text(&render(&app, 40, 6));
+        let text = buffer_text(&render(&mut app, 40, 6));
         assert!(text.contains("streamed"), "live block missing: {text}");
         assert!(text.contains("▌"), "live cursor missing: {text}");
     }

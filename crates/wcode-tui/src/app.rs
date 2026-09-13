@@ -19,6 +19,8 @@ pub enum Key {
     Right,
     Home,
     End,
+    PageUp,
+    PageDown,
     Enter,
     Esc,
     /// A control chord, e.g. `Ctrl('c')` for Ctrl-C.
@@ -107,6 +109,14 @@ pub struct App {
     status: Status,
     /// Provider-reported input tokens of the last turn: how full the context was.
     context_used: Option<u64>,
+    /// Lines scrolled up from the bottom; `0` follows the tail.
+    scroll: usize,
+    /// Clamp for [`App::scroll`], set by the renderer from the line count.
+    max_scroll: usize,
+    /// Transcript height and total line count from the last draw, so the view
+    /// can stay pinned while new lines stream in.
+    viewport: usize,
+    last_total: usize,
     running: bool,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
@@ -158,6 +168,8 @@ impl App {
             }
             Key::Enter => self.submit(),
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
+            Key::PageUp => self.scroll_up(),
+            Key::PageDown => self.scroll_down(),
             _ => {}
         }
     }
@@ -178,6 +190,7 @@ impl App {
     fn submit(&mut self) {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.scroll = 0;
         self.dirty = true;
         if text.trim().is_empty() {
             return;
@@ -358,6 +371,39 @@ impl App {
     /// Provider-reported input tokens of the most recent turn, if any.
     pub fn context_used(&self) -> Option<u64> {
         self.context_used
+    }
+
+    /// A full page of transcript lines, for PgUp/PgDn.
+    fn page(&self) -> usize {
+        self.viewport.saturating_sub(1).max(1)
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll = (self.scroll + self.page()).min(self.max_scroll);
+        self.dirty = true;
+    }
+
+    fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_sub(self.page());
+        self.dirty = true;
+    }
+
+    /// Lines scrolled up from the tail (`0` = following).
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Reconcile scroll state with the transcript the renderer just measured:
+    /// keep the view pinned while content grows, then clamp to the top.
+    pub fn sync_scroll(&mut self, total: usize, height: usize) {
+        if self.scroll > 0 {
+            self.scroll = self.scroll.saturating_add(total.saturating_sub(self.last_total));
+        }
+        let max = total.saturating_sub(height);
+        self.scroll = self.scroll.min(max);
+        self.max_scroll = max;
+        self.viewport = height;
+        self.last_total = total;
     }
 
     pub fn status(&self) -> &Status {
@@ -563,6 +609,34 @@ mod tests {
         };
         app.handle(AppEvent::Agent(AgentEvent::TurnEnd { message }));
         assert_eq!(app.context_used(), Some(14_200));
+    }
+
+    #[test]
+    fn scrolling_clamps_and_stays_pinned_while_content_grows() {
+        let mut app = App::new();
+        app.sync_scroll(100, 10); // 100 lines in a 10-high viewport: max 90
+        app.handle(AppEvent::Key(Key::PageUp));
+        assert_eq!(app.scroll(), 9); // one page (height - 1)
+
+        // Scrolled up: growing the transcript keeps the same lines in view.
+        app.sync_scroll(110, 10);
+        assert_eq!(app.scroll(), 19);
+
+        // PageDown past the bottom lands at 0.
+        for _ in 0..20 {
+            app.handle(AppEvent::Key(Key::PageDown));
+        }
+        assert_eq!(app.scroll(), 0);
+    }
+
+    #[test]
+    fn submitting_returns_to_the_tail() {
+        let mut app = App::new();
+        app.sync_scroll(100, 10);
+        app.handle(AppEvent::Key(Key::PageUp));
+        assert_eq!(app.scroll(), 9);
+        submit(&mut app, "go");
+        assert_eq!(app.scroll(), 0);
     }
 
     #[test]

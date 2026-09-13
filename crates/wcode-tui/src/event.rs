@@ -30,6 +30,8 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
         KeyCode::Right => Key::Right,
         KeyCode::Home => Key::Home,
         KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
         _ => return None,
