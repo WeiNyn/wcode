@@ -330,7 +330,8 @@ frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wir
 another `wcode-protocol` client. S3's P0 skeleton has landed: `wcode-tui` runs a
 session through a `Backend`, locally or over `--socket`, and `wcode` picks the
 TUI on a TTY (`--tui`/`--no-tui`). P1 has landed too — scrollback,
-`/`-commands, prompt history, multiline. Next: P2 (markdown, resize, copy).
+`/`-commands, prompt history, multiline, and P2 (markdown, context bar, resize,
+copy). Next: P3 (side panel, diff pane, pickers).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

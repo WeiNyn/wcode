@@ -149,16 +149,20 @@ prompt per line beside the sessions. (Shift-Enter needs a terminal that reports
 the modifier — kitty/xterm-`modifyOtherKeys`; elsewhere it is Enter.)
 
 **Status** — one dim "chrome" row, full width, left-aligned:
-`model · effort · tokens · session · state`, where tokens is `used / limit`
-(e.g. `14.2k / 1M`, shown once a turn has reported usage) and state is
-`⏸ idle` / `⠹ running`. The state glyph is the single source of "am I running";
-the spinner also rides the active tool line, so a long tool never looks frozen.
+`model · effort · tokens · session · state`, where tokens is an 8-cell gauge
+colored by fill (green/yellow/red) plus `used / limit` (e.g. `██████░░ 150k / 200k`,
+shown once a turn has reported usage) and state is `⏸ idle` / `⠹ running`. The
+state glyph is the single source of "am I running"; the spinner also rides the
+active tool line, so a long tool never looks frozen. Committed assistant
+messages are rendered as markdown (headings, bullets, fenced code, inline
+`code`/`**bold**`); the live stream stays plain to avoid reflow jitter.
 When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
 
 **Keys** — `Enter` submit · `Shift-Enter` newline · `Up`/`Down` history ·
 `PgUp`/`PgDn` scroll the transcript (`↑ N` in the status while scrolled) ·
-`Esc`/`Ctrl-C` cancel a run, quit when idle.
+`Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
+reply (OSC-52).
 
 ## 5. Decisions
 

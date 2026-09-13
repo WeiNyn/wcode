@@ -218,8 +218,9 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 - **Crate** — a new `wcode-tui` depending on `wcode-protocol`.
 - **Data source** — the `Backend` seam, never `Agent` (§3). This *is* the
   client/server split the brainstorm §12 asked for; the TUI is a peer.
-- **Markdown** — defer to P2 (hand-rolled minimal; decide then).
-- **Clipboard** — defer to P2; OSC-52 before pulling `arboard`.
+- **Markdown** — landed in P2: a hand-rolled minimal renderer (`markdown.rs`),
+  no dependency.
+- **Clipboard** — landed in P2: OSC-52 (`/copy`), no `arboard`.
 
 Still open:
 
@@ -243,6 +244,7 @@ Still open:
 - [x] P1: scrollback (PgUp/PgDn, pinned view), `/`-commands (`/exit /model
       /effort /compact /usage /help`), prompt history (Up/Down, persisted),
       multiline (Shift-Enter).
-- [ ] P2 markdown + status + resize + copy.
+- [x] P2: markdown for committed messages; context bar; redraw on resize;
+      `/copy` (OSC-52).
 - [ ] P3 panels + pickers.
 - [ ] P4 stretch.
