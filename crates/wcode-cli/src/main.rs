@@ -1,6 +1,6 @@
 //! CLI entry: arg parsing, config → LlmOpts → Agent, one-shot or REPL.
 
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::PathBuf;
 
 use wcode_harness::actor::SessionActor;
@@ -27,7 +27,7 @@ use crate::repl::{
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [serve] [--socket <path>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [serve] [--socket <path>] [--tui|--no-tui]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -44,6 +44,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --dump-system-prompt  print the composed system prompt and exit
   serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
+  --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -101,7 +102,12 @@ struct Args {
     /// `wcode serve`: own the session and serve it over a socket.
     serve: bool,
     /// Connect to a session served elsewhere instead of running one locally.
+    /// Connect to a session served elsewhere instead of running one locally.
     socket: Option<String>,
+    /// `--tui`: force the full-screen TUI.
+    tui: bool,
+    /// `--no-tui`: force the line REPL (pipes/CI).
+    no_tui: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -166,6 +172,8 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 a.socket = Some(args.get(i).ok_or("--socket requires a path")?.clone());
                 i += 1;
             }
+            "--tui" => a.tui = true,
+            "--no-tui" => a.no_tui = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
     }
@@ -329,6 +337,17 @@ async fn main() {
         match args.prompt.clone() {
             Some(prompt) => std::process::exit(one_shot(Backend::from(client), &prompt).await),
             None => {
+                if choose_tui(&args, is_tty()) {
+                    let status = wcode_tui::Status {
+                        model: llm.model.clone(),
+                        effort: llm.effort.clone(),
+                    };
+                    if let Err(e) = wcode_tui::run(Backend::from(client), status).await {
+                        eprintln!("tui: {e}");
+                        std::process::exit(1);
+                    }
+                    std::process::exit(0);
+                }
                 // The server owns the system prompt and skills, so a remote
                 // client discovers none of its own.
                 repl::run(
@@ -459,6 +478,19 @@ async fn main() {
             std::process::exit(one_shot(Backend::from(SessionActor::spawn(agent)), &prompt).await)
         }
         None => {
+            if choose_tui(&args, is_tty()) {
+                let status = wcode_tui::Status {
+                    model: llm.model.clone(),
+                    effort: llm.effort.clone(),
+                };
+                if let Err(e) =
+                    wcode_tui::run(Backend::from(SessionActor::spawn(agent)), status).await
+                {
+                    eprintln!("tui: {e}");
+                    std::process::exit(1);
+                }
+                std::process::exit(0);
+            }
             repl::run(
                 repl::SessionSource::Local(Box::new(agent)),
                 llm,
@@ -471,6 +503,21 @@ async fn main() {
             .await
         }
     }
+}
+
+/// Pick the interactive front-end: the TUI when forced with `--tui`, or by
+/// default on a TTY; `--no-tui` (or a pipe/CI) keeps the line REPL. One-shot
+/// (`-p`) and `serve` never use the TUI.
+fn choose_tui(args: &Args, tty: bool) -> bool {
+    if args.no_tui || args.prompt.is_some() || args.serve {
+        return false;
+    }
+    args.tui || tty
+}
+
+/// Both ends must be a terminal for an interactive TUI.
+fn is_tty() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// Default socket for `serve`/`--socket`: alongside the config, so both ends
@@ -722,6 +769,28 @@ mod tests {
         assert_eq!(resolve_session_path("/"), PathBuf::from("/"));
         let fallback = resolve_session_path("no-such-session-file.jsonl");
         assert!(fallback.starts_with(session_dir()));
+    }
+
+    #[test]
+    fn choose_tui_prefers_flags_then_terminal() {
+        assert!(choose_tui(&Args::default(), true));
+        assert!(!choose_tui(&Args::default(), false));
+        assert!(choose_tui(&Args { tui: true, ..Args::default() }, false));
+        assert!(!choose_tui(&Args { no_tui: true, ..Args::default() }, true));
+        assert!(!choose_tui(
+            &Args {
+                prompt: Some("x".into()),
+                ..Args::default()
+            },
+            true
+        ));
+        assert!(!choose_tui(
+            &Args {
+                serve: true,
+                ..Args::default()
+            },
+            true
+        ));
     }
 }
 
