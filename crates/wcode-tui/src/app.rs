@@ -71,6 +71,8 @@ pub enum Block {
     Tool(Tool),
     Notice(String),
     Error(String),
+    /// A changed file's diff, re-shown from `/changes` (not the live render).
+    Diff { path: String, diff: String },
 }
 
 /// One tool invocation, from `ToolExecutionStart` to `ToolExecutionEnd`.
@@ -82,6 +84,47 @@ pub struct Tool {
     pub is_error: bool,
     /// A UI-only unified diff, when the tool changed a file (`ToolOutput::diff`).
     pub diff: Option<String>,
+    /// The file this tool changed (UI-only), from `ToolExecutionEnd`: labels the
+    /// `⚙` line and feeds the run's changeset.
+    pub path: Option<String>,
+}
+
+/// A file the run changed, recorded from the UI-only `ToolExecutionEnd` fields.
+/// The changeset is per-run and view-owned: reset when the next prompt starts a
+/// run, kept afterwards so it stays reviewable, and never persisted (durable
+/// history is git's job).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+    pub diff: String,
+}
+
+impl Change {
+    fn new(path: String, diff: String) -> Self {
+        let (added, removed) = diff_counts(&diff);
+        Change {
+            path,
+            added,
+            removed,
+            diff,
+        }
+    }
+}
+
+/// Count `+`/`-` body lines in a unified diff — the `@@` header is neither.
+pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        match line.as_bytes().first() {
+            Some(b'+') => added += 1,
+            Some(b'-') => removed += 1,
+            _ => {}
+        }
+    }
+    (added, removed)
 }
 
 /// A transient modal drawn over the three bands. Shared infrastructure: any
@@ -100,6 +143,9 @@ pub struct Picker {
     pub kind: PickerKind,
     pub title: String,
     pub items: Vec<String>,
+    /// Per-item value yielded on selection, aligned with `items`. Empty means
+    /// the item itself is the value (a plain list, e.g. the model picker).
+    pub values: Vec<String>,
     pub query: String,
     /// Index into [`Picker::rows`], not into `items`.
     pub selected: usize,
@@ -109,6 +155,8 @@ pub struct Picker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerKind {
     Model,
+    /// A file the run changed (`/changes`); selecting re-shows its diff.
+    Change,
 }
 
 impl Picker {
@@ -117,6 +165,7 @@ impl Picker {
             kind,
             title: title.into(),
             items,
+            values: Vec::new(),
             query: String::new(),
             selected: 0,
         }
@@ -127,18 +176,56 @@ impl Picker {
     /// empty query shows every item.
     pub fn rows(&self) -> Vec<(&str, Option<std::ops::Range<usize>>)> {
         let query = self.query.to_lowercase();
-        self.items
-            .iter()
-            .filter_map(|item| {
-                if query.is_empty() {
-                    return Some((item.as_str(), None));
-                }
-                let lower = item.to_lowercase();
-                lower
-                    .find(&query)
-                    .map(|start| (item.as_str(), Some(start..start + query.len())))
+        self.visible_indices()
+            .into_iter()
+            .map(|i| {
+                let item = &self.items[i];
+                let range = if query.is_empty() {
+                    None
+                } else {
+                    item.to_lowercase()
+                        .find(&query)
+                        .map(|start| start..start + query.len())
+                };
+                (item.as_str(), range)
             })
             .collect()
+    }
+
+    /// A picker whose rows carry a distinct value (e.g. a changed path while
+    /// the label shows stats). `values` is aligned with `items`.
+    fn with_values(
+        kind: PickerKind,
+        title: impl Into<String>,
+        items: Vec<String>,
+        values: Vec<String>,
+    ) -> Self {
+        Picker {
+            kind,
+            title: title.into(),
+            items,
+            values,
+            query: String::new(),
+            selected: 0,
+        }
+    }
+
+    /// Indices of the items matching the current query, in display order.
+    fn visible_indices(&self) -> Vec<usize> {
+        let query = self.query.to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| query.is_empty() || item.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The value of the highlighted row (e.g. a model id, a changed path),
+    /// falling back to the label for a plain list.
+    pub fn selected_value(&self) -> Option<&str> {
+        let index = *self.visible_indices().get(self.selected)?;
+        Some(self.values.get(index).map_or(&self.items[index], String::as_str))
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -199,6 +286,9 @@ pub struct App {
     /// Model ids for the `/model` picker — injected by the composition root,
     /// since the TUI holds no `LlmOpts` and cannot list models itself.
     models: Vec<String>,
+    /// Files changed during the current run, in call order; reset when the next
+    /// prompt starts a run, kept afterwards so the run stays reviewable.
+    changes: Vec<Change>,
     /// The open modal, if any. While one is shown it captures every key.
     overlay: Option<Overlay>,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -330,6 +420,8 @@ impl App {
         self.transcript.push(Block::User(text.clone()));
         self.running = true;
         self.cancelled = false;
+        // A new run starts a fresh changeset; the previous one is superseded.
+        self.changes.clear();
         self.actions.push(Action::Submit(text));
     }
 
@@ -361,9 +453,10 @@ impl App {
                 instructions: arg.map(str::to_string),
             })),
             "/usage" => self.actions.push(Action::Ask(Request::GetHistory)),
+            "/changes" => self.open_changes_picker(),
             "/copy" => self.copy_last(),
             "/help" => self.notice(
-                "commands: /exit /model <id> /effort [level] /compact [text] /usage /copy /help",
+                "commands: /exit /model <id> /effort [level] /compact [text] /changes /usage /copy /help",
             ),
             other => self.notice(format!("unknown command: {other}")),
         }
@@ -473,6 +566,7 @@ impl App {
                     done: false,
                     is_error: false,
                     diff: None,
+                    path: None,
                 }));
                 self.dirty = true;
             }
@@ -486,6 +580,7 @@ impl App {
                 output,
                 is_error,
                 diff,
+                path,
                 ..
             } => {
                 if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
@@ -494,8 +589,14 @@ impl App {
                     }
                     tool.done = true;
                     tool.is_error = is_error;
-                    tool.diff = diff;
+                    tool.path = path.clone();
+                    tool.diff = diff.clone();
                     self.dirty = true;
+                }
+                // A mutating tool's UI-only (path, diff) pair feeds the run's
+                // changeset — recorded even if no block matched the call.
+                if let (Some(path), Some(diff)) = (path, diff) {
+                    self.changes.push(Change::new(path, diff));
                 }
             }
             AgentEvent::AgentEnd => {
@@ -504,6 +605,10 @@ impl App {
                 if self.cancelled {
                     self.cancelled = false;
                     self.transcript.push(Block::Notice("⏹ aborted".into()));
+                }
+                // Surface the run's changes once it settles; they stay for `/changes`.
+                if !self.changes.is_empty() {
+                    self.transcript.push(Block::Notice(self.changes_summary()));
                 }
                 self.dirty = true;
             }
@@ -702,6 +807,73 @@ impl App {
         self.last_width = width;
     }
 
+    /// Open the `/changes` picker over the files this run changed.
+    fn open_changes_picker(&mut self) {
+        if self.changes.is_empty() {
+            self.notice("no changes this run");
+            return;
+        }
+        let mut items = Vec::new();
+        let mut values = Vec::new();
+        for (path, added, removed) in self.changes_by_path() {
+            items.push(format!("{path} · +{added} −{removed}"));
+            values.push(path);
+        }
+        self.overlay = Some(Overlay::Pick(Picker::with_values(
+            PickerKind::Change,
+            "changes",
+            items,
+            values,
+        )));
+        self.dirty = true;
+    }
+
+    /// Re-show a changed file's diff from this run in the transcript.
+    fn show_change(&mut self, path: &str) {
+        let diff: String = self
+            .changes
+            .iter()
+            .filter(|c| c.path == path)
+            .map(|c| c.diff.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if diff.is_empty() {
+            return;
+        }
+        self.transcript.push(Block::Diff {
+            path: path.to_string(),
+            diff,
+        });
+        self.dirty = true;
+    }
+
+    /// Distinct changed paths in first-seen order, with their summed stats.
+    fn changes_by_path(&self) -> Vec<(String, usize, usize)> {
+        let mut out: Vec<(String, usize, usize)> = Vec::new();
+        for change in &self.changes {
+            match out.iter_mut().find(|(p, _, _)| *p == change.path) {
+                Some((_, added, removed)) => {
+                    *added += change.added;
+                    *removed += change.removed;
+                }
+                None => out.push((change.path.clone(), change.added, change.removed)),
+            }
+        }
+        out
+    }
+
+    /// A one-line summary of the run's changes, e.g. `⋯ 2 files changed · +9 −3`.
+    fn changes_summary(&self) -> String {
+        let by_path = self.changes_by_path();
+        let added: usize = by_path.iter().map(|(_, a, _)| a).sum();
+        let removed: usize = by_path.iter().map(|(_, _, r)| r).sum();
+        let files = by_path.len();
+        format!(
+            "⋯ {files} file{} changed · +{added} −{removed} · /changes",
+            if files == 1 { "" } else { "s" }
+        )
+    }
+
     /// Open the model picker over the injected model list.
     fn open_model_picker(&mut self) {
         if self.models.is_empty() {
@@ -749,12 +921,10 @@ impl App {
         let Some(Overlay::Pick(picker)) = self.overlay.take() else {
             return;
         };
-        let rows = picker.rows();
-        let Some((item, _)) = rows.get(picker.selected) else {
+        let Some(selected) = picker.selected_value().map(str::to_string) else {
             self.notice("no match to select");
             return;
         };
-        let selected = item.to_string();
         match picker.kind {
             PickerKind::Model => {
                 self.status.model.clone_from(&selected);
@@ -762,6 +932,7 @@ impl App {
                 self.actions
                     .push(Action::Ask(Request::SetModel { model: selected }));
             }
+            PickerKind::Change => self.show_change(&selected),
         }
     }
 
@@ -846,6 +1017,7 @@ impl App {
                         done: true,
                         is_error: *is_error,
                         diff: None,
+                        path: None,
                     }));
                 }
             }
@@ -1406,5 +1578,102 @@ mod tests {
             }
             other => panic!("expected a tool block, got {other:?}"),
         }
+    }
+
+    /// Drive a tool lifecycle whose end carries the UI-only (path, diff) pair.
+    fn tool_end(app: &mut App, name: &str, path: Option<&str>, diff: Option<&str>) {
+        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionStart {
+            call_id: "t1".into(),
+            name: name.into(),
+        }));
+        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionEnd {
+            call_id: "t1".into(),
+            name: name.into(),
+            output: "ok".into(),
+            is_error: false,
+            diff: diff.map(str::to_string),
+            path: path.map(str::to_string),
+        }));
+    }
+
+    #[test]
+    fn a_mutating_tool_records_a_change_and_a_new_run_clears_it() {
+        let mut app = App::new();
+        submit(&mut app, "edit things");
+        let _ = app.take_actions();
+        tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
+
+        assert_eq!(app.changes.len(), 1);
+        assert_eq!(app.changes[0].path, "src/a.rs");
+        assert_eq!((app.changes[0].added, app.changes[0].removed), (1, 1));
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+
+        // A new prompt starts a fresh changeset; the settled one is superseded.
+        submit(&mut app, "again");
+        assert!(app.changes.is_empty());
+    }
+
+    #[test]
+    fn a_tool_without_a_path_or_diff_is_not_a_change() {
+        let mut app = App::new();
+        submit(&mut app, "read");
+        let _ = app.take_actions();
+        tool_end(&mut app, "read", None, None);
+        assert!(app.changes.is_empty());
+    }
+
+    #[test]
+    fn the_changeset_summary_appears_when_the_run_settles() {
+        let mut app = App::new();
+        submit(&mut app, "edit");
+        let _ = app.take_actions();
+        tool_end(&mut app, "edit", Some("a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
+        tool_end(&mut app, "write", Some("b.rs"), Some("@@ -0,0 +1 @@\n+new"));
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("2 files changed") && t.contains("+2 −1")
+        ));
+    }
+
+    #[test]
+    fn the_tool_block_carries_the_changed_path() {
+        let mut app = App::new();
+        tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
+        match app.transcript().last() {
+            Some(Block::Tool(tool)) => assert_eq!(tool.path.as_deref(), Some("src/a.rs")),
+            other => panic!("expected a tool block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn changes_command_opens_a_picker_and_selection_shows_the_diff() {
+        let mut app = App::new();
+        submit(&mut app, "edit");
+        let _ = app.take_actions();
+        tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+
+        submit(&mut app, "/changes");
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "changes"));
+        app.handle(AppEvent::Key(Key::Enter));
+
+        assert!(app.overlay().is_none(), "selecting closes the modal");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Diff { path, .. }) if path == "src/a.rs"
+        ));
+    }
+
+    #[test]
+    fn changes_with_nothing_says_so() {
+        let mut app = App::new();
+        submit(&mut app, "/changes");
+        assert!(app.overlay().is_none());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("no changes")
+        ));
     }
 }

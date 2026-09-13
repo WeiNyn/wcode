@@ -173,7 +173,9 @@ tokens** (model and state always stay). The session id is shortened to 8 chars.
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
-reply (OSC-52).
+reply (OSC-52). `/changes` lists the files the current run changed (`path · +a −r`)
+in the overlay; selecting one re-shows its diff in the transcript. The changeset
+is per-run and ephemeral — durable history is git's.
 
 ## 5. Decisions
 

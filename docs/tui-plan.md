@@ -18,7 +18,7 @@ it can be picked up as its own workstream.
 | P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
 | P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☐ todo |
 | P2 | polish: markdown, usage status, resize, copy | ☐ todo |
-| P3 | extras: overlays + pickers, diff rendering, side panel | ◐ P3a–P3b done |
+| P3 | extras: overlays + pickers, diff rendering, run changeset, session picker | ◐ P3a–P3c done |
 | P4 | stretch: images, mermaid, theming | ☐ todo |
 
 ---
@@ -180,12 +180,12 @@ not expose, so the phase is mostly presentation plus **capabilities injected by
 the composition root** (the same shape P0–P2 already use for `status`/`history`),
 not protocol growth. Two forks, both resolved the conservative way:
 
-- **Inject, don't extend the protocol.** A model list, a session list, and file
-  bytes are things the *client* can fetch (`list_models`, `list_sessions`, the
-  fs); pushing `ListModels`/`ListSessions` into the actor would pull the endpoint
-  and the session dir into the kernel — the multi-session scope §1 excludes.
-  Revisit only when the socket TUI needs it (the same reasoning that defers the
-  O(n²) wire deltas).
+- **Inject, don't extend the protocol.** A model list and a session list are
+  things the *client* can fetch (`list_models`, `list_sessions`); pushing
+  `ListModels`/`ListSessions` into the actor would pull the endpoint and the
+  session dir into the kernel — the multi-session scope §1 excludes. Revisit only
+  when the socket TUI needs it (the same reasoning that defers the O(n²) wire
+  deltas).
 - **The session picker is a re-exec handoff.** The TUI cannot rebuild an agent;
   a picker selection emits an Action ("quit and `--resume <path>`") the CLI maps
   through the existing `repl::reload_args`, keeping the TUI a pure client.
@@ -203,22 +203,24 @@ Slices, ascending in coupling (each independently shippable — tests + clippy +
   under the `⚙` line with a `+a −r` summary. The diff is **UI-only**: it rides a
   new `ToolOutput::diff` → `ToolExecutionEnd.diff` field so the model's context
   stays lean (route 2 in the fork below).
-- **P3c — side panel (file viewer).** A fixed-width column beside the bands (an
-  *addition*, not a reflow), toggled by Ctrl-O / `/panel`; its content comes from
-  an injected `PanelSource` (Local → fs; Remote → client-host fs or disabled).
+- **P3c — run changeset.** The changed file's path now rides the tool event
+  (`ToolExecutionEnd.path`, UI-only, alongside `diff`); the TUI accumulates the
+  run's `(path, +a −r, diff)`, `/changes` lists the changed files in the overlay,
+  and selecting one re-shows its diff. View-owned and ephemeral — reset on the
+  next prompt, never persisted (durable history is git's job).
 - **P3d — session picker.** `/resume` opens a picker seeded from an injected
   session list (id · age · first user line); a selection emits the re-exec
   Action. Landed **last** — the only feature that needs composition-root
   cooperation.
 
 Testing: pure reducer tests (overlay open/filter/select → the right `Action`;
-keys swallowed while open), `TestBackend` snapshots (overlay box, panel column,
-diff styling), and a live check per slice.
+keys swallowed while open; the changeset's accumulate/reset), `TestBackend`
+snapshots (overlay box, diff styling, the changeset picker), and a live check
+per slice.
 
-Open: standalone panel column vs. overlay; diff from tool output vs. a
-structured `ContentBlock::Diff`; dedicated picker chords vs. the `/`-palette;
-`NO_COLOR`/narrow-width behaviour for overlays; pickers under `Backend::Remote`
-(no session dir, no model list).
+Open: dedicated picker chords vs. the `/`-palette; `NO_COLOR`/narrow-width
+behaviour for overlays; pickers under `Backend::Remote` (no session dir, no model
+list).
 
 **P4 — stretch.** Inline images (kitty/iTerm), mermaid, configurable theming.
 
@@ -265,6 +267,10 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 - **Diff is UI-only** — not in the tool `output`, so it never enters the model's
   context; carried by `ToolOutput::diff` / `AgentEvent::ToolExecutionEnd.diff`, so
   it works live but is not persisted (a replayed session shows no diff).
+- **The changeset is view-owned** — the run's changes live in the TUI
+  (accumulated from `ToolExecutionEnd.path`/`.diff`), reset per prompt and never
+  persisted; the path rides the event the same UI-only way the diff does. Durable
+  history is git's job, so there is no protocol request and no fs read.
 - **P3 capabilities** — injected from the composition root, *not* new protocol
   requests (`ListModels`/`ListSessions`); the session picker is a `--resume`
   re-exec handoff. Revisit when the socket client needs them.
@@ -299,6 +305,7 @@ Still open:
 - [x] P3a: overlay layer + model picker (`/model` with no arg opens a
       centered modal; the model list is injected; `/model <id>` still sets).
 - [x] P3b: diff rendering (UI-only unified diff; styled `@@`/`+`/`-`, `+a −r`).
-- [ ] P3c: side panel (file viewer; injected `PanelSource`).
+- [x] P3c: run changeset (`ToolExecutionEnd.path`; `/changes` lists the run's
+      changed files and re-shows a diff).
 - [ ] P3d: session picker (`/resume`; re-exec handoff).
 - [ ] P4 stretch.

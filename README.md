@@ -113,7 +113,7 @@ renders the same `AgentEvent` stream, over a local session or a `--socket` one.
 TUI keys: `Enter` submit · `Shift-Enter` newline · `Up`/`Down` recall prompts ·
 `PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-Y` copy the
 last reply (OSC-52). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
-[level]`, `/compact [text]`, `/usage`, `/copy`, `/help` — the subset that maps
+[level]`, `/compact [text]`, `/changes`, `/usage`, `/copy`, `/help` — the subset that maps
 to a `Request` under the current session (the session-lifecycle commands below
 stay in the REPL).
 

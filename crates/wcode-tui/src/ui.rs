@@ -153,6 +153,7 @@ fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         Block::Tool(tool) => tool_lines(tool),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
+        Block::Diff { path, diff } => diff_block_lines(path, diff),
     }
 }
 
@@ -180,12 +181,21 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
     lines
 }
 
+/// The changed file (dim), appended to a tool's `⚙` header when it touched one.
+fn path_span(tool: &Tool) -> Option<Span<'static>> {
+    tool.path
+        .as_ref()
+        .map(|path| Span::styled(format!("  {path}"), dim()))
+}
+
 fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
     if !tool.done {
-        let mut lines = vec![Line::from(vec![
+        let mut header = vec![
             Span::styled("   ⚙ ", dim()),
             Span::styled(tool.name.clone(), dim()),
-        ])];
+        ];
+        header.extend(path_span(tool));
+        let mut lines = vec![Line::from(header)];
         if let Some(tail) = last_line(&tool.output) {
             lines.push(Line::from(vec![
                 Span::styled("     ", dim()),
@@ -208,6 +218,7 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
         Span::styled(format!("   {mark} "), style),
         Span::styled(tool.name.clone(), style),
     ];
+    spans.extend(path_span(tool));
     let note = first_line(&tool.output);
     if !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
@@ -215,25 +226,43 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
     vec![Line::from(spans)]
 }
 
+/// A re-shown change (`/changes`): the file, then its styled diff body.
+fn diff_block_lines(path: &str, diff: &str) -> Vec<Line<'static>> {
+    let (added, removed) = crate::app::diff_counts(diff);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("   ", dim()),
+        Span::styled(path.to_string(), dim()),
+        Span::styled(format!(" · +{added} −{removed}"), dim()),
+    ])];
+    for raw in diff.lines() {
+        let style = match raw.chars().next() {
+            Some('+') => added_style(),
+            Some('-') => removed_style(),
+            _ => dim(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("     ", dim()),
+            Span::styled(raw.to_string(), style),
+        ]));
+    }
+    lines
+}
+
 /// A done tool that changed a file: its edit shown as a diff under the `⚙`
 /// line, with a `+a −r` summary. The diff is UI-only (`ToolOutput::diff`), so
 /// it never reached the model.
 fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
+    let mut header = vec![
         Span::styled("   ⚙ ", dim()),
         Span::styled(tool.name.clone(), dim()),
-    ])];
-    let (mut added, mut removed) = (0usize, 0usize);
+    ];
+    header.extend(path_span(tool));
+    let mut lines = vec![Line::from(header)];
+    let (added, removed) = crate::app::diff_counts(diff);
     for raw in diff.lines() {
         let style = match raw.chars().next() {
-            Some('+') => {
-                added += 1;
-                added_style()
-            }
-            Some('-') => {
-                removed += 1;
-                removed_style()
-            }
+            Some('+') => added_style(),
+            Some('-') => removed_style(),
             _ => dim(),
         };
         lines.push(Line::from(vec![
@@ -706,5 +735,47 @@ mod tests {
         assert!(text.contains("-old"), "removal missing: {text}");
         assert!(text.contains("+new"), "addition missing: {text}");
         assert!(text.contains("+1 −1"), "summary missing: {text}");
+    }
+
+    #[test]
+    fn the_run_summary_and_changes_picker_render() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t1".into(),
+                name: "edit".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t1".into(),
+                name: "edit".into(),
+                output: "ok".into(),
+                is_error: false,
+                diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+                path: Some("src/a.rs".into()),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            wcode_harness::event::AgentEvent::AgentEnd,
+        ));
+
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(text.contains("1 file changed"), "summary missing: {text}");
+        // The `⚙` line names the changed file.
+        assert!(text.contains("src/a.rs"), "tool path missing: {text}");
+
+        for c in "/changes".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(text.contains("changes"), "picker title missing: {text}");
+        assert!(text.contains("+1 −1"), "picker stats missing: {text}");
+
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(text.contains("-old"), "re-shown removal missing: {text}");
+        assert!(text.contains("+new"), "re-shown addition missing: {text}");
     }
 }
