@@ -1,21 +1,28 @@
 //! A remote client: the [`SessionHandle`] API over a socket.
 //!
 //! The client demuxes the connection the same way the actor demuxes its
-//! channels: a reader task splits inbound frames into *streaming* events
-//! ([`Client::subscribe`]) and *replies* ([`Client::ask`], matched by the
-//! envelope's `reply_to`), and a writer task serializes outbound requests. So a
-//! caller cannot tell a [`Client`] from a [`SessionHandle`] — which is the
-//! whole point of [`crate::Backend`].
+//! channels: a supervisor writes queued requests and reads inbound frames,
+//! routing *streaming* events to [`Client::subscribe`] and *replies* to
+//! [`Client::ask`] (matched by the envelope's `reply_to`). So a caller cannot
+//! tell a [`Client`] from a [`SessionHandle`] — which is the whole point of
+//! [`crate::Backend`].
+//!
+//! It also **reconnects**: if the connection drops (a server restart, a blip),
+//! the supervisor re-establishes it with backoff and keeps going. Requests
+//! queued during the gap are delivered once it is back. An in-flight `ask`
+//! whose reply was lost to the drop fails with [`Closed`] — the reply is simply
+//! not coming — and the caller (or the user) retries.
 //!
 //! [`SessionHandle`]: wcode_harness::actor::SessionHandle
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
+use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wcode_harness::actor::EVENT_BUFFER;
@@ -25,16 +32,20 @@ use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId};
 use crate::Closed;
 use crate::frame::{read_frame, write_frame};
 
-/// A connection to a remote session.
+/// Reconnect backoff: first wait, doubling up to the cap.
+const RECONNECT_BASE: Duration = Duration::from_millis(200);
+const RECONNECT_CAP: Duration = Duration::from_secs(5);
+
+/// A connection to a remote session, reconnecting automatically if it drops.
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
+    /// Requests, drained by the supervisor across reconnects.
+    out: mpsc::UnboundedSender<Frame<Request>>,
 }
 
 struct Inner {
-    /// Outbound requests, drained by the writer task.
-    out: mpsc::UnboundedSender<Frame<Request>>,
-    /// Streaming events from the server (replies are routed to `pending`).
+    path: PathBuf,
     events: broadcast::Sender<AgentEvent>,
     /// Reply waiters, keyed by request id.
     pending: Mutex<HashMap<u64, oneshot::Sender<AgentEvent>>>,
@@ -44,51 +55,52 @@ struct Inner {
 
 impl Client {
     /// Connect to a server listening at `path`.
+    ///
+    /// The first connect is eager — `Err` if nothing is listening — but after
+    /// that the client reconnects on its own if the connection drops.
     pub async fn connect(path: &Path) -> io::Result<Client> {
         let stream = crate::socket::connect(path).await?;
-        Ok(Client::from_stream(stream))
+        Ok(Client::adopt(path.to_path_buf(), stream))
     }
 
-    fn from_stream(stream: UnixStream) -> Client {
-        let (read, write) = stream.into_split();
+    fn adopt(path: PathBuf, stream: UnixStream) -> Client {
         let (out, out_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let inner = Arc::new(Inner {
-            out,
+            path,
             events,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             // Single-session server (S2): the routing field is inert here.
             session: SessionId::new("remote"),
         });
-        tokio::spawn(write_loop(write, out_rx));
-        tokio::spawn(read_loop(BufReader::new(read), inner.clone()));
-        Client { inner }
+        tokio::spawn(supervise(inner.clone(), out_rx, Some(stream)));
+        Client { inner, out }
     }
 
-    /// Fire-and-forget: send a request and return. Streaming events (and the
-    /// eventual reply) arrive on the subscription from [`Client::subscribe`].
+    /// Fire-and-forget: queue a request. Streaming events (and the eventual
+    /// reply) arrive on the subscription from [`Client::subscribe`]. Fails only
+    /// once every clone has dropped and the supervisor has ended.
     pub fn send(&self, request: Request) -> Result<(), Closed> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .out
-            .send(self.frame(id, request))
-            .map_err(|_| Closed)
+        self.out.send(self.frame(id, request)).map_err(|_| Closed)
     }
 
-    /// Send a request and await its correlated reply.
+    /// Send a request and await its correlated reply. Fails with [`Closed`] if
+    /// the connection drops before the reply arrives.
     pub async fn ask(&self, request: Request) -> Result<AgentEvent, Closed> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-        if self.inner.out.send(self.frame(id, request)).is_err() {
+        if self.out.send(self.frame(id, request)).is_err() {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err(Closed);
         }
         rx.await.map_err(|_| Closed)
     }
 
-    /// Stream the server's events. Each subscriber gets its own receiver.
+    /// Stream the server's events. Each subscriber gets its own receiver, which
+    /// survives a reconnect (only events during the gap are lost).
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.inner.events.subscribe()
     }
@@ -104,38 +116,63 @@ impl Client {
     }
 }
 
-async fn write_loop<W>(mut write: W, mut rx: mpsc::UnboundedReceiver<Frame<Request>>)
-where
-    W: AsyncWrite + Unpin,
-{
-    while let Some(frame) = rx.recv().await {
-        if write_frame(&mut write, &frame).await.is_err() {
-            break;
+/// Own the connection: write queued requests and read events, reconnecting on
+/// drop until every [`Client`] clone is gone.
+async fn supervise(
+    inner: Arc<Inner>,
+    mut out: mpsc::UnboundedReceiver<Frame<Request>>,
+    mut next: Option<UnixStream>,
+) {
+    let mut backoff = RECONNECT_BASE;
+    loop {
+        let stream = match next.take() {
+            Some(stream) => stream,
+            None => match crate::socket::connect(&inner.path).await {
+                Ok(stream) => stream,
+                Err(_) => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RECONNECT_CAP);
+                    continue;
+                }
+            },
+        };
+        backoff = RECONNECT_BASE;
+
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+        loop {
+            tokio::select! {
+                request = out.recv() => match request {
+                    Some(frame) => {
+                        if write_frame(&mut write, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Every clone dropped: nothing left to serve.
+                    None => return,
+                },
+                event = read_frame::<_, AgentEvent>(&mut read) => match event {
+                    Ok(Some(frame)) => deliver(&inner, frame),
+                    // EOF or a broken read: the connection is gone.
+                    _ => break,
+                },
+            }
         }
+        // The connection dropped: fail every in-flight `ask` (its reply is not
+        // coming), then loop to reconnect.
+        inner.pending.lock().unwrap().clear();
     }
 }
 
-async fn read_loop<R>(mut read: R, inner: Arc<Inner>)
-where
-    R: AsyncBufRead + Unpin,
-{
-    loop {
-        match read_frame::<_, AgentEvent>(&mut read).await {
-            Ok(Some(frame)) => match frame.reply_to {
-                Some(id) => {
-                    if let Some(tx) = inner.pending.lock().unwrap().remove(&id) {
-                        let _ = tx.send(frame.body);
-                    }
-                }
-                None => {
-                    let _ = inner.events.send(frame.body);
-                }
-            },
-            Ok(None) => break,
-            Err(_) => break,
+fn deliver(inner: &Inner, frame: Frame<AgentEvent>) {
+    match frame.reply_to {
+        Some(id) => {
+            if let Some(tx) = inner.pending.lock().unwrap().remove(&id) {
+                let _ = tx.send(frame.body);
+            }
+        }
+        None => {
+            let _ = inner.events.send(frame.body);
         }
     }
-    // The connection is gone: drop every waiter so their `ask` fails rather
-    // than hanging forever.
-    inner.pending.lock().unwrap().clear();
 }

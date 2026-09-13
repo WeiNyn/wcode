@@ -154,3 +154,66 @@ async fn a_second_client_observes_the_same_session() {
         assert!(saw, "{name} observed the streamed text");
     }
 }
+
+/// A client reconnects after the connection drops, and a request issued around
+/// the drop is delivered once it is back.
+#[tokio::test]
+async fn a_client_reconnects_after_the_connection_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("wcode.sock");
+
+    // A "server" that accepts one connection and closes it, so the client sees
+    // a dropped connection.
+    let bad = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = bad.accept().await {
+            drop(stream);
+        }
+        drop(bad);
+    });
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+
+    // Bring the real server up on the same path.
+    let handle = SessionActor::spawn(agent(vec![vec![
+        LlmStreamEvent::TextDelta("back".into()),
+        done(),
+    ]]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        handle,
+        SessionId::new("test"),
+        listener,
+    ));
+
+    // Wait until the supervisor has reconnected to the real server: a read-back
+    // that resolves proves the request path is live again. (A request sent while
+    // the connection is down cannot be acknowledged without an app-level ack, so
+    // the test does not race the drop.)
+    let mut reconnected = false;
+    for _ in 0..200 {
+        if client.ask(Request::GetHistory).await.is_ok() {
+            reconnected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(reconnected, "the client reconnected");
+
+    // Now a turn goes through.
+    client.send(Request::Submit { text: "hi".into() }).unwrap();
+    let mut saw_text = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the run streamed after reconnect")
+            .expect("open");
+        match event {
+            AgentEvent::MessageUpdate { message } if message.as_text() == "back" => saw_text = true,
+            AgentEvent::AgentEnd => break,
+            _ => {}
+        }
+    }
+    assert!(saw_text, "the request went through after reconnecting");
+}
