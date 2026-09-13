@@ -236,7 +236,8 @@ Still open:
 - [x] `App` + reducers; headless reducer + render-snapshot tests. (P0a/P0b.)
 - [x] P0c: subscribe a `Backend`, `Submit` a turn, stream into the transcript,
       `Cancel` on Esc/Ctrl-C, wire the status line. (`run(backend, status)`.)
-- [ ] P0 wired into `wcode-cli` behind the TTY branch (`--tui`/`--no-tui`).
+- [x] P0 wired into `wcode-cli`: the TUI on a TTY (or `--tui`), the REPL for
+      `--no-tui`/pipes/`-p`.
 - [ ] P1 transcript + commands + history.
 - [ ] P2 markdown + status + resize + copy.
 - [ ] P3 panels + pickers.

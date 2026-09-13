@@ -21,9 +21,18 @@ Presentation code streams and styles `AgentEvent`s; the kernel owns the loop.
 - `event.rs` — `AgentEvent` / `LlmStreamEvent` (the UI seam).
 - `compaction.rs`, `session.rs`, `message.rs`, `limits.rs`.
 
-`crates/wcode-cli` — the client:
+`crates/wcode-protocol` — transport above the kernel: the `Backend` seam
+(`Local`/`Remote`), NDJSON `Frame`s, a socket `serve`/`Client`, so a client speaks
+`Request` → `AgentEvent` the same way locally or across a socket.
 
-- `main.rs` — arg parsing, config load, agent construction, one-shot vs REPL.
+`crates/wcode-tui` — the full-screen TUI (`ratatui`/`crossterm`), a
+`wcode-protocol` client: `run(backend, status)`, a pure reducer over
+`AgentEvent`, three bands (transcript · input · status).
+
+`crates/wcode-cli` — the composition root:
+
+- `main.rs` — arg parsing, config load, agent construction; picks one-shot, TUI
+  (TTY, `--tui`/`--no-tui`), or the line REPL.
 - `repl.rs` — REPL loop, `/`-commands, event printing, system prompt, the
   project-instruction file.
 - `config.rs` — `config.toml` + env resolution.

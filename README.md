@@ -101,7 +101,14 @@ wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
+wcode --tui                  # force the full-screen TUI (default on a TTY)
+wcode --no-tui               # force the line REPL (pipes/CI)
 ```
+
+The interactive path: with no `-p`, `wcode` starts a full-screen TUI when stdin
+and stdout are a terminal, and the line REPL otherwise. `--tui`/`--no-tui` force
+either; `-p`, `serve`, and piped input always take the non-TUI path. The TUI
+renders the same `AgentEvent` stream, over a local session or a `--socket` one.
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
 
