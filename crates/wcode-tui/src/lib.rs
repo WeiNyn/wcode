@@ -12,6 +12,7 @@
 
 pub mod app;
 
+mod clipboard;
 mod event;
 mod markdown;
 mod terminal;
@@ -105,6 +106,9 @@ async fn event_loop(
                     let _ = backend.send(Request::Cancel);
                 }
                 Action::Ask(request) => spawn_ask(&backend, &reply_tx, request),
+                Action::Copy(text) => {
+                    let _ = clipboard::copy(&text);
+                }
             }
         }
 

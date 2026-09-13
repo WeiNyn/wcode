@@ -51,6 +51,8 @@ pub enum Action {
     Cancel,
     /// Send a request and route its reply back as an [`AppEvent::Agent`].
     Ask(Request),
+    /// Copy this text to the terminal clipboard (OSC-52).
+    Copy(String),
 }
 
 /// A committed transcript block. Thinking and prose share [`Block::Assistant`]
@@ -200,6 +202,7 @@ impl App {
                 self.insert_char('\n');
             }
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
+            Key::Ctrl('y') => self.copy_last(),
             Key::PageUp => self.scroll_up(),
             Key::PageDown => self.scroll_down(),
             _ => {}
@@ -274,12 +277,41 @@ impl App {
                 instructions: arg.map(str::to_string),
             })),
             "/usage" => self.actions.push(Action::Ask(Request::GetHistory)),
+            "/copy" => self.copy_last(),
             "/help" => self.notice(
-                "commands: /exit /model <id> /effort [level] /compact [text] /usage /help",
+                "commands: /exit /model <id> /effort [level] /compact [text] /usage /copy /help",
             ),
             other => self.notice(format!("unknown command: {other}")),
         }
         self.dirty = true;
+    }
+    /// Copy the last assistant reply to the terminal clipboard.
+    fn copy_last(&mut self) {
+        match self.last_assistant_text() {
+            Some(text) => {
+                let chars = text.chars().count();
+                self.actions.push(Action::Copy(text));
+                self.notice(format!("copied {chars} chars to the clipboard"));
+            }
+            None => self.notice("nothing to copy yet"),
+        }
+    }
+
+    /// The text of the most recent assistant reply, if any.
+    fn last_assistant_text(&self) -> Option<String> {
+        self.transcript.iter().rev().find_map(|block| match block {
+            Block::Assistant(content) => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (!text.trim().is_empty()).then_some(text)
+            }
+            _ => None,
+        })
     }
 
     fn notice(&mut self, text: impl Into<String>) {
@@ -912,6 +944,39 @@ mod tests {
 
         app.handle(AppEvent::Key(Key::Enter));
         assert_eq!(app.transcript()[0], Block::User("a\nb".into()));
+    }
+
+    #[test]
+    fn copy_emits_the_last_reply() {
+        let mut app = App::new();
+        submit(&mut app, "hi");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(AgentEvent::MessageStart {
+            message: assistant(""),
+        }));
+        app.handle(AppEvent::Agent(AgentEvent::MessageEnd {
+            message: assistant("the answer"),
+        }));
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        let _ = app.take_actions();
+
+        submit(&mut app, "/copy");
+        assert_eq!(app.take_actions(), vec![Action::Copy("the answer".into())]);
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("copied")
+        ));
+    }
+
+    #[test]
+    fn copy_with_nothing_says_so() {
+        let mut app = App::new();
+        submit(&mut app, "/copy");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("nothing to copy")
+        ));
     }
 
     #[test]
