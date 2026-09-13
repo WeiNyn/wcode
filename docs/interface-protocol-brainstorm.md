@@ -444,14 +444,25 @@ in `README.md` §Philosophy.
    #2 only when the TUI needs it; #3 only when a second agent exists.
 8. **Wire event shape?** Recommended: decide before the socket — deltas vs whole
    messages (the O(n²) issue in §9).
-9. **A2A delivery vocabulary?** Recommended: rename/alias to
-   `Notify`/`Interrupt`/`Wake`, mapping onto `no_reply`/`steer`/`follow_up`.
-10. **A2A policy?** Recommended: a `before_inbound` hook (drop/rewrite), and
-    ownership by `report_back_to`; no ACL, no config.
+9. **A2A delivery vocabulary?** Decided: canonical `Notify`/`Interrupt`/
+   `Wake`/`Ask`; `Steer`/`FollowUp` kept as serde aliases (`steer`/`follow_up`)
+   for back-compat. Mapping: `Interrupt`→steer, `Wake`→follow_up, `Notify`→
+   append-no-turn, `Ask`→request/reply.
+10. **A2A policy?** Decided: `before_inbound(from, request)` — a hook that may
+    drop or rewrite by *who* sent it; ownership by `report_back_to`; no ACL, no
+    config. A local handle leaves `from` unset ("the human").
 11. **Do we take the task-DAG reframe?** Recommended: no for v1; note as the
     direction if deep swarms become a goal.
 12. **Does the line REPL change?** Recommended: no behavior change; it becomes a
     second client of the same protocol (as jcode's `harness_repl` example is).
+13. **The model's A2A surface?** Decided: **one** `message { to, content, mode }`
+    tool, `mode` ∈ `notify`/`ask`/`interrupt`/`wake`; an inbound message is
+    rendered in the model's context tagged with its sender. No per-mode tools.
+14. **Is there an `Ack` verb?** Decided: no. Receiving a message *is* the ack (it
+    lands in the context, tagged); a reply is just `message` to the `from`. No
+    handshake, no delivery receipt.
+15. **Address book?** Later (S4-5): a `phonebook` (name → address) above the
+    registry, so a sender can say `to: "reviewer"` instead of `agent:<id>`.
 
 ---
 
@@ -528,15 +539,40 @@ in `README.md` §Philosophy.
       carry (§9).
     - **Landed.** Verified by the in-module actor tests and a socket round-trip
       (`a_notify_crosses_the_socket`); the CLI is unchanged (no surface yet).
-  - **S4-2 — Registry + addressing.** A `Registry` mapping `SessionId` →
-    `SessionHandle`; `Request::{Ask { to, content }, Notify { to, content }}`
-    resolved against it; the completion report auto-forwarded on turn end along
-    `report_back_to`.
-  - **S4-3 — Spawn (bounded fan-out) + a `task` tool.** A tool the root model
-    calls to spawn a peer session (only the root spawns / a depth cap); the child
-    reports its result back on turn end.
+  - **S4-2 — Registry, addressing, and the sender.** A `Registry` mapping
+    `SessionId` → `SessionHandle`; the mailbox carries the **sender**, so a
+    message can be attributed and policy can branch on it. Concretely:
+    - Canonical verbs: `Notify`/`Interrupt`/`Wake`/`Ask`. `Steer`/`FollowUp`
+      become serde **aliases** (`#[serde(alias = "steer")]` / `"follow_up"`) so
+      old frames still parse; the kernel methods keep their names. One delivery
+      vocabulary, no duplicate spellings (§13.9).
+    - The actor's inbox item grows a sender: `Message::{Tell, Ask}` carry
+      `from: Option<SessionId>` (a local handle defaults it; a peer fills it in).
+      `MessageReceived.from` stops being a constant.
+    - `Hooks::before_inbound(from: Option<&SessionId>, request: &mut Request)` —
+      policy can now decide by *who* sent it (ownership from `report_back_to`).
+    - `Request::{Ask { to, content }, Notify { to, content }, …}` resolved
+      against the registry; the completion report auto-forwarded on turn end
+      along `report_back_to`.
+    - Open: is a peer's `Ask` reply the correlated reply, or a subscription to
+      the peer's event stream?
+  - **S4-3 — Spawn (bounded fan-out) + the `message` tool.** Only the root
+    spawns (a depth cap bounds fan-out); the child reports its result back on
+    turn end. The model talks to peers through **one** tool:
+    - `message { to, content, mode }`, `mode` ∈ `notify` (default) / `ask` /
+      `interrupt` / `wake`, mapping 1:1 onto the wire verbs. One tool, one
+      concept — the mode is data (§13.13).
+    - An inbound message is injected into the model's context **tagged with its
+      sender** (`[message from agent:abc] …`), so the model knows the address to
+      reply to. **`Ack` is not a verb**: reply = `message` to the `from` you
+      just saw. No handshake (§13.14).
   - **S4-4 — Socket peers.** Point the registry at served sessions, so `Ask`
     reaches across the socket (`Client` is already the transport).
+  - **S4-5 — Phonebook (later).** A **name → address** map above the registry,
+    so the model (and the human) can address `to: "reviewer"` instead of a raw
+    `agent:<id>`. The registry stays the transport-level address book; the
+    phonebook is the human/agent-facing alias layer. Discovery and persistence
+    of names are its own small design (§13.15).
 - **S5 — (optional, far)** Task-DAG / deep swarm, only if wanted.
 
 The dependency is linear and each stage is independently useful: S0 unblocks S1
