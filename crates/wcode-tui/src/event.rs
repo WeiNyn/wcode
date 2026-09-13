@@ -15,6 +15,7 @@ pub fn translate(event: Event) -> Vec<AppEvent> {
             translate_key(k).map(AppEvent::Key).into_iter().collect()
         }
         Event::Paste(text) => vec![AppEvent::Paste(text)],
+        Event::Resize(_, _) => vec![AppEvent::Resize],
         _ => Vec::new(),
     }
 }
@@ -78,6 +79,10 @@ mod tests {
             translate(Event::Paste("hi".into())).as_slice(),
             [AppEvent::Paste(t)] if t == "hi"
         ));
-        assert!(translate(Event::Resize(1, 1)).is_empty());
+        assert!(matches!(
+            translate(Event::Resize(1, 1)).as_slice(),
+            [AppEvent::Resize]
+        ));
+        assert!(translate(Event::FocusGained).is_empty());
     }
 }

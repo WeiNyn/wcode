@@ -59,7 +59,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // the transcript and reconciles the scroll window.
     let height = area.height as usize;
     let total = lines.len();
-    app.sync_scroll(total, height);
+    app.sync_scroll(total, height, area.width as usize);
     let end = total.saturating_sub(app.scroll());
     let start = end.saturating_sub(height);
     let window: Vec<Line> = lines.drain(start..end).collect();

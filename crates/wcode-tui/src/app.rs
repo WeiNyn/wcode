@@ -40,6 +40,8 @@ pub enum AppEvent {
     /// A fact from the session (streamed, or a correlated reply).
     Agent(AgentEvent),
     Tick,
+    /// The terminal was resized; force a redraw and re-measure the scroll.
+    Resize,
 }
 
 /// A side effect the event loop must perform — the app's only outward channel.
@@ -130,6 +132,7 @@ pub struct App {
     /// can stay pinned while new lines stream in.
     viewport: usize,
     last_total: usize,
+    last_width: usize,
     running: bool,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
@@ -153,6 +156,10 @@ impl App {
             AppEvent::Paste(text) => self.insert_str(&text),
             AppEvent::Agent(event) => self.on_agent(event),
             AppEvent::Tick => {}
+            AppEvent::Resize => {
+                // Force a redraw; the width change resets the scroll pin.
+                self.dirty = true;
+            }
         }
     }
 
@@ -558,8 +565,10 @@ impl App {
 
     /// Reconcile scroll state with the transcript the renderer just measured:
     /// keep the view pinned while content grows, then clamp to the top.
-    pub fn sync_scroll(&mut self, total: usize, height: usize) {
-        if self.scroll > 0 {
+    pub fn sync_scroll(&mut self, total: usize, height: usize, width: usize) {
+        // Pin the view while content grows — but not across a resize, which
+        // re-wraps everything and moves every line.
+        if self.scroll > 0 && width == self.last_width {
             self.scroll = self.scroll.saturating_add(total.saturating_sub(self.last_total));
         }
         let max = total.saturating_sub(height);
@@ -567,6 +576,7 @@ impl App {
         self.max_scroll = max;
         self.viewport = height;
         self.last_total = total;
+        self.last_width = width;
     }
 
     pub fn status(&self) -> &Status {
@@ -777,12 +787,12 @@ mod tests {
     #[test]
     fn scrolling_clamps_and_stays_pinned_while_content_grows() {
         let mut app = App::new();
-        app.sync_scroll(100, 10); // 100 lines in a 10-high viewport: max 90
+        app.sync_scroll(100, 10, 80); // 100 lines in a 10-high viewport: max 90
         app.handle(AppEvent::Key(Key::PageUp));
         assert_eq!(app.scroll(), 9); // one page (height - 1)
 
         // Scrolled up: growing the transcript keeps the same lines in view.
-        app.sync_scroll(110, 10);
+        app.sync_scroll(110, 10, 80);
         assert_eq!(app.scroll(), 19);
 
         // PageDown past the bottom lands at 0.
@@ -793,9 +803,21 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_does_not_pin_the_view() {
+        let mut app = App::new();
+        app.sync_scroll(100, 10, 80);
+        app.handle(AppEvent::Key(Key::PageUp));
+        assert_eq!(app.scroll(), 9);
+
+        // A width change re-wraps everything: the offset is kept, not extended.
+        app.sync_scroll(120, 10, 60);
+        assert_eq!(app.scroll(), 9);
+    }
+
+    #[test]
     fn submitting_returns_to_the_tail() {
         let mut app = App::new();
-        app.sync_scroll(100, 10);
+        app.sync_scroll(100, 10, 80);
         app.handle(AppEvent::Key(Key::PageUp));
         assert_eq!(app.scroll(), 9);
         submit(&mut app, "go");
