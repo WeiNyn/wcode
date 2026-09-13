@@ -470,20 +470,34 @@ async fn reload(llm: &LlmOpts, session: Option<&Path>, no_session: bool, in_flig
     let args = reload_args(llm, session, no_session);
     println!("reloading {} ...", exe.display());
     let _ = io::stdout().flush();
+    exec_self(&args);
+}
+/// Replace the current process with this binary re-invoked as `args` — the
+/// `/reload` and `/resume` handoff. Returns only if the exec failed; the caller
+/// decides what to do then.
+pub fn exec_self(args: &[String]) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("exec: current exe: {e}");
+            return;
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let err = std::process::Command::new(&exe).args(&args).exec();
-        eprintln!("reload: exec: {err}");
+        let err = std::process::Command::new(&exe).args(args).exec();
+        eprintln!("exec: {err}");
     }
     #[cfg(not(unix))]
     {
-        match std::process::Command::new(&exe).args(&args).spawn() {
+        match std::process::Command::new(&exe).args(args).spawn() {
             Ok(_) => std::process::exit(0),
-            Err(e) => eprintln!("reload: spawn: {e}"),
+            Err(e) => eprintln!("exec: spawn: {e}"),
         }
     }
 }
+
 /// `/models [filter]`: list `GET {base_url}/models` ids, `*` marks the
 /// current model. Filter is a case-insensitive substring on the id.
 async fn print_models(llm: &LlmOpts, filter: Option<&str>) {

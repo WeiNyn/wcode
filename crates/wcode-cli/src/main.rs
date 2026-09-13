@@ -1,7 +1,7 @@
 //! CLI entry: arg parsing, config → LlmOpts → Agent, one-shot or REPL.
 
 use std::io::{IsTerminal, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use wcode_harness::actor::SessionActor;
 use wcode_harness::event::AgentEvent;
@@ -349,15 +349,25 @@ async fn main() {
                         )
                         .map(|l| l.context),
                     };
-                    let models: Vec<String> =
-                        wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default();
-                    if let Err(e) =
-                        wcode_tui::run(Backend::from(client), status, models, Some(repl::history_path())).await
-                    {
-                        eprintln!("tui: {e}");
-                        std::process::exit(1);
+                    let options = wcode_tui::Options {
+                        status,
+                        models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
+                        // The server owns the session; a socket client cannot see
+                        // the session dir, so `/resume` has nothing to offer.
+                        sessions: Vec::new(),
+                        history: Some(repl::history_path()),
+                    };
+                    match wcode_tui::run(Backend::from(client), options).await {
+                        Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                        Ok(wcode_tui::Outcome::Resume(_)) => {
+                            eprintln!("tui: cannot resume over a socket");
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("tui: {e}");
+                            std::process::exit(1);
+                        }
                     }
-                    std::process::exit(0);
                 }
                 // The server owns the system prompt and skills, so a remote
                 // client discovers none of its own.
@@ -500,21 +510,25 @@ async fn main() {
                     )
                     .map(|l| l.context),
                 };
-                let models: Vec<String> =
-                    wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default();
-                if let Err(e) =
-                    wcode_tui::run(
-                        Backend::from(SessionActor::spawn(agent)),
-                        status,
-                        models,
-                        Some(repl::history_path()),
-                    )
-                    .await
-                {
-                    eprintln!("tui: {e}");
-                    std::process::exit(1);
+                let options = wcode_tui::Options {
+                    status,
+                    models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
+                    sessions: session_items(),
+                    history: Some(repl::history_path()),
+                };
+                match wcode_tui::run(Backend::from(SessionActor::spawn(agent)), options).await {
+                    Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                    Ok(wcode_tui::Outcome::Resume(path)) => {
+                        // The TUI cannot rebuild an agent: hand off by re-exec'ing
+                        // with `--resume <path>` (the terminal is already restored).
+                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false));
+                        std::process::exit(1); // only reached if the exec failed
+                    }
+                    Err(e) => {
+                        eprintln!("tui: {e}");
+                        std::process::exit(1);
+                    }
                 }
-                std::process::exit(0);
             }
             repl::run(
                 repl::SessionSource::Local(Box::new(agent)),
@@ -551,6 +565,87 @@ fn default_socket_path() -> PathBuf {
     config_dir()
         .map(|d| d.join("wcode.sock"))
         .unwrap_or_else(|| std::env::temp_dir().join("wcode.sock"))
+}
+
+/// The `/resume` picker's list: one entry per session file, newest first, each
+/// with a `id · age · first user line` label and the path to hand back for
+/// `--resume`. Failures degrade to a bare file name rather than break the picker.
+fn session_items() -> Vec<wcode_tui::SessionItem> {
+    list_sessions(&session_dir())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| wcode_tui::SessionItem {
+            label: session_label(&path),
+            path,
+        })
+        .collect()
+}
+
+/// `id · age · first user line`, omitting whichever parts are unavailable.
+fn session_label(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let id = name.strip_suffix(".jsonl").unwrap_or(&name);
+
+    let mut parts = vec![id.to_string()];
+    if let Some(age) = age_millis(id) {
+        parts.push(humanize_age(age));
+    }
+    if let Some(first) = first_user_line(path) {
+        parts.push(first);
+    }
+    parts.join(" · ")
+}
+
+/// How long ago the session was created, from the `{millis}_` name prefix.
+fn age_millis(id: &str) -> Option<u64> {
+    let created: u64 = id.split('_').next()?.parse().ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some(now.saturating_sub(created))
+}
+
+/// `3s` / `12m` / `5h` / `2d` — coarse enough to fit the picker row.
+fn humanize_age(ms: u64) -> String {
+    const MINUTE: u64 = 60 * 1000;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match ms {
+        _ if ms < MINUTE => format!("{}s", ms / 1000),
+        _ if ms < HOUR => format!("{}m", ms / MINUTE),
+        _ if ms < DAY => format!("{}h", ms / HOUR),
+        _ => format!("{}d", ms / DAY),
+    }
+}
+
+/// The first line of the session's first user message, truncated — the quickest
+/// way to recognize a session in the picker.
+fn first_user_line(path: &Path) -> Option<String> {
+    Session::open(path)
+        .ok()?
+        .messages()
+        .into_iter()
+        .find_map(|message| match message {
+            AgentMessage::User { .. } => {
+                let text = message.as_text();
+                let line = text.lines().next().unwrap_or_default().trim();
+                (!line.is_empty()).then(|| truncate_chars(line, 48))
+            }
+            _ => None,
+        })
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// `-p` mode: no streaming output; print the final assistant text.
@@ -619,6 +714,40 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn session_label_reads_the_first_user_line_and_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create_with_cwd(dir.path(), dir.path()).unwrap();
+        session
+            .append(wcode_harness::session::SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: AgentMessage::user_text("fix the flaky test\nsecond line"),
+            })
+            .unwrap();
+        let path = session.path().unwrap().to_path_buf();
+
+        let label = session_label(&path);
+        assert!(label.contains("fix the flaky test"), "{label}");
+        assert!(!label.contains("second line"), "only the first line: {label}");
+        assert!(label.contains(" · 0s · "), "a fresh session reads as 0s: {label}");
+    }
+
+    #[test]
+    fn session_age_is_humanized() {
+        assert_eq!(humanize_age(3_000), "3s");
+        assert_eq!(humanize_age(90_000), "1m");
+        assert_eq!(humanize_age(60 * 60_000), "1h");
+        assert_eq!(humanize_age(2 * 24 * 60 * 60_000), "2d");
+    }
+
+    #[test]
+    fn truncate_chars_keeps_short_text_and_elides_long() {
+        assert_eq!(truncate_chars("short", 48), "short");
+        assert_eq!(truncate_chars(&"x".repeat(60), 48).chars().count(), 48);
+        assert!(truncate_chars(&"x".repeat(60), 48).ends_with('…'));
     }
 
     #[test]

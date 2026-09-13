@@ -778,4 +778,20 @@ mod tests {
         assert!(text.contains("-old"), "re-shown removal missing: {text}");
         assert!(text.contains("+new"), "re-shown addition missing: {text}");
     }
+
+    #[test]
+    fn the_resume_picker_lists_sessions() {
+        let mut app = App::new();
+        app.set_sessions(vec![crate::app::SessionItem {
+            label: "a1b2c3 · 5m · add the picker".into(),
+            path: std::path::PathBuf::from("/s/a1b2c3.jsonl"),
+        }]);
+        for c in "/resume".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("resume"), "picker title missing: {text}");
+        assert!(text.contains("add the picker"), "label missing: {text}");
+    }
 }

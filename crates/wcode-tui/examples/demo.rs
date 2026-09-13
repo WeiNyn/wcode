@@ -70,6 +70,11 @@ async fn main() -> std::io::Result<()> {
         session: Some("demo-session".into()),
         context_limit: Some(200_000),
     };
-    let models = vec!["demo".to_string(), "demo-mini".to_string()];
-    wcode_tui::run(Backend::Local(handle), status, models, None).await
+    let options = wcode_tui::Options {
+        status,
+        models: vec!["demo".to_string(), "demo-mini".to_string()],
+        sessions: Vec::new(),
+        history: None,
+    };
+    wcode_tui::run(Backend::Local(handle), options).await.map(|_| ())
 }

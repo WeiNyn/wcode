@@ -30,27 +30,52 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::Request;
 use wcode_protocol::Backend;
 
-pub use crate::app::{Action, App, AppEvent, Block, Key, Status, Tool};
+pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, Tool};
 
 /// Spinner/status refresh cadence, only consulted while a run is in flight.
 const TICK: Duration = Duration::from_millis(120);
 
+/// Everything the composition root injects for a run — state this crate cannot
+/// derive (it holds no `LlmOpts`, no session dir, no model list, no fs).
+#[derive(Clone, Debug)]
+pub struct Options {
+    pub status: Status,
+    /// Model ids for the `/model` picker (from `list_models`).
+    pub models: Vec<String>,
+    /// Resumable sessions for the `/resume` picker (local sessions only; empty
+    /// when the client is remote and cannot see the session dir).
+    pub sessions: Vec<SessionItem>,
+    /// Where prompt history is persisted (`None` keeps it in memory only).
+    pub history: Option<PathBuf>,
+}
+
+/// How a TUI run ended — the return value tells the composition root whether to
+/// continue or hand off.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    /// The user quit; nothing more to do.
+    Quit,
+    /// The user picked a session to resume (`/resume`); the caller should
+    /// re-exec with `--resume <path>`.
+    Resume(PathBuf),
+}
+
 /// Run the TUI against `backend` until the user quits. Enters the alternate
-/// screen; restores it on every exit path. `history` is where prompt history is
-/// persisted (`None` keeps it in memory only). `models` seeds the `/model`
-/// picker: this crate cannot list models (no `LlmOpts`), so the caller supplies
-/// them (e.g. from `list_models`).
-pub async fn run(
-    backend: Backend,
-    status: Status,
-    models: Vec<String>,
-    history: Option<PathBuf>,
-) -> io::Result<()> {
+/// screen; restores it on every exit path. See [`Options`] for the injected
+/// state and [`Outcome`] for the handoff on exit.
+pub async fn run(backend: Backend, options: Options) -> io::Result<Outcome> {
+    let Options {
+        status,
+        models,
+        sessions,
+        history,
+    } = options;
     let (guard, mut terminal) = terminal::enter()?;
 
     let mut app = App::new();
     app.set_status(status);
     app.set_models(models);
+    app.set_sessions(sessions);
     // Attach-replay: a resumed session already has turns; show them, so the
     // transcript is never mysteriously empty (`GetHistory` is the seam for it).
     if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
@@ -68,7 +93,13 @@ pub async fn run(
     // Drop the terminal (flush) before leaving the alternate screen.
     drop(terminal);
     drop(guard);
-    result
+    result?;
+
+    // The TUI only *decides* to resume; the composition root owns the re-exec.
+    Ok(match app.pending_resume() {
+        Some(path) => Outcome::Resume(path.to_path_buf()),
+        None => Outcome::Quit,
+    })
 }
 
 async fn event_loop(

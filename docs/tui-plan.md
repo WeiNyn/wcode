@@ -18,7 +18,7 @@ it can be picked up as its own workstream.
 | P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
 | P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☐ todo |
 | P2 | polish: markdown, usage status, resize, copy | ☐ todo |
-| P3 | extras: overlays + pickers, diff rendering, run changeset, session picker | ◐ P3a–P3c done |
+| P3 | extras: overlays + pickers, diff rendering, run changeset, session picker | ☑ P3 done |
 | P4 | stretch: images, mermaid, theming | ☐ todo |
 
 ---
@@ -208,10 +208,12 @@ Slices, ascending in coupling (each independently shippable — tests + clippy +
   run's `(path, +a −r, diff)`, `/changes` lists the changed files in the overlay,
   and selecting one re-shows its diff. View-owned and ephemeral — reset on the
   next prompt, never persisted (durable history is git's job).
-- **P3d — session picker.** `/resume` opens a picker seeded from an injected
-  session list (id · age · first user line); a selection emits the re-exec
-  Action. Landed **last** — the only feature that needs composition-root
-  cooperation.
+- **P3d — session picker.** `/resume` opens the overlay seeded from an injected
+  session list (`id · age · first user line`, built by the composition root from
+  the session dir; an argument pre-fills the filter). A selection does not resume
+  in place — the TUI returns `Outcome::Resume(path)` and the CLI re-execs with
+  `--resume <path>` through the shared `exec_self`, keeping the TUI a pure client.
+  The list is empty over a socket (the server owns the session).
 
 Testing: pure reducer tests (overlay open/filter/select → the right `Action`;
 keys swallowed while open; the changeset's accumulate/reset), `TestBackend`
@@ -307,5 +309,5 @@ Still open:
 - [x] P3b: diff rendering (UI-only unified diff; styled `@@`/`+`/`-`, `+a −r`).
 - [x] P3c: run changeset (`ToolExecutionEnd.path`; `/changes` lists the run's
       changed files and re-shows a diff).
-- [ ] P3d: session picker (`/resume`; re-exec handoff).
+- [x] P3d: session picker (`/resume`; `Outcome::Resume` → CLI re-exec handoff).
 - [ ] P4 stretch.

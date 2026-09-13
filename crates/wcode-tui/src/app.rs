@@ -5,6 +5,8 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
+use std::path::{Path, PathBuf};
+
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, ContentBlock};
 use wcode_harness::protocol::Request;
@@ -157,6 +159,8 @@ pub enum PickerKind {
     Model,
     /// A file the run changed (`/changes`); selecting re-shows its diff.
     Change,
+    /// A resumable session (`/resume`); selecting hands its path back to re-exec.
+    Resume,
 }
 
 impl Picker {
@@ -234,6 +238,15 @@ impl Picker {
     }
 }
 
+/// A resumable session offered by `/resume`: a display `label` (`id · age ·
+/// first line`) and the file to hand back for a `--resume` re-exec. Injected by
+/// the composition root — the TUI owns no session dir and cannot list one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionItem {
+    pub label: String,
+    pub path: PathBuf,
+}
+
 /// Status-line fields.
 #[derive(Clone, Debug)]
 pub struct Status {
@@ -289,6 +302,12 @@ pub struct App {
     /// Files changed during the current run, in call order; reset when the next
     /// prompt starts a run, kept afterwards so the run stays reviewable.
     changes: Vec<Change>,
+    /// Resumable sessions for the `/resume` picker — injected by the composition
+    /// root, which owns the session dir the TUI cannot see.
+    sessions: Vec<SessionItem>,
+    /// Set when the user picks a session to resume; the run returns it so the CLI
+    /// can re-exec with `--resume <path>`.
+    pending_resume: Option<PathBuf>,
     /// The open modal, if any. While one is shown it captures every key.
     overlay: Option<Overlay>,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -454,9 +473,10 @@ impl App {
             })),
             "/usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "/changes" => self.open_changes_picker(),
+            "/resume" => self.open_session_picker(arg),
             "/copy" => self.copy_last(),
             "/help" => self.notice(
-                "commands: /exit /model <id> /effort [level] /compact [text] /changes /usage /copy /help",
+                "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /help",
             ),
             other => self.notice(format!("unknown command: {other}")),
         }
@@ -874,6 +894,27 @@ impl App {
         )
     }
 
+    /// Open the `/resume` picker over the injected session list. An argument
+    /// pre-fills the filter (a quick way to jump to a known id).
+    fn open_session_picker(&mut self, filter: Option<&str>) {
+        if self.sessions.is_empty() {
+            self.notice("no sessions to resume");
+            return;
+        }
+        let items = self.sessions.iter().map(|s| s.label.clone()).collect();
+        let values = self
+            .sessions
+            .iter()
+            .map(|s| s.path.display().to_string())
+            .collect();
+        let mut picker = Picker::with_values(PickerKind::Resume, "resume", items, values);
+        if let Some(filter) = filter {
+            picker.query = filter.to_string();
+        }
+        self.overlay = Some(Overlay::Pick(picker));
+        self.dirty = true;
+    }
+
     /// Open the model picker over the injected model list.
     fn open_model_picker(&mut self) {
         if self.models.is_empty() {
@@ -933,12 +974,29 @@ impl App {
                     .push(Action::Ask(Request::SetModel { model: selected }));
             }
             PickerKind::Change => self.show_change(&selected),
+            PickerKind::Resume => {
+                // Hand the choice back and quit; the composition root re-execs
+                // with `--resume <path>` — a client cannot rebuild the agent.
+                self.pending_resume = Some(PathBuf::from(selected));
+                self.should_quit = true;
+            }
         }
     }
 
     /// The open modal, if any (read by the renderer).
     pub fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// Seed the session list the `/resume` picker offers.
+    pub fn set_sessions(&mut self, sessions: Vec<SessionItem>) {
+        self.sessions = sessions;
+    }
+
+    /// The session the user chose to resume, if any — read by the event loop
+    /// after it exits so the composition root can re-exec with `--resume`.
+    pub fn pending_resume(&self) -> Option<&Path> {
+        self.pending_resume.as_deref()
     }
 
     /// Seed the model list the picker offers (e.g. from `list_models`).
@@ -1674,6 +1732,56 @@ mod tests {
         assert!(matches!(
             app.transcript().last(),
             Some(Block::Notice(t)) if t.contains("no changes")
+        ));
+    }
+
+    fn sessions() -> Vec<SessionItem> {
+        vec![
+            SessionItem {
+                label: "a1b2 · 5m · hello".into(),
+                path: PathBuf::from("/s/a1b2.jsonl"),
+            },
+            SessionItem {
+                label: "c3d4 · 1h · world".into(),
+                path: PathBuf::from("/s/c3d4.jsonl"),
+            },
+        ]
+    }
+
+    #[test]
+    fn resume_opens_the_picker_and_selection_hands_back_the_path() {
+        let mut app = App::new();
+        app.set_sessions(sessions());
+        submit(&mut app, "/resume");
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "resume"));
+
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none(), "selecting closes the modal");
+        assert_eq!(app.pending_resume(), Some(Path::new("/s/c3d4.jsonl")));
+        assert!(app.should_quit(), "a resume selection quits the TUI");
+    }
+
+    #[test]
+    fn the_resume_filter_prefills_the_query() {
+        let mut app = App::new();
+        app.set_sessions(sessions());
+        submit(&mut app, "/resume c3d4");
+        // The filter narrows to one row, so Enter selects it directly.
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.pending_resume(), Some(Path::new("/s/c3d4.jsonl")));
+    }
+
+    #[test]
+    fn resume_with_no_sessions_says_so() {
+        let mut app = App::new();
+        submit(&mut app, "/resume");
+        assert!(app.overlay().is_none());
+        assert!(!app.should_quit());
+        assert_eq!(app.pending_resume(), None);
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("no sessions")
         ));
     }
 }

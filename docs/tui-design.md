@@ -175,7 +175,9 @@ transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52). `/changes` lists the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
-is per-run and ephemeral — durable history is git's.
+is per-run and ephemeral — durable history is git's. `/resume` opens the same
+overlay over the sessions on disk; choosing one quits and re-execs into it
+(`--resume`), since a pure client cannot rebuild a session in place.
 
 ## 5. Decisions
 
