@@ -11,7 +11,7 @@ use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::LlmStreamEvent;
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
-use wcode_harness::message::{AgentMessage, StopReason};
+use wcode_harness::message::{AgentMessage, StopReason, Usage};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 use wcode_protocol::Backend;
 use wcode_tui::Status;
@@ -31,7 +31,12 @@ fn echo_stream_fn() -> StreamFn {
             LlmStreamEvent::TextDelta(reply),
             LlmStreamEvent::Done {
                 stop_reason: StopReason::Stop,
-                usage: None,
+                usage: Some(Usage {
+                    input_tokens: 150_000,
+                    output_tokens: 42,
+                    cache_read_tokens: Some(120_000),
+                    cache_write_tokens: None,
+                }),
             },
         ];
         Box::pin(futures::stream::iter(events)) as LlmStream
@@ -57,5 +62,11 @@ async fn main() -> std::io::Result<()> {
         compaction: CompactionPolicy::default(),
     };
     let handle = SessionActor::spawn(Agent::new(config));
-    wcode_tui::run(Backend::Local(handle), Status::new("demo"), None).await
+    let status = Status {
+        model: "demo".into(),
+        effort: None,
+        session: Some("demo-session".into()),
+        context_limit: Some(200_000),
+    };
+    wcode_tui::run(Backend::Local(handle), status, None).await
 }

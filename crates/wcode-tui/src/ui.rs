@@ -239,27 +239,38 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let state = if app.running() { "⠹ running" } else { "⏸ idle" };
     let width = area.width as usize;
 
-    // Fields are ordered most-important-first and dropped from the right when
-    // space is tight: session first, then effort, then tokens.
+    // Fields are ordered most-important-first and dropped when space is tight:
+    // session first, then effort, then tokens.
     let (mut show_tokens, mut show_effort, mut show_session) = (true, true, true);
-    let text = loop {
-        let mut parts = vec![status.model.clone()];
+    loop {
+        let mut spans: Vec<Span> = vec![
+            Span::raw(" "),
+            Span::styled(status.model.clone(), dim()),
+        ];
         if show_effort && let Some(effort) = &status.effort {
-            parts.push(effort.clone());
+            spans.push(sep());
+            spans.push(Span::styled(effort.clone(), dim()));
         }
-        if show_tokens && let Some(tokens) = token_field(app) {
-            parts.push(tokens);
+        if show_tokens && let Some(tokens) = token_spans(app) {
+            spans.push(sep());
+            spans.extend(tokens);
         }
         if show_session && let Some(session) = &status.session {
-            parts.push(format!("session {}", short_id(session)));
+            spans.push(sep());
+            spans.push(Span::styled(format!("session {}", short_id(session)), dim()));
         }
-        parts.push(state.to_string());
+        spans.push(sep());
+        spans.push(Span::styled(state, dim()));
         if app.scroll() > 0 {
-            parts.push(format!("↑ {}", app.scroll()));
+            spans.push(sep());
+            spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
         }
-        let candidate = format!(" {} ", parts.join(" · "));
-        if candidate.chars().count() <= width || !(show_tokens || show_effort || show_session) {
-            break candidate;
+        spans.push(Span::raw(" "));
+
+        let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if len <= width || !(show_tokens || show_effort || show_session) {
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
         }
         if show_session {
             show_session = false;
@@ -268,16 +279,54 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             show_tokens = false;
         }
-    };
-    frame.render_widget(Paragraph::new(Line::from(Span::styled(text, dim()))), area);
+    }
 }
 
-fn token_field(app: &App) -> Option<String> {
+/// The dim ` · ` separator between status fields.
+fn sep() -> Span<'static> {
+    Span::styled(" · ", dim())
+}
+
+/// Context usage: a colored gauge plus `used / limit` (or just `used`).
+fn token_spans(app: &App) -> Option<Vec<Span<'static>>> {
     let used = app.context_used()?;
     Some(match app.status().context_limit {
-        Some(limit) => format!("{} / {}", format_tokens(used), format_tokens(limit)),
-        None => format_tokens(used),
+        Some(limit) => {
+            let ratio = if limit == 0 {
+                0.0
+            } else {
+                used as f64 / limit as f64
+            };
+            let color = if ratio >= 0.85 {
+                Color::Red
+            } else if ratio >= 0.6 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            let bar_style = if no_color() {
+                dim()
+            } else {
+                Style::new().fg(color)
+            };
+            vec![
+                Span::styled(bar(ratio, 8), bar_style),
+                Span::styled(
+                    format!(" {} / {}", format_tokens(used), format_tokens(limit)),
+                    dim(),
+                ),
+            ]
+        }
+        None => vec![Span::styled(format_tokens(used), dim())],
     })
+}
+
+/// An 8-cell gauge: `████░░░░`.
+fn bar(ratio: f64, cells: usize) -> String {
+    let filled = ((ratio.clamp(0.0, 1.0) * cells as f64).round() as usize).min(cells);
+    let mut out = "█".repeat(filled);
+    out.push_str(&"░".repeat(cells - filled));
+    out
 }
 
 /// Compact token count: `840`, `14.2k`, `272k`, `1M`.
@@ -398,6 +447,14 @@ mod tests {
         assert_eq!(format_tokens(272_000), "272k");
         assert_eq!(format_tokens(1_000_000), "1M");
         assert_eq!(format_tokens(1_050_000), "1.1M");
+    }
+
+    #[test]
+    fn bar_fills_proportionally() {
+        assert_eq!(bar(0.0, 8), "░░░░░░░░");
+        assert_eq!(bar(1.0, 8), "████████");
+        assert_eq!(bar(0.5, 8), "████░░░░");
+        assert_eq!(bar(2.0, 8), "████████"); // clamped
     }
 
     #[test]
