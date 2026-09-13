@@ -341,6 +341,13 @@ async fn main() {
                     let status = wcode_tui::Status {
                         model: llm.model.clone(),
                         effort: llm.effort.clone(),
+                        // The server owns the session id; the client cannot learn it yet.
+                        session: None,
+                        context_limit: wcode_harness::limits::model_limit(
+                            llm.base_url.as_deref(),
+                            &llm.model,
+                        )
+                        .map(|l| l.context),
                     };
                     if let Err(e) = wcode_tui::run(Backend::from(client), status).await {
                         eprintln!("tui: {e}");
@@ -482,6 +489,12 @@ async fn main() {
                 let status = wcode_tui::Status {
                     model: llm.model.clone(),
                     effort: llm.effort.clone(),
+                    session: agent.session_id(),
+                    context_limit: wcode_harness::limits::model_limit(
+                        llm.base_url.as_deref(),
+                        &llm.model,
+                    )
+                    .map(|l| l.context),
                 };
                 if let Err(e) =
                     wcode_tui::run(Backend::from(SessionActor::spawn(agent)), status).await

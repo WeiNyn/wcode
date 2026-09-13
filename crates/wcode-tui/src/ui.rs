@@ -217,13 +217,69 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let status = app.status();
-    let mut parts = vec![status.model.clone()];
-    if let Some(effort) = &status.effort {
-        parts.push(effort.clone());
-    }
-    parts.push(if app.running() { "⠹ running" } else { "⏸ idle" }.to_string());
-    let text = format!(" {} ", parts.join(" · "));
+    let state = if app.running() { "⠹ running" } else { "⏸ idle" };
+    let width = area.width as usize;
+
+    // Fields are ordered most-important-first and dropped from the right when
+    // space is tight: session first, then effort, then tokens.
+    let (mut show_tokens, mut show_effort, mut show_session) = (true, true, true);
+    let text = loop {
+        let mut parts = vec![status.model.clone()];
+        if show_effort && let Some(effort) = &status.effort {
+            parts.push(effort.clone());
+        }
+        if show_tokens && let Some(tokens) = token_field(app) {
+            parts.push(tokens);
+        }
+        if show_session && let Some(session) = &status.session {
+            parts.push(format!("session {}", short_id(session)));
+        }
+        parts.push(state.to_string());
+        let candidate = format!(" {} ", parts.join(" · "));
+        if candidate.chars().count() <= width || !(show_tokens || show_effort || show_session) {
+            break candidate;
+        }
+        if show_session {
+            show_session = false;
+        } else if show_effort {
+            show_effort = false;
+        } else {
+            show_tokens = false;
+        }
+    };
     frame.render_widget(Paragraph::new(Line::from(Span::styled(text, dim()))), area);
+}
+
+fn token_field(app: &App) -> Option<String> {
+    let used = app.context_used()?;
+    Some(match app.status().context_limit {
+        Some(limit) => format!("{} / {}", format_tokens(used), format_tokens(limit)),
+        None => format_tokens(used),
+    })
+}
+
+/// Compact token count: `840`, `14.2k`, `272k`, `1M`.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format_scaled(n, 1_000_000, "M")
+    } else if n >= 1_000 {
+        format_scaled(n, 1_000, "k")
+    } else {
+        n.to_string()
+    }
+}
+
+fn format_scaled(n: u64, unit: u64, suffix: &str) -> String {
+    if n.is_multiple_of(unit) {
+        format!("{}{suffix}", n / unit)
+    } else {
+        format!("{:.1}{suffix}", n as f64 / unit as f64)
+    }
+}
+
+/// First 8 chars of a session id — enough to recognize, not enough to crowd.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 fn split_at_char(text: &str, n: usize) -> (String, String) {
@@ -284,6 +340,42 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn status_compacts_tokens_and_shows_the_session() {
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            model: "m".into(),
+            effort: Some("high".into()),
+            session: Some("abcdef0123456789".into()),
+            context_limit: Some(1_000_000),
+        });
+        app.handle(AppEvent::Agent(wcode_harness::event::AgentEvent::TurnEnd {
+            message: AgentMessage::Assistant {
+                content: vec![ContentBlock::Text { text: "x".into() }],
+                stop_reason: wcode_harness::message::StopReason::Stop,
+                usage: Some(wcode_harness::message::Usage {
+                    input_tokens: 14_200,
+                    output_tokens: 1,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                }),
+                model: None,
+            },
+        }));
+        let text = buffer_text(&render(&app, 80, 3));
+        assert!(text.contains("14.2k / 1M"), "tokens missing: {text}");
+        assert!(text.contains("session abcdef01"), "session missing: {text}");
+    }
+
+    #[test]
+    fn format_tokens_compacts() {
+        assert_eq!(format_tokens(840), "840");
+        assert_eq!(format_tokens(14_200), "14.2k");
+        assert_eq!(format_tokens(272_000), "272k");
+        assert_eq!(format_tokens(1_000_000), "1M");
+        assert_eq!(format_tokens(1_050_000), "1.1M");
     }
 
     #[test]

@@ -67,6 +67,10 @@ pub struct Tool {
 pub struct Status {
     pub model: String,
     pub effort: Option<String>,
+    /// The session's id, shown in the status line (local sessions only).
+    pub session: Option<String>,
+    /// The model's context window, for the `used / limit` readout.
+    pub context_limit: Option<u64>,
 }
 
 impl Default for Status {
@@ -74,6 +78,8 @@ impl Default for Status {
         Status {
             model: "wcode".to_string(),
             effort: None,
+            session: None,
+            context_limit: None,
         }
     }
 }
@@ -83,6 +89,8 @@ impl Status {
         Status {
             model: model.into(),
             effort: None,
+            session: None,
+            context_limit: None,
         }
     }
 }
@@ -97,6 +105,8 @@ pub struct App {
     /// Cursor position as a *character* index into `input`.
     cursor: usize,
     status: Status,
+    /// Provider-reported input tokens of the last turn: how full the context was.
+    context_used: Option<u64>,
     running: bool,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
@@ -260,7 +270,8 @@ impl App {
                 )));
                 self.dirty = true;
             }
-            // Turn boundaries, start, and non-streamed replies need no state.
+            AgentEvent::TurnEnd { message } => self.record_usage(&message),
+            // Start and non-streamed replies need no state.
             _ => {}
         }
     }
@@ -283,6 +294,14 @@ impl App {
     fn flush_live(&mut self) {
         if let Some(message) = self.live.take() {
             self.commit(message);
+        }
+    }
+
+    /// Record the context usage the provider reported for a finished turn.
+    fn record_usage(&mut self, message: &AgentMessage) {
+        if let AgentMessage::Assistant { usage: Some(u), .. } = message {
+            self.context_used = Some(u.input_tokens);
+            self.dirty = true;
         }
     }
 
@@ -334,6 +353,11 @@ impl App {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Provider-reported input tokens of the most recent turn, if any.
+    pub fn context_used(&self) -> Option<u64> {
+        self.context_used
     }
 
     pub fn status(&self) -> &Status {
@@ -521,6 +545,24 @@ mod tests {
         app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
         assert!(!app.running());
         assert_eq!(app.transcript().last(), Some(&Block::Notice("⏹ aborted".into())));
+    }
+
+    #[test]
+    fn a_turn_end_records_context_usage() {
+        let mut app = App::new();
+        let message = AgentMessage::Assistant {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            stop_reason: StopReason::Stop,
+            usage: Some(wcode_harness::message::Usage {
+                input_tokens: 14_200,
+                output_tokens: 30,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
+            model: None,
+        };
+        app.handle(AppEvent::Agent(AgentEvent::TurnEnd { message }));
+        assert_eq!(app.context_used(), Some(14_200));
     }
 
     #[test]

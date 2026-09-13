@@ -11,7 +11,7 @@ use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
-use wcode_harness::message::{ContentBlock, StopReason};
+use wcode_harness::message::{ContentBlock, StopReason, Usage};
 use wcode_harness::protocol::Request;
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 use wcode_protocol::Backend;
@@ -59,7 +59,12 @@ async fn a_submitted_turn_streams_into_the_transcript() {
         LlmStreamEvent::TextDelta("lo".into()),
         LlmStreamEvent::Done {
             stop_reason: StopReason::Stop,
-            usage: None,
+            usage: Some(Usage {
+                input_tokens: 1234,
+                output_tokens: 5,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
         },
     ]))));
     let backend = Backend::Local(handle);
@@ -91,6 +96,7 @@ async fn a_submitted_turn_streams_into_the_transcript() {
     }
 
     assert!(!app.running());
+    assert_eq!(app.context_used(), Some(1234));
     assert_eq!(app.transcript()[0], Block::User("hi".into()));
     match app.transcript().last() {
         Some(Block::Assistant(content)) => assert_eq!(text_of(content), "hello"),
