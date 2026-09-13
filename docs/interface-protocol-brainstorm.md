@@ -1,7 +1,8 @@
 # Interface & protocol — brainstorm
 
 Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2
-(registry + sender + verbs) landed; S4-3a/b landed; S4-3c next** (see §14).
+(registry + sender + verbs) landed; S4-3 (spawn/message/auto-report) landed;
+S4-4 next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -629,7 +630,7 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       event — not a subscription to the peer's stream, and not a blocking reply.
     - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
       event — not a subscription to the peer's stream, and not a blocking reply.
-  - ◐ **S4-3 — Spawn + the `message` tool.** Only the root spawns; a worker cannot
+  - ☑ **S4-3 — Spawn + the `message` tool.** Only the root spawns; a worker cannot
     (bounded fan-out by construction — the root's tool set has `spawn`, a worker's
     does not). A `SessionFactory` builds a worker `Agent` from the parent's
     template, spawns its actor, and `register`s + `set_owner`s it in the
@@ -648,7 +649,9 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     - ☑ **S4-3b** — the `message` tool (`to` defaults to the owner) + sender
       tagging (`[message from <addr>]`), threaded through `repl` so `/new` keeps
       `spawn`+`message`. Landed; the report round-trip is model-driven.
-    - ☐ **S4-3c** — completion auto-forward (a "run-ended" hook).
+    - ☑ **S4-3c** — completion auto-forward: a `Hooks::after_run` point + a
+      `ReportBack` hook forwards a worker's final message to its orchestrator as
+      a `Wake`. Landed; the worker prompt no longer asks it to report by hand.
     - `message { to?, content, mode? }`, `mode` ∈ `wake` (**default**) / `notify` /
       `interrupt` / `ask`, mapping 1:1 onto the wire verbs. The default is
       `wake`, so a message (a task, or a worker's report) **runs a turn even if
