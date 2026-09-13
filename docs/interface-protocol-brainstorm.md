@@ -667,6 +667,10 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     `agent:<id>`. The registry stays the transport-level address book; the
     phonebook is the human/agent-facing alias layer. Discovery and persistence
     of names are its own small design (§13.15).
+  - *(future surface)* **Worker visibility / perspective switch.** A worker
+    emits to its *own* event stream and nothing renders it; letting the TUI
+    switch to a worker's view (and/or forwarding its activity into the root's
+    transcript) is a later surface — out of scope for S4.
 - **S5 — (optional, far)** Task-DAG / deep swarm, only if wanted.
 
 The dependency is linear and each stage is independently useful: S0 unblocks S1
