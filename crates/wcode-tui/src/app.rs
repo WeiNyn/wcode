@@ -652,6 +652,57 @@ impl App {
         std::mem::take(&mut self.actions)
     }
 
+    /// Seed the transcript with the conversation so far — what a resumed
+    /// session (or a reconnecting socket client) already has. The event loop
+    /// calls this once at startup, before any live event, so the earlier turns
+    /// are readable (and scrollable) instead of missing.
+    pub fn seed_history(&mut self, messages: &[AgentMessage]) {
+        if messages.is_empty() {
+            return;
+        }
+        let start = self.transcript.len();
+        for message in messages {
+            match message {
+                AgentMessage::User { .. } => {
+                    let text = message.as_text();
+                    if !text.trim().is_empty() {
+                        self.transcript.push(Block::User(text));
+                    }
+                }
+                AgentMessage::Assistant { content, .. } => {
+                    // As when committing live: tool calls get their own line.
+                    let visible: Vec<ContentBlock> = content
+                        .iter()
+                        .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
+                        .cloned()
+                        .collect();
+                    if !visible.is_empty() {
+                        self.transcript.push(Block::Assistant(visible));
+                    }
+                    self.record_usage(message);
+                }
+                AgentMessage::ToolResult {
+                    name,
+                    output,
+                    is_error,
+                    ..
+                } => {
+                    self.transcript.push(Block::Tool(Tool {
+                        name: name.clone(),
+                        output: output.clone(),
+                        done: true,
+                        is_error: *is_error,
+                    }));
+                }
+            }
+        }
+        // Mark where the replayed prefix ends, mirroring the REPL's divider.
+        self.transcript.insert(
+            start,
+            Block::Notice(format!("⋯ {} earlier message(s)", messages.len())),
+        );
+        self.dirty = true;
+    }
 }
 
 #[cfg(test)]
@@ -844,6 +895,68 @@ mod tests {
             app.handle(AppEvent::Key(Key::PageDown));
         }
         assert_eq!(app.scroll(), 0);
+    }
+
+    #[test]
+    fn seeding_replays_the_conversation_so_far() {
+        let mut app = App::new();
+        app.seed_history(&[
+            AgentMessage::user_text("earlier question"),
+            AgentMessage::Assistant {
+                content: vec![
+                    ContentBlock::Text {
+                        text: "earlier answer".into(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "t1".into(),
+                        name: "read".into(),
+                        arguments: Default::default(),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Some(wcode_harness::message::Usage {
+                    input_tokens: 700,
+                    output_tokens: 5,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                }),
+                model: None,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "t1".into(),
+                name: "read".into(),
+                output: "128 lines".into(),
+                is_error: false,
+            },
+        ]);
+
+        // A divider marks the replayed prefix, as the REPL's does.
+        assert!(matches!(&app.transcript()[0], Block::Notice(t) if t.contains("3 earlier message")));
+        assert_eq!(app.transcript()[1], Block::User("earlier question".into()));
+        // Dropped tool call, kept prose — same shape as a live commit.
+        assert_eq!(
+            app.transcript()[2],
+            Block::Assistant(vec![ContentBlock::Text {
+                text: "earlier answer".into()
+            }])
+        );
+        // The tool result keeps the one-line summary form.
+        assert!(
+            matches!(&app.transcript()[3], Block::Tool(t)
+                if t.done && !t.is_error && t.name == "read" && t.output == "128 lines")
+        );
+        // The resumed context fill reads like a live turn's.
+        assert_eq!(app.context_used(), Some(700));
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn seeding_an_empty_history_changes_nothing() {
+        let mut app = App::new();
+        app.clear_dirty();
+        app.seed_history(&[]);
+        assert!(app.transcript().is_empty());
+        assert!(!app.dirty());
     }
 
     #[test]

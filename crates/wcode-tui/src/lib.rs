@@ -43,6 +43,11 @@ pub async fn run(backend: Backend, status: Status, history: Option<PathBuf>) -> 
 
     let mut app = App::new();
     app.set_status(status);
+    // Attach-replay: a resumed session already has turns; show them, so the
+    // transcript is never mysteriously empty (`GetHistory` is the seam for it).
+    if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
+        app.seed_history(&messages);
+    }
     if let Some(path) = &history {
         app.load_history(read_history(path));
     }
