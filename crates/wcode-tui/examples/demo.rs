@@ -27,18 +27,20 @@ fn echo_stream_fn() -> StreamFn {
             })
             .unwrap_or_default();
         let reply = format!("You said: {prompt}\n\n(This is the scripted demo session.)");
-        let events = vec![
-            LlmStreamEvent::TextDelta(reply),
-            LlmStreamEvent::Done {
-                stop_reason: StopReason::Stop,
-                usage: Some(Usage {
-                    input_tokens: 150_000,
-                    output_tokens: 42,
-                    cache_read_tokens: Some(120_000),
-                    cache_write_tokens: None,
-                }),
-            },
-        ];
+        // Stream word by word, like a real provider.
+        let mut events: Vec<LlmStreamEvent> = reply
+            .split_inclusive(' ')
+            .map(|word| LlmStreamEvent::TextDelta(word.to_string()))
+            .collect();
+        events.push(LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: Some(Usage {
+                input_tokens: 150_000,
+                output_tokens: 42,
+                cache_read_tokens: Some(120_000),
+                cache_write_tokens: None,
+            }),
+        });
         Box::pin(futures::stream::iter(events)) as LlmStream
     })
 }

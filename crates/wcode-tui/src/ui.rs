@@ -84,11 +84,7 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
     for block in content {
         match block {
             ContentBlock::Text { text } => {
-                if live {
-                    lines.extend(wrap(text, width, "   ", "   ", Style::default()));
-                } else {
-                    lines.extend(markdown::render(text, width));
-                }
+                lines.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
                 lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, dim()));
