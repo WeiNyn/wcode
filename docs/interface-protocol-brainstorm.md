@@ -493,9 +493,9 @@ in `README.md` §Philosophy.
   - ☑ **S2-2b** — the *interactive* remote REPL: `repl::run` takes a
     `SessionSource` and drives a `Backend`; `--socket` attaches the REPL to a
     served session; `/new`/`/resume`/`/reload` are gated (the server owns the
-    session); attaching replays the transcript (a `GetHistory` read-back). Still
-    open: **auto-reconnect** on a mid-session drop (today a dropped connection
-    surfaces as `Closed`).
+    session); attaching replays the transcript (a `GetHistory` read-back); the
+    `Client` reconnects on a drop (backoff, requests queued across the gap),
+    though an in-flight `ask` whose reply was lost fails with `Closed`.
   *(This is the jcode TUI architecture, minimal.)*
 - **S3 — TUI.** Per `tui-plan.md`, but as a `wcode-protocol` client. P0 skeleton
   first; single surface; then multi-surface on the same connection (`session` in
