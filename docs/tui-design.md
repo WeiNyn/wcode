@@ -154,8 +154,9 @@ colored by fill (green/yellow/red) plus `used / limit` (e.g. `██████
 shown once a turn has reported usage) and state is `⏸ idle` / `⠹ running`. The
 state glyph is the single source of "am I running"; the spinner also rides the
 active tool line, so a long tool never looks frozen. Committed assistant
-messages are rendered as markdown (headings, bullets, fenced code, inline
-`code`/`**bold**`); the live stream stays plain to avoid reflow jitter.
+messages are rendered as markdown (headings, bullets, fenced code, tables with
+alignment, inline `code`/`**bold**`), live and committed; long words and table
+cells wrap rather than overflow.
 When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
 
