@@ -134,20 +134,17 @@ CAPABILITIES.md` §recommendations).
 ```
 crates/wcode-tui/
   src/
-    lib.rs         // pub use, `run(backend, …)`
-    app.rs         // App state + reducers over AgentEvent / key events
-    event.rs       // crossterm events + agent events → AppEvent
+    lib.rs         // the event loop; `run(backend, status, history)`
+    app.rs         // App state + pure reducers (AgentEvent / key) + Actions
+    event.rs       // crossterm events → AppEvent
     terminal.rs    // raw mode / alt screen / restore guard
-    ui/
-      mod.rs       // frame composition (layout)
-      transcript.rs
-      input.rs
-      status.rs
-    markdown.rs    // P2 — message rendering
+    ui.rs          // frame composition (the three bands)
+    markdown.rs    // message rendering (headings, bullets, code, tables)
+    clipboard.rs   // OSC-52 copy (base64)
 ```
 
 `wcode-cli` gains a dependency on `wcode-tui` and calls
-`wcode_tui::run(backend, …)` when the TTY branch is chosen; the existing
+`wcode_tui::run(backend, status, history)` when the TTY branch is chosen; the
 `repl.rs` remains for pipes. The look (bands, glyphs, mockups) is specified in
 [`tui-design.md`](tui-design.md).
 
@@ -163,14 +160,16 @@ crates/wcode-tui/
 **P1 — transcript & commands.**
 - Scrollback (offset into the rendered transcript), follow-tail while streaming.
 - Thinking + tool blocks styled and collapsible.
-- `/`-command palette mirroring the REPL (`/exit /new /model /models /effort
-  /resume /sessions /usage /compact /reload`) with completion.
-- Prompt history (persisted beside sessions); multiline (Shift-Enter / `\`).
+- `/`-commands: the TUI ships `/exit /model /effort /compact /usage /copy
+  /help`; the session-lifecycle ones (`/new /resume /sessions /reload`) stay in
+  the REPL (they need the composition root).
+- Prompt history (persisted beside sessions); multiline (Shift-Enter — the `\`
+  continuation is not implemented).
 
 **P2 — polish.**
-- Markdown rendering of completed messages (own minimal renderer, see open qs).
+- Markdown rendering of messages, live and committed (own minimal renderer).
 - Usage/token status; context-window bar.
-- Copy: mouse selection + OSC-52 or clipboard.
+- Copy: OSC-52 (`/copy`; no mouse selection).
 - Theme detection (truecolor via `COLORTERM`), graceful 256-color fallback.
 
 **P3 — extras.**

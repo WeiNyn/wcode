@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
 Status: **design settled; implementation started** (S0–S1 landed — see §14).
-Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
+Status: **landed through S2; S3 (TUI) P0–P2 shipped** (see §14).
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
 This doc asks one question and follows it where it goes:
@@ -480,7 +480,7 @@ in `README.md` §Philosophy.
   current handle. `/reload`'s build is *not* specially cancellable (a developer
   path — Ctrl-C there is a non-case). Verified live end-to-end against a local
   model.
-- ◐ **S2 — Transport.** New `wcode-protocol` crate: NDJSON `read_frame`/
+- ☑ **S2 — Transport.** New `wcode-protocol` crate: NDJSON `read_frame`/
   `write_frame`, `bind`/`connect` (Unix), a `serve` that bridges a session
   `SessionHandle` to sockets (a writer + an event fan + a per-request reply
   task, correlated by `reply_to`), a `Client` that mirrors the handle
@@ -497,9 +497,10 @@ in `README.md` §Philosophy.
     `Client` reconnects on a drop (backoff, requests queued across the gap),
     though an in-flight `ask` whose reply was lost fails with `Closed`.
   *(This is the jcode TUI architecture, minimal.)*
-- **S3 — TUI.** Per `tui-plan.md`, but as a `wcode-protocol` client. P0 skeleton
-  first; single surface; then multi-surface on the same connection (`session` in
-  the frame).
+- ◐ **S3 — TUI.** Landed as a `wcode-protocol` client (per `tui-plan.md`):
+  P0–P2 — three bands, streaming, scrollback, `/`-commands, prompt history,
+  multiline, markdown, context bar, resize, `/copy`. Single surface;
+  multi-surface on the same connection (`session` in the frame) is not started.
 - **S4 — A2A.** Reuse the socket as the peer transport; add `Ask`/`Notify`
   addressed at a peer; a registry for addresses; ownership from `report_back_to`;
   a `before_inbound` hook for policy. DM + report-back only.

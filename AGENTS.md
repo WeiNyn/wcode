@@ -26,8 +26,8 @@ Presentation code streams and styles `AgentEvent`s; the kernel owns the loop.
 `Request` → `AgentEvent` the same way locally or across a socket.
 
 `crates/wcode-tui` — the full-screen TUI (`ratatui`/`crossterm`), a
-`wcode-protocol` client: `run(backend, status)`, a pure reducer over
-`AgentEvent`, three bands (transcript · input · status).
+`wcode-protocol` client: `run(backend, status, history)`, a pure reducer over
+`AgentEvent`, three bands (transcript · input · status), markdown + `/`-commands.
 
 `crates/wcode-cli` — the composition root:
 

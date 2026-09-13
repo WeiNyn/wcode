@@ -17,9 +17,11 @@ TUI reads as the same product, given a full screen.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
    glance; wrapped continuation lines align under it.
-3. **Two colors, dim is the third.** One accent (user prompt + running), red
-   (errors). Everything else is default-fg or dim. Honor `NO_COLOR`; degrade to
-   256-color when truecolor is absent.
+3. **A small palette, dim is the workhorse.** Accent (cyan) for the user prompt
+   and running state; red for errors; yellow for inline code; a green→yellow→red
+   gauge for context fill. Everything else is default-fg or dim. Honor
+   `NO_COLOR` (styles collapse to bold/dim); degrade to 256-color when
+   truecolor is absent.
 4. **Blocks are separated by a blank line between roles** (tools cluster tight
    under their `⚙`). Noise is dim; only the model's prose and *your* prompt are
    full-strength.
@@ -38,6 +40,9 @@ TUI reads as the same product, given a full screen.
 | live cursor | `▌` | accent, steady |
 | spinner (running) | `⠋⠙⠹⠸…` | accent |
 | status separators | `·` | dim |
+| inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
+| table | `│ ─ ┼` | header bold; columns aligned, cells wrap |
+| context gauge | `█░` | green → yellow → red by fill |
 
 ## 3. Layout drafts
 
@@ -176,7 +181,9 @@ Agreed for P0 (see also `tui-plan.md` §9):
 - **Versions**: `ratatui` 0.30, `crossterm` 0.29 (jcode's; both exist).
 - **Alt-screen**: yes, with a custom scrollback (P1).
 - **Palette**: accent + red only at P0; theme detection at P2.
-- **Deferred**: markdown (P2), clipboard (P2, OSC-52 before pulling `arboard`).
+- **Markdown**: hand-rolled, applied live and committed (P1/P2). **Clipboard**:
+  OSC-52, no `arboard` (P2).
+- **Theme detection** (truecolor via `COLORTERM`): still open.
 - **Wire deltas**: P0 accepts whole-message `MessageUpdate`; the O(n²) matters
   only for a socket-backed TUI (already reachable via `--socket`) and is
   resolved before that path is a goal.

@@ -13,7 +13,7 @@ each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
-| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S1b, S2 landed; S3 TUI next |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P2; S4 (A2A) next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -326,12 +326,12 @@ core (`actor.rs`: `SessionActor`/`SessionHandle`, inbox + broadcast outbox) have
 landed, plus the reply path (`GetHistory` + `ask`) and the CLI repoint: the REPL
 and `-p` now drive a `SessionHandle`. S2 adds the `wcode-protocol` crate (NDJSON
 frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wires
-`wcode serve` + `wcode --socket` (one-shot and interactive). Next: the TUI (S3) as
-another `wcode-protocol` client. S3's P0 skeleton has landed: `wcode-tui` runs a
-session through a `Backend`, locally or over `--socket`, and `wcode` picks the
-TUI on a TTY (`--tui`/`--no-tui`). P1 has landed too — scrollback,
-`/`-commands, prompt history, multiline, and P2 (markdown, context bar, resize,
-copy). Next: P3 (side panel, diff pane, pickers).
+`wcode serve` + `wcode --socket` (one-shot and interactive). The TUI (S3) is
+another `wcode-protocol` client, and has landed P0–P2: `wcode-tui` runs a session
+through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
+(`--tui`/`--no-tui`) — three bands, streaming, scrollback, `/`-commands, prompt
+history, multiline, markdown (tables included), a context bar, resize, `/copy`.
+Next: P3 (side panel, diff pane, pickers).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

@@ -110,6 +110,13 @@ and stdout are a terminal, and the line REPL otherwise. `--tui`/`--no-tui` force
 either; `-p`, `serve`, and piped input always take the non-TUI path. The TUI
 renders the same `AgentEvent` stream, over a local session or a `--socket` one.
 
+TUI keys: `Enter` submit · `Shift-Enter` newline · `Up`/`Down` recall prompts ·
+`PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-Y` copy the
+last reply (OSC-52). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
+[level]`, `/compact [text]`, `/usage`, `/copy`, `/help` — the subset that maps
+to a `Request` under the current session (the session-lifecycle commands below
+stay in the REPL).
+
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
 
 | command | effect |
