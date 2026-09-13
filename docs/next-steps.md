@@ -327,7 +327,9 @@ landed, plus the reply path (`GetHistory` + `ask`) and the CLI repoint: the REPL
 and `-p` now drive a `SessionHandle`. S2 adds the `wcode-protocol` crate (NDJSON
 frames, a socket server, a remote `Client`, a local-or-remote `Backend`) and wires
 `wcode serve` + `wcode --socket` (one-shot and interactive). Next: the TUI (S3) as
-another `wcode-protocol` client.
+another `wcode-protocol` client. S3's design is settled — `tui-plan.md`
+§3/§9 (the `Backend` seam) plus the visual spec in `tui-design.md`; scaffolding
+is next.
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

@@ -9,6 +9,9 @@ it can be picked up as its own workstream.
 > That doc reframes this plan: the TUI should be a client of `Request`/`Event`
 > over a backend, never of the `Agent` directly (§12 there). The phases below
 > still stand; only the seam is redrawn.
+>
+> **Visual spec:** [`tui-design.md`](tui-design.md) — bands, glyphs, colors,
+> and the mockups each phase should hit.
 
 | phase | scope | status |
 |-------|-------|--------|
@@ -33,8 +36,10 @@ input box, a status line, and scrollback — driven by the *same* `AgentEvent`
 stream the REPL already consumes. The kernel (`wcode-harness`) does not change.
 
 **Non-goals for v1** (kept deliberately out, matching wcode's "minimal" stance):
-the client/server split, multi-session/swarm, remote handoff, inline images,
-mermaid, and an iOS client. Those are jcode-scale; revisit only if wanted.
+multi-session/swarm, remote handoff, inline images, mermaid, and an iOS client.
+The TUI still *consumes* the `Backend` seam (§3), so the client/server split is
+not a rewrite later — but multi-surface and swarm are jcode-scale; revisit only
+if wanted.
 
 ## 2. Reference: how jcode does it
 
@@ -62,20 +67,27 @@ jcode is the mature reference (`../jcode`). Facts worth carrying over:
 
 ## 3. Architecture for wcode
 
-A **new crate `wcode-tui`** depending on `wcode-harness`. The kernel is
-untouched; `wcode-cli` stays the composition root.
+A **new crate `wcode-tui`** depending on **`wcode-protocol`** (not
+`wcode-harness` directly). The TUI is a client of the `Backend` seam —
+`Local(SessionHandle)` or `Remote(Client)` — so local vs socket is a transport
+swap it never branches on. The kernel is untouched; `wcode-cli` stays the
+composition root.
 
-### Seams already present in the kernel
+### The seam it consumes
 
-| seam | today | the TUI uses it to |
-|------|-------|--------------------|
-| `AgentEvent` stream (typed, `serde`) | `agent.run(prompt, tx)`; REPL drains it | drive every UI update |
-| `Agent::run(prompt, tx)` | one-shot / REPL | start a turn |
-| `Agent::cancel_token()` | Ctrl-C task | cancel an in-flight run |
-| `Agent::messages()` / `compact()` | `/usage`, `/compact` | transcript truth, manual compaction |
-| `Session` (JSONL) | `/resume`, `/sessions` | history + session picker |
+The TUI talks to one thing: a `Backend`
+(`../crates/wcode-protocol/src/backend.rs`), whose three verbs mirror the
+REPL's use of the session.
 
-This is the whole point: **the TUI is just another client of the event stream.**
+| verb | maps to | the TUI uses it to |
+|------|---------|--------------------|
+| `subscribe()` → `AgentEvent` stream | the actor's outbox | drive every UI update |
+| `send(Request)` / `ask(Request)` | the actor's inbox | `Submit`, `Cancel`, `SetModel`, `SetEffort`, `Compact`, `GetHistory` |
+| `ask(GetHistory)` → reply | `Agent::messages()` | transcript truth / attach-replay |
+
+Request variants are defined once in `wcode-harness/src/protocol.rs`; the CLI's
+`Command` enum maps onto them. The TUI never names `Agent` — it is just another
+peer on the same wire.
 
 ### Binary / mode selection
 
@@ -96,8 +108,9 @@ tick interval          ─┘
 
 - `crossterm::event::EventStream` (async) gives keys/mouse/resize/paste.
 - The agent's `AgentEvent` receiver gives stream deltas, tool lifecycle, turns.
-- A tick drives animation/status refresh; separate "real change" from
-  "animation only" so idle doesn't burn frames (jcode's `redraw_schedule`).
+- A tick drives the spinner/status refresh **only while a run is in flight**;
+  when idle there is no timer in the `select!`, so the task parks on input and
+  never burns frames. Draw only when the reducer reports a visible change.
 - Render is immediate-mode: compose a `Frame`, run `terminal.draw` only when the
   state (or tick policy) says so.
 
@@ -121,7 +134,7 @@ CAPABILITIES.md` §recommendations).
 ```
 crates/wcode-tui/
   src/
-    lib.rs         // pub use, `run(llm, hooks, tools, compaction, …)`
+    lib.rs         // pub use, `run(backend, …)`
     app.rs         // App state + reducers over AgentEvent / key events
     event.rs       // crossterm events + agent events → AppEvent
     terminal.rs    // raw mode / alt screen / restore guard
@@ -133,8 +146,10 @@ crates/wcode-tui/
     markdown.rs    // P2 — message rendering
 ```
 
-`wcode-cli` gains a dependency on `wcode-tui` and calls `wcode_tui::run(...)`
-when the TTY branch is chosen; the existing `repl.rs` remains for pipes.
+`wcode-cli` gains a dependency on `wcode-tui` and calls
+`wcode_tui::run(backend, …)` when the TTY branch is chosen; the existing
+`repl.rs` remains for pipes. The look (bands, glyphs, mockups) is specified in
+[`tui-design.md`](tui-design.md).
 
 ## 5. Feature phasing
 
@@ -194,23 +209,29 @@ Carried straight from jcode's `TERMINAL_CAPABILITIES.md`:
 
 ## 9. Open questions
 
-- **ratatui/crossterm versions** — pin to jcode's (`0.30`/`0.29`) or the latest?
-- **Alt-screen vs inline** — full-screen alt-screen (jcode) or an inline
-  renderer that preserves normal scrollback? Full-screen is simpler and matches
-  the goal.
-- **Markdown** — hand-rolled minimal vs `pulldown-cmark` + our styling vs a
-  ready `tui-markdown`-style crate.
-- **Crate** — new `wcode-tui` (recommended, mirrors jcode's isolation) vs a
-  module inside `wcode-cli`.
-- **Clipboard** — `arboard` dep vs OSC-52 escape.
-- **Client/server seam** — out of scope now; note only that the `AgentEvent`
-  channel keeps the door open.
-- **Do we retire the line REPL?** Keep it for pipes/`-p`; the TUI replaces only
-  the interactive TTY path.
+## 9. Decisions
+
+Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
+
+- **Versions** — pin to jcode's: `ratatui 0.30` + `crossterm 0.29` (both exist).
+- **Alt-screen** — yes: full-screen with a custom scrollback (P1).
+- **Crate** — a new `wcode-tui` depending on `wcode-protocol`.
+- **Data source** — the `Backend` seam, never `Agent` (§3). This *is* the
+  client/server split the brainstorm §12 asked for; the TUI is a peer.
+- **Markdown** — defer to P2 (hand-rolled minimal; decide then).
+- **Clipboard** — defer to P2; OSC-52 before pulling `arboard`.
+
+Still open:
+
+- **Thinking** — inline vs collapsed (lean inline P0, collapsible P1).
+- **Header/title bar**, **timestamps**, block separation — `tui-design.md` §6.
+- **Do we retire the line REPL?** — no; keep it for pipes/`-p`, the TUI
+  replaces only the interactive TTY path.
 
 ## 10. Progress
 
-- [ ] Decide open questions (versions, alt-screen, markdown, crate split).
+- [x] Decide open questions (versions, alt-screen, crate split, seam).
+- [x] Visual spec drafted: [`tui-design.md`](tui-design.md).
 - [ ] Scaffold `wcode-tui`; `ratatui`+`crossterm`; terminal enter/restore guard.
 - [ ] `App` + reducers over `AgentEvent`; headless tests.
 - [ ] P0 skeleton wired into `wcode-cli` behind the TTY branch.

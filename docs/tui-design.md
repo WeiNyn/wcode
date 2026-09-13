@@ -1,0 +1,177 @@
+# wcode TUI — design (visual spec)
+
+Status: **draft, agreed**. Companion to [`tui-plan.md`](tui-plan.md) (the
+architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
+(the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
+glyphs, colors, and the mockups each phase should hit.
+
+The REPL already has a vocabulary worth keeping — `❯` user, `⚙` tool start,
+`✓`/`✗` tool end, `···` thinking, `⋯` compaction/retry, "dim = secondary". The
+TUI reads as the same product, given a full screen.
+
+## 1. Principles
+
+1. **Three bands, always.** Transcript (flex) → input → status. The only fixed
+   structure. A palette, side panel, or diff is an *overlay* or an addition —
+   never a reflow of the base.
+2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
+   at a fixed column. The gutter is what makes a scrollback readable at a
+   glance; wrapped continuation lines align under it.
+3. **Two colors, dim is the third.** One accent (user prompt + running), red
+   (errors). Everything else is default-fg or dim. Honor `NO_COLOR`; degrade to
+   256-color when truecolor is absent.
+4. **Blocks are separated by a blank line between roles** (tools cluster tight
+   under their `⚙`). Noise is dim; only the model's prose and *your* prompt are
+   full-strength.
+
+## 2. Vocabulary
+
+| element | glyph | style |
+|---|---|---|
+| user prompt | `❯` | accent, bold |
+| assistant prose | — | default fg |
+| thinking | `···` | dim, italic |
+| tool start | `⚙ name  args` | dim |
+| tool done | `✓ name · note` | dim (green-dim ok) |
+| tool error | `✗ name · note` | red |
+| compaction / retry | `⋯` | dim |
+| live cursor | `▌` | accent, steady |
+| spinner (running) | `⠋⠙⠹⠸…` | accent |
+| status separators | `·` | dim |
+
+## 3. Layout drafts
+
+### A — idle, a completed exchange (78 cols)
+
+```
+ ❯ how does edit resolve an anchor?
+
+
+   An anchor is a 5-char hash of a line's raw content, so a line's address
+   includes its indentation — a reformatter moves the anchors.
+
+
+   ⚙ read  crates/wcode-cli/src/tools/edit.rs
+   ✓ read · 128 lines · 12ms
+
+
+   The drift-proofing is the point: every edit targets one snapshot, and an
+   edit above a target never shifts it.
+
+
+ ❯ ▌
+ ────────────────────────────────────────────────────────────────────────────
+  gpt-5-codex · high · 14.2k / 272k · session a1b2c3 · ⏸ idle
+```
+
+### B — running (thinking, tool in flight, live cursor)
+
+```
+ ❯ add a test for the ambiguous-anchor case
+
+
+   ··· The tests use an edit(src, from, to) helper; I'll add a case with two
+       identical lines and assert the ambiguity error is returned.
+   I'll add the test, then run the suite to be sure.
+
+   ⚙ edit  crates/wcode-cli/src/tools/edit.rs
+   ✓ edit · 84 lines changed · 9ms
+
+   ⚙ bash  cargo test -p wcode-cli
+   ⠹ bash · running 1.2s
+
+ ❯ ▌
+ ────────────────────────────────────────────────────────────────────────────
+  gpt-5-codex · high · 15.8k / 272k · session a1b2c3 · ⠹ running 3.1s
+```
+
+### C — narrow (48 cols; status truncates by priority)
+
+```
+ ❯ run the tests
+
+   ⚙ bash  cargo test
+   ✓ bash · 12 lines
+   All 41 tests pass.
+
+ ❯ ▌
+ ──────────────────────────────────────
+  gpt-5-codex · 15.8k · ⏸ idle
+```
+
+### D — command palette (P1, overlay)
+
+```
+   ┌──────────────────────────────────────────────┐
+   │ /                                            │
+   │ ❯ model      set the model                   │
+   │   models     list available models           │
+   │   effort     set reasoning effort            │
+   │   compact    summarize older messages        │
+   │   resume     open another session            │
+   │   usage      token usage                     │
+   └──────────────────────────────────────────────┘
+ ❯ /m▌
+ ────────────────────────────────────────────────────────────────────────────
+  gpt-5-codex · high · 14.2k / 272k · session a1b2c3 · ⏸ idle
+```
+
+### E — tool result with a diff (P1/P2, inline)
+
+```
+   ⚙ edit  crates/wcode-cli/src/tools/edit.rs
+     @@ -40,6 +40,9 @@
+      fn resolve(anchor: &str) -> Result<usize, EditError> {
+     +    if matches.len() > 1 {
+     +        return Err(EditError::Ambiguous);
+     +    }
+          Ok(matches[0])
+      }
+   ✓ edit · +3 −0 · 9ms
+```
+
+## 4. Component specs
+
+**Transcript** — `Vec<Block>` of committed blocks plus one live block. Block
+kinds: `User`, `Assistant`, `Thinking`, `Tool`, `Notice`. Each block computes
+its own height at draw time. A wrapped-line cache keyed by `(revision, width)`
+is the P2 optimization (do not re-wrap static history every frame). Follow-tail
+while streaming; scroll-lock when the user scrolls up (P1).
+
+**Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
+continuation lines align under the text, as in draft B's `···` block). The
+gutter is also the natural home for a `▌` selection bar (P3, copy).
+
+**Input** — 1 line at P0, grows to N at P1 (Shift-Enter newline, `\`
+continuation). `❯ ` prefix; block cursor `▌`. History on Up/Down (P1).
+
+**Status** — one dim "chrome" row, full width. Left: model · effort · tokens.
+Right: session · state. The state glyph is the single source of "am I running";
+the spinner also rides the active tool line, so a long tool never looks frozen.
+Truncation priority when narrow: **model → state → tokens → effort → session**.
+
+## 5. Decisions
+
+Agreed for P0 (see also `tui-plan.md` §9):
+
+- **Data source**: a `wcode-protocol` [`Backend`](../crates/wcode-protocol/src/backend.rs)
+  (`Local`/`Remote`), never `Agent` directly. Local↔remote becomes a transport
+  swap, and the TUI is already the jcode architecture minus the work.
+- **Crate**: new `wcode-tui`, depending on `wcode-protocol`.
+- **Versions**: `ratatui` 0.30, `crossterm` 0.29 (jcode's; both exist).
+- **Alt-screen**: yes, with a custom scrollback (P1).
+- **Palette**: accent + red only at P0; theme detection at P2.
+- **Deferred**: markdown (P2), clipboard (P2, OSC-52 before pulling `arboard`).
+- **Wire deltas**: P0 accepts whole-message `MessageUpdate`; the O(n²) matters
+  only for a socket-backed TUI (already reachable via `--socket`) and is
+  resolved before that path is a goal.
+
+## 6. Open questions
+
+- **Thinking**: inline (drafted) vs a collapsed one-liner `⋯ thinking · N chars`,
+  expandable. Lean inline at P0, collapsible at P1.
+- **Timestamps** on turns: lean no.
+- **Header/title bar** (session, cwd): lean no — the status line carries it.
+- **Block separation**: blank between *roles* (drafted) vs between every block.
+- **Gutter vs flat**: gutter (drafted) — it is the main thing the TUI buys over
+  the line loop. Revisit only if it costs width on 80-col terminals.
