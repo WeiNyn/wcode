@@ -10,6 +10,7 @@ pub mod find;
 pub mod grep;
 pub mod read;
 pub mod replace;
+pub mod spawn;
 pub mod write;
 
 use std::path::{Path, PathBuf};

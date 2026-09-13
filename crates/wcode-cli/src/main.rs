@@ -8,8 +8,11 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
+use wcode_harness::streamfn::rig_stream_fn;
+use wcode_harness::tool::erased;
 use wcode_protocol::Backend;
 
+mod agents;
 mod config;
 mod instructions;
 mod repl;
@@ -22,12 +25,13 @@ use crate::instructions::{InstructionSet, Mode, load as load_instructions};
 use crate::skills::{SkillSet, discover as discover_skills};
 use crate::repl::{
     AgentSpec, build_agent, default_hooks, list_sessions, resolve_session_path, session_dir,
+    system_prompt,
 };
 
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [serve] [--socket <path>] [--tui|--no-tui]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [serve] [--socket <path>] [--tui|--no-tui]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -98,6 +102,9 @@ struct Args {
     no_instructions: bool,
     dump_system_prompt: bool,
     no_skills: bool,
+    /// `--agents`: register the `spawn` tool so this session can spawn worker
+    /// agents (A2A, §10.1).
+    agents: bool,
     sequential: bool,
     /// `wcode serve`: own the session and serve it over a socket.
     serve: bool,
@@ -167,6 +174,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--dump-system-prompt" => a.dump_system_prompt = true,
             "--no-skills" => a.no_skills = true,
             "--sequential" => a.sequential = true,
+            "--agents" => a.agents = true,
             "serve" => a.serve = true,
             "--socket" => {
                 a.socket = Some(args.get(i).ok_or("--socket requires a path")?.clone());
@@ -455,6 +463,26 @@ async fn main() {
     let skills = discover_skills_for(&args, &cfg, &cwd);
 
     let hooks = default_hooks(&cfg.hooks);
+    // A2A (opt-in): a session factory + the `spawn` tool. Only this root session
+    // gets the tool, so only it spawns (§10.1).
+    let mut extra_tools: Vec<wcode_harness::tool::Tool> = Vec::new();
+    if args.agents {
+        let template = crate::agents::WorkerTemplate {
+            system: system_prompt(&cfg.tools, &instructions, &skills, &cwd),
+            llm: llm.clone(),
+            stream_fn: rig_stream_fn(),
+            hooks: hooks.clone(),
+            tools: cfg.tools,
+            compaction: cfg.compaction,
+            working_dir: cwd.clone(),
+        };
+        let factory =
+            crate::agents::SessionFactory::new(wcode_protocol::Registry::new(), template);
+        extra_tools.push(erased(crate::tools::spawn::Spawn::new(
+            factory,
+            SessionId::agent("orchestrator"),
+        )));
+    }
     let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
@@ -466,6 +494,7 @@ async fn main() {
         },
         session,
         context,
+        extra_tools,
     );
 
     if args.serve {

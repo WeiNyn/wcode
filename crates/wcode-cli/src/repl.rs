@@ -18,6 +18,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
+use wcode_harness::tool::Tool;
 use wcode_protocol::Backend;
 #[cfg(unix)]
 use wcode_protocol::Client;
@@ -349,11 +350,14 @@ pub fn build_agent(
     spec: AgentSpec<'_>,
     session: Option<Session>,
     context: Vec<AgentMessage>,
+    extra_tools: Vec<Tool>,
 ) -> Agent {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut tools = default_tools(spec.tools);
+    tools.extend(extra_tools);
     Agent::new(AgentConfig {
         system: system_prompt(spec.tools, spec.instructions, spec.skills, &cwd),
-        tools: default_tools(spec.tools),
+        tools,
         llm: spec.llm,
         stream_fn: rig_stream_fn(),
         hooks: spec.hooks,
@@ -651,6 +655,7 @@ pub async fn run(
                             },
                             session,
                             Vec::new(),
+                            vec![],
                         );
                         backend = Backend::from(SessionActor::spawn(new_agent));
                         *lock_slot(&backend_slot) = backend.clone();
@@ -755,6 +760,7 @@ pub async fn run(
                             },
                             Some(s),
                             messages,
+                            vec![],
                         );
                         backend = Backend::from(SessionActor::spawn(new_agent));
                         *lock_slot(&backend_slot) = backend.clone();
