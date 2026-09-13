@@ -349,8 +349,10 @@ async fn main() {
                         )
                         .map(|l| l.context),
                     };
+                    let models: Vec<String> =
+                        wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default();
                     if let Err(e) =
-                        wcode_tui::run(Backend::from(client), status, Some(repl::history_path())).await
+                        wcode_tui::run(Backend::from(client), status, models, Some(repl::history_path())).await
                     {
                         eprintln!("tui: {e}");
                         std::process::exit(1);
@@ -498,10 +500,13 @@ async fn main() {
                     )
                     .map(|l| l.context),
                 };
+                let models: Vec<String> =
+                    wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default();
                 if let Err(e) =
                     wcode_tui::run(
                         Backend::from(SessionActor::spawn(agent)),
                         status,
+                        models,
                         Some(repl::history_path()),
                     )
                     .await

@@ -13,7 +13,7 @@ each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☐ todo |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
-| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P2; S4 (A2A) next |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ◐ S0–S2 landed; S3 TUI P0–P3a; S4 (A2A) next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -331,7 +331,7 @@ another `wcode-protocol` client, and has landed P0–P2: `wcode-tui` runs a sess
 through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 (`--tui`/`--no-tui`) — three bands, streaming, scrollback, `/`-commands, prompt
 history, multiline, markdown (tables included), a context bar, resize, `/copy`.
-Next: P3 (side panel, diff pane, pickers).
+Next: P3b–P3d (diff rendering, side panel, session picker).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

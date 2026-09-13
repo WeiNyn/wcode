@@ -18,7 +18,7 @@ it can be picked up as its own workstream.
 | P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
 | P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☐ todo |
 | P2 | polish: markdown, usage status, resize, copy | ☐ todo |
-| P3 | extras: side panel, diff pane, session/model pickers | ☐ todo |
+| P3 | extras: overlays + pickers, diff rendering, side panel | ◐ P3a done |
 | P4 | stretch: images, mermaid, theming | ☐ todo |
 
 ---
@@ -173,9 +173,52 @@ crates/wcode-tui/
 - Theme detection (truecolor via `COLORTERM`), graceful 256-color fallback.
 
 **P3 — extras.**
-- Side panel (file viewer; later diff viewer).
-- Diff pane for edits.
-- Session picker and model picker overlays.
+
+The TUI is a *client of a `Backend`*: it owns no filesystem, no `LlmOpts`, no
+session dir, no model list. Every P3 feature wants a capability the session does
+not expose, so the phase is mostly presentation plus **capabilities injected by
+the composition root** (the same shape P0–P2 already use for `status`/`history`),
+not protocol growth. Two forks, both resolved the conservative way:
+
+- **Inject, don't extend the protocol.** A model list, a session list, and file
+  bytes are things the *client* can fetch (`list_models`, `list_sessions`, the
+  fs); pushing `ListModels`/`ListSessions` into the actor would pull the endpoint
+  and the session dir into the kernel — the multi-session scope §1 excludes.
+  Revisit only when the socket TUI needs it (the same reasoning that defers the
+  O(n²) wire deltas).
+- **The session picker is a re-exec handoff.** The TUI cannot rebuild an agent;
+  a picker selection emits an Action ("quit and `--resume <path>`") the CLI maps
+  through the existing `repl::reload_args`, keeping the TUI a pure client.
+
+Slices, ascending in coupling (each independently shippable — tests + clippy +
+**a live check**):
+
+- **P3a — overlay layer + model picker.** A generic modal (`Overlay::Picker`)
+  drawn over the three bands (design §1: an overlay never reflows the base;
+  draft D). Keys route to the overlay first; Esc closes, ↑/↓ move, printable
+  chars filter, Enter selects. `/model` with no arg opens it; a selection emits
+  the existing `SetModel`. The model list is injected into `run(...)`.
+- **P3b — diff rendering.** Style `@@`/`+`/`-` lines in a tool block
+  (green/red/dim) instead of the one-line summary; paired with a CLI-tools change
+  so `edit`/`edits`/`write`/`replace` emit a compact unified diff as their
+  `output` — it then flows through the existing `ToolExecutionEnd` and
+  `GetHistory`, so it works live and on replay (and helps the REPL).
+- **P3c — side panel (file viewer).** A fixed-width column beside the bands (an
+  *addition*, not a reflow), toggled by Ctrl-O / `/panel`; its content comes from
+  an injected `PanelSource` (Local → fs; Remote → client-host fs or disabled).
+- **P3d — session picker.** `/resume` opens a picker seeded from an injected
+  session list (id · age · first user line); a selection emits the re-exec
+  Action. Landed **last** — the only feature that needs composition-root
+  cooperation.
+
+Testing: pure reducer tests (overlay open/filter/select → the right `Action`;
+keys swallowed while open), `TestBackend` snapshots (overlay box, panel column,
+diff styling), and a live check per slice.
+
+Open: standalone panel column vs. overlay; diff from tool output vs. a
+structured `ContentBlock::Diff`; dedicated picker chords vs. the `/`-palette;
+`NO_COLOR`/narrow-width behaviour for overlays; pickers under `Backend::Remote`
+(no session dir, no model list).
 
 **P4 — stretch.** Inline images (kitty/iTerm), mermaid, configurable theming.
 
@@ -206,7 +249,6 @@ Carried straight from jcode's `TERMINAL_CAPABILITIES.md`:
 - Possibly a clipboard crate (`arboard`, as jcode uses) or OSC-52 to avoid one —
   decide at P2.
 
-## 9. Open questions
 
 ## 9. Decisions
 
@@ -220,6 +262,9 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 - **Markdown** — landed in P2: a hand-rolled minimal renderer (`markdown.rs`),
   no dependency.
 - **Clipboard** — landed in P2: OSC-52 (`/copy`), no `arboard`.
+- **P3 capabilities** — injected from the composition root, *not* new protocol
+  requests (`ListModels`/`ListSessions`); the session picker is a `--resume`
+  re-exec handoff. Revisit when the socket client needs them.
 
 Still open:
 
@@ -248,5 +293,9 @@ Still open:
 - [x] P2 fixes: the wheel scrolls the transcript (mouse capture; 3 lines a
       notch) and startup replays `GetHistory`, so a resumed session opens on its
       earlier turns rather than an empty pane.
-- [ ] P3 panels + pickers.
+- [x] P3a: overlay layer + model picker (`/model` with no arg opens a
+      centered modal; the model list is injected; `/model <id>` still sets).
+- [ ] P3b: diff rendering (tool output as unified diff; styled `@@`/`+`/`-`).
+- [ ] P3c: side panel (file viewer; injected `PanelSource`).
+- [ ] P3d: session picker (`/resume`; re-exec handoff).
 - [ ] P4 stretch.

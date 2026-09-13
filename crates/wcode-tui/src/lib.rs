@@ -37,12 +37,20 @@ const TICK: Duration = Duration::from_millis(120);
 
 /// Run the TUI against `backend` until the user quits. Enters the alternate
 /// screen; restores it on every exit path. `history` is where prompt history is
-/// persisted (`None` keeps it in memory only).
-pub async fn run(backend: Backend, status: Status, history: Option<PathBuf>) -> io::Result<()> {
+/// persisted (`None` keeps it in memory only). `models` seeds the `/model`
+/// picker: this crate cannot list models (no `LlmOpts`), so the caller supplies
+/// them (e.g. from `list_models`).
+pub async fn run(
+    backend: Backend,
+    status: Status,
+    models: Vec<String>,
+    history: Option<PathBuf>,
+) -> io::Result<()> {
     let (guard, mut terminal) = terminal::enter()?;
 
     let mut app = App::new();
     app.set_status(status);
+    app.set_models(models);
     // Attach-replay: a resumed session already has turns; show them, so the
     // transcript is never mysteriously empty (`GetHistory` is the seam for it).
     if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {

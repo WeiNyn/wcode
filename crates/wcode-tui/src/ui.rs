@@ -9,10 +9,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
-use crate::app::{App, Block, Tool};
+use crate::app::{App, Block, Overlay, Tool};
 use crate::markdown;
 
 /// First/continuation prefixes for a thinking block (`···` then an aligned
@@ -22,6 +22,7 @@ const THINK_CONT: &str = "       ";
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
     // The input grows with its line count (Shift-Enter adds a line).
     let input_height = (app.input().matches('\n').count() + 1).clamp(1, 6) as u16;
     let [body, rule, input, status] = Layout::vertical([
@@ -30,12 +31,90 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(area);
 
     draw_transcript(frame, body, app);
     draw_rule(frame, rule);
     draw_input(frame, input, app);
     draw_status(frame, status, app);
+    // The modal, if any, is drawn last — over the bands.
+    draw_overlay(frame, area, app);
+}
+
+/// Draw the open modal, centered over everything else. `Clear` first so the
+/// bands beneath do not bleed through (design §1: an overlay never reflows the
+/// base layout).
+fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(Overlay::Pick(picker)) = app.overlay() else {
+        return;
+    };
+    let rows = picker.rows();
+
+    // Borders (2) + the filter line (1) + at least one item row.
+    let max_items = area.height.saturating_sub(3).max(1) as usize;
+    let visible = rows.len().min(max_items).max(1);
+    let start = if rows.len() <= visible {
+        0
+    } else {
+        picker
+            .selected
+            .saturating_sub(visible - 1)
+            .min(rows.len() - visible)
+    };
+
+    let height = (visible as u16 + 3).min(area.height);
+    let width = area.width.saturating_sub(4).clamp(1, 64);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_style(dim())
+        .title(Span::styled(format!(" {} ", picker.title), dim()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!("/{}", picker.query),
+        dim(),
+    ))];
+    for (i, (item, range)) in rows.iter().enumerate().skip(start).take(visible) {
+        let marker = if i == picker.selected {
+            Span::styled("❯ ", accent())
+        } else {
+            Span::styled("  ", dim())
+        };
+        let mut spans = vec![marker];
+        spans.extend(highlight(item, range.as_ref()));
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Split an item into spans, emphasizing the matched substring (if any), all in
+/// the dim base style. A match range off a char boundary is ignored rather than
+/// sliced mid-codepoint.
+fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'static>> {
+    let style = dim();
+    let Some(range) = range else {
+        return vec![Span::styled(text.to_string(), style)];
+    };
+    if range.end > text.len()
+        || !text.is_char_boundary(range.start)
+        || !text.is_char_boundary(range.end)
+    {
+        return vec![Span::styled(text.to_string(), style)];
+    }
+    vec![
+        Span::styled(text[..range.start].to_string(), style),
+        Span::styled(text[range.start..range.end].to_string(), accent()),
+        Span::styled(text[range.end..].to_string(), style),
+    ]
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -528,5 +607,18 @@ mod tests {
         let lines = greedy_wrap("one two three four", 8);
         assert!(lines.iter().all(|l| l.chars().count() <= 8));
         assert_eq!(lines.join(" "), "one two three four");
+    }
+
+    #[test]
+    fn an_open_picker_renders_over_the_bands() {
+        let mut app = App::new();
+        app.set_models(vec!["gpt-4o".into(), "gpt-4o-mini".into()]);
+        for c in "/model".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("model"), "picker title missing: {text}");
+        assert!(text.contains("gpt-4o"), "picker item missing: {text}");
     }
 }

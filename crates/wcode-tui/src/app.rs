@@ -82,6 +82,69 @@ pub struct Tool {
     pub is_error: bool,
 }
 
+/// A transient modal drawn over the three bands. Shared infrastructure: any
+/// list the user picks from (models now, sessions later) is an [`Overlay`],
+/// opened from a `/`-command, capturing keys until dismissed, and drawn *over*
+/// the base layout — it never reflows it (design §1).
+#[derive(Clone, Debug)]
+pub enum Overlay {
+    Pick(Picker),
+}
+
+/// A filterable list the user navigates and selects from. `items` is the full
+/// injected list; [`Picker::rows`] is the visible subset `selected` indexes.
+#[derive(Clone, Debug)]
+pub struct Picker {
+    pub kind: PickerKind,
+    pub title: String,
+    pub items: Vec<String>,
+    pub query: String,
+    /// Index into [`Picker::rows`], not into `items`.
+    pub selected: usize,
+}
+
+/// What selecting a [`Picker`] row does — the [`Action`] the reducer emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerKind {
+    Model,
+}
+
+impl Picker {
+    fn new(kind: PickerKind, title: impl Into<String>, items: Vec<String>) -> Self {
+        Picker {
+            kind,
+            title: title.into(),
+            items,
+            query: String::new(),
+            selected: 0,
+        }
+    }
+
+    /// The rows to show: each item matching `query` (case-insensitive) and, when
+    /// filtering, the byte range of the match within it (for highlighting). An
+    /// empty query shows every item.
+    pub fn rows(&self) -> Vec<(&str, Option<std::ops::Range<usize>>)> {
+        let query = self.query.to_lowercase();
+        self.items
+            .iter()
+            .filter_map(|item| {
+                if query.is_empty() {
+                    return Some((item.as_str(), None));
+                }
+                let lower = item.to_lowercase();
+                lower
+                    .find(&query)
+                    .map(|start| (item.as_str(), Some(start..start + query.len())))
+            })
+            .collect()
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let last = self.rows().len().saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+    }
+}
+
 /// Status-line fields.
 #[derive(Clone, Debug)]
 pub struct Status {
@@ -131,6 +194,11 @@ pub struct App {
     /// The in-progress line, saved while browsing history.
     draft: String,
     status: Status,
+    /// Model ids for the `/model` picker — injected by the composition root,
+    /// since the TUI holds no `LlmOpts` and cannot list models itself.
+    models: Vec<String>,
+    /// The open modal, if any. While one is shown it captures every key.
+    overlay: Option<Overlay>,
     /// Provider-reported input tokens of the last turn: how full the context was.
     context_used: Option<u64>,
     /// Lines scrolled up from the bottom; `0` follows the tail.
@@ -173,6 +241,11 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key) {
+        // A modal owns the keyboard: no key reaches the input while it is up.
+        if self.overlay.is_some() {
+            self.on_overlay_key(key);
+            return;
+        }
         match key {
             Key::Char(c) => {
                 self.history_index = None;
@@ -270,7 +343,7 @@ impl App {
                 Some(m) => self.actions.push(Action::Ask(Request::SetModel {
                     model: m.to_string(),
                 })),
-                None => self.notice("usage: /model <id>"),
+                None => self.open_model_picker(),
             },
             "/effort" => match arg {
                 Some(level) => {
@@ -620,6 +693,79 @@ impl App {
         self.viewport = height;
         self.last_total = total;
         self.last_width = width;
+    }
+
+    /// Open the model picker over the injected model list.
+    fn open_model_picker(&mut self) {
+        if self.models.is_empty() {
+            self.notice("no models available to pick");
+            return;
+        }
+        self.overlay = Some(Overlay::Pick(Picker::new(
+            PickerKind::Model,
+            "model",
+            self.models.clone(),
+        )));
+        self.dirty = true;
+    }
+
+    /// Keys while a modal is open: ↑/↓ move, printable chars filter, Backspace
+    /// deletes, Enter selects, Esc dismisses. Everything else is swallowed.
+    fn on_overlay_key(&mut self, key: Key) {
+        match key {
+            Key::Esc => self.overlay = None,
+            Key::Up => self.map_picker(|p| p.move_selection(-1)),
+            Key::Down => self.map_picker(|p| p.move_selection(1)),
+            Key::Backspace => self.map_picker(|p| {
+                p.query.pop();
+                p.selected = 0;
+            }),
+            Key::Char(c) => self.map_picker(|p| {
+                p.query.push(c);
+                p.selected = 0;
+            }),
+            Key::Enter => self.accept_picker(),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Run `f` against the open picker, if any.
+    fn map_picker(&mut self, f: impl FnOnce(&mut Picker)) {
+        if let Some(Overlay::Pick(picker)) = self.overlay.as_mut() {
+            f(picker);
+        }
+    }
+
+    /// Apply the highlighted row and dismiss the modal.
+    fn accept_picker(&mut self) {
+        let Some(Overlay::Pick(picker)) = self.overlay.take() else {
+            return;
+        };
+        let rows = picker.rows();
+        let Some((item, _)) = rows.get(picker.selected) else {
+            self.notice("no match to select");
+            return;
+        };
+        let selected = item.to_string();
+        match picker.kind {
+            PickerKind::Model => {
+                self.status.model.clone_from(&selected);
+                self.notice(format!("model: {selected}"));
+                self.actions
+                    .push(Action::Ask(Request::SetModel { model: selected }));
+            }
+        }
+    }
+
+    /// The open modal, if any (read by the renderer).
+    pub fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
+    }
+
+    /// Seed the model list the picker offers (e.g. from `list_models`).
+    pub fn set_models(&mut self, models: Vec<String>) {
+        self.models = models;
     }
 
     pub fn status(&self) -> &Status {
@@ -1144,5 +1290,88 @@ mod tests {
         assert!(app.dirty());
         app.clear_dirty();
         assert!(!app.dirty());
+    }
+
+    #[test]
+    fn model_without_an_argument_opens_the_picker() {
+        let mut app = App::new();
+        app.set_models(vec!["gpt-4o".into(), "gpt-4o-mini".into()]);
+        submit(&mut app, "/model");
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "model"));
+        // Opening a picker emits nothing; the selection does.
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn the_picker_navigates_and_selects() {
+        let mut app = App::new();
+        app.set_models(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none(), "selecting closes the modal");
+        assert_eq!(app.status().model, "beta");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "beta".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn the_picker_filters_then_selects_the_only_match() {
+        let mut app = App::new();
+        app.set_models(vec!["alpha".into(), "beta".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+
+        for c in "bet".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "beta".into()
+            })]
+        );
+    }
+
+    #[test]
+    fn esc_dismisses_the_picker_without_selecting() {
+        let mut app = App::new();
+        app.set_models(vec!["alpha".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.overlay().is_none());
+        assert!(app.take_actions().is_empty());
+        assert!(!app.should_quit(), "Esc closes the modal, it does not quit");
+    }
+
+    #[test]
+    fn keys_do_not_reach_the_input_while_a_modal_is_open() {
+        let mut app = App::new();
+        app.set_models(vec!["alpha".into()]);
+        submit(&mut app, "/model");
+        for c in "xyz".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        assert_eq!(app.input(), "", "the input stayed untouched");
+    }
+
+    #[test]
+    fn model_without_an_argument_and_no_list_says_so() {
+        let mut app = App::new();
+        submit(&mut app, "/model");
+        assert!(app.overlay().is_none());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("no models")
+        ));
     }
 }
