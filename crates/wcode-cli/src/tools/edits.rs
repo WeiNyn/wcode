@@ -66,6 +66,7 @@ impl TypedTool for Edits {
             return ToolOutput {
                 output: "[E_EMPTY_BATCH] `edits` needs at least one op.".into(),
                 is_error: true,
+                diff: None,
             };
         }
 
@@ -79,6 +80,7 @@ impl TypedTool for Edits {
                         args.edits[0].path, op.path
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
         }
@@ -89,6 +91,7 @@ impl TypedTool for Edits {
                 return ToolOutput {
                     output: format!("edits {}: {e}", args.edits[0].path),
                     is_error: true,
+                    diff: None,
                 };
             }
         };
@@ -114,6 +117,7 @@ impl TypedTool for Edits {
                         label, op.from, ANCHOR_SEP
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
             if let Some(t) = &op.to
@@ -125,6 +129,7 @@ impl TypedTool for Edits {
                         label
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
             let ranges = anchor::find_ranges(
@@ -150,6 +155,7 @@ impl TypedTool for Edits {
                         op.path
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
             if ranges.len() > 1 && !op.replace_all.unwrap_or(false) {
@@ -167,6 +173,7 @@ impl TypedTool for Edits {
                         candidates
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
             for r in ranges {
@@ -194,6 +201,7 @@ impl TypedTool for Edits {
                         cur.end + 1,
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
         }
@@ -233,6 +241,7 @@ impl TypedTool for Edits {
                     args.edits[0].path
                 ),
                 is_error: false,
+                diff: None,
             };
         }
 
@@ -280,6 +289,7 @@ impl TypedTool for Edits {
                         ));
                     }
                 }
+                let diff = super::diff::unified(&original, &updated);
                 ToolOutput {
                     output: format!(
                         "edited {} ({total} range{} applied: {summary}). Region now:\n{echo}",
@@ -287,11 +297,13 @@ impl TypedTool for Edits {
                         if total == 1 { "" } else { "s" },
                     ),
                     is_error: false,
+                    diff,
                 }
             }
             Err(e) => ToolOutput {
                 output: format!("edits {}: {e}", args.edits[0].path),
                 is_error: true,
+                diff: None,
             },
         }
     }

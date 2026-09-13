@@ -3,6 +3,7 @@ pub mod ast;
 pub mod ast_edit;
 pub mod ast_search;
 pub mod bash;
+pub mod diff;
 pub mod edit;
 pub mod edits;
 pub mod find;

@@ -12,8 +12,13 @@ pub struct ToolContext {
 
 #[derive(Clone, Debug, Default)]
 pub struct ToolOutput {
+    /// What the model reads — this becomes the `ToolResult` content.
     pub output: String,
     pub is_error: bool,
+    /// An optional unified diff, for *presentation only*: it rides the
+    /// `ToolExecutionEnd` event to the UI but never enters the model's context.
+    /// `None` for tools that do not touch files.
+    pub diff: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -65,6 +70,7 @@ impl<T: TypedTool> ErasedToolCore for T {
             return ToolOutput {
                 output: "cancelled".to_string(),
                 is_error: true,
+                diff: None,
             };
         }
         let parsed: T::Args = match serde_json::from_value(args) {
@@ -76,6 +82,7 @@ impl<T: TypedTool> ErasedToolCore for T {
                         TypedTool::name(self)
                     ),
                     is_error: true,
+                    diff: None,
                 };
             }
         };
@@ -139,6 +146,7 @@ mod tests {
             ToolOutput {
                 output: format!("echo:{}", args.text),
                 is_error: false,
+                diff: None,
             }
         }
     }

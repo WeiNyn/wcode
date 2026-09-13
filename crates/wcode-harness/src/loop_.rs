@@ -439,6 +439,7 @@ pub async fn run_loop(
                         results[i] = Some(ToolOutput {
                             output: "aborted before execution".to_string(),
                             is_error: true,
+                            diff: None,
                         });
                     }
                 }
@@ -488,6 +489,7 @@ pub async fn run_loop(
                     let out = results[i].take().unwrap_or_else(|| ToolOutput {
                         output: "aborted before execution".to_string(),
                         is_error: true,
+                        diff: None,
                     });
                     let sent = started[i]
                         && sink
@@ -496,6 +498,7 @@ pub async fn run_loop(
                                 name: c.name.clone(),
                                 output: out.output.clone(),
                                 is_error: out.is_error,
+                                diff: out.diff.clone(),
                             })
                             .is_ok();
                     // Push the result before honoring a dead sink so ctx never
@@ -613,6 +616,7 @@ impl Planned {
             fail: Some(ToolOutput {
                 output,
                 is_error: true,
+                diff: None,
             }),
             parallel_safe: false,
         }
@@ -635,12 +639,14 @@ fn synthesize_unexecuted(
         let out = ToolOutput {
             output: "aborted before execution".to_string(),
             is_error: true,
+            diff: None,
         };
         let _ = sink.send(AgentEvent::ToolExecutionEnd {
             call_id: rid.clone(),
             name: rname.clone(),
             output: out.output.clone(),
             is_error: out.is_error,
+            diff: out.diff.clone(),
         });
         let result = AgentMessage::ToolResult {
             tool_call_id: rid,

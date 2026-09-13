@@ -559,6 +559,7 @@ mod tests {
             ToolOutput {
                 output: format!("released:{}", args.text),
                 is_error: false,
+                diff: None,
             }
         }
     }

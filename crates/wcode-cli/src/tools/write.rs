@@ -39,18 +39,25 @@ impl TypedTool for Write {
             return ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
+                diff: None,
             };
         }
+        // Best-effort read of the previous contents so the diff shows what an
+        // overwrite replaced; a new file diffs as all additions.
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let diff = super::diff::unified(&old, &args.content);
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
         let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &args.content).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
                 output: format!("wrote {} bytes to {}", args.content.len(), args.path),
                 is_error: false,
+                diff,
             },
             Err(e) => ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
+                diff: None,
             },
         }
     }

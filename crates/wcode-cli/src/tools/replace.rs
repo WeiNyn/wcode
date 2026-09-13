@@ -45,6 +45,7 @@ impl TypedTool for Replace {
                 return ToolOutput {
                     output: format!("replace {}: {e}", args.path),
                     is_error: true,
+                    diff: None,
                 };
             }
         };
@@ -53,6 +54,7 @@ impl TypedTool for Replace {
             return ToolOutput {
                 output: format!("old_string not found in {}", args.path),
                 is_error: true,
+                diff: None,
             };
         }
         if matches > 1 && !args.replace_all.unwrap_or(false) {
@@ -62,6 +64,7 @@ impl TypedTool for Replace {
                     args.path
                 ),
                 is_error: true,
+                diff: None,
             };
         }
         let updated = if args.replace_all.unwrap_or(false) {
@@ -69,16 +72,19 @@ impl TypedTool for Replace {
         } else {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
+        let diff = super::diff::unified(&content, &updated);
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
         let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
                 output: format!("replaced in {}", args.path),
                 is_error: false,
+                diff,
             },
             Err(e) => ToolOutput {
                 output: format!("replace {}: {e}", args.path),
                 is_error: true,
+                diff: None,
             },
         }
     }

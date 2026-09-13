@@ -92,6 +92,7 @@ impl TypedTool for RecordingTool {
         ToolOutput {
             output: format!("echo:{}", self.seen.lock().unwrap().last().unwrap()),
             is_error: false,
+            diff: None,
         }
     }
 }
@@ -123,6 +124,7 @@ impl TypedTool for CwdProbe {
         ToolOutput {
             output: "ok".into(),
             is_error: false,
+            diff: None,
         }
     }
 }
@@ -980,6 +982,7 @@ impl TypedTool for CancelTool {
         ToolOutput {
             output: format!("ran:{}", args.text),
             is_error: false,
+            diff: None,
         }
     }
 }
@@ -1369,6 +1372,7 @@ impl TypedTool for TimedTool {
         ToolOutput {
             output: format!("{}:{}", self.name, args.tag),
             is_error: false,
+            diff: None,
         }
     }
 }
@@ -1525,4 +1529,68 @@ async fn parallel_false_forces_sequential_execution() {
         vec![("a", "start"), ("a", "end"), ("b", "start"), ("b", "end")],
         "parallel=false must restore sequential execution"
     );
+}
+
+struct DiffTool;
+
+#[async_trait::async_trait]
+impl TypedTool for DiffTool {
+    type Args = NoArgs;
+    fn name(&self) -> &str {
+        "patch"
+    }
+    fn description(&self) -> &str {
+        "returns an output plus a UI-only diff"
+    }
+    async fn execute(&self, _args: NoArgs, _ctx: &ToolContext) -> ToolOutput {
+        ToolOutput {
+            output: "edited f".into(),
+            is_error: false,
+            diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+        }
+    }
+}
+
+/// The diff is UI-only: it rides `ToolExecutionEnd` to the client but must NOT
+/// enter the `ToolResult` the model sees (that would tax every edit).
+#[tokio::test]
+async fn the_diff_rides_the_event_but_not_the_model_context() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "patch".into(),
+            arguments: serde_json::json!({}),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("done".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![erased(DiffTool)],
+        HooksSet::default(),
+    );
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (_res, events) = run(cfg, &mut ctx).await;
+
+    let diff = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd { diff, .. } => diff.clone(),
+        _ => None,
+    });
+    assert_eq!(diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { output, .. } if output == "edited f"
+    ));
 }

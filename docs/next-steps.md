@@ -331,7 +331,7 @@ another `wcode-protocol` client, and has landed P0–P2: `wcode-tui` runs a sess
 through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 (`--tui`/`--no-tui`) — three bands, streaming, scrollback, `/`-commands, prompt
 history, multiline, markdown (tables included), a context bar, resize, `/copy`.
-Next: P3b–P3d (diff rendering, side panel, session picker).
+Next: P3c–P3d (side panel, session picker).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

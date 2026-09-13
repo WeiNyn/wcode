@@ -51,6 +51,7 @@ impl TypedTool for AstSearch {
                     "ast_search: no ast-grep binary on PATH (tool should not have been registered)"
                         .into(),
                 is_error: true,
+                diff: None,
             };
         };
         let mut cmd = tokio::process::Command::new(bin);
@@ -85,6 +86,7 @@ impl TypedTool for AstSearch {
                 return ToolOutput {
                     output: "cancelled".to_string(),
                     is_error: true,
+                    diff: None,
                 };
             }
             res = cmd.output() => match res {
@@ -93,6 +95,7 @@ impl TypedTool for AstSearch {
                     return ToolOutput {
                         output: format!("ast_search: failed to run `{bin}`: {e}"),
                         is_error: true,
+                        diff: None,
                     };
                 }
             },
@@ -113,6 +116,7 @@ impl TypedTool for AstSearch {
                     }
                 ),
                 is_error: true,
+                diff: None,
             };
         }
         let mut text = stdout;
@@ -126,6 +130,7 @@ impl TypedTool for AstSearch {
                 text
             },
             is_error: false,
+            diff: None,
         }
     }
 }

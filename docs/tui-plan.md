@@ -18,7 +18,7 @@ it can be picked up as its own workstream.
 | P0 | skeleton: alt-screen, input box, stream, status line, Ctrl-C, restore | ☐ todo |
 | P1 | transcript: scrollback, thinking/tool blocks, `/`-commands, history | ☐ todo |
 | P2 | polish: markdown, usage status, resize, copy | ☐ todo |
-| P3 | extras: overlays + pickers, diff rendering, side panel | ◐ P3a done |
+| P3 | extras: overlays + pickers, diff rendering, side panel | ◐ P3a–P3b done |
 | P4 | stretch: images, mermaid, theming | ☐ todo |
 
 ---
@@ -198,11 +198,11 @@ Slices, ascending in coupling (each independently shippable — tests + clippy +
   draft D). Keys route to the overlay first; Esc closes, ↑/↓ move, printable
   chars filter, Enter selects. `/model` with no arg opens it; a selection emits
   the existing `SetModel`. The model list is injected into `run(...)`.
-- **P3b — diff rendering.** Style `@@`/`+`/`-` lines in a tool block
-  (green/red/dim) instead of the one-line summary; paired with a CLI-tools change
-  so `edit`/`edits`/`write`/`replace` emit a compact unified diff as their
-  `output` — it then flows through the existing `ToolExecutionEnd` and
-  `GetHistory`, so it works live and on replay (and helps the REPL).
+- **P3b — diff rendering.** `edit`/`edits`/`write`/`replace` attach a compact
+  unified diff to their result; the TUI styles `@@`/`+`/`-` lines (dim/green/red)
+  under the `⚙` line with a `+a −r` summary. The diff is **UI-only**: it rides a
+  new `ToolOutput::diff` → `ToolExecutionEnd.diff` field so the model's context
+  stays lean (route 2 in the fork below).
 - **P3c — side panel (file viewer).** A fixed-width column beside the bands (an
   *addition*, not a reflow), toggled by Ctrl-O / `/panel`; its content comes from
   an injected `PanelSource` (Local → fs; Remote → client-host fs or disabled).
@@ -262,6 +262,9 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 - **Markdown** — landed in P2: a hand-rolled minimal renderer (`markdown.rs`),
   no dependency.
 - **Clipboard** — landed in P2: OSC-52 (`/copy`), no `arboard`.
+- **Diff is UI-only** — not in the tool `output`, so it never enters the model's
+  context; carried by `ToolOutput::diff` / `AgentEvent::ToolExecutionEnd.diff`, so
+  it works live but is not persisted (a replayed session shows no diff).
 - **P3 capabilities** — injected from the composition root, *not* new protocol
   requests (`ListModels`/`ListSessions`); the session picker is a `--resume`
   re-exec handoff. Revisit when the socket client needs them.
@@ -295,7 +298,7 @@ Still open:
       earlier turns rather than an empty pane.
 - [x] P3a: overlay layer + model picker (`/model` with no arg opens a
       centered modal; the model list is injected; `/model <id>` still sets).
-- [ ] P3b: diff rendering (tool output as unified diff; styled `@@`/`+`/`-`).
+- [x] P3b: diff rendering (UI-only unified diff; styled `@@`/`+`/`-`, `+a −r`).
 - [ ] P3c: side panel (file viewer; injected `PanelSource`).
 - [ ] P3d: session picker (`/resume`; re-exec handoff).
 - [ ] P4 stretch.

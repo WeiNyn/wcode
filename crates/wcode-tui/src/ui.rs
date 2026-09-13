@@ -195,6 +195,10 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
         return lines;
     }
 
+    if let Some(diff) = &tool.diff {
+        return diff_lines(tool, diff);
+    }
+
     let (mark, style) = if tool.is_error {
         ("✗", error_style())
     } else {
@@ -209,6 +213,45 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
     vec![Line::from(spans)]
+}
+
+/// A done tool that changed a file: its edit shown as a diff under the `⚙`
+/// line, with a `+a −r` summary. The diff is UI-only (`ToolOutput::diff`), so
+/// it never reached the model.
+fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("   ⚙ ", dim()),
+        Span::styled(tool.name.clone(), dim()),
+    ])];
+    let (mut added, mut removed) = (0usize, 0usize);
+    for raw in diff.lines() {
+        let style = match raw.chars().next() {
+            Some('+') => {
+                added += 1;
+                added_style()
+            }
+            Some('-') => {
+                removed += 1;
+                removed_style()
+            }
+            _ => dim(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("     ", dim()),
+            Span::styled(raw.to_string(), style),
+        ]));
+    }
+    let (mark, style) = if tool.is_error {
+        ("✗", error_style())
+    } else {
+        ("✓", dim())
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("   {mark} "), style),
+        Span::styled(tool.name.clone(), style),
+        Span::styled(format!(" · +{added} −{removed}"), dim()),
+    ]));
+    lines
 }
 
 /// First non-blank line, truncated — the one-line tool summary.
@@ -454,6 +497,24 @@ pub(crate) fn accent() -> Style {
     }
 }
 
+/// Added (`+`) and removed (`-`) diff lines. Colored when available; bold (vs
+/// the dim context) under `NO_COLOR`.
+fn added_style() -> Style {
+    if no_color() {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Green)
+    }
+}
+
+fn removed_style() -> Style {
+    if no_color() {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(Color::Red)
+    }
+}
+
 fn error_style() -> Style {
     if no_color() {
         Style::new().add_modifier(Modifier::BOLD)
@@ -620,5 +681,29 @@ mod tests {
         let text = buffer_text(&render(&mut app, 60, 12));
         assert!(text.contains("model"), "picker title missing: {text}");
         assert!(text.contains("gpt-4o"), "picker item missing: {text}");
+    }
+
+    #[test]
+    fn a_tool_diff_renders_with_a_plus_minus_summary() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t1".into(),
+                name: "edit".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t1".into(),
+                name: "edit".into(),
+                output: "edited f".into(),
+                is_error: false,
+                diff: Some("@@ -1,2 +1,2 @@\n ctx\n-old\n+new".into()),
+            },
+        ));
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("-old"), "removal missing: {text}");
+        assert!(text.contains("+new"), "addition missing: {text}");
+        assert!(text.contains("+1 −1"), "summary missing: {text}");
     }
 }

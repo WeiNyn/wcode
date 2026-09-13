@@ -57,6 +57,7 @@ impl TypedTool for Grep {
                 return ToolOutput {
                     output: format!("grep: invalid pattern: {e}"),
                     is_error: true,
+                    diff: None,
                 };
             }
         };
@@ -77,6 +78,7 @@ impl TypedTool for Grep {
                     return ToolOutput {
                         output: "cancelled".to_string(),
                         is_error: true,
+                        diff: None,
                     };
                 }
                 if let Ok(entry) = entry
@@ -94,6 +96,7 @@ impl TypedTool for Grep {
                 return ToolOutput {
                     output: "cancelled".to_string(),
                     is_error: true,
+                    diff: None,
                 };
             }
             let rel = file.strip_prefix(&ctx.working_dir).unwrap_or(&file);
@@ -139,6 +142,7 @@ impl TypedTool for Grep {
                     return ToolOutput {
                         output: out,
                         is_error: false,
+                        diff: None,
                     };
                 }
                 let line = &lines[i];
@@ -166,6 +170,7 @@ impl TypedTool for Grep {
         ToolOutput {
             output: out,
             is_error: false,
+            diff: None,
         }
     }
 }

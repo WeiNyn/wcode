@@ -80,6 +80,8 @@ pub struct Tool {
     pub output: String,
     pub done: bool,
     pub is_error: bool,
+    /// A UI-only unified diff, when the tool changed a file (`ToolOutput::diff`).
+    pub diff: Option<String>,
 }
 
 /// A transient modal drawn over the three bands. Shared infrastructure: any
@@ -470,6 +472,7 @@ impl App {
                     output: String::new(),
                     done: false,
                     is_error: false,
+                    diff: None,
                 }));
                 self.dirty = true;
             }
@@ -480,7 +483,10 @@ impl App {
                 }
             }
             AgentEvent::ToolExecutionEnd {
-                output, is_error, ..
+                output,
+                is_error,
+                diff,
+                ..
             } => {
                 if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
                     if !output.is_empty() {
@@ -488,6 +494,7 @@ impl App {
                     }
                     tool.done = true;
                     tool.is_error = is_error;
+                    tool.diff = diff;
                     self.dirty = true;
                 }
             }
@@ -838,6 +845,7 @@ impl App {
                         output: output.clone(),
                         done: true,
                         is_error: *is_error,
+                        diff: None,
                     }));
                 }
             }
@@ -979,6 +987,7 @@ mod tests {
             name: "bash".into(),
             output: "building\nok".into(),
             is_error: false,
+            diff: None,
         }));
         match app.transcript().last() {
             Some(Block::Tool(tool)) => {
@@ -1373,5 +1382,27 @@ mod tests {
             app.transcript().last(),
             Some(Block::Notice(t)) if t.contains("no models")
         ));
+    }
+
+    #[test]
+    fn tool_end_captures_the_ui_only_diff() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionStart {
+            call_id: "t1".into(),
+            name: "edit".into(),
+        }));
+        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionEnd {
+            call_id: "t1".into(),
+            name: "edit".into(),
+            output: "edited f (lines 1)".into(),
+            is_error: false,
+            diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+        }));
+        match app.transcript().last() {
+            Some(Block::Tool(tool)) => {
+                assert_eq!(tool.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+            }
+            other => panic!("expected a tool block, got {other:?}"),
+        }
     }
 }

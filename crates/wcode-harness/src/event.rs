@@ -60,6 +60,10 @@ pub enum AgentEvent {
         name: String,
         output: String,
         is_error: bool,
+        /// UI-only unified diff (see `ToolOutput::diff`); absent when there is
+        /// nothing to show, or on an older peer that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
     },
     TurnEnd {
         message: AgentMessage,
@@ -163,6 +167,7 @@ mod tests {
                 name: "run".into(),
                 output: "out".into(),
                 is_error: false,
+                diff: Some("@@ -1 +1 @@".into()),
             },
             "tool_execution_end",
         );
