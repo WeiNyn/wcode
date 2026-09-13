@@ -245,5 +245,8 @@ Still open:
       multiline (Shift-Enter).
 - [x] P2: markdown for committed messages; context bar; redraw on resize;
       `/copy` (OSC-52).
+- [x] P2 fixes: the wheel scrolls the transcript (mouse capture; 3 lines a
+      notch) and startup replays `GetHistory`, so a resumed session opens on its
+      earlier turns rather than an empty pane.
 - [ ] P3 panels + pickers.
 - [ ] P4 stretch.

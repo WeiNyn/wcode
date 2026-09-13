@@ -141,7 +141,11 @@ TUI reads as the same product, given a full screen.
 kinds: `User`, `Assistant`, `Thinking`, `Tool`, `Notice`. Each block computes
 its own height at draw time. A wrapped-line cache keyed by `(revision, width)`
 is the P2 optimization (do not re-wrap static history every frame). Follow-tail
-while streaming; scroll-lock when the user scrolls up (P1).
+while streaming; scroll-lock when the user scrolls up (P1). At startup the loop
+asks `GetHistory` and `App::seed_history` rebuilds the transcript from it, so a
+resumed session (or a reconnecting socket client) opens on its earlier turns
+instead of an empty pane — a dim `⋯ N earlier message(s)` divider marks the
+replayed prefix.
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
 continuation lines align under the text, as in draft B's `···` block). The
@@ -166,7 +170,8 @@ When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
 
 **Keys** — `Enter` submit · `Shift-Enter` newline · `Up`/`Down` history ·
-`PgUp`/`PgDn` scroll the transcript (`↑ N` in the status while scrolled) ·
+`PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
+transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52).
 
