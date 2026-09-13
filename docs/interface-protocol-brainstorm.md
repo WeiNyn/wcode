@@ -490,8 +490,12 @@ in `README.md` §Philosophy.
     `ask`s, streams the run, reads history back; two clients share one session).
   - ☑ **S2-2a** — `wcode serve [--socket P]` owns and serves the session;
     `wcode --socket P -p "..."` runs one shot through a remote `Backend`.
-  - ☐ **S2-2b** — the *interactive* remote REPL (`/new`/`/resume`/`/reload`
-    gated: the server owns the session) and reconnect/replay from the log.
+  - ☑ **S2-2b** — the *interactive* remote REPL: `repl::run` takes a
+    `SessionSource` and drives a `Backend`; `--socket` attaches the REPL to a
+    served session; `/new`/`/resume`/`/reload` are gated (the server owns the
+    session); attaching replays the transcript (a `GetHistory` read-back). Still
+    open: **auto-reconnect** on a mid-session drop (today a dropped connection
+    surfaces as `Closed`).
   *(This is the jcode TUI architecture, minimal.)*
 - **S3 — TUI.** Per `tui-plan.md`, but as a `wcode-protocol` client. P0 skeleton
   first; single surface; then multi-surface on the same connection (`session` in
