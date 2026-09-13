@@ -18,7 +18,7 @@ mod skills;
 mod tools;
 
 use crate::config::{Config, ConfigError, EnvLike, FileConfig, config_dir, merge, parse_endpoint};
-use crate::instructions::{Mode, load as load_instructions};
+use crate::instructions::{InstructionSet, Mode, load as load_instructions};
 use crate::skills::{SkillSet, discover as discover_skills};
 use crate::repl::{
     AgentSpec, build_agent, default_hooks, list_sessions, resolve_session_path, session_dir,
@@ -329,8 +329,19 @@ async fn main() {
         match args.prompt.clone() {
             Some(prompt) => std::process::exit(one_shot(Backend::from(client), &prompt).await),
             None => {
-                eprintln!("error: `--socket` currently supports `-p` only");
-                std::process::exit(2);
+                // The server owns the system prompt and skills, so a remote
+                // client discovers none of its own.
+                repl::run(
+                    repl::SessionSource::Remote(client),
+                    llm,
+                    default_hooks(&cfg.hooks),
+                    cfg.tools,
+                    cfg.compaction,
+                    InstructionSet::default(),
+                    SkillSet::default(),
+                )
+                .await;
+                std::process::exit(0);
             }
         }
     }
@@ -447,7 +458,18 @@ async fn main() {
         Some(prompt) => {
             std::process::exit(one_shot(Backend::from(SessionActor::spawn(agent)), &prompt).await)
         }
-        None => repl::run(agent, llm, hooks, cfg.tools, cfg.compaction, instructions, skills).await,
+        None => {
+            repl::run(
+                repl::SessionSource::Local(Box::new(agent)),
+                llm,
+                hooks,
+                cfg.tools,
+                cfg.compaction,
+                instructions,
+                skills,
+            )
+            .await
+        }
     }
 }
 

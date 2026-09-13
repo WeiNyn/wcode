@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast;
-use wcode_harness::actor::{SessionActor, SessionHandle};
+use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::AgentEvent;
@@ -18,6 +18,9 @@ use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
+use wcode_protocol::Backend;
+#[cfg(unix)]
+use wcode_protocol::Client;
 
 use crate::config::{HooksConfig, ToolsConfig};
 use crate::instructions::InstructionSet;
@@ -509,8 +512,17 @@ fn lock_slot<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Where a REPL session comes from: a local agent to hand to the actor, or a
+/// client already connected to a session served elsewhere.
+pub enum SessionSource {
+    /// Boxed: the enum is small when a `Client` (an `Arc`) is the variant.
+    Local(Box<Agent>),
+    #[cfg(unix)]
+    Remote(Client),
+}
+
 pub async fn run(
-    agent: Agent,
+    source: SessionSource,
     mut llm: LlmOpts,
     hooks: HooksSet,
     tools: ToolsConfig,
@@ -518,20 +530,36 @@ pub async fn run(
     instructions: InstructionSet,
     skills: SkillSet,
 ) {
+    #[cfg(unix)]
+    let remote = matches!(source, SessionSource::Remote(_));
+    #[cfg(not(unix))]
+    let remote = false;
+
     let in_flight = Arc::new(AtomicBool::new(false));
-    let mut session_path = agent.session_path().map(Path::to_path_buf);
-    let mut handle = SessionActor::spawn(agent);
-    // Ctrl-C lives on a separate task. The slot holds the *current* handle
+    let mut session_path;
+    let mut backend;
+    match source {
+        SessionSource::Local(agent) => {
+            session_path = agent.session_path().map(Path::to_path_buf);
+            backend = Backend::from(SessionActor::spawn(*agent));
+        }
+        #[cfg(unix)]
+        SessionSource::Remote(client) => {
+            session_path = None;
+            backend = Backend::from(client);
+        }
+    }
+    // Ctrl-C lives on a separate task. The slot holds the *current* backend
     // (swapped by `/new`/`/resume`) so Ctrl-C always reaches the live run; when
     // idle it exits.
-    let handle_slot: Arc<Mutex<SessionHandle>> = Arc::new(Mutex::new(handle.clone()));
+    let backend_slot: Arc<Mutex<Backend>> = Arc::new(Mutex::new(backend.clone()));
     {
         let in_flight = in_flight.clone();
-        let handle_slot = handle_slot.clone();
+        let backend_slot = backend_slot.clone();
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
                 if in_flight.load(Ordering::SeqCst) {
-                    let _ = lock_slot(&handle_slot).send(Request::Cancel);
+                    let _ = lock_slot(&backend_slot).send(Request::Cancel);
                 } else {
                     println!();
                     std::process::exit(0);
@@ -561,6 +589,10 @@ pub async fn run(
         println!("skills: {}", skills.skills.len());
     }
 
+    if remote {
+        replay(&backend).await;
+    }
+
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     loop {
         print!("❯ ");
@@ -574,6 +606,11 @@ pub async fn run(
         }
         match parse_command(line) {
             Some(Command::Exit) => break,
+            Some(Command::New) if remote => {
+                println!(
+                    "{DIM}/new is unavailable over a socket (the server owns the session){RESET}"
+                )
+            }
             Some(Command::New) => {
                 let session = session_path
                     .is_some()
@@ -596,8 +633,8 @@ pub async fn run(
                             session,
                             Vec::new(),
                         );
-                        handle = SessionActor::spawn(new_agent);
-                        *lock_slot(&handle_slot) = handle.clone();
+                        backend = Backend::from(SessionActor::spawn(new_agent));
+                        *lock_slot(&backend_slot) = backend.clone();
                         session_path = path;
                         match &session_path {
                             Some(p) => println!("new session: {}", p.display()),
@@ -608,7 +645,7 @@ pub async fn run(
                 }
             }
             Some(Command::Model(arg)) => match arg {
-                Some(id) => match handle.ask(Request::SetModel { model: id.clone() }).await {
+                Some(id) => match backend.ask(Request::SetModel { model: id.clone() }).await {
                     Ok(AgentEvent::Ack) => {
                         llm.model = id;
                         println!("model: {}", llm.model);
@@ -629,7 +666,7 @@ pub async fn run(
                 },
                 // `/effort -` clears back to send-nothing.
                 Some("-") | Some("none") | Some("off") => {
-                    match handle.ask(Request::SetEffort { effort: None }).await {
+                    match backend.ask(Request::SetEffort { effort: None }).await {
                         Ok(AgentEvent::Ack) => {
                             llm.effort = None;
                             println!("(no effort)");
@@ -640,7 +677,7 @@ pub async fn run(
                     }
                 }
                 Some(level) => {
-                    match handle
+                    match backend
                         .ask(Request::SetEffort {
                             effort: Some(level.to_string()),
                         })
@@ -656,6 +693,11 @@ pub async fn run(
                     }
                 }
             },
+            Some(Command::Resume(_)) if remote => {
+                println!(
+                    "{DIM}/resume is unavailable over a socket (the server owns the session){RESET}"
+                )
+            }
             Some(Command::Resume(arg)) => {
                 let path = match arg {
                     Some(a) => resolve_session_path(&a),
@@ -695,8 +737,8 @@ pub async fn run(
                             Some(s),
                             messages,
                         );
-                        handle = SessionActor::spawn(new_agent);
-                        *lock_slot(&handle_slot) = handle.clone();
+                        backend = Backend::from(SessionActor::spawn(new_agent));
+                        *lock_slot(&backend_slot) = backend.clone();
                         session_path = Some(path.clone());
                         println!("resumed {} ({n} messages)", path.display());
                     }
@@ -723,10 +765,13 @@ pub async fn run(
                 }
                 Err(e) => eprintln!("list sessions: {e}"),
             },
+            Some(Command::Reload { .. }) if remote => {
+                println!("{DIM}/reload (rebuild + re-exec) is unavailable over a socket{RESET}")
+            }
             Some(Command::Reload { no_session }) => {
                 reload(&llm, session_path.as_deref(), no_session, &in_flight).await
             }
-            Some(Command::Usage) => match handle.ask(Request::GetHistory).await {
+            Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
                     println!("{}", format_usage(&usage_totals(&messages)));
                     if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
@@ -739,7 +784,7 @@ pub async fn run(
                 Err(_) => eprintln!("usage: session closed"),
             },
             Some(Command::Compact(arg)) => {
-                match handle.ask(Request::Compact { instructions: arg }).await {
+                match backend.ask(Request::Compact { instructions: arg }).await {
                     Ok(AgentEvent::Compaction { summarized, kept }) => {
                         println!("compacted: summarized {summarized}, kept {kept} (+ summary)")
                     }
@@ -763,13 +808,13 @@ pub async fn run(
                             Err(e) => eprintln!("read {}: {e}", skill.path.display()),
                             Ok(body) => {
                                 let input = skill_turn(&skill.name, &body, extra);
-                                run_turn(&handle, &input, &in_flight).await;
+                                run_turn(&backend, &input, &in_flight).await;
                             }
                         },
                     }
                 }
             },
-            None => run_turn(&handle, line, &in_flight).await,
+            None => run_turn(&backend, line, &in_flight).await,
         }
     }
 }
@@ -803,13 +848,38 @@ fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
     out
 }
 
+/// When attaching to a session served elsewhere, print the transcript so far —
+/// the "replay from the log" a (re)connecting client shows. Local sessions are
+/// not replayed: the REPL never has.
+async fn replay(backend: &Backend) {
+    let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await else {
+        return;
+    };
+    if messages.is_empty() {
+        return;
+    }
+    println!("{DIM}— {} earlier message(s) —{RESET}", messages.len());
+    for message in &messages {
+        match message {
+            AgentMessage::User { .. } => println!("{DIM}❯ {}{RESET}", message.as_text()),
+            AgentMessage::Assistant { .. } => {
+                let text = message.as_text();
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+            }
+            AgentMessage::ToolResult { .. } => {}
+        }
+    }
+}
+
 /// One user turn: subscribe for the printer, submit, and await the run's stop
 /// reason.
-async fn run_turn(handle: &SessionHandle, input: &str, in_flight: &AtomicBool) {
-    let mut rx = handle.subscribe();
+async fn run_turn(backend: &Backend, input: &str, in_flight: &AtomicBool) {
+    let mut rx = backend.subscribe();
     let printer = tokio::spawn(async move { print_events(&mut rx).await });
     in_flight.store(true, Ordering::SeqCst);
-    let reply = handle
+    let reply = backend
         .ask(Request::Submit {
             text: input.to_string(),
         })
