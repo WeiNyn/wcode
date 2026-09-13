@@ -6796,6 +6796,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wcode-protocol"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wcode-harness",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
