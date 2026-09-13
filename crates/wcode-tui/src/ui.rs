@@ -699,6 +699,7 @@ mod tests {
                 output: "edited f".into(),
                 is_error: false,
                 diff: Some("@@ -1,2 +1,2 @@\n ctx\n-old\n+new".into()),
+                path: Some("f.rs".into()),
             },
         ));
         let text = buffer_text(&render(&mut app, 60, 12));

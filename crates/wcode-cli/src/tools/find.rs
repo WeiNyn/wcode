@@ -43,6 +43,7 @@ impl TypedTool for Find {
                 output: format!("find: {} does not exist", base.display()),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         let (includes, excludes) = parse_globs(args.glob.as_deref());
@@ -71,6 +72,7 @@ impl TypedTool for Find {
                         output: "cancelled".to_string(),
                         is_error: true,
                         diff: None,
+                        path: None,
                     };
                 }
                 if let Ok(entry) = entry {
@@ -108,6 +110,7 @@ impl TypedTool for Find {
             output: out,
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }

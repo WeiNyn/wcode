@@ -560,6 +560,7 @@ mod tests {
                 output: format!("released:{}", args.text),
                 is_error: false,
                 diff: None,
+                path: None,
             }
         }
     }

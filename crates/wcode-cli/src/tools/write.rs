@@ -40,6 +40,7 @@ impl TypedTool for Write {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         // Best-effort read of the previous contents so the diff shows what an
@@ -53,11 +54,13 @@ impl TypedTool for Write {
                 output: format!("wrote {} bytes to {}", args.content.len(), args.path),
                 is_error: false,
                 diff,
+                path: Some(args.path.clone()),
             },
             Err(e) => ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
                 diff: None,
+                path: None,
             },
         }
     }

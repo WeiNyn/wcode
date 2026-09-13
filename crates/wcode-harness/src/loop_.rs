@@ -435,11 +435,11 @@ pub async fn run_loop(
                     if !sent {
                         // Dead sink: the tool never runs. Synthesize its error
                         // output so the ToolResult still lands in ctx.
-                        aborted = true;
                         results[i] = Some(ToolOutput {
                             output: "aborted before execution".to_string(),
                             is_error: true,
                             diff: None,
+                            path: None,
                         });
                     }
                 }
@@ -490,6 +490,7 @@ pub async fn run_loop(
                         output: "aborted before execution".to_string(),
                         is_error: true,
                         diff: None,
+                        path: None,
                     });
                     let sent = started[i]
                         && sink
@@ -499,6 +500,7 @@ pub async fn run_loop(
                                 output: out.output.clone(),
                                 is_error: out.is_error,
                                 diff: out.diff.clone(),
+                                path: out.path.clone(),
                             })
                             .is_ok();
                     // Push the result before honoring a dead sink so ctx never
@@ -617,6 +619,7 @@ impl Planned {
                 output,
                 is_error: true,
                 diff: None,
+                path: None,
             }),
             parallel_safe: false,
         }
@@ -640,6 +643,7 @@ fn synthesize_unexecuted(
             output: "aborted before execution".to_string(),
             is_error: true,
             diff: None,
+            path: None,
         };
         let _ = sink.send(AgentEvent::ToolExecutionEnd {
             call_id: rid.clone(),
@@ -647,6 +651,7 @@ fn synthesize_unexecuted(
             output: out.output.clone(),
             is_error: out.is_error,
             diff: out.diff.clone(),
+            path: out.path.clone(),
         });
         let result = AgentMessage::ToolResult {
             tool_call_id: rid,

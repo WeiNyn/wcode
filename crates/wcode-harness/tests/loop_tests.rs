@@ -93,6 +93,7 @@ impl TypedTool for RecordingTool {
             output: format!("echo:{}", self.seen.lock().unwrap().last().unwrap()),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }
@@ -125,6 +126,7 @@ impl TypedTool for CwdProbe {
             output: "ok".into(),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }
@@ -983,6 +985,7 @@ impl TypedTool for CancelTool {
             output: format!("ran:{}", args.text),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }
@@ -1373,6 +1376,7 @@ impl TypedTool for TimedTool {
             output: format!("{}:{}", self.name, args.tag),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }
@@ -1547,12 +1551,14 @@ impl TypedTool for DiffTool {
             output: "edited f".into(),
             is_error: false,
             diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+            path: Some("f.txt".into()),
         }
     }
 }
 
-/// The diff is UI-only: it rides `ToolExecutionEnd` to the client but must NOT
-/// enter the `ToolResult` the model sees (that would tax every edit).
+/// The diff and the changed path are UI-only: they ride `ToolExecutionEnd` to
+/// the client but must NOT enter the `ToolResult` the model sees (that would tax
+/// every edit).
 #[tokio::test]
 async fn the_diff_rides_the_event_but_not_the_model_context() {
     let rec = Recorder::default();
@@ -1588,6 +1594,13 @@ async fn the_diff_rides_the_event_but_not_the_model_context() {
         _ => None,
     });
     assert_eq!(diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
+
+    // The changed path rides alongside, likewise presentation-only.
+    let path = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd { path, .. } => path.clone(),
+        _ => None,
+    });
+    assert_eq!(path.as_deref(), Some("f.txt"));
 
     assert!(matches!(
         &ctx[2],

@@ -98,6 +98,7 @@ impl TypedTool for GateTool {
             output: format!("ran:{}", args.text),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }

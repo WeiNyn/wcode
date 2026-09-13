@@ -52,6 +52,7 @@ impl TypedTool for AstSearch {
                         .into(),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         };
         let mut cmd = tokio::process::Command::new(bin);
@@ -87,6 +88,7 @@ impl TypedTool for AstSearch {
                     output: "cancelled".to_string(),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             res = cmd.output() => match res {
@@ -96,6 +98,7 @@ impl TypedTool for AstSearch {
                         output: format!("ast_search: failed to run `{bin}`: {e}"),
                         is_error: true,
                         diff: None,
+                        path: None,
                     };
                 }
             },
@@ -117,6 +120,7 @@ impl TypedTool for AstSearch {
                 ),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         let mut text = stdout;
@@ -131,6 +135,7 @@ impl TypedTool for AstSearch {
             },
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }

@@ -64,6 +64,10 @@ pub enum AgentEvent {
         /// nothing to show, or on an older peer that predates the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<String>,
+        /// UI-only path of the changed file (see `ToolOutput::path`); absent
+        /// when the tool touched no file, or on an older peer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     TurnEnd {
         message: AgentMessage,
@@ -168,6 +172,7 @@ mod tests {
                 output: "out".into(),
                 is_error: false,
                 diff: Some("@@ -1 +1 @@".into()),
+                path: Some("src/f.rs".into()),
             },
             "tool_execution_end",
         );

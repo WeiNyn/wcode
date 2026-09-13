@@ -19,6 +19,11 @@ pub struct ToolOutput {
     /// `ToolExecutionEnd` event to the UI but never enters the model's context.
     /// `None` for tools that do not touch files.
     pub diff: Option<String>,
+    /// The file the tool changed, as the caller named it. Presentation only —
+    /// it rides `ToolExecutionEnd` so the UI can index the run's changes and
+    /// label each `⚙` line, but it never enters the model's context.
+    /// `None` for tools that do not touch files (or an uncommitted dry run).
+    pub path: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -71,6 +76,7 @@ impl<T: TypedTool> ErasedToolCore for T {
                 output: "cancelled".to_string(),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         let parsed: T::Args = match serde_json::from_value(args) {
@@ -83,6 +89,7 @@ impl<T: TypedTool> ErasedToolCore for T {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         };
@@ -147,6 +154,7 @@ mod tests {
                 output: format!("echo:{}", args.text),
                 is_error: false,
                 diff: None,
+                path: None,
             }
         }
     }

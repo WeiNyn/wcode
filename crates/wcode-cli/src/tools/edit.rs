@@ -41,6 +41,7 @@ fn bad_anchor(ref_: &str, field: &str) -> ToolOutput {
         ),
         is_error: true,
         diff: None,
+        path: None,
     }
 }
 
@@ -73,6 +74,7 @@ impl TypedTool for Edit {
                     output: format!("edit {}: {e}", args.path),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         };
@@ -100,6 +102,7 @@ impl TypedTool for Edit {
                 output: stale_message(&args, &lines, &anchors),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         let replace_all = args.replace_all.unwrap_or(false);
@@ -119,6 +122,7 @@ impl TypedTool for Edit {
                 ),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
 
@@ -146,6 +150,7 @@ impl TypedTool for Edit {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         }
@@ -185,6 +190,7 @@ impl TypedTool for Edit {
                 ),
                 is_error: false,
                 diff: None,
+                path: None,
             };
         }
 
@@ -216,12 +222,14 @@ impl TypedTool for Edit {
                     ),
                     is_error: false,
                     diff,
+                    path: Some(args.path.clone()),
                 }
             }
             Err(e) => ToolOutput {
                 output: format!("edit {}: {e}", args.path),
                 is_error: true,
                 diff: None,
+                path: None,
             },
         }
     }
@@ -315,7 +323,12 @@ mod tests {
             "a = 1\nb = 20\nc = 3\n"
         );
         // Fresh anchors are echoed so the next edit chains without a re-read.
+        // Fresh anchors are echoed so the next edit chains without a re-read.
         assert!(out.output.contains(&anchor::anchor("b = 20")));
+        // The UI-only change record rides the result: the file it touched and a
+        // unified diff of the edit (neither enters the model's context).
+        assert_eq!(out.path.as_deref(), Some("f.txt"));
+        assert!(out.diff.as_deref().is_some_and(|d| d.contains("+b = 20")));
     }
 
     #[tokio::test]

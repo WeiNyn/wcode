@@ -64,6 +64,7 @@ impl TypedTool for AstEdit {
                         .into(),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         };
         let path = super::resolve(&ctx.working_dir, &args.path);
@@ -74,6 +75,7 @@ impl TypedTool for AstEdit {
                     output: format!("ast_edit {}: {e}", args.path),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         };
@@ -97,6 +99,7 @@ impl TypedTool for AstEdit {
                     output: "cancelled".to_string(),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             res = base.output() => match res {
@@ -106,6 +109,7 @@ impl TypedTool for AstEdit {
                         output: format!("ast_edit: failed to run `{bin}`: {e}"),
                         is_error: true,
                         diff: None,
+                        path: None,
                     };
                 }
             },
@@ -120,6 +124,7 @@ impl TypedTool for AstEdit {
                 ),
                 is_error: false,
                 diff: None,
+                path: None,
             };
         }
         if !dry.status.success() {
@@ -135,6 +140,7 @@ impl TypedTool for AstEdit {
                 ),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
 
@@ -147,6 +153,7 @@ impl TypedTool for AstEdit {
                 ),
                 is_error: false,
                 diff: None,
+                path: None,
             };
         }
 
@@ -163,6 +170,7 @@ impl TypedTool for AstEdit {
                 output: format!("ast_edit {}: {e}", args.path),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
         let applied = tokio::select! {
@@ -172,6 +180,7 @@ impl TypedTool for AstEdit {
                     output: "cancelled".to_string(),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             res = async {
@@ -196,6 +205,7 @@ impl TypedTool for AstEdit {
                         output: format!("ast_edit {}: {e}", args.path),
                         is_error: true,
                         diff: None,
+                        path: None,
                     };
                 }
             },
@@ -215,6 +225,7 @@ impl TypedTool for AstEdit {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             Err(e) => {
@@ -223,6 +234,7 @@ impl TypedTool for AstEdit {
                     output: format!("ast_edit {}: failed to run `{bin}`: {e}", args.path),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         };
@@ -237,6 +249,7 @@ impl TypedTool for AstEdit {
                 output: format!("ast_edit {}: {e}", args.path),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
 
@@ -252,6 +265,7 @@ impl TypedTool for AstEdit {
             ),
             is_error: false,
             diff: None,
+            path: None,
         }
     }
 }

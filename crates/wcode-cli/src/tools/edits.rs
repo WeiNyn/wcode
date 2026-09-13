@@ -67,6 +67,7 @@ impl TypedTool for Edits {
                 output: "[E_EMPTY_BATCH] `edits` needs at least one op.".into(),
                 is_error: true,
                 diff: None,
+                path: None,
             };
         }
 
@@ -81,6 +82,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         }
@@ -92,6 +94,7 @@ impl TypedTool for Edits {
                     output: format!("edits {}: {e}", args.edits[0].path),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         };
@@ -118,6 +121,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             if let Some(t) = &op.to
@@ -130,6 +134,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             let ranges = anchor::find_ranges(
@@ -156,6 +161,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             if ranges.len() > 1 && !op.replace_all.unwrap_or(false) {
@@ -174,6 +180,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
             for r in ranges {
@@ -202,6 +209,7 @@ impl TypedTool for Edits {
                     ),
                     is_error: true,
                     diff: None,
+                    path: None,
                 };
             }
         }
@@ -242,6 +250,7 @@ impl TypedTool for Edits {
                 ),
                 is_error: false,
                 diff: None,
+                path: None,
             };
         }
 
@@ -298,12 +307,14 @@ impl TypedTool for Edits {
                     ),
                     is_error: false,
                     diff,
+                    path: Some(args.edits[0].path.clone()),
                 }
             }
             Err(e) => ToolOutput {
                 output: format!("edits {}: {e}", args.edits[0].path),
                 is_error: true,
                 diff: None,
+                path: None,
             },
         }
     }

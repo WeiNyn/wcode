@@ -988,6 +988,7 @@ mod tests {
             output: "building\nok".into(),
             is_error: false,
             diff: None,
+            path: None,
         }));
         match app.transcript().last() {
             Some(Block::Tool(tool)) => {
@@ -1397,6 +1398,7 @@ mod tests {
             output: "edited f (lines 1)".into(),
             is_error: false,
             diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+            path: Some("f.rs".into()),
         }));
         match app.transcript().last() {
             Some(Block::Tool(tool)) => {
