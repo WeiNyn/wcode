@@ -624,9 +624,22 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       event — not a subscription to the peer's stream, and not a blocking reply.
     - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
       event — not a subscription to the peer's stream, and not a blocking reply.
-  - **S4-3 — Spawn (bounded fan-out) + the `message` tool.** Only the root
-    spawns (a depth cap bounds fan-out); the child reports its result back on
-    turn end. The model talks to peers through **one** tool:
+  - ◐ **S4-3 — Spawn + the `message` tool.** Only the root spawns; a worker cannot
+    (bounded fan-out by construction — the root's tool set has `spawn`, a worker's
+    does not). A `SessionFactory` builds a worker `Agent` from the parent's
+    template, spawns its actor, and `register`s + `set_owner`s it in the
+    `Registry`. Decisions:
+    - **Opt-in** (`--agents`), so the default single-agent behaviour is unchanged.
+    - **`spawn { task, name? }`** — combined: create the worker and deliver `task`
+      as a `Wake` (so it starts working), returning `"agent:<name>"`.
+    - **In-memory workers** (no session file) for v1; per-worker files later.
+    - **Model-driven report** for v1 (the worker's prompt tells it to `message`
+      its owner). Auto-forward (a "run-ended" hook) is a follow-up.
+    - Future customization (`spawn { system?, tools?, write?, read? }`, a
+      `WorkerSpec`): v1 fills defaults (inherit the parent) and uses only `name`;
+      the tool/path restrictions become a child `Hooks` impl — no config.
+    Split: **S4-3a** factory + `spawn` tool + registry wiring; **S4-3b** the
+    `message` tool + sender tagging; **S4-3c** completion auto-forward.
     - `message { to?, content, mode? }`, `mode` ∈ `notify` (default) / `ask` /
       `interrupt` / `wake`, mapping 1:1 onto the wire verbs. `to` **defaults to the
       sender's `report_back_to`** — a worker has exactly one place to send. One
