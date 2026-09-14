@@ -1,6 +1,7 @@
 //! In-process address book + router — the A2A bus (§8 #3, §10.1).
 //!
-//! Two pieces: an **address book** (`SessionId` → `SessionHandle`) and an
+//! Two pieces: an **address book** (`SessionId` → `Backend`: an in-process
+//! handle or a remote `Client`) and an **ownership** map (the `report_back_to`
 //! **ownership** map (the `report_back_to` edge: worker → orchestrator). Routing
 //! a message checks the **permitted set** — an orchestrator reaches its workers,
 //! a worker its orchestrator, and nothing else (v1 star, §10.1) — then delivers
@@ -17,6 +18,10 @@ use std::sync::{Arc, Mutex};
 
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::protocol::{Request, SessionId};
+
+use crate::backend::Backend;
+#[cfg(unix)]
+use crate::client::Client;
 
 /// Why a message could not be routed (§10.1 enforcement).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +61,7 @@ pub struct Registry {
 
 #[derive(Default)]
 struct Inner {
-    peers: Mutex<HashMap<SessionId, SessionHandle>>,
+    peers: Mutex<HashMap<SessionId, Backend>>,
     owners: Mutex<HashMap<SessionId, SessionId>>,
 }
 
@@ -67,7 +72,22 @@ impl Registry {
 
     /// Register a peer's mailbox at `id`; re-registering replaces it.
     pub fn register(&self, id: SessionId, handle: SessionHandle) {
-        self.inner.peers.lock().unwrap().insert(id, handle);
+        self.inner
+            .peers
+            .lock()
+            .unwrap()
+            .insert(id, Backend::Local(handle));
+    }
+
+    /// Register a peer reachable **across a socket** — a served session this
+    /// process can message, and which can reach back if it knows us (§8, S4-4).
+    #[cfg(unix)]
+    pub fn register_remote(&self, id: SessionId, client: Client) {
+        self.inner
+            .peers
+            .lock()
+            .unwrap()
+            .insert(id, Backend::Remote(client));
     }
 
     /// Record the `report_back_to` edge: `worker` reports to `owner` (its
@@ -87,8 +107,8 @@ impl Registry {
     /// Resolve `to` for `from`, enforcing the permitted set. Fails
     /// [`RouteError::Unknown`] if no peer is registered, else
     /// [`RouteError::NotPermitted`] if the sender is out of scope.
-    pub fn resolve(&self, from: &SessionId, to: &SessionId) -> Result<SessionHandle, RouteError> {
-        let handle = self
+    pub fn resolve(&self, from: &SessionId, to: &SessionId) -> Result<Backend, RouteError> {
+        let endpoint = self
             .inner
             .peers
             .lock()
@@ -102,7 +122,7 @@ impl Registry {
                 to: to.clone(),
             });
         }
-        Ok(handle)
+        Ok(endpoint)
     }
 
     /// Deliver a target-side `request` to `to`, attributed to `from`. The
@@ -114,8 +134,8 @@ impl Registry {
         to: &SessionId,
         request: Request,
     ) -> Result<(), RouteError> {
-        let handle = self.resolve(from, to)?;
-        handle
+        let endpoint = self.resolve(from, to)?;
+        endpoint
             .send_from(from.clone(), request)
             .map_err(|_| RouteError::Closed)
     }

@@ -8,7 +8,7 @@
 use tokio::sync::broadcast;
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::event::AgentEvent;
-use wcode_harness::protocol::Request;
+use wcode_harness::protocol::{Request, SessionId};
 
 #[cfg(unix)]
 use crate::client::Client;
@@ -43,6 +43,16 @@ impl Backend {
             Backend::Local(handle) => handle.send(request).map_err(|_| Closed),
             #[cfg(unix)]
             Backend::Remote(client) => client.send(request),
+        }
+    }
+
+    /// Fire-and-forget, attributed to `from` (A2A): the sender reaches the
+    /// target's `before_inbound` and sender tag, local or over a socket.
+    pub fn send_from(&self, from: SessionId, request: Request) -> Result<(), Closed> {
+        match self {
+            Backend::Local(handle) => handle.send_from(from, request).map_err(|_| Closed),
+            #[cfg(unix)]
+            Backend::Remote(client) => client.send_from(from, request),
         }
     }
 

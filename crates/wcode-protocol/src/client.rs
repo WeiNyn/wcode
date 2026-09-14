@@ -83,7 +83,17 @@ impl Client {
     /// once every clone has dropped and the supervisor has ended.
     pub fn send(&self, request: Request) -> Result<(), Closed> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.out.send(self.frame(id, request)).map_err(|_| Closed)
+        self.out.send(self.frame(id, None, request)).map_err(|_| Closed)
+    }
+
+    /// Fire-and-forget, attributing the request to a remote `from` address
+    /// (A2A). The server feeds `from` into the target's `before_inbound` and its
+    /// sender tag, exactly as an in-process `send_from` does.
+    pub fn send_from(&self, from: SessionId, request: Request) -> Result<(), Closed> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.out
+            .send(self.frame(id, Some(from), request))
+            .map_err(|_| Closed)
     }
 
     /// Send a request and await its correlated reply. Fails with [`Closed`] if
@@ -92,7 +102,7 @@ impl Client {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-        if self.out.send(self.frame(id, request)).is_err() {
+        if self.out.send(self.frame(id, None, request)).is_err() {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err(Closed);
         }
@@ -105,12 +115,13 @@ impl Client {
         self.inner.events.subscribe()
     }
 
-    fn frame(&self, id: u64, body: Request) -> Frame<Request> {
+    fn frame(&self, id: u64, sender: Option<SessionId>, body: Request) -> Frame<Request> {
         Frame {
             v: PROTOCOL_VERSION,
             id,
             reply_to: None,
             session: self.inner.session.clone(),
+            sender,
             body,
         }
     }

@@ -58,6 +58,7 @@ async fn connection(handle: SessionHandle, session: SessionId, stream: UnixStrea
                         id: 0,
                         reply_to: None,
                         session: event_session.clone(),
+                        sender: None,
                         body: event,
                     };
                     if event_out.send(frame).is_err() {
@@ -74,17 +75,24 @@ async fn connection(handle: SessionHandle, session: SessionId, stream: UnixStrea
     let mut read = BufReader::new(read);
     while let Ok(Some(frame)) = read_frame::<_, Request>(&mut read).await {
         let Frame {
-            id, session, body, ..
+            id, session, sender, body, ..
         } = frame;
         let handle = handle.clone();
         let out = out.clone();
         tokio::spawn(async move {
-            if let Ok(reply) = handle.ask(body).await {
+            // A peer's frame carries its address in `from`; feed it to the
+            // target so `before_inbound` and the sender tag see it (A2A).
+            let reply = match sender {
+                Some(from) => handle.ask_from(from, body).await,
+                None => handle.ask(body).await,
+            };
+            if let Ok(reply) = reply {
                 let frame = Frame {
                     v: PROTOCOL_VERSION,
                     id,
                     reply_to: Some(id),
                     session,
+                    sender: None,
                     body: reply,
                 };
                 let _ = out.send(frame);

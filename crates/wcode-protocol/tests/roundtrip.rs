@@ -266,3 +266,51 @@ async fn a_notify_crosses_the_socket() {
         "the notify landed in the context: {messages:?}"
     );
 }
+
+/// S4-4: the registry can hold a **remote** peer, and the sender crosses the
+/// socket — a delivery to a served session arrives attributed to the sender.
+#[tokio::test]
+async fn a_remote_peer_delivery_carries_the_sender() {
+    use wcode_protocol::Registry;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let w_handle = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        w_handle,
+        SessionId::new("w1"),
+        listener,
+    ));
+
+    let orch = SessionId::agent("orchestrator");
+    let w1 = SessionId::agent("w1");
+
+    let registry = Registry::new();
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+    registry.register_remote(w1.clone(), client);
+    registry.set_owner(w1.clone(), orch.clone());
+
+    registry
+        .deliver(
+            &orch,
+            &w1,
+            Request::Notify {
+                content: "hi".into(),
+            },
+        )
+        .unwrap();
+
+    // The served session received it, attributed to `agent:orchestrator`.
+    let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
+        .await
+        .expect("an event")
+        .expect("open");
+    assert!(
+        matches!(&event, AgentEvent::MessageReceived { from, content }
+            if from == &orch && content == "hi"),
+        "{event:?}"
+    );
+}

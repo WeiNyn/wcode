@@ -192,6 +192,10 @@ pub struct Frame<P> {
     /// The session this frame concerns — the target of a request, the origin of
     /// an event. The whole addressing scheme.
     pub session: SessionId,
+    /// The sender's address, when it is not the transport's own client (an
+    /// in-process handle leaves it unset; an A2A peer sets its `"agent:<id>"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<SessionId>,
     #[serde(flatten)]
     pub body: P,
 }
@@ -204,6 +208,7 @@ impl<P> Frame<P> {
             id,
             reply_to: None,
             session,
+            sender: None,
             body,
         }
     }
@@ -297,6 +302,7 @@ mod tests {
             id: 8,
             reply_to: Some(7),
             session: SessionId::from("s1"),
+            sender: None,
             body: AgentEvent::AgentEnd,
         };
         let v = serde_json::to_value(&f).unwrap();

@@ -203,6 +203,16 @@ impl Orchestrator {
         ]
     }
 
+    /// Register a remote peer — a session served over a socket — so A2A
+    /// messages reach it across the process boundary (§8, S4-4).
+    #[cfg(unix)]
+    pub fn register_remote(&self, id: SessionId, client: wcode_protocol::Client) {
+        self.registry.register_remote(id.clone(), client);
+        // A peer we register is one we own — the permitted set admits the edge
+        // in both directions (§10.1).
+        self.registry.set_owner(id, self.id.clone());
+    }
+
     /// Register the root's mailbox so a worker can report back to it.
     pub fn register_root(&self, handle: SessionHandle) {
         self.registry.register(self.id.clone(), handle);

@@ -30,7 +30,7 @@ use crate::repl::{
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [serve] [--socket <path>] [--tui|--no-tui]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [serve] [--socket <path>] [--tui|--no-tui]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -104,6 +104,9 @@ struct Args {
     /// `--agents`: register the `spawn` tool so this session can spawn worker
     /// agents (A2A, §10.1).
     agents: bool,
+    /// `--peer <name>=<socket>`: register a remote peer (a served session) so
+    /// A2A messages reach it over its socket (§8, S4-4). Repeatable.
+    peers: Vec<String>,
     sequential: bool,
     /// `wcode serve`: own the session and serve it over a socket.
     serve: bool,
@@ -116,6 +119,8 @@ struct Args {
     no_tui: bool,
 }
 
+// `Args` is much larger than `Help`; boxing it would only churn the call sites.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 enum Parsed {
     Args(Args),
@@ -174,6 +179,11 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--no-skills" => a.no_skills = true,
             "--sequential" => a.sequential = true,
             "--agents" => a.agents = true,
+            "--peer" => {
+                a.peers
+                    .push(args.get(i).ok_or("--peer requires <name>=<socket>")?.clone());
+                i += 1;
+            }
             "serve" => a.serve = true,
             "--socket" => {
                 a.socket = Some(args.get(i).ok_or("--socket requires a path")?.clone());
@@ -478,6 +488,33 @@ async fn main() {
         };
         crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
     });
+    // Register remote peers (`--peer name=socket`): a served session becomes an
+    // addressable A2A peer reachable over its socket (S4-4).
+    if !args.peers.is_empty() && orchestrator.is_none() {
+        eprintln!("error: --peer requires --agents");
+        std::process::exit(2);
+    }
+    #[cfg(unix)]
+    if let Some(o) = &orchestrator {
+        for spec in &args.peers {
+            let Some((name, path)) = spec.split_once('=') else {
+                eprintln!("error: --peer expects <name>=<socket>, got `{spec}`");
+                std::process::exit(2);
+            };
+            match wcode_protocol::Client::connect(Path::new(path)).await {
+                Ok(client) => o.register_remote(SessionId::agent(name), client),
+                Err(e) => {
+                    eprintln!("error: cannot reach peer `{name}` at {path}: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if !args.peers.is_empty() {
+        eprintln!("error: `--peer` is not supported on this platform");
+        std::process::exit(2);
+    }
     let extra_tools = orchestrator
         .as_ref()
         .map(|o| o.tools())
