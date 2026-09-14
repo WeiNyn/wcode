@@ -1,6 +1,6 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1/2/3 landed; S4-4
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1/2/3/5 landed; S4-4
 transport + outbound landed, reply path next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
@@ -670,11 +670,12 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     the sender attributed. **Follow-up:** the *reply* direction needs the served
     peer to be a worker with an owner (a `--owner` on `serve`, giving it a
     `ReportBack`) — or the orchestrator served too; not yet wired.
-  - **S4-5 — Phonebook (later).** A **name → address** map above the registry,
-    so the model (and the human) can address `to: "reviewer"` instead of a raw
-    `agent:<id>`. The registry stays the transport-level address book; the
-    phonebook is the human/agent-facing alias layer. Discovery and persistence
-    of names are its own small design (§13.15).
+  - ☑ **S4-5 — Phonebook.** A **name → address** map above the registry, so the
+    model (and the human) address a peer by name (`to: "reviewer"`). `Phonebook`
+    in the CLI; `message` resolves `to` through it (falling back to a bare
+    `agent:<name>`); `spawn`/`register_remote` add names, and `[peers]` config
+    adds persistent ones (a socket path, or an `agent:<id>`/`user` alias). A
+    `peers` tool lists them. Landed.
   - *(future surface)* **Worker visibility / perspective switch.** A worker
     emits to its *own* event stream and nothing renders it; letting the TUI
     switch to a worker's view (and/or forwarding its activity into the root's
