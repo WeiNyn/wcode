@@ -1,8 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1 landed; S4-2
-(registry + sender + verbs) landed; S4-3 (spawn/message/auto-report) landed;
-S4-4 next** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1/2/3 landed; S4-4
+transport + outbound landed, reply path next** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -663,8 +662,14 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       sender** (`[message from agent:abc] …`), so the model knows the address to
       reply to. **`Ack` is not a verb**: reply = `message` to the `from` you
       just saw. No handshake (§13.14).
-  - **S4-4 — Socket peers.** Point the registry at served sessions, so `Ask`
-    reaches across the socket (`Client` is already the transport).
+  - ◐ **S4-4 — Socket peers.** Point the registry at served sessions, so a
+    message reaches across the socket. Landed: `Frame.sender`, `Client::send_from`
+    /`Backend::send_from`, the server honoring `sender` (via `ask_from`), a
+    `Registry` that holds a `Backend` (`register_remote`), and
+    `wcode --agents --peer <name>=<socket>`. Delivers *out* to a served peer with
+    the sender attributed. **Follow-up:** the *reply* direction needs the served
+    peer to be a worker with an owner (a `--owner` on `serve`, giving it a
+    `ReportBack`) — or the orchestrator served too; not yet wired.
   - **S4-5 — Phonebook (later).** A **name → address** map above the registry,
     so the model (and the human) can address `to: "reviewer"` instead of a raw
     `agent:<id>`. The registry stays the transport-level address book; the
