@@ -190,6 +190,11 @@ pub struct FileConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub retry: RetryConfig,
+    /// `[peers]`: a name → peer map. A value is a socket path (a served peer,
+    /// reachable over `--peer`/`register_remote`) or an address alias
+    /// (`agent:<id>`/`user`). The phonebook (§13.15) resolves `message`'s `to`.
+    #[serde(default)]
+    pub peers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +210,8 @@ pub struct Config {
     pub instructions: InstructionsConfig,
     pub skills: SkillsConfig,
     pub retry: RetryPolicy,
+    /// Resolved `[peers]` (name → socket path or address): the phonebook (§13.15).
+    pub peers: std::collections::HashMap<String, String>,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -382,6 +389,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         instructions,
         skills,
         retry,
+        peers: file.peers,
     })
 }
 

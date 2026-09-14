@@ -6,7 +6,7 @@ use serde::Deserialize;
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use crate::agents::{SessionFactory, WorkerSpec};
+use crate::agents::{Phonebook, SessionFactory, WorkerSpec, short_name};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SpawnArgs {
@@ -24,11 +24,16 @@ pub struct SpawnArgs {
 pub struct Spawn {
     factory: Arc<SessionFactory>,
     me: SessionId,
+    phonebook: Phonebook,
 }
 
 impl Spawn {
-    pub fn new(factory: Arc<SessionFactory>, me: SessionId) -> Self {
-        Self { factory, me }
+    pub fn new(factory: Arc<SessionFactory>, me: SessionId, phonebook: Phonebook) -> Self {
+        Self {
+            factory,
+            me,
+            phonebook,
+        }
     }
 }
 
@@ -48,6 +53,9 @@ impl TypedTool for Spawn {
 
     async fn execute(&self, args: SpawnArgs, _ctx: &ToolContext) -> ToolOutput {
         let worker = self.factory.spawn(&self.me, WorkerSpec { name: args.name });
+        // The worker joins the phonebook, so the model can address it by name.
+        self.phonebook
+            .insert(short_name(&worker.id), worker.id.clone());
         // Hand the task over at once — as a `Wake`, so the worker runs even if
         // idle.
         match self.factory.registry().deliver(

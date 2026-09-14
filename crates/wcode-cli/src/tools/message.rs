@@ -6,6 +6,8 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 use wcode_protocol::Registry;
 
+use crate::agents::Phonebook;
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct MessageArgs {
     /// The recipient's address (`agent:w1`). Omit it to message your
@@ -30,14 +32,22 @@ pub struct Message {
     /// The default recipient for a worker (its orchestrator); `None` for the
     /// orchestrator itself, which must always name `to`.
     owner: Option<SessionId>,
+    /// The name → address phonebook (§13.15), resolved before `agent:<name>`.
+    phonebook: Phonebook,
 }
 
 impl Message {
-    pub fn new(registry: Registry, me: SessionId, owner: Option<SessionId>) -> Self {
+    pub fn new(
+        registry: Registry,
+        me: SessionId,
+        owner: Option<SessionId>,
+        phonebook: Phonebook,
+    ) -> Self {
         Self {
             registry,
             me,
             owner,
+            phonebook,
         }
     }
 }
@@ -81,17 +91,22 @@ impl TypedTool for Message {
     }
 
     async fn execute(&self, args: MessageArgs, _ctx: &ToolContext) -> ToolOutput {
-        let recipient = args
-            .to
-            .as_deref()
-            .or(self.owner.as_ref().map(SessionId::as_str));
-        let Some(to) = recipient.map(address) else {
-            return ToolOutput {
-                output: "no recipient: give `to` (there is no orchestrator to default to)"
-                    .to_string(),
-                is_error: true,
-                ..ToolOutput::default()
-            };
+        // A worker defaults to its orchestrator; a name resolves through the
+        // phonebook first (§13.15), then falls back to a bare `agent:<name>`.
+        let to = match args.to.as_deref() {
+            Some(to) => self.phonebook.get(to).unwrap_or_else(|| address(to)),
+            None => match &self.owner {
+                Some(owner) => owner.clone(),
+                None => {
+                    return ToolOutput {
+                        output: "no recipient: give `to` (there is no orchestrator to \
+                                 default to)"
+                            .to_string(),
+                        is_error: true,
+                        ..ToolOutput::default()
+                    };
+                }
+            },
         };
 
         let request = match request(args.mode.as_deref(), args.content) {

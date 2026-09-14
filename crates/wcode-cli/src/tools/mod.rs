@@ -9,6 +9,7 @@ pub mod edits;
 pub mod find;
 pub mod grep;
 pub mod message;
+pub mod peers;
 pub mod read;
 pub mod replace;
 pub mod spawn;

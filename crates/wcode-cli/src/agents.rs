@@ -31,7 +31,51 @@ use crate::tools::default_tools;
 use crate::tools::message::Message;
 use crate::tools::spawn::Spawn;
 
+/// A **name → address** map above the registry (§13.15): the phonebook. The
+/// orchestrator's model addresses a peer by name (`to: "reviewer"`), and the
+/// human can declare peers in `[peers]`. Cheap to clone (shared).
+#[derive(Clone, Default)]
+pub struct Phonebook {
+    names: Arc<std::sync::Mutex<std::collections::HashMap<String, SessionId>>>,
+}
+
+impl Phonebook {
+    /// Record `name → address` (an alias, or a peer's short name).
+    pub fn insert(&self, name: impl Into<String>, address: SessionId) {
+        self.names.lock().unwrap().insert(name.into(), address);
+    }
+
+    /// The address a name resolves to, if known.
+    pub fn get(&self, name: &str) -> Option<SessionId> {
+        self.names.lock().unwrap().get(name).cloned()
+    }
+
+    /// The known names, sorted — for the `peers` tool.
+    pub fn entries(&self) -> Vec<(String, SessionId)> {
+        let mut entries: Vec<_> = self
+            .names
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, address)| (name.clone(), address.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+}
+
+/// The short name of an address (`agent:w1` → `w1`); an unprefixed address is
+/// its own name.
+pub fn short_name(address: &SessionId) -> String {
+    address
+        .as_str()
+        .strip_prefix("agent:")
+        .unwrap_or(address.as_str())
+        .to_string()
+}
+
 /// The fixed configuration a worker inherits from its orchestrator. Owned (not
+/// borrowed) so a [`SessionFactory`] can be shared across tool calls.
 /// borrowed) so a [`SessionFactory`] can be shared across tool calls.
 #[derive(Clone)]
 pub struct WorkerTemplate {
@@ -106,6 +150,8 @@ impl SessionFactory {
             self.registry.clone(),
             id.clone(),
             Some(owner.clone()),
+            // A worker sends only to its owner; it needs no phonebook.
+            Phonebook::default(),
         )));
         Agent::new(AgentConfig {
             system,
@@ -184,6 +230,7 @@ pub struct Orchestrator {
     registry: Registry,
     factory: Arc<SessionFactory>,
     id: SessionId,
+    phonebook: Phonebook,
 }
 
 impl Orchestrator {
@@ -192,15 +239,32 @@ impl Orchestrator {
             factory: SessionFactory::new(registry.clone(), template),
             registry,
             id: SessionId::agent("orchestrator"),
+            phonebook: Phonebook::default(),
         }
     }
 
-    /// The root's A2A tools — `spawn` and `message`.
+    /// The root's A2A tools — `spawn`, `message`, and `peers`.
     pub fn tools(&self) -> Vec<Tool> {
         vec![
-            erased(Spawn::new(self.factory.clone(), self.id.clone())),
-            erased(Message::new(self.registry.clone(), self.id.clone(), None)),
+            erased(Spawn::new(
+                self.factory.clone(),
+                self.id.clone(),
+                self.phonebook.clone(),
+            )),
+            erased(Message::new(
+                self.registry.clone(),
+                self.id.clone(),
+                None,
+                self.phonebook.clone(),
+            )),
+            erased(crate::tools::peers::Peers::new(self.phonebook.clone())),
         ]
+    }
+
+    /// Record a name → address alias in the phonebook (§13.15) — a `[peers]`
+    /// entry whose target is an address rather than a socket.
+    pub fn alias(&self, name: impl Into<String>, address: SessionId) {
+        self.phonebook.insert(name, address);
     }
 
     /// Register a remote peer — a session served over a socket — so A2A
@@ -210,7 +274,8 @@ impl Orchestrator {
         self.registry.register_remote(id.clone(), client);
         // A peer we register is one we own — the permitted set admits the edge
         // in both directions (§10.1).
-        self.registry.set_owner(id, self.id.clone());
+        self.registry.set_owner(id.clone(), self.id.clone());
+        self.phonebook.insert(short_name(&id), id);
     }
 
     /// Register the root's mailbox so a worker can report back to it.
@@ -338,6 +403,7 @@ mod tests {
             registry.clone(),
             worker.clone(),
             Some(orch.clone()),
+            Phonebook::default(),
         ));
         let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = wcode_harness::tool::ToolContext {
@@ -409,5 +475,47 @@ mod tests {
                 if from == &worker.id && content == "the answer is 56"),
             "{event:?}"
         );
+    }
+
+    #[test]
+    fn phonebook_resolves_names_and_lists_them_sorted() {
+        let book = Phonebook::default();
+        book.insert("reviewer", SessionId::agent("w1"));
+        book.insert("helper", SessionId::new("agent:uuid-7"));
+
+        assert_eq!(book.get("reviewer"), Some(SessionId::agent("w1")));
+        assert_eq!(book.get("nope"), None);
+
+        let names: Vec<String> = book.entries().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["helper", "reviewer"]);
+
+        assert_eq!(short_name(&SessionId::agent("w1")), "w1");
+        assert_eq!(short_name(&SessionId::user()), "user");
+    }
+
+    #[tokio::test]
+    async fn spawn_registers_the_worker_in_the_phonebook() {
+        let (factory, _registry) = factory();
+        let book = Phonebook::default();
+        let tool = erased(Spawn::new(
+            factory,
+            SessionId::agent("orch"),
+            book.clone(),
+        ));
+
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = wcode_harness::tool::ToolContext {
+            call_id: "s1".into(),
+            name: "spawn".into(),
+            working_dir: std::env::temp_dir(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            events,
+        };
+        let out = tool
+            .execute(serde_json::json!({ "task": "hi", "name": "reviewer" }), ctx)
+            .await;
+        assert!(!out.is_error, "{out:?}");
+
+        assert_eq!(book.get("reviewer"), Some(SessionId::agent("reviewer")));
     }
 }

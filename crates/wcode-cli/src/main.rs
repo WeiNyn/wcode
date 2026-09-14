@@ -515,6 +515,24 @@ async fn main() {
         eprintln!("error: `--peer` is not supported on this platform");
         std::process::exit(2);
     }
+    // `[peers]` (config): persistent peers — a socket path connects a remote
+    // peer, an address (`agent:<id>`) is a phonebook alias (§13.15).
+    #[cfg(unix)]
+    if let Some(o) = &orchestrator {
+        for (name, target) in &cfg.peers {
+            if target.contains(':') {
+                o.alias(name.clone(), SessionId::new(target.clone()));
+            } else {
+                match wcode_protocol::Client::connect(Path::new(target)).await {
+                    Ok(client) => o.register_remote(SessionId::agent(name), client),
+                    Err(e) => {
+                        eprintln!("error: cannot reach peer `{name}` at {target}: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+        }
+    }
     let extra_tools = orchestrator
         .as_ref()
         .map(|o| o.tools())
