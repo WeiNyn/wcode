@@ -1,7 +1,7 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4-1/2/3/5 landed; S4-4
-transport + outbound landed, reply path next** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4 (A2A) complete —
+S4-1…S4-5 landed** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -662,14 +662,14 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       sender** (`[message from agent:abc] …`), so the model knows the address to
       reply to. **`Ack` is not a verb**: reply = `message` to the `from` you
       just saw. No handshake (§13.14).
-  - ◐ **S4-4 — Socket peers.** Point the registry at served sessions, so a
-    message reaches across the socket. Landed: `Frame.sender`, `Client::send_from`
-    /`Backend::send_from`, the server honoring `sender` (via `ask_from`), a
-    `Registry` that holds a `Backend` (`register_remote`), and
-    `wcode --agents --peer <name>=<socket>`. Delivers *out* to a served peer with
-    the sender attributed. **Follow-up:** the *reply* direction needs the served
-    peer to be a worker with an owner (a `--owner` on `serve`, giving it a
-    `ReportBack`) — or the orchestrator served too; not yet wired.
+  - ☑ **S4-4 — Socket peers.** A message reaches across the socket, both ways.
+    `Frame.sender` + `Client::send_from`/`Backend::send_from`, the server honoring
+    `sender` (via `ask_from`), a `Registry` holding a `Backend` (`register_remote`),
+    `wcode --agents --peer <name>=<socket>`, and `Client::lazy` (so two sessions
+    can each wait for the other). **Reply:** `wcode serve --name <id> --owner
+    <addr>` makes a served session a reporting worker (a `message` tool bound to
+    its owner + a `ReportBack` hook + the ownership edge). Verified live across
+    two served processes.
   - ☑ **S4-5 — Phonebook.** A **name → address** map above the registry, so the
     model (and the human) address a peer by name (`to: "reviewer"`). `Phonebook`
     in the CLI; `message` resolves `to` through it (falling back to a bare
