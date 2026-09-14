@@ -314,3 +314,42 @@ async fn a_remote_peer_delivery_carries_the_sender() {
         "{event:?}"
     );
 }
+
+/// S4-4 reply: a *lazy* client (the mode `--peer`/`[peers]` use) connects once
+/// the peer appears, so two sessions can each be waiting for the other.
+#[tokio::test]
+async fn a_lazy_client_connects_once_the_peer_appears() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    // Connect lazily *before* the server exists, and queue a request.
+    let client = Client::lazy(&sock);
+    let mut events = client.subscribe();
+    client
+        .send_from(
+            SessionId::agent("orchestrator"),
+            Request::Notify {
+                content: "hi".into(),
+            },
+        )
+        .unwrap();
+
+    // Now bring the server up.
+    let handle = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        handle,
+        SessionId::new("w1"),
+        listener,
+    ));
+
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("an event")
+        .expect("open");
+    assert!(
+        matches!(&event, AgentEvent::MessageReceived { from, content }
+            if from.as_str() == "agent:orchestrator" && content == "hi"),
+        "{event:?}"
+    );
+}

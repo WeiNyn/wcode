@@ -30,7 +30,7 @@ use crate::repl::{
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [serve] [--socket <path>] [--tui|--no-tui]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -107,6 +107,11 @@ struct Args {
     /// `--peer <name>=<socket>`: register a remote peer (a served session) so
     /// A2A messages reach it over its socket (§8, S4-4). Repeatable.
     peers: Vec<String>,
+    /// `--name <id>`: this session's A2A address (`agent:<id>`), for `--owner`.
+    name: Option<String>,
+    /// `--owner <addr>`: make this (served) session a worker of `<addr>` — it
+    /// reports back over the socket (S4-4 reply). Requires `--agents`.
+    owner: Option<String>,
     sequential: bool,
     /// `wcode serve`: own the session and serve it over a socket.
     serve: bool,
@@ -182,6 +187,14 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--peer" => {
                 a.peers
                     .push(args.get(i).ok_or("--peer requires <name>=<socket>")?.clone());
+                i += 1;
+            }
+            "--name" => {
+                a.name = Some(args.get(i).ok_or("--name requires an id")?.clone());
+                i += 1;
+            }
+            "--owner" => {
+                a.owner = Some(args.get(i).ok_or("--owner requires an address")?.clone());
                 i += 1;
             }
             "serve" => a.serve = true,
@@ -501,13 +514,12 @@ async fn main() {
                 eprintln!("error: --peer expects <name>=<socket>, got `{spec}`");
                 std::process::exit(2);
             };
-            match wcode_protocol::Client::connect(Path::new(path)).await {
-                Ok(client) => o.register_remote(SessionId::agent(name), client),
-                Err(e) => {
-                    eprintln!("error: cannot reach peer `{name}` at {path}: {e}");
-                    std::process::exit(2);
-                }
-            }
+            // Lazy: a peer may not be up yet (two peers can be waiting on each
+            // other); the supervisor connects once it is.
+            o.register_remote(
+                SessionId::agent(name),
+                wcode_protocol::Client::lazy(Path::new(path)),
+            );
         }
     }
     #[cfg(not(unix))]
@@ -523,24 +535,35 @@ async fn main() {
             if target.contains(':') {
                 o.alias(name.clone(), SessionId::new(target.clone()));
             } else {
-                match wcode_protocol::Client::connect(Path::new(target)).await {
-                    Ok(client) => o.register_remote(SessionId::agent(name), client),
-                    Err(e) => {
-                        eprintln!("error: cannot reach peer `{name}` at {target}: {e}");
-                        std::process::exit(2);
-                    }
-                }
+                o.register_remote(
+                    SessionId::agent(name),
+                    wcode_protocol::Client::lazy(Path::new(target)),
+                );
             }
         }
     }
-    let extra_tools = orchestrator
-        .as_ref()
-        .map(|o| o.tools())
-        .unwrap_or_default();
+    // A session with `--owner` is a **served worker** (S4-4 reply): it gets a
+    // `message` tool bound to its owner and a `ReportBack` hook, and the
+    // ownership edge is recorded so its report is permitted.
+    let mut agent_hooks = hooks.clone();
+    let extra_tools = match (&orchestrator, &args.owner) {
+        (Some(o), Some(owner)) => {
+            let me = SessionId::agent(args.name.clone().unwrap_or_else(|| "worker".to_string()));
+            let (tools, hook) = o.as_worker(me, SessionId::new(owner.clone()));
+            agent_hooks.push(hook);
+            tools
+        }
+        (Some(o), None) => o.tools(),
+        (None, Some(_)) => {
+            eprintln!("error: --owner requires --agents");
+            std::process::exit(2);
+        }
+        (None, None) => Vec::new(),
+    };
     let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
-            hooks: hooks.clone(),
+            hooks: agent_hooks,
             tools: &cfg.tools,
             compaction: cfg.compaction,
             instructions: &instructions,

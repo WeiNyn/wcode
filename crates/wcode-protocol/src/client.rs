@@ -60,10 +60,18 @@ impl Client {
     /// that the client reconnects on its own if the connection drops.
     pub async fn connect(path: &Path) -> io::Result<Client> {
         let stream = crate::socket::connect(path).await?;
-        Ok(Client::adopt(path.to_path_buf(), stream))
+        Ok(Client::adopt(path.to_path_buf(), Some(stream)))
     }
 
-    fn adopt(path: PathBuf, stream: UnixStream) -> Client {
+    /// Connect **lazily**: never fails. The supervisor keeps trying `path` in the
+    /// background, so a peer that is not up yet (or restarts) is reached once it
+    /// appears — the right mode for an A2A peer (`--peer`/`[peers]`), where two
+    /// sessions may each be waiting for the other.
+    pub fn lazy(path: &Path) -> Client {
+        Client::adopt(path.to_path_buf(), None)
+    }
+
+    fn adopt(path: PathBuf, stream: Option<UnixStream>) -> Client {
         let (out, out_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let inner = Arc::new(Inner {
@@ -74,7 +82,7 @@ impl Client {
             // Single-session server (S2): the routing field is inert here.
             session: SessionId::new("remote"),
         });
-        tokio::spawn(supervise(inner.clone(), out_rx, Some(stream)));
+        tokio::spawn(supervise(inner.clone(), out_rx, stream));
         Client { inner, out }
     }
 

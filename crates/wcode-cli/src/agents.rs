@@ -267,6 +267,26 @@ impl Orchestrator {
         self.phonebook.insert(name, address);
     }
 
+    /// Configure this session as a **served worker** of `owner` (S4-4 reply):
+    /// returns its tool set (a `message` bound to the owner) and the
+    /// `ReportBack` hook, and records the ownership edge so the report is
+    /// permitted. `me` is the worker's own address (`agent:<name>`).
+    pub fn as_worker(&self, me: SessionId, owner: SessionId) -> (Vec<Tool>, Arc<dyn Hooks>) {
+        self.registry.set_owner(me.clone(), owner.clone());
+        let tools = vec![erased(Message::new(
+            self.registry.clone(),
+            me.clone(),
+            Some(owner.clone()),
+            self.phonebook.clone(),
+        ))];
+        let hook = Arc::new(ReportBack {
+            registry: self.registry.clone(),
+            me,
+            owner,
+        }) as Arc<dyn Hooks>;
+        (tools, hook)
+    }
+
     /// Register a remote peer — a session served over a socket — so A2A
     /// messages reach it across the process boundary (§8, S4-4).
     #[cfg(unix)]
@@ -517,5 +537,55 @@ mod tests {
         assert!(!out.is_error, "{out:?}");
 
         assert_eq!(book.get("reviewer"), Some(SessionId::agent("reviewer")));
+    }
+
+    /// S4-4 reply: `as_worker` records the ownership edge and returns a hook
+    /// that forwards the worker's final text to its owner.
+    #[tokio::test]
+    async fn a_served_worker_reports_to_its_owner() {
+        let registry = Registry::new();
+        let orch = SessionId::agent("orchestrator");
+        let root = session();
+        registry.register(orch.clone(), root.clone());
+
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let template = WorkerTemplate {
+            system: "sys".into(),
+            llm: LlmOpts::default(),
+            stream_fn,
+            hooks: HooksSet::default(),
+            tools: ToolsConfig::default(),
+            compaction: CompactionPolicy::default(),
+            working_dir: std::env::temp_dir(),
+        };
+        let o = Orchestrator::new(registry.clone(), template);
+
+        let me = SessionId::agent("w1");
+        let (tools, hook) = o.as_worker(me.clone(), orch.clone());
+        assert_eq!(tools.len(), 1, "the worker gets a `message` tool");
+        assert!(registry.permitted(&me, &orch), "the ownership edge is recorded");
+
+        let mut root_rx = root.subscribe();
+        let ctx = vec![AgentMessage::Assistant {
+            content: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }];
+        hook.after_run(&ctx, StopReason::Stop).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(2), root_rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        assert!(
+            matches!(&event, AgentEvent::MessageReceived { from, content }
+                if from == &me && content == "done"),
+            "{event:?}"
+        );
     }
 }
