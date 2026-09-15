@@ -44,6 +44,9 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
         KeyCode::End => Key::End,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
+        // Tab accepts the inline command completion. BackTab (Shift-Tab) is a
+        // distinct code and stays unmapped.
+        KeyCode::Tab => Key::Tab,
         KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => Key::Newline,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
@@ -134,5 +137,15 @@ mod tests {
             [AppEvent::Resize]
         ));
         assert!(translate(Event::FocusGained).is_empty());
+    }
+
+    #[test]
+    fn tab_accepts_completion_and_backtab_stays_unmapped() {
+        assert_eq!(
+            keys(translate(key(KeyCode::Tab, KeyModifiers::NONE))),
+            vec![Key::Tab]
+        );
+        // BackTab is a distinct code; we never mapped it and still do not.
+        assert!(keys(translate(key(KeyCode::BackTab, KeyModifiers::SHIFT))).is_empty());
     }
 }

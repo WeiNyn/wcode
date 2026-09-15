@@ -43,6 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_rule(frame, rule);
     draw_input(frame, input, &view);
     draw_status(frame, status, app);
+    draw_completion(frame, area, rule, app);
     // The modal, if any, is drawn last — over the bands.
     draw_overlay(frame, area, app);
 }
@@ -97,6 +98,67 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
         };
         let mut spans = vec![marker];
         spans.extend(highlight(item, range.as_ref()));
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Cap on completion rows shown at once.
+const MAX_COMPLETION_ROWS: usize = 8;
+
+/// Draw the inline `/`-command completion popup, floating just above the input
+/// band (its bottom edge rests on the `rule`). Non-modal and non-reflowing: it
+/// is `Clear`ed over the transcript and styled like the picker (design D7).
+fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
+    let rows = app.completion_rows();
+    if rows.is_empty() {
+        return;
+    }
+    let selected = app.completion_selected();
+    // Leave two rows for the borders; cap so the list never dominates the screen.
+    let max_items = MAX_COMPLETION_ROWS.min(above.y.saturating_sub(2) as usize);
+    let visible = rows.len().min(max_items);
+    if visible == 0 {
+        return;
+    }
+    let start = if rows.len() <= visible {
+        0
+    } else {
+        selected.saturating_sub(visible - 1).min(rows.len() - visible)
+    };
+    let height = visible as u16 + 2;
+    let width = area.width.saturating_sub(2).clamp(1, 64);
+    let rect = Rect {
+        x: area.x + 1,
+        y: above.y - height,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_style(dim())
+        .title(Span::styled(" commands ", dim()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(start).take(visible) {
+        let marker = if i == selected {
+            Span::styled("❯ ", accent())
+        } else {
+            Span::styled("  ", dim())
+        };
+        let mut spans = vec![marker];
+        spans.extend(highlight(&row.label, row.range.as_ref()));
+        if let Some(alias) = row.alias {
+            spans.push(Span::styled(format!(" (/{alias})"), dim()));
+        }
+        if let Some(args) = row.args {
+            spans.push(Span::styled(format!(" {args}"), dim()));
+        }
+        spans.push(Span::styled(format!("  {}", row.summary), dim()));
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1021,5 +1083,62 @@ mod tests {
         assert!(text.contains("pasted"), "chip missing:\n{text}");
         assert!(text.contains("❱"), "chip tail missing:\n{text}");
         assert!(text.contains("▌"), "cursor missing:\n{text}");
+    }
+
+    #[test]
+    fn the_completion_popup_lists_matching_commands() {
+        let mut app = App::new();
+        for c in "/mo".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("commands"), "popup title missing:\n{text}");
+        assert!(text.contains("/model"), "completion row missing:\n{text}");
+    }
+
+    #[test]
+    fn the_completion_popup_shows_why_an_alias_matched() {
+        let mut app = App::new();
+        for c in "/s".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("/resume"), "row missing:\n{text}");
+        assert!(text.contains("/sessions"), "alias hint missing:\n{text}");
+    }
+
+    #[test]
+    fn draw_completion_is_safe_on_a_short_terminal() {
+        // The popup floats above the rule; on a screen too short to seat it the
+        // rect math must skip rather than underflow. `above.y.saturating_sub(2)`
+        // caps the rows, and the drawn height keeps `above.y - height >= 0`.
+        let mut app = App::new();
+        for c in "/mo".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        assert!(!app.completion_rows().is_empty(), "the popup should be open");
+
+        // A tiny area: the layout clamps the popup away entirely (no panic).
+        render(&mut app, 20, 4);
+        let text = buffer_text(&render(&mut app, 20, 5));
+        assert!(!text.is_empty(), "a short screen still draws the bands");
+
+        // Pin the rect math directly for degenerate `above` rects: below the
+        // two-row border reserve, and exactly the popup height.
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                for y in [0u16, 1, 2, 3, 5] {
+                    let above = Rect {
+                        x: area.x,
+                        y,
+                        width: area.width,
+                        height: 1,
+                    };
+                    draw_completion(frame, area, above, &app);
+                }
+            })
+            .unwrap();
     }
 }

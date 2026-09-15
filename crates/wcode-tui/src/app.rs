@@ -34,6 +34,8 @@ pub enum Key {
     ScrollUp,
     /// One mouse-wheel notch down.
     ScrollDown,
+    /// Tab: accept the highlighted inline command completion.
+    Tab,
     Enter,
     /// Shift-Enter: insert a newline instead of submitting.
     Newline,
@@ -179,20 +181,14 @@ impl Picker {
     /// The rows to show: each item matching `query` (case-insensitive) and, when
     /// filtering, the byte range of the match within it (for highlighting). An
     /// empty query shows every item.
-    pub fn rows(&self) -> Vec<(&str, Option<std::ops::Range<usize>>)> {
-        let query = self.query.to_lowercase();
-        self.visible_indices()
+    pub fn rows(&self) -> Vec<(&str, Option<Range<usize>>)> {
+        matching_indices(&self.items, &self.query)
             .into_iter()
             .map(|i| {
-                let item = &self.items[i];
-                let range = if query.is_empty() {
-                    None
-                } else {
-                    item.to_lowercase()
-                        .find(&query)
-                        .map(|start| start..start + query.len())
-                };
-                (item.as_str(), range)
+                (
+                    self.items[i].as_str(),
+                    match_range(&self.items[i], &self.query),
+                )
             })
             .collect()
     }
@@ -217,13 +213,7 @@ impl Picker {
 
     /// Indices of the items matching the current query, in display order.
     fn visible_indices(&self) -> Vec<usize> {
-        let query = self.query.to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| query.is_empty() || item.to_lowercase().contains(&query))
-            .map(|(i, _)| i)
-            .collect()
+        matching_indices(&self.items, &self.query)
     }
 
     /// The value of the highlighted row (e.g. a model id, a changed path),
@@ -237,6 +227,195 @@ impl Picker {
         let last = self.rows().len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
     }
+}
+
+/// One `/`-command the TUI understands. [`COMMANDS`] is the single source of
+/// truth for dispatch, the generated `/help`, and inline completion. It is
+/// deliberately TUI-local: the REPL keeps its own parser, since the two command
+/// sets legitimately differ (see `docs/team-and-tui-plan.md`, decision D8).
+struct Command {
+    /// Canonical name, without the leading slash.
+    name: &'static str,
+    /// Accepted alternative spellings (also slash-less).
+    aliases: &'static [&'static str],
+    /// Argument hint for `/help` and the completion popup, e.g. `"<id>"`.
+    args: Option<&'static str>,
+    /// One-line description shown in the completion popup.
+    summary: &'static str,
+}
+
+/// The command table — its order is the `/help` listing.
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "exit",
+        aliases: &["quit"],
+        args: None,
+        summary: "quit wcode",
+    },
+    Command {
+        name: "model",
+        aliases: &[],
+        args: Some("<id>"),
+        summary: "switch model (no arg: pick)",
+    },
+    Command {
+        name: "effort",
+        aliases: &[],
+        args: Some("[level]"),
+        summary: "set reasoning effort ('-' clears)",
+    },
+    Command {
+        name: "compact",
+        aliases: &[],
+        args: Some("[text]"),
+        summary: "summarize older context",
+    },
+    Command {
+        name: "changes",
+        aliases: &[],
+        args: None,
+        summary: "files changed this run",
+    },
+    Command {
+        name: "resume",
+        aliases: &["sessions"],
+        args: None,
+        summary: "resume a saved session",
+    },
+    Command {
+        name: "usage",
+        aliases: &[],
+        args: None,
+        summary: "token usage so far",
+    },
+    Command {
+        name: "copy",
+        aliases: &[],
+        args: None,
+        summary: "copy the last reply",
+    },
+    Command {
+        name: "help",
+        aliases: &[],
+        args: None,
+        summary: "list commands",
+    },
+];
+
+/// The inline `/`-command completion popup. Non-modal: it never owns the
+/// keyboard, so the user keeps typing arguments beneath it. `matches` indexes
+/// [`COMMANDS`]; `selected` indexes `matches`.
+#[derive(Clone, Debug, Default)]
+struct Completion {
+    pub matches: Vec<usize>,
+    pub selected: usize,
+}
+
+/// One renderable completion row.
+pub(crate) struct CompletionRow {
+    pub(crate) label: String,
+    pub(crate) range: Option<Range<usize>>,
+    /// The alias that matched when the canonical name has no prefix (a hint).
+    pub(crate) alias: Option<&'static str>,
+    pub(crate) args: Option<&'static str>,
+    pub(crate) summary: &'static str,
+}
+
+/// Look up a command by its typed name (canonical or alias). The leading slash
+/// is optional.
+fn command_named(token: &str) -> Option<&'static Command> {
+    let name = token.strip_prefix('/').unwrap_or(token);
+    COMMANDS
+        .iter()
+        .find(|c| c.name == name || c.aliases.contains(&name))
+}
+
+/// The generated `/help` line, e.g. `commands: /exit /model <id> …`.
+fn help_text() -> String {
+    let mut out = String::from("commands:");
+    for cmd in COMMANDS {
+        out.push(' ');
+        out.push('/');
+        out.push_str(cmd.name);
+        if let Some(args) = cmd.args {
+            out.push(' ');
+            out.push_str(args);
+        }
+    }
+    out
+}
+
+/// `true` when `query` is already a complete command name *or alias* — nothing
+/// left to complete, so Enter submits rather than completes.
+fn is_exact_command(query: &str) -> bool {
+    COMMANDS
+        .iter()
+        .any(|c| c.name == query || c.aliases.contains(&query))
+}
+
+/// Indices of the entries matching `query` (case-insensitive substring), in
+/// order. An empty query matches everything. Used by the picker filter — the
+/// completion popup uses [`prefix_indices`] instead.
+fn matching_indices<S: AsRef<str>>(items: &[S], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| query.is_empty() || item.as_ref().to_lowercase().contains(&query))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Indices of the commands whose *name* — or any of whose aliases — starts with
+/// `query` (case-insensitive). This is the completion popup's matcher: a leading
+/// prefix, not the picker's mid-string [`matching_indices`]. An empty query
+/// matches every name, so a bare `/` still lists them all.
+fn prefix_indices(commands: &[Command], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    commands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.name.to_lowercase().starts_with(&query)
+                || c.aliases
+                    .iter()
+                    .any(|a| a.to_lowercase().starts_with(&query))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The leading-prefix highlight range for a completion row, or `None` when the
+/// query matched an alias rather than the canonical name (there is then no
+/// prefix to light up in the label). `label` is `/` + `name`, hence the shift.
+fn prefix_range(label: &str, name: &str, query: &str) -> Option<Range<usize>> {
+    if query.is_empty() || !name.to_lowercase().starts_with(&query.to_lowercase()) {
+        return None;
+    }
+    Some(0..(1 + query.len()).min(label.len()))
+}
+
+/// The first alias of `cmd` that starts with `query` (case-insensitive) — the
+/// popup's dim "why did this match" hint when the canonical name has no prefix.
+fn matched_alias(cmd: &Command, query: &str) -> Option<&'static str> {
+    let query = query.to_lowercase();
+    cmd.aliases
+        .iter()
+        .copied()
+        .find(|a| a.to_lowercase().starts_with(&query))
+}
+
+/// The byte range of `query` within `item` for highlighting (case-insensitive),
+/// or `None` when the query is empty or absent. Used by the picker; the
+/// completion popup uses [`prefix_range`].
+fn match_range(item: &str, query: &str) -> Option<Range<usize>> {
+    if query.is_empty() {
+        return None;
+    }
+    let query = query.to_lowercase();
+    item.to_lowercase()
+        .find(&query)
+        .map(|start| start..start + query.len())
 }
 
 /// A resumable session offered by `/resume`: a display `label` (`id · age ·
@@ -374,6 +553,9 @@ pub struct App {
     pending_resume: Option<PathBuf>,
     /// The open modal, if any. While one is shown it captures every key.
     overlay: Option<Overlay>,
+    /// The inline command-completion popup, if one is showing. Recomputed after
+    /// every buffer edit; non-modal (it never owns the keyboard — see [`Completion`]).
+    completion: Option<Completion>,
     /// Provider-reported input tokens of the last turn: how full the context was.
     context_used: Option<u64>,
     /// Lines scrolled up from the bottom; `0` follows the tail.
@@ -426,6 +608,12 @@ impl App {
             self.on_overlay_key(key);
             return;
         }
+        // While the inline completion is open it owns Up/Down/Tab/Esc (and an
+        // Enter with something left to complete); Char/Backspace fall through to
+        // the buffer below.
+        if self.completion.is_some() && self.on_completion_key(key) {
+            return;
+        }
         match key {
             Key::Char(c) => {
                 self.history_index = None;
@@ -472,6 +660,7 @@ impl App {
             Key::ScrollDown => self.scroll_down(WHEEL_LINES),
             _ => {}
         }
+        self.recompute_completion();
     }
 
     /// Esc / Ctrl-C: cancel a run, else quit.
@@ -518,21 +707,31 @@ impl App {
         self.actions.push(Action::Submit(text));
     }
 
-    /// Parse and act on a `/`-command typed at the prompt.
+    /// Parse and act on a `/`-command typed at the prompt. Dispatch goes through
+    /// [`COMMANDS`], so aliases and the generated `/help` share one source.
     fn command(&mut self, line: &str) {
         let mut parts = line.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("");
         let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
         self.notice(line);
-        match name {
-            "/exit" | "/quit" => self.should_quit = true,
-            "/model" => match arg {
+        match command_named(name) {
+            Some(cmd) => self.run_command(cmd, arg),
+            None => self.notice(format!("unknown command: {name}")),
+        }
+        self.dirty = true;
+    }
+
+    /// Run a looked-up command; `arg` is the text after the name, if any.
+    fn run_command(&mut self, cmd: &Command, arg: Option<&str>) {
+        match cmd.name {
+            "exit" => self.should_quit = true,
+            "model" => match arg {
                 Some(m) => self.actions.push(Action::Ask(Request::SetModel {
                     model: m.to_string(),
                 })),
                 None => self.open_model_picker(),
             },
-            "/effort" => match arg {
+            "effort" => match arg {
                 Some(level) => {
                     let effort = match level {
                         "-" | "none" | "off" => None,
@@ -542,19 +741,149 @@ impl App {
                 }
                 None => self.notice("usage: /effort <level> ('-' clears)"),
             },
-            "/compact" => self.actions.push(Action::Ask(Request::Compact {
+            "compact" => self.actions.push(Action::Ask(Request::Compact {
                 instructions: arg.map(str::to_string),
             })),
-            "/usage" => self.actions.push(Action::Ask(Request::GetHistory)),
-            "/changes" => self.open_changes_picker(),
-            "/resume" => self.open_session_picker(arg),
-            "/copy" => self.copy_last(),
-            "/help" => self.notice(
-                "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /help",
+            "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
+            "changes" => self.open_changes_picker(),
+            "resume" => self.open_session_picker(arg),
+            "copy" => self.copy_last(),
+            "help" => self.notice(help_text()),
+            // Unreachable: every [`COMMANDS`] name is matched above. A debug
+            // assert keeps a table entry from silently shadowing a real arm.
+            _ => debug_assert!(
+                false,
+                "COMMANDS entry without a run_command arm: {}",
+                cmd.name
             ),
-            other => self.notice(format!("unknown command: {other}")),
+        }
+    }
+
+    /// The command name being typed, when the buffer is still a lone `/`-token:
+    /// `Some(text-after-slash)`. `None` once the buffer holds whitespace (the
+    /// user moved on to arguments) or does not start with `/`.
+    fn command_query(&self) -> Option<String> {
+        let text = self.expanded();
+        if text.contains(char::is_whitespace) {
+            return None;
+        }
+        Some(text.strip_prefix('/')?.to_string())
+    }
+
+    /// Recompute the inline completion from the current buffer. Called after
+    /// every edit; a lone `/`-token opens it, anything else closes it. A live
+    /// selection is preserved (clamped) across edits.
+    fn recompute_completion(&mut self) {
+        let Some(query) = self.command_query() else {
+            self.completion = None;
+            return;
+        };
+        let matches = prefix_indices(COMMANDS, &query);
+        if matches.is_empty() {
+            self.completion = None;
+            return;
+        }
+        let selected = self
+            .completion
+            .as_ref()
+            .map_or(0, |c| c.selected.min(matches.len() - 1));
+        self.completion = Some(Completion { matches, selected });
+    }
+
+    /// Handle a key while the completion popup is open. Returns `true` when the
+    /// popup consumed it. `Char`/`Backspace` (and Enter with nothing left to
+    /// complete) fall through to the buffer below.
+    fn on_completion_key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Up => {
+                self.move_completion(-1);
+                true
+            }
+            Key::Down => {
+                self.move_completion(1);
+                true
+            }
+            Key::Tab => {
+                self.accept_completion();
+                true
+            }
+            Key::Esc => {
+                self.completion = None;
+                self.dirty = true;
+                true
+            }
+            Key::Enter => {
+                // Enter completes only when something is left to complete; a
+                // fully typed name/alias submits as usual, and a bare `/` is not
+                // a command at all (it falls through to "unknown command: /").
+                let pending = self
+                    .command_query()
+                    .is_some_and(|q| !q.is_empty() && !is_exact_command(&q));
+                if pending {
+                    self.accept_completion();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Move the highlighted completion row by `delta`, clamped to the matches.
+    fn move_completion(&mut self, delta: isize) {
+        if let Some(completion) = self.completion.as_mut() {
+            let last = completion.matches.len().saturating_sub(1) as isize;
+            completion.selected = (completion.selected as isize + delta).clamp(0, last) as usize;
         }
         self.dirty = true;
+    }
+
+    /// Insert the highlighted command as `/<name> ` (trailing space) and close
+    /// the popup, so the user can type arguments.
+    fn accept_completion(&mut self) {
+        let Some(&idx) = self.completion.as_ref().and_then(|c| c.matches.get(c.selected)) else {
+            self.completion = None;
+            return;
+        };
+        let text = format!("/{} ", COMMANDS[idx].name);
+        self.input = Self::atoms(&text);
+        self.cursor = self.input.len();
+        self.history_index = None;
+        self.completion = None;
+        self.dirty = true;
+    }
+
+    /// The completion rows to render (empty when no popup is showing).
+    pub(crate) fn completion_rows(&self) -> Vec<CompletionRow> {
+        let Some(completion) = &self.completion else {
+            return Vec::new();
+        };
+        let query = self.command_query().unwrap_or_default();
+        completion
+            .matches
+            .iter()
+            .map(|&idx| {
+                let cmd = &COMMANDS[idx];
+                let label = format!("/{}", cmd.name);
+                let range = prefix_range(&label, cmd.name, &query);
+                let alias = (range.is_none() && !query.is_empty())
+                    .then(|| matched_alias(cmd, &query))
+                    .flatten();
+                CompletionRow {
+                    range,
+                    label,
+                    alias,
+                    args: cmd.args,
+                    summary: cmd.summary,
+                }
+            })
+            .collect()
+    }
+
+    /// The highlighted completion row index (0 when no popup is showing).
+    pub(crate) fn completion_selected(&self) -> usize {
+        self.completion.as_ref().map_or(0, |c| c.selected)
     }
     /// Copy the last assistant reply to the terminal clipboard.
     fn copy_last(&mut self) {
@@ -794,6 +1123,7 @@ impl App {
         } else {
             self.insert_str(&text);
         }
+        self.recompute_completion();
     }
 
     fn backspace(&mut self) {
@@ -2004,5 +2334,224 @@ mod tests {
             app.transcript().last(),
             Some(Block::Notice(t)) if t.contains("no sessions")
         ));
+    }
+
+    fn completion_labels(app: &App) -> Vec<String> {
+        app.completion_rows().into_iter().map(|r| r.label).collect()
+    }
+
+    #[test]
+    fn help_lists_every_command_from_the_table() {
+        let mut app = App::new();
+        submit(&mut app, "/help");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a help notice");
+        };
+        assert_eq!(
+            text,
+            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /help"
+        );
+        for name in [
+            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "help",
+        ] {
+            assert!(
+                text.contains(&format!("/{name}")),
+                "{name} missing from help: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_filters_by_the_typed_prefix() {
+        let mut app = App::new();
+        typed(&mut app, "/mo");
+        assert_eq!(completion_labels(&app), vec!["/model"]);
+    }
+
+    #[test]
+    fn completion_matches_a_prefix_case_insensitively() {
+        // `prefix_indices` lowercases both sides, so an upper/mixed-case prefix
+        // still completes — a canonical name and an alias each.
+        let mut app = App::new();
+        typed(&mut app, "/MO");
+        assert_eq!(completion_labels(&app), vec!["/model"]);
+
+        let mut app = App::new();
+        typed(&mut app, "/SES"); // a case-insensitive prefix of the `/sessions` alias
+        assert_eq!(completion_labels(&app), vec!["/resume"]);
+    }
+
+    #[test]
+    fn a_bare_slash_matches_every_command() {
+        let mut app = App::new();
+        typed(&mut app, "/");
+        let labels = completion_labels(&app);
+        assert_eq!(labels.len(), COMMANDS.len());
+        assert!(labels.contains(&"/exit".to_string()));
+        assert!(labels.contains(&"/help".to_string()));
+    }
+
+    #[test]
+    fn tab_accepts_the_highlighted_command_with_a_trailing_space() {
+        let mut app = App::new();
+        typed(&mut app, "/mo");
+        app.handle(AppEvent::Key(Key::Tab));
+        assert_eq!(app.input(), "/model ");
+        assert_eq!(app.cursor(), 7);
+        assert!(app.completion_rows().is_empty(), "the popup closed");
+    }
+
+    #[test]
+    fn esc_dismisses_the_completion_without_editing_the_buffer() {
+        let mut app = App::new();
+        typed(&mut app, "/mo");
+        assert!(!app.completion_rows().is_empty());
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.input(), "/mo", "the buffer is untouched");
+        assert!(app.completion_rows().is_empty(), "the popup closed");
+        assert!(!app.should_quit(), "Esc dismisses the popup, it does not quit");
+    }
+
+    #[test]
+    fn up_and_down_move_the_completion_selection() {
+        let mut app = App::new();
+        typed(&mut app, "/");
+        assert_eq!(app.completion_selected(), 0);
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.completion_selected(), 1);
+        assert_eq!(app.input(), "/", "moving the selection does not edit the buffer");
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.completion_selected(), 0);
+    }
+
+    #[test]
+    fn up_recalls_history_once_the_popup_is_closed() {
+        let mut app = App::new();
+        submit(&mut app, "first");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+
+        typed(&mut app, "drafty"); // no slash: no completion popup
+        assert!(app.completion_rows().is_empty());
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "first");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.input(), "drafty");
+    }
+
+    #[test]
+    fn a_space_falls_through_and_closes_the_popup() {
+        let mut app = App::new();
+        typed(&mut app, "/model");
+        assert!(!app.completion_rows().is_empty());
+        typed(&mut app, " gpt");
+        assert!(app.completion_rows().is_empty(), "a space closed the popup");
+        assert_eq!(app.input(), "/model gpt");
+    }
+
+    #[test]
+    fn enter_completes_a_partial_command_but_submits_a_complete_one() {
+        // A partial name: Enter accepts the highlighted completion (no submit).
+        let mut app = App::new();
+        typed(&mut app, "/mo");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.input(), "/model ");
+        assert!(app.take_actions().is_empty(), "no submit happened");
+        assert!(app.transcript().is_empty(), "no user block was committed");
+        assert!(app.completion_rows().is_empty());
+
+        // A complete name: Enter submits it as today (`/usage` asks for history).
+        let mut app = App::new();
+        typed(&mut app, "/usage");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.take_actions(), vec![Action::Ask(Request::GetHistory)]);
+    }
+
+    #[test]
+    fn quit_alias_dispatches_through_the_table() {
+        let mut app = App::new();
+        submit(&mut app, "/quit");
+        assert!(app.should_quit());
+        assert!(app.take_actions().is_empty());
+    }
+    #[test]
+    fn completion_matches_a_leading_prefix_only() {
+        // `/s` is a prefix of the `/sessions` alias, so it lands on `/resume`;
+        // `/z` is a prefix of nothing.
+        let mut app = App::new();
+        typed(&mut app, "/s");
+        assert_eq!(completion_labels(&app), vec!["/resume"]);
+
+        let mut app = App::new();
+        typed(&mut app, "/z");
+        assert!(completion_labels(&app).is_empty(), "/z must not match anything");
+
+        // `/m` → `/model`; `/e` → `/effort` + `/exit`.
+        let mut app = App::new();
+        typed(&mut app, "/m");
+        assert_eq!(completion_labels(&app), vec!["/model"]);
+
+        let mut app = App::new();
+        typed(&mut app, "/e");
+        assert_eq!(completion_labels(&app), vec!["/exit", "/effort"]);
+    }
+
+    #[test]
+    fn completion_suggests_an_alias_by_its_canonical_name() {
+        let mut app = App::new();
+        typed(&mut app, "/ses"); // a prefix of the `/sessions` alias for `/resume`
+        assert_eq!(completion_labels(&app), vec!["/resume"]);
+    }
+
+    #[test]
+    fn an_alias_match_carries_the_alias_hint() {
+        let mut app = App::new();
+        typed(&mut app, "/s");
+        let rows = app.completion_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "/resume");
+        assert_eq!(rows[0].alias, Some("sessions"));
+        assert!(rows[0].range.is_none(), "no canonical-name prefix to highlight");
+    }
+
+    #[test]
+    fn typing_a_full_alias_submits_it_rather_than_rewriting_it() {
+        let mut app = App::new();
+        app.set_sessions(sessions());
+        submit(&mut app, "/sessions");
+        // Dispatched to `/resume` (the picker opened) — not rewritten to `/resume `.
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "resume"));
+    }
+
+    #[test]
+    fn a_bare_slash_does_not_accept_on_enter() {
+        let mut app = App::new();
+        typed(&mut app, "/");
+        assert!(!app.completion_rows().is_empty(), "the popup lists every name");
+        app.handle(AppEvent::Key(Key::Enter));
+        // Enter fell through: the buffer was submitted as a (bad) command.
+        assert_eq!(app.input(), "");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t == "unknown command: /"
+        ));
+    }
+
+    #[test]
+    fn the_picker_still_matches_mid_string() {
+        // The completion moved to prefix matching, but the picker keeps the
+        // substring filter: "eta" is not a prefix of "beta" yet must match it.
+        let mut app = App::new();
+        app.set_models(vec!["alpha".into(), "beta".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+        typed(&mut app, "eta");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "beta".into()
+            })]
+        );
     }
 }
