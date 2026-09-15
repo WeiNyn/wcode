@@ -1,9 +1,6 @@
 # Brainstorm: content-addressed read/edit + grep/find + ast-grep for wcode
 
-Status: proposed (prototype landed in `crates/wcode-cli/src/tools`, behind the
-default tool set; `grep`/`find` now register only when the `[tools]` config
-enables them — off by default, since `bash` already covers search/locate)
-default tool set)
+Status: **superseded** by `2026-09-07-read-edit-phase2.md` — the content-addressed read/edit + grep/find/ast-grep design landed; see that doc for the current state.
 Date: 2026-09-06
 
 ## The problem

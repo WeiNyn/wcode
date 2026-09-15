@@ -573,7 +573,7 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
   model, `/changes`, and `/resume` pickers), tool-diff rendering, a per-run
   changeset, and a session picker that hands off by re-exec. Single surface;
   multi-surface on the same connection (`session` in the frame) is not started.
-- ◐ **S4 — A2A.** Route `Notify`/`Interrupt`/`Wake` to a peer (the router
+- ☑ **S4 — A2A.** Route `Notify`/`Interrupt`/`Wake` to a peer (the router
   resolves `to`); a registry for addresses; ownership from `report_back_to`;
   a `before_inbound` hook for policy. Orchestrator v1 (§10.1); DM + report-back
   only. Too large for one step, so it splits like S1 did
@@ -600,7 +600,7 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       carry (§9).
     - **Landed.** Verified by the in-module actor tests and a socket round-trip
       (`a_notify_crosses_the_socket`); the CLI is unchanged (no surface yet).
-  - ◐ **S4-2 — Registry, addressing, and the sender.** The mailbox carries the
+  - ☑ **S4-2 — Registry, addressing, and the sender.** The mailbox carries the
     **sender** (landed), and a `Registry` (`SessionId` → `SessionHandle`) lets
     an addressed `Request::Ask { to, content }` reach a peer (next). Concretely:
     - ☑ Canonical verbs: `Notify`/`Interrupt`/`Wake`/`Ask`. `Steer`/`FollowUp`
@@ -622,11 +622,9 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
       supersedes the earlier `Request::Ask { to, content }` sketch — a `to` in the
       kernel was redundant with the frame's `session` on the wire and with the
       held handle in-process.
-    - ☐ Wire a spawn to `register`/`set_owner` (S4-3) and the `message` tool to
+    - ☑ Wire a spawn to `register`/`set_owner` (S4-3) and the `message` tool to
       `deliver`; auto-forward the worker's completion report on turn end along
       `report_back_to`.
-    - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
-      event — not a subscription to the peer's stream, and not a blocking reply.
     - Resolved (§10.1): the answer is a **message back**, delivered as an inbound
       event — not a subscription to the peer's stream, and not a blocking reply.
   - ☑ **S4-3 — Spawn + the `message` tool.** Only the root spawns; a worker cannot

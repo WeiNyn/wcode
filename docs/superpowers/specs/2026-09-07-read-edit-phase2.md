@@ -1,6 +1,6 @@
 # Phase 2 design: read/edit refinements — remaining steps
 
-Status: **draft for design review** (no code landed for these items)
+Status: **landed** — §F (D1/A1/A2/B2/B1) and the §G decisions landed; only §E stretch items remain open.
 Date: 2026-09-07
 Supersedes the Phase-2 sketch in `2026-09-06-hashline-grep-integration.md`.
 

@@ -10,7 +10,7 @@ each task completes and keep the status table current.
 | 2 | `bash` output cap | ☑ done |
 | 1 | Project instructions (`AGENTS.md`) | ☑ done |
 | 4 | Retry / backoff on transient errors | ☑ done |
-| 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☑ done |
+| 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☑ TUI shipped (P0–P3); P4 stretch open |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) complete — S4-1…S4-5 landed |
@@ -42,7 +42,7 @@ bash cap, retry knobs).
 
 **Tasks**
 - [x] Remove the duplicated `WCODE_RTK … tools.grep/` line.
-- [ ] (later, with each item) document the new `[instructions]` / `[retry]`
+- [x] (later, with each item) document the new `[instructions]` / `[retry]`
       tables and their env vars.
 
 **Open questions.** None.
@@ -333,7 +333,7 @@ through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 history, multiline, markdown (tables included), a context bar, resize, `/copy`,
 then overlays (the model, `/changes`, and `/resume` pickers), tool-diff
 rendering, a per-run changeset, and a session picker that hands off by re-exec.
-Next: S4 (agent-to-agent) — the TUI's P0–P3d are done.
+S4 (agent-to-agent) is complete (S4-1…S4-5). Remaining: the optional S5 (task-DAG) and the TUI's multi-surface work (one connection serving several surfaces).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 

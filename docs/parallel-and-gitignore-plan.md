@@ -228,23 +228,20 @@ must diagnose). Without it, gitignore-awareness becomes a wall.
 - **Context order is always call order** (API requirement).
 - **`ignore` crate**, not hand-rolled gitignore parsing.
 
-**Open**
+**Resolved**
 
-- **`ToolExecutionEnd` ordering** — as-completed (live, needs call_id pairing in
-  the UI) vs in-call-order (deterministic). Recommend as-completed for
-  responsiveness, with the REPL printer teaching itself to pair.
-- **Concurrency cap** — unbounded (batch size is model-chosen, usually < 8) vs a
-  fixed cap (e.g. 8). Recommend a small cap as a runaway guard.
-- **`require_git`** — apply `.gitignore` outside a git repo (pi does) or only
-  inside one (ripgrep's default)? Recommend `false` (pi's behaviour).
-- **Hidden files** — confirm we keep searching dotfiles (`.hidden(false)`), i.e.
-  this change is only about ignore rules.
-- **`[tools] parallel` default** — on (pi's default, recommended) vs off with
-  opt-in. On unless the live timing check shows a regression.
+- **`ToolExecutionEnd` ordering** — **call order**: End events, session records and
+  ctx pushes are emitted in call order (`loop_.rs`); the UI does not pair by id.
+- **Concurrency cap** — a fixed cap of **8** (`MAX_PARALLEL_TOOLS`) as a runaway guard.
+- **`require_git`** — **`false`**: `.gitignore` applies inside *and* outside a git
+  repo (pi's behaviour).
+- **Hidden files** — dotfiles are still searched (`.hidden(false)`); this change is
+  only about ignore rules.
+- **`[tools] parallel` default** — **on** (absent = enabled); `--sequential` opts out.
 
 ## 9. Progress
 
-- [ ] Settle the open questions above.
+- [x] Settle the open questions above (see §8).
 - [x] Phase 1 (parallel tool execution) — verified live (see §11).
 - [x] Phase 2 (`.gitignore` awareness) — verified end-to-end (see §10).
 

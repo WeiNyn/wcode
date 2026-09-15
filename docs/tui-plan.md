@@ -67,8 +67,9 @@ jcode is the mature reference (`../jcode`). Facts worth carrying over:
 
 ## 3. Architecture for wcode
 
-A **new crate `wcode-tui`** depending on **`wcode-protocol`** (not
-`wcode-harness` directly). The TUI is a client of the `Backend` seam —
+A **new crate `wcode-tui`** depending on **`wcode-protocol`** for transport (it
+also uses `wcode-harness` kernel types directly — `AgentEvent`, `Request`),
+never on the `Agent`. The TUI is a client of the `Backend` seam —
 `Local(SessionHandle)` or `Remote(Client)` — so local vs socket is a transport
 swap it never branches on. The kernel is untouched; `wcode-cli` stays the
 composition root.

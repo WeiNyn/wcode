@@ -1,16 +1,20 @@
 # wcode Dependency Graph
 
-Map for exploring the codebase. Two crates, strict one-way layering.
+Map for exploring the codebase. Four crates in strict one-way layering: the kernel carries no transport or presentation; the transport and the two front-ends sit above it.
 
 ```
-crates/wcode-cli   (bin `wcode`)        the application: config, REPL, built-in tools
+crates/wcode-cli      (bin `wcode`)   application: arg parse · config · mode pick (REPL/TUI/one-shot) · built-in tools
+crates/wcode-tui      (lib)           full-screen TUI — a `wcode-protocol` Backend client
        │
        ▼
-crates/wcode-harness (lib)              the kernel: loop, tools, hooks, events, session
+crates/wcode-protocol (lib)           transport: NDJSON frames · socket serve/client · Backend · Registry (in-proc A2A bus)
        │
        ▼
-rig 0.42                                LLM engine: streaming + tool-schema plumbing
-                                        (touched ONLY by wcode-harness/src/streamfn.rs)
+crates/wcode-harness  (lib)           the kernel: actor · protocol types · loop · tools · hooks · events · session
+       │
+       ▼
+rig 0.42                              LLM engine: streaming + tool-schema plumbing
+                                      (touched ONLY by wcode-harness/src/streamfn.rs)
 ```
 
 ## Crate: `wcode-harness` (module level)
@@ -27,6 +31,8 @@ graph TD
     limits["limits.rs<br/>model context windows"]
     loop_["loop_.rs<br/>run_loop() — the kernel"]
     agent["agent.rs<br/>Agent — stateful wrapper<br/>(queues, cancel, session)"]
+    protocol["protocol.rs<br/>Request, Frame, SessionId<br/>(wire types)"]
+    actor["actor.rs<br/>SessionActor / SessionHandle<br/>(inbox + broadcast outbox)"]
 
     event --> message
     tool --> event
@@ -44,6 +50,11 @@ graph TD
     agent --> loop_
     agent --> agent_msg[message]
     agent --> event
+    protocol --> event
+    actor --> agent
+    actor --> protocol
+    actor --> event
+    actor --> hooks
     agent --> tool
     agent --> hooks
     agent --> session
@@ -67,6 +78,56 @@ Reading order for a new contributor:
 6. `session.rs`, `hooks.rs`, `streamfn.rs` — persistence, extension points, rig adapter
 7. `compaction.rs`, `limits.rs` — context budget, cut points, summarization, model windows
 
+## Crate: `wcode-protocol` (module level)
+
+The transport above the kernel: NDJSON frames and the `Backend` seam (`Local` | `Remote`), so a
+client drives a session the same way in-process or across a socket. `client` / `server` /
+`socket` are `#[cfg(unix)]`.
+
+```mermaid
+graph TD
+    frame["frame.rs<br/>read_frame / write_frame, Frame"]
+    backend["backend.rs<br/>Backend (Local | Remote), Closed"]
+    registry["registry.rs<br/>Registry, RouteError<br/>(A2A address book + permitted set)"]
+    socket["socket.rs<br/>bind / connect (Unix)"]
+    server["server.rs<br/>serve — SessionHandle → sockets"]
+    client["client.rs<br/>Client — send / ask / subscribe, reconnect"]
+
+    backend --> client
+    backend --> handle["harness::actor::SessionHandle"]
+    server --> socket
+    server --> frame
+    client --> socket
+    client --> frame
+    registry --> handle
+```
+
+## Crate: `wcode-tui` (module level)
+
+A thin immediate-mode client of a `Backend`; consumers never see an `Agent` — only the
+`AgentEvent` stream over the protocol.
+
+```mermaid
+graph TD
+    lib["lib.rs<br/>run() — select! over input/events/replies/tick · Outcome"]
+    app["app.rs<br/>App + pure reducer, Action, AppEvent,<br/>Block, Status, Key"]
+    ui["ui.rs<br/>draw(frame, app)"]
+    event["event.rs<br/>crossterm → AppEvent"]
+    markdown["markdown.rs<br/>transcript rendering"]
+    terminal["terminal.rs<br/>enter / restore (alt screen)"]
+    clipboard["clipboard.rs<br/>/copy"]
+
+    lib --> app
+    lib --> ui
+    lib --> event
+    lib --> terminal
+    lib --> clipboard
+    lib --> harness["harness::event · protocol"]
+    ui --> app
+    ui --> markdown
+    event --> app
+```
+
 ## Crate: `wcode-cli` (module level)
 
 ```mermaid
@@ -77,6 +138,7 @@ graph TD
     rtk["rtk.rs<br/>RtkHooks (Hooks impl)<br/>rtk rewrite of bash"]
     instr["instructions.rs<br/>instruction files (AGENTS.md/CLAUDE.md)<br/>global + ancestor chain, capped"]
     skills["skills.rs<br/>SKILL.md discovery + frontmatter<br/>name + description → prompt"]
+    agents["agents.rs<br/>SessionFactory — spawn/register a worker<br/>(--agents)"]
 
     subgraph tools["tools/"]
         toolsmod["mod.rs<br/>default_tools · resolve · normalize · temp_path"]
@@ -92,12 +154,19 @@ graph TD
         ast["ast.rs<br/>ast-grep discovery"]
         asts["ast_search"]
         aste["ast_edit"]
+        spawn["spawn (--agents)"]
+        message["message (--agents)"]
+        peers["peers (--agents)"]
     end
 
     main --> config
     main --> repl
     main --> instr
     main --> skills
+    main --> agents
+    repl --> agents
+    agents --> reg["protocol::Registry"]
+    agents --> atool["harness::tool"]
     repl --> config
     repl --> instr
     repl --> skills
@@ -115,6 +184,12 @@ graph TD
     toolsmod --> find
     toolsmod --> asts
     toolsmod --> aste
+    toolsmod --> spawn
+    toolsmod --> message
+    toolsmod --> peers
+    spawn --> agents
+    message --> agents
+    peers --> agents
     read --> anchor
     edit --> anchor
     edits --> anchor
@@ -151,8 +226,6 @@ binary is on PATH. `build_agent()` takes an `AgentSpec` (llm, hooks, tools,
 compaction, instructions, skills) plus session/context and assembles the
 `Agent`: `system_prompt(tools, instructions, skills, cwd)` + `default_tools()` +
 `rig_stream_fn()` + `default_hooks()` (the rtk hook) + session + working dir.
-the registered inspect tools) + `default_tools()` + `rig_stream_fn()` +
-`default_hooks()` (the rtk hook) + session + working dir.
 
 ## Kernel data flow (one run)
 
@@ -183,12 +256,12 @@ user text ──▶ Agent.run()
 | Crate | Used by | For |
 |---|---|---|
 | `rig` 0.42 (`default-features = false`, `reqwest`, `rustls`) | harness | OpenAI Completions streaming client, `ToolDefinition`, `StreamedAssistantContent` / `StreamFinal` — `streamfn.rs` branches `LlmEndpoint::Chat` (completions client) vs `Responses` (default client) around one shared forwarding loop |
-| `tokio` | both | runtime, process (bash), channels |
+| `tokio` | all | runtime, process (bash), channels |
 | `tokio-util` | harness, repl | `CancellationToken` |
 | `async-trait` | harness | dyn-safe `TypedTool` / `Hooks` |
-| `schemars` 1 | both | JSON Schema for tool args |
-| `serde` / `serde_json` | both | message / session / event shapes |
-| `futures` | both | streams |
+| `schemars` 1 | harness, cli | JSON Schema for tool args |
+| `serde` / `serde_json` | harness, protocol, cli | message / session / event shapes |
+| `futures` | harness, tui | streams |
 | `uuid`, `chrono` | harness | session ids, timestamps |
 | `thiserror` | harness | `LoopError` |
 | `regex` | cli | `grep` pattern matching |
@@ -197,6 +270,8 @@ user text ──▶ Agent.run()
 | `libc` | cli | `bash` process-group kill (unix) |
 | `toml`, `dirs` | cli | config parsing; `~/.config` / `~/.local/share` paths |
 | `serde_yaml_ng` | cli | `SKILL.md` frontmatter (the maintained `serde_yaml` fork; pulls `unsafe-libyaml`) |
+| `ratatui` 0.30 | tui | full-screen rendering: widgets, layout |
+| `crossterm` 0.29 | tui | terminal backend + `EventStream` |
 
 ## Extension points
 
@@ -205,7 +280,7 @@ user text ──▶ Agent.run()
 | Add a tool | `impl TypedTool` (Args: `Deserialize + JsonSchema`) + `erased()`; read-only tools also override `parallel_safe() -> true` (see `tools/read.rs`) |
 | Change behavior (block/patch tools, rewrite context, early stop) | `impl Hooks` (all default no-ops); see `crates/wcode-harness/src/hooks.rs` |
 | Add an LLM provider / wire family | write a `StreamFn` (adapter from provider stream → `LlmStreamEvent`); default is `rig_stream_fn()` in `streamfn.rs` |
-| Build a different UI | consume `AgentEvent` from the sink channel; REPL's printer (`repl.rs`) is the reference |
+| Build a different UI | consume `AgentEvent` from the sink channel; REPL's printer (`repl.rs`) is the reference; the TUI (`wcode-tui`) consumes the same `AgentEvent` stream through `wcode-protocol`'s `Backend`. |
 | Change persistence | `Session` in `session.rs` — append-only JSONL, one entry per line |
 
 Constraint worth knowing: rig types live only in `streamfn.rs` (exception: `Tool::definition()` returns rig's `ToolDefinition`) — kernel types never expose rig, so the engine stays swappable via the `StreamFn` seam.
