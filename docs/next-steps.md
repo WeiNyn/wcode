@@ -15,6 +15,7 @@ each task completes and keep the status table current.
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) complete — S4-1…S4-5 landed |
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
+| 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1 landed (reviewed); F2 next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -353,6 +354,30 @@ paste collapses to a `❰ pasted N lines · M chars ❱` chip that expands on su
 > questions, progress.
 
 This entry stays as the pointer plus status only, like items 3, 6, 7, and 8.
+
+---
+
+## 10. Team: define, declare, see
+
+**New.** The A2A/team capability (item 8, S4) is complete at the protocol level but
+remains **manual** (the team forms only when the model decides to `spawn`),
+**uncustomizable** (`WorkerSpec` carries only a name, so every worker inherits the
+parent wholesale), and **invisible** (the TUI holds one session and knows nothing
+of peers or workers). Four features share one spine: a TUI **command table +
+completion** (F1), **customizable spawned agents** — `model`/`role`/`tools`
+(F2), a **`[team]` preset** that forms the team at startup (F3), and a **team
+status sidebar + in-process multi-surface** (F4). F2 is the hinge: F3 depends on
+it, and F4 shows its results; F1 is the orthogonal command surface the others
+extend.
+
+> ➡️ **[`team-and-tui-plan.md`](team-and-tui-plan.md)** — problem, the dependency
+> spine, per-feature design, locked decisions, phased tasks, open questions,
+> progress tracker.
+
+**Status.** Planned. Sequence: F1 → F2 → F3 → F4. In-process first; per-agent
+provider, remote-agent definition, and socket multiplexing are deferred (tier 2).
+
+This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 
 ---
 
