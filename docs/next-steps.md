@@ -1,7 +1,7 @@
 # Next steps — plan & progress tracker
 
 Follow-ups identified after the compaction work landed, plus pointers to two
-larger projects (items 3 and 6). Ordered low-risk → high-risk; tick the boxes as
+larger projects (items 3, 6, 7, 8, 9). Ordered low-risk → high-risk; tick the boxes as
 each task completes and keep the status table current.
 
 | # | item | status |
@@ -14,6 +14,7 @@ each task completes and keep the status table current.
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) complete — S4-1…S4-5 landed |
+| 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -336,6 +337,22 @@ rendering, a per-run changeset, and a session picker that hands off by re-exec.
 S4 (agent-to-agent) is complete (S4-1…S4-5). Remaining: the optional S5 (task-DAG) and the TUI's multi-surface work (one connection serving several surfaces).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
+
+---
+
+## 9. TUI input: wrap & paste
+
+**New.** Two composer defects: the input box does not **wrap** (a logical line
+wider than the band is truncated; more than six lines hides the cursor), and a
+**paste** is inserted verbatim, flooding the box. Fix the first with wrapping +
+a scrolled, height-capped band; the second with a paste **placeholder** — a big
+paste collapses to a `❰ pasted N lines · M chars ❱` chip that expands on submit.
+
+> ➡️ **[`tui-input-plan.md`](tui-input-plan.md)** — problem, design (Phase 1 wrap
+> · Phase 2 paste-as-placeholder), locked decisions, phased tasks, open
+> questions, progress.
+
+This entry stays as the pointer plus status only, like items 3, 6, 7, and 8.
 
 ---
 
