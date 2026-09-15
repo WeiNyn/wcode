@@ -110,9 +110,11 @@ and stdout are a terminal, and the line REPL otherwise. `--tui`/`--no-tui` force
 either; `-p`, `serve`, and piped input always take the non-TUI path. The TUI
 renders the same `AgentEvent` stream, over a local session or a `--socket` one.
 
-TUI keys: `Enter` submit · `Shift-Enter` newline · `Up`/`Down` recall prompts ·
-`PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-Y` copy the
-last reply (OSC-52). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
+TUI keys: `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Up`/`Down` recall
+prompts · `PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-Y`
+copy the last reply (OSC-52). The input box wraps and grows (scrolling past ~8
+rows); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
+chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/compact [text]`, `/usage`, `/copy`, `/help` — the subset that maps to
 a `Request` under the current session — plus `/changes` (list the files this run
 changed, re-showing a diff) and `/resume` (pick a session; the CLI re-execs into

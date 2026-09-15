@@ -151,11 +151,14 @@ replayed prefix.
 continuation lines align under the text, as in draft B's `···` block). The
 gutter is also the natural home for a `▌` selection bar (P3, copy).
 
-**Input** — `❯ ` prefix, block cursor `▌`. One line, growing with its content
-(Shift-Enter inserts a newline; the band is capped at 6 lines). Up/Down recall
-prompts, saving the draft and restoring it at the bottom; history persists one
-prompt per line beside the sessions. (Shift-Enter needs a terminal that reports
-the modifier — kitty/xterm-`modifyOtherKeys`; elsewhere it is Enter.)
+**Input** — `❯ ` prefix on the first row, block cursor `▌`. Wraps and grows with
+its content (Shift-Enter or Ctrl-J inserts a newline); the band grows to ~8 rows
+then scrolls to keep the cursor visible. A paste over 100 chars or more than 3
+lines collapses to a dim chip `❰ pasted 12 lines · 340 chars ❱` — atomic
+(Backspace removes it whole) and expanded on submit (outer whitespace trimmed). Up/Down recall prompts, saving
+the draft and restoring it at the bottom; history persists one prompt per line
+beside the sessions. (Shift-Enter needs a terminal that reports the modifier —
+kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
 **Status** — one dim "chrome" row, full width, left-aligned:
 `model · effort · tokens · session · state`, where tokens is an 8-cell gauge
@@ -169,7 +172,7 @@ cells wrap rather than overflow.
 When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
 
-**Keys** — `Enter` submit · `Shift-Enter` newline · `Up`/`Down` history ·
+**Keys** — `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Del` forward-delete · `Up`/`Down` history ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last

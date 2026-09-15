@@ -12,6 +12,8 @@ it can be picked up as its own workstream.
 >
 > **Visual spec:** [`tui-design.md`](tui-design.md) — bands, glyphs, colors,
 > and the mockups each phase should hit.
+>
+> **Input-box detail:** [`tui-input-plan.md`](tui-input-plan.md) — wrapping, the `Ctrl-J` newline, and paste-as-chip.
 
 | phase | scope | status |
 |-------|-------|--------|
@@ -164,7 +166,7 @@ crates/wcode-tui/
 - `/`-commands: the TUI ships `/exit /model /effort /compact /changes /resume
   /usage /copy /help`; the session-lifecycle ones (`/new /sessions /reload`) stay
   in the REPL (they need the composition root).
-- Prompt history (persisted beside sessions); multiline (Shift-Enter — the `\`
+- Prompt history (persisted beside sessions); multiline (Shift-Enter / Ctrl-J — the `\`
   continuation is not implemented).
 
 **P2 — polish.**
@@ -302,7 +304,7 @@ Still open:
       with narrow-width field dropping.
 - [x] P1: scrollback (PgUp/PgDn, pinned view), `/`-commands (`/exit /model
       /effort /compact /usage /help`), prompt history (Up/Down, persisted),
-      multiline (Shift-Enter).
+      multiline (Shift-Enter / Ctrl-J).
 - [x] P2: markdown for committed messages; context bar; redraw on resize;
       `/copy` (OSC-52).
 - [x] P2 fixes: the wheel scrolls the transcript (mouse capture; 3 lines a
