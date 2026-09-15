@@ -5,6 +5,7 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use wcode_harness::event::AgentEvent;
@@ -280,15 +281,78 @@ impl Status {
     }
 }
 
+/// One piece of the input buffer: a typed character, or a whole pasted blob kept
+/// atomic (one Backspace removes it; Left/Right step over it in one move).
+#[derive(Clone, Debug, PartialEq)]
+enum Atom {
+    Char(char),
+    Paste(PasteBlock),
+}
+
+impl Atom {
+    /// The text this atom contributes to the *submitted* prompt.
+    fn text(&self) -> String {
+        match self {
+            Atom::Char(c) => c.to_string(),
+            Atom::Paste(p) => p.text.clone(),
+        }
+    }
+
+    /// What this atom shows in the input box (a paste collapses to a chip).
+    fn display(&self) -> String {
+        match self {
+            Atom::Char(c) => c.to_string(),
+            Atom::Paste(p) => p.chip(),
+        }
+    }
+}
+
+/// A pasted blob kept as one placeholder. `lines`/`chars` are measured once at
+/// paste time; `id` distinguishes blocks (a future command can address one).
+#[derive(Clone, Debug, PartialEq)]
+struct PasteBlock {
+    id: u64,
+    text: String,
+    lines: usize,
+    chars: usize,
+}
+
+impl PasteBlock {
+    /// The one-line chip shown in the input, e.g. `❰ pasted 3 lines · 128 chars ❱`.
+    fn chip(&self) -> String {
+        // `chars` counts characters (the threshold and the `chars` suffix); the
+        // KB branch is sized in UTF-8 *bytes*, matching the unit's label.
+        let size = if self.chars >= 1024 {
+            format!("{:.1} KB", self.text.len() as f64 / 1024.0)
+        } else {
+            format!("{} chars", self.chars)
+        };
+        let line = if self.lines == 1 { "line" } else { "lines" };
+        format!("❰ pasted {} {line} · {size} ❱", self.lines)
+    }
+}
+
+/// A read-only view of the input for the renderer: the display string (paste
+/// chips expanded to their chip text), the cursor's display column, and the char
+/// ranges of the chips so they can be styled rather than shown raw.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InputView {
+    pub(crate) display: String,
+    pub(crate) cursor_col: usize,
+    pub(crate) chips: Vec<Range<usize>>,
+}
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 #[derive(Default)]
 pub struct App {
     transcript: Vec<Block>,
     /// The assistant message currently streaming (rendered below the transcript).
     live: Option<AgentMessage>,
-    input: String,
-    /// Cursor position as a *character* index into `input`.
+    input: Vec<Atom>,
+    /// Cursor as a *gap index* between atoms (`0..=input.len()`).
     cursor: usize,
+    /// Monotonic id source for [`PasteBlock`]s.
+    paste_id: u64,
     /// Submitted prompts, oldest first, for Up/Down recall.
     history: Vec<String>,
     /// Index into `history` while browsing; `None` edits the draft.
@@ -341,7 +405,12 @@ impl App {
     pub fn handle(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.on_key(key),
-            AppEvent::Paste(text) => self.insert_str(&text),
+            AppEvent::Paste(text) => {
+                // A modal owns the input: a paste must not edit the buffer.
+                if self.overlay.is_none() {
+                    self.on_paste(text);
+                }
+            }
             AppEvent::Agent(event) => self.on_agent(event),
             AppEvent::Tick => {}
             AppEvent::Resize => {
@@ -366,13 +435,16 @@ impl App {
                 self.history_index = None;
                 self.backspace();
             }
-            Key::Delete => {}
+            Key::Delete => {
+                self.history_index = None;
+                self.delete();
+            }
             Key::Left => {
                 self.cursor = self.cursor.saturating_sub(1);
                 self.dirty = true;
             }
             Key::Right => {
-                if self.cursor < self.input.chars().count() {
+                if self.cursor < self.input.len() {
                     self.cursor += 1;
                 }
                 self.dirty = true;
@@ -384,7 +456,7 @@ impl App {
                 self.dirty = true;
             }
             Key::End => {
-                self.cursor = self.input.chars().count();
+                self.cursor = self.input.len();
                 self.dirty = true;
             }
             Key::Enter => self.submit(),
@@ -416,10 +488,12 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let text = std::mem::take(&mut self.input);
+        // Expand pasted blocks back to their full text before submitting.
+        let atoms = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.scroll = 0;
         self.dirty = true;
+        let text: String = atoms.iter().map(Atom::text).collect();
         let text = text.trim().to_string();
         self.history_index = None;
         self.draft.clear();
@@ -690,37 +764,63 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
-        let at = self.byte_index(self.cursor);
-        self.input.insert(at, c);
+        self.input.insert(self.cursor, Atom::Char(c));
         self.cursor += 1;
         self.dirty = true;
     }
 
+    /// Insert `text` literally, one `Char` atom per character (small pastes).
     fn insert_str(&mut self, text: &str) {
-        let at = self.byte_index(self.cursor);
-        self.input.insert_str(at, text);
-        self.cursor += text.chars().count();
+        for c in text.chars() {
+            self.input.insert(self.cursor, Atom::Char(c));
+            self.cursor += 1;
+        }
         self.dirty = true;
+    }
+
+    /// Handle a paste: a large blob becomes one atomic chip, a small one is
+    /// inserted inline. `lines()` counts logical lines, so a trailing newline
+    /// does not add an empty line.
+    fn on_paste(&mut self, text: String) {
+        let lines = text.lines().count();
+        let chars = text.chars().count();
+        if chars > 100 || lines > 3 {
+            self.paste_id += 1;
+            let id = self.paste_id;
+            self.input
+                .insert(self.cursor, Atom::Paste(PasteBlock { id, text, lines, chars }));
+            self.cursor += 1;
+            self.dirty = true;
+        } else {
+            self.insert_str(&text);
+        }
     }
 
     fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
         }
-        let end = self.byte_index(self.cursor);
-        let start = self.byte_index(self.cursor - 1);
-        self.input.replace_range(start..end, "");
+        self.input.remove(self.cursor - 1);
         self.cursor -= 1;
         self.dirty = true;
     }
 
-    /// Byte offset of the `n`th character, or the string end.
-    fn byte_index(&self, n: usize) -> usize {
-        self.input
-            .char_indices()
-            .nth(n)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input.len())
+    /// Forward-delete: remove the atom at the cursor (a no-op at the end).
+    fn delete(&mut self) {
+        if self.cursor < self.input.len() {
+            self.input.remove(self.cursor);
+            self.dirty = true;
+        }
+    }
+
+    /// The buffer expanded to plain text — what a submit sends.
+    fn expanded(&self) -> String {
+        self.input.iter().map(Atom::text).collect()
+    }
+
+    /// Wrap a plain string as all-`Char` atoms (history recall and the draft).
+    fn atoms(text: &str) -> Vec<Atom> {
+        text.chars().map(Atom::Char).collect()
     }
 
     /// Recall the previous prompt (saving the draft on the way up).
@@ -730,15 +830,16 @@ impl App {
         }
         let next = match self.history_index {
             None => {
-                self.draft = std::mem::take(&mut self.input);
+                self.draft = self.expanded();
                 self.history.len() - 1
             }
             Some(0) => return,
             Some(i) => i - 1,
         };
         self.history_index = Some(next);
-        self.input = self.history[next].clone();
-        self.cursor = self.input.chars().count();
+        let entry = self.history[next].clone();
+        self.input = Self::atoms(&entry);
+        self.cursor = self.input.len();
         self.dirty = true;
     }
 
@@ -749,12 +850,14 @@ impl App {
         };
         if i + 1 < self.history.len() {
             self.history_index = Some(i + 1);
-            self.input = self.history[i + 1].clone();
+            let entry = self.history[i + 1].clone();
+            self.input = Self::atoms(&entry);
         } else {
             self.history_index = None;
-            self.input = std::mem::take(&mut self.draft);
+            let draft = std::mem::take(&mut self.draft);
+            self.input = Self::atoms(&draft);
         }
-        self.cursor = self.input.chars().count();
+        self.cursor = self.input.len();
         self.dirty = true;
     }
 
@@ -776,8 +879,30 @@ impl App {
         self.live.as_ref()
     }
 
-    pub fn input(&self) -> &str {
-        &self.input
+    /// The buffer expanded to plain text (paste blocks inlined) — what is sent.
+    pub fn input(&self) -> String {
+        self.expanded()
+    }
+
+    /// A render-ready view of the buffer: display text, cursor column, chip ranges.
+    pub(crate) fn input_view(&self) -> InputView {
+        let mut display = String::new();
+        let mut chips = Vec::new();
+        let mut cursor_col = 0;
+        let mut len = 0;
+        for (i, atom) in self.input.iter().enumerate() {
+            let s = atom.display();
+            let n = s.chars().count();
+            if i < self.cursor {
+                cursor_col += n;
+            }
+            if matches!(atom, Atom::Paste(_)) {
+                chips.push(len..len + n);
+            }
+            display.push_str(&s);
+            len += n;
+        }
+        InputView { display, cursor_col, chips }
     }
 
     pub fn cursor(&self) -> usize {
@@ -1135,6 +1260,19 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_the_char_at_the_cursor() {
+        let mut app = App::new();
+        typed(&mut app, "abc");
+        app.handle(AppEvent::Key(Key::Left));
+        app.handle(AppEvent::Key(Key::Delete));
+        assert_eq!(app.input(), "ab");
+        assert_eq!(app.cursor(), 2);
+        // At the end of the buffer, Delete is a no-op.
+        app.handle(AppEvent::Key(Key::Delete));
+        assert_eq!(app.input(), "ab");
+    }
+
+    #[test]
     fn paste_inserts_at_the_cursor() {
         let mut app = App::new();
         typed(&mut app, "ac");
@@ -1142,6 +1280,89 @@ mod tests {
         app.handle(AppEvent::Paste("b".into()));
         assert_eq!(app.input(), "abc");
         assert_eq!(app.cursor(), 2);
+    }
+
+    #[test]
+    fn a_small_paste_inserts_inline() {
+        let mut app = App::new();
+        app.handle(AppEvent::Paste("hi there".into()));
+        assert_eq!(app.input(), "hi there");
+        assert_eq!(app.cursor(), 8);
+        assert!(app.input_view().chips.is_empty());
+    }
+
+    #[test]
+    fn a_large_paste_becomes_one_chip() {
+        let mut app = App::new();
+        let blob = "one\ntwo\nthree\nfour"; // 4 lines ⇒ a chip
+        app.handle(AppEvent::Paste(blob.into()));
+        let view = app.input_view();
+        assert_eq!(view.chips.len(), 1);
+        assert!(view.display.contains("pasted 4 lines"), "chip: {}", view.display);
+        assert!(!view.display.contains("two"), "raw text leaked: {}", view.display);
+        // The buffer still expands to the full pasted text.
+        assert_eq!(app.input(), blob);
+        assert_eq!(app.cursor(), 1);
+    }
+
+    #[test]
+    fn submitting_a_chip_sends_the_full_text() {
+        let mut app = App::new();
+        let blob = "one\ntwo\nthree\nfour";
+        app.handle(AppEvent::Paste(blob.into()));
+        // The paste really became a chip (not raw text), so the submit can only
+        // carry the expanded full text.
+        assert_eq!(app.input_view().chips.len(), 1);
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.transcript()[0], Block::User(blob.into()));
+        assert_eq!(app.history().first().map(String::as_str), Some(blob));
+        assert_eq!(app.take_actions(), vec![Action::Submit(blob.into())]);
+        assert_eq!(app.input(), "");
+        assert_eq!(app.cursor(), 0);
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_chip_and_arrows_step_over_it() {
+        let mut app = App::new();
+        app.handle(AppEvent::Paste("a\nb\nc\nd".into())); // 4 lines ⇒ a chip
+        assert_eq!(app.cursor(), 1);
+        app.handle(AppEvent::Key(Key::Left));
+        assert_eq!(app.cursor(), 0);
+        app.handle(AppEvent::Key(Key::Right));
+        assert_eq!(app.cursor(), 1);
+        app.handle(AppEvent::Key(Key::Right)); // already at the end
+        assert_eq!(app.cursor(), 1);
+        app.handle(AppEvent::Key(Key::Backspace));
+        assert_eq!(app.cursor(), 0);
+        assert_eq!(app.input(), "");
+    }
+
+    #[test]
+    fn two_pastes_make_two_chips() {
+        let mut app = App::new();
+        app.handle(AppEvent::Paste("a\nb\nc\nd".into()));
+        app.handle(AppEvent::Paste("w\nx\ny\nz".into()));
+        assert_eq!(app.cursor(), 2);
+        let ids: Vec<u64> = app
+            .input
+            .iter()
+            .filter_map(|a| match a {
+                Atom::Paste(p) => Some(p.id),
+                Atom::Char(_) => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn paste_is_ignored_while_an_overlay_is_open() {
+        let mut app = App::new();
+        app.set_models(vec!["m".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Paste("a\nb\nc\nd".into()));
+        assert_eq!(app.input(), "", "the paste must not reach the gated input");
     }
 
     #[test]

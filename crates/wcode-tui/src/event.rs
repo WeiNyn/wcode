@@ -29,6 +29,9 @@ pub fn translate(event: Event) -> Vec<AppEvent> {
 fn translate_key(k: KeyEvent) -> Option<Key> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     Some(match k.code {
+        // Ctrl-J is a portable newline: many terminals deliver it as a bare LF,
+        // so map the chord (Shift-Enter still works) to an explicit Newline.
+        KeyCode::Char('j') if ctrl => Key::Newline,
         KeyCode::Char(c) if ctrl => Key::Ctrl(c),
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Backspace => Key::Backspace,
@@ -95,6 +98,14 @@ mod tests {
         assert_eq!(
             keys(translate(key(KeyCode::Char('c'), KeyModifiers::CONTROL))),
             vec![Key::Ctrl('c')]
+        );
+    }
+
+    #[test]
+    fn ctrl_j_is_a_newline() {
+        assert_eq!(
+            keys(translate(key(KeyCode::Char('j'), KeyModifiers::CONTROL))),
+            vec![Key::Newline]
         );
     }
 

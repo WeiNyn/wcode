@@ -3,6 +3,7 @@
 //! Bands (top → bottom): transcript · rule · input · status. See
 //! `docs/tui-design.md` for the visual spec.
 
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use ratatui::Frame;
@@ -12,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
-use crate::app::{App, Block, Overlay, Tool};
+use crate::app::{App, Block, InputView, Overlay, Tool};
 use crate::markdown;
 
 /// First/continuation prefixes for a thinking block (`···` then an aligned
@@ -23,8 +24,13 @@ const THINK_CONT: &str = "       ";
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    // The input grows with its line count (Shift-Enter adds a line).
-    let input_height = (app.input().matches('\n').count() + 1).clamp(1, 6) as u16;
+    // The input grows with its *wrapped* row count (Shift-Enter / Ctrl-J add
+    // lines; long lines wrap), capped so it never crowds out the transcript.
+    let width = input_content_width(area);
+    let max_rows = 8.min(area.height as usize / 2).max(1);
+    let view = app.input_view();
+    let (_, _, _, total_rows) = input_rows(&view.display, view.cursor_col, width);
+    let input_height = total_rows.clamp(1, max_rows) as u16;
     let [body, rule, input, status] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
@@ -35,7 +41,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_transcript(frame, body, app);
     draw_rule(frame, rule);
-    draw_input(frame, input, app);
+    draw_input(frame, input, &view);
     draw_status(frame, status, app);
     // The modal, if any, is drawn last — over the bands.
     draw_overlay(frame, area, app);
@@ -356,34 +362,166 @@ fn greedy_wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Width available to input text: the band minus the 3-column gutter.
+fn input_content_width(area: Rect) -> usize {
+    (area.width as usize).saturating_sub(3).max(1)
+}
+
+/// The input's visual rows, char-exact: wrap `text` to `width`, preserving every
+/// space and hard-breaking an over-long token. At least one row per logical line.
+fn wrap_input(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let chars: Vec<char> = line.chars().collect();
+        rows.extend(wrap_line(&chars, width));
+    }
+    rows
+}
+
+/// Wrap one logical line into rows of at most `width` chars: break after the last
+/// space that fits, else hard-break (no whitespace is collapsed).
+fn wrap_line(chars: &[char], width: usize) -> Vec<String> {
+    let width = width.max(1);
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        if chars.len() - start <= width {
+            rows.push(chars[start..].iter().collect());
+            break;
+        }
+        let window = &chars[start..start + width];
+        let end = match window.iter().rposition(|&c| c == ' ') {
+            Some(pos) => start + pos + 1, // keep the space at the end of the row
+            None => start + width,        // no space to break on: hard-break
+        };
+        rows.push(chars[start..end].iter().collect());
+        start = end;
+    }
+    rows
+}
+
+/// The wrapped input and where the cursor sits in it:
+/// `(rows, cursor_row, cursor_col, total_rows)`. `cursor` is a char index.
+fn input_rows(input: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize, usize) {
+    let width = width.max(1);
+    let mut rows = wrap_input(input, width);
+
+    // The cursor sits at the end of the wrapped text *before* it; a full last row
+    // pushes it onto the next (wrapping) row.
+    let (before, _) = split_at_char(input, cursor);
+    let before_rows = wrap_input(&before, width);
+    let mut cursor_row = before_rows.len().saturating_sub(1);
+    let mut cursor_col = before_rows.last().map_or(0, |r| r.chars().count());
+    if cursor_col >= width {
+        cursor_row += 1;
+        cursor_col = 0;
+    }
+    while rows.len() <= cursor_row {
+        rows.push(String::new());
+    }
+    let total_rows = rows.len();
+    (rows, cursor_row, cursor_col, total_rows)
+}
+
 fn draw_rule(frame: &mut Frame, area: Rect) {
     let rule = "─".repeat(area.width as usize);
     frame.render_widget(Paragraph::new(Line::from(Span::styled(rule, dim()))), area);
 }
 
-fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let (before, after) = split_at_char(app.input(), app.cursor());
-    let before: Vec<&str> = before.split('\n').collect();
-    let after: Vec<&str> = after.split('\n').collect();
+fn draw_input(frame: &mut Frame, area: Rect, view: &InputView) {
+    let width = input_content_width(area);
+    let (rows, cursor_row, cursor_col, _) = input_rows(&view.display, view.cursor_col, width);
+    let height = area.height as usize;
+    // Scroll so the cursor row stays visible; rows above `offset` are hidden.
+    let offset = cursor_row.saturating_sub(height.saturating_sub(1));
+    let offsets = row_offsets(&view.display, &rows);
 
     let mut lines: Vec<Line> = Vec::new();
-    let last = before.len() - 1;
-    for (i, segment) in before.iter().enumerate() {
-        let prefix = if i == 0 { " ❯ " } else { "   " };
-        let mut spans = vec![
-            Span::styled(prefix, if i == 0 { accent() } else { dim() }),
-            Span::raw((*segment).to_string()),
-        ];
-        if i == last {
-            spans.push(Span::styled("▌", accent()));
-            spans.push(Span::raw(after[0].to_string()));
-        }
-        lines.push(Line::from(spans));
-    }
-    for segment in &after[1..] {
-        lines.push(Line::from(Span::raw(format!("   {segment}"))));
+    for (i, row) in rows.iter().enumerate().skip(offset).take(height) {
+        // Only the very first row carries the prompt gutter, as before.
+        let (prefix, prefix_style) = if i == 0 {
+            (" ❯ ", accent())
+        } else {
+            ("   ", dim())
+        };
+        let cursor = (i == cursor_row).then_some(cursor_col);
+        lines.push(styled_input_row(
+            prefix,
+            prefix_style,
+            row,
+            offsets[i],
+            &view.chips,
+            cursor,
+        ));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Each row's starting char offset in `display`, so a chip range can be mapped
+/// onto wrapped rows (a continuation row adds nothing; a new logical line eats
+/// the `\n` separating them).
+fn row_offsets(display: &str, rows: &[String]) -> Vec<usize> {
+    let chars: Vec<char> = display.chars().collect();
+    let mut offsets = Vec::with_capacity(rows.len());
+    let mut pos = 0;
+    for row in rows {
+        offsets.push(pos);
+        pos += row.chars().count();
+        if pos < chars.len() && chars[pos] == '\n' {
+            pos += 1;
+        }
+    }
+    offsets
+}
+
+/// One input row as spans: chars inside a chip range are [`accent`]ed, the rest
+/// raw, and the cursor `▌` is inserted at `cursor` (a char index within the row).
+fn styled_input_row(
+    prefix: &str,
+    prefix_style: Style,
+    row: &str,
+    row_offset: usize,
+    chips: &[Range<usize>],
+    cursor: Option<usize>,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(prefix.to_string(), prefix_style)];
+    let mut buf = String::new();
+    let mut chip = false;
+    for (j, c) in row.chars().enumerate() {
+        if cursor == Some(j) {
+            flush(&mut buf, chip, &mut spans);
+            spans.push(Span::styled("▌", accent()));
+        }
+        let is_chip = chips.iter().any(|r| r.contains(&(row_offset + j)));
+        if is_chip != chip {
+            flush(&mut buf, chip, &mut spans);
+            chip = is_chip;
+        }
+        buf.push(c);
+    }
+    if cursor == Some(row.chars().count()) {
+        flush(&mut buf, chip, &mut spans);
+        spans.push(Span::styled("▌", accent()));
+    }
+    flush(&mut buf, chip, &mut spans);
+    Line::from(spans)
+}
+
+/// Push the pending run in `buf` as a span (chip-styled or raw) and clear it.
+fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
+    if buf.is_empty() {
+        return;
+    }
+    let text = std::mem::take(buf);
+    spans.push(if chip {
+        Span::styled(text, accent())
+    } else {
+        Span::raw(text)
+    });
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -793,5 +931,95 @@ mod tests {
         let text = buffer_text(&render(&mut app, 60, 12));
         assert!(text.contains("resume"), "picker title missing: {text}");
         assert!(text.contains("add the picker"), "label missing: {text}");
+    }
+
+    #[test]
+    fn wrap_input_keeps_short_text_and_preserves_spaces() {
+        assert_eq!(wrap_input("one  two", 20), vec!["one  two"]);
+        assert_eq!(wrap_input("a  b", 10), vec!["a  b"]);
+        assert_eq!(wrap_input("a\nb", 10), vec!["a", "b"]);
+        assert_eq!(wrap_input("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_input_breaks_on_the_last_space_keeping_it() {
+        assert_eq!(wrap_input("a  b", 3), vec!["a  ", "b"]);
+        assert_eq!(wrap_input("hello world", 8), vec!["hello ", "world"]);
+    }
+
+    #[test]
+    fn wrap_input_hard_breaks_a_token_longer_than_width() {
+        let token = "x".repeat(40);
+        let rows = wrap_input(&token, 10);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.chars().count() <= 10));
+        assert_eq!(rows.concat(), token);
+    }
+
+    #[test]
+    fn input_rows_place_the_cursor_in_wrapped_coordinates() {
+        // A 16-char line at width 10 wraps; the cursor at the end is on row 1.
+        let (rows, row, col, total) = input_rows("abcdefghijklmnop", 16, 10);
+        assert_eq!(rows, vec!["abcdefghij", "klmnop"]);
+        assert_eq!((row, col, total), (1, 6, 2));
+
+        // A break on a space: the cursor follows the wrapped text.
+        let (rows, row, col, _) = input_rows("hello world", 9, 8);
+        assert_eq!(rows, vec!["hello ", "world"]);
+        assert_eq!((row, col), (1, 3));
+    }
+
+    #[test]
+    fn a_long_input_line_wraps_and_is_not_truncated() {
+        let mut app = App::new();
+        let line = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWX";
+        for c in line.chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        let text = buffer_text(&render(&mut app, 40, 12));
+        // The tail lies beyond the 37-column content width — only wrapping shows it.
+        assert!(text.contains("UVWX"), "tail truncated:\n{text}");
+        assert!(text.contains("▌"), "cursor missing:\n{text}");
+    }
+
+    #[test]
+    fn a_tall_input_scrolls_to_keep_the_cursor_row_visible() {
+        let mut app = App::new();
+        for i in 0..8 {
+            for c in format!("line{i}").chars() {
+                app.handle(AppEvent::Key(Key::Char(c)));
+            }
+            if i < 7 {
+                app.handle(AppEvent::Key(Key::Newline));
+            }
+        }
+        // Height 12 ⇒ at most 6 input rows, so 8 logical lines must scroll.
+        let text = buffer_text(&render(&mut app, 40, 12));
+        assert!(text.contains("line7"), "cursor row scrolled off:\n{text}");
+        assert!(text.contains("▌"), "cursor missing:\n{text}");
+        assert!(!text.contains("line0"), "the top should scroll off:\n{text}");
+    }
+
+    #[test]
+    fn a_pasted_chip_renders_as_a_placeholder_not_raw_text() {
+        let mut app = App::new();
+        let blob = "aaa\nbbb\nccc\nddd"; // 4 lines ⇒ a chip
+        app.handle(AppEvent::Paste(blob.into()));
+        let text = buffer_text(&render(&mut app, 60, 8));
+        assert!(text.contains("pasted"), "chip missing:\n{text}");
+        assert!(text.contains("4 lines"), "line count missing:\n{text}");
+        assert!(text.contains("15 chars"), "char count missing:\n{text}");
+        assert!(!text.contains("bbb"), "raw paste leaked:\n{text}");
+    }
+
+    #[test]
+    fn a_chip_at_a_narrow_width_still_renders_within_the_band() {
+        let mut app = App::new();
+        app.handle(AppEvent::Paste("x".repeat(500)));
+        // Content width is 17 here, so the chip wraps across rows.
+        let text = buffer_text(&render(&mut app, 20, 8));
+        assert!(text.contains("pasted"), "chip missing:\n{text}");
+        assert!(text.contains("❱"), "chip tail missing:\n{text}");
+        assert!(text.contains("▌"), "cursor missing:\n{text}");
     }
 }
