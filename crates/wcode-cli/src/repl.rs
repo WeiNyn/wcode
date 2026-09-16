@@ -23,7 +23,7 @@ use wcode_protocol::Backend;
 #[cfg(unix)]
 use wcode_protocol::Client;
 
-use crate::config::{HooksConfig, ToolsConfig};
+use crate::config::{HooksConfig, TeamMember, ToolsConfig};
 use crate::instructions::InstructionSet;
 use crate::skills::SkillSet;
 use crate::rtk::RtkHooks;
@@ -39,6 +39,7 @@ pub fn system_prompt(
     tools: &ToolsConfig,
     instructions: &InstructionSet,
     skills: &SkillSet,
+    team: &[TeamMember],
     cwd: &Path,
 ) -> String {
     let inspect = match (tools.grep, tools.find) {
@@ -60,6 +61,27 @@ pub fn system_prompt(
     if let Some(section) = skills.render(cwd) {
         prompt.push_str("\n\n");
         prompt.push_str(&section);
+    }
+    // The team block is rendered only when the root actually has a team (F3):
+    // a teamless orchestrator's prompt is byte-identical to before.
+    if !team.is_empty() {
+        let mut block = String::from(
+            "# Your team\n\n\
+             You orchestrate a team of worker agents. Address a member by name with \
+             `message` (`to: \"<name>\"`); `spawn` adds a worker; `peers` lists them. \
+             Delegate by role and prefer messaging an existing member over spawning a \
+             duplicate.\n\nMembers:",
+        );
+        for member in team {
+            block.push_str("\n- ");
+            block.push_str(&member.name);
+            if let Some(role) = &member.role {
+                block.push_str(" — ");
+                block.push_str(role);
+            }
+        }
+        prompt.push_str("\n\n");
+        prompt.push_str(&block);
     }
     prompt
 }
@@ -344,6 +366,7 @@ pub struct AgentSpec<'a> {
     pub compaction: CompactionPolicy,
     pub instructions: &'a InstructionSet,
     pub skills: &'a SkillSet,
+    pub team: &'a [TeamMember],
 }
 
 pub fn build_agent(
@@ -356,7 +379,7 @@ pub fn build_agent(
     let mut tools = default_tools(spec.tools);
     tools.extend(extra_tools);
     Agent::new(AgentConfig {
-        system: system_prompt(spec.tools, spec.instructions, spec.skills, &cwd),
+        system: system_prompt(spec.tools, spec.instructions, spec.skills, spec.team, &cwd),
         tools,
         llm: spec.llm,
         stream_fn: rig_stream_fn(),
@@ -373,7 +396,12 @@ pub fn build_agent(
 /// Re-exec argv for `/reload`: resume the session (or `--no-session`) and
 /// forward the effective LLM opts so flag overrides survive the re-exec
 /// (the session only records model/effort *changes*, not launch flags).
-pub fn reload_args(llm: &LlmOpts, session: Option<&Path>, no_session: bool) -> Vec<String> {
+pub fn reload_args(
+    llm: &LlmOpts,
+    session: Option<&Path>,
+    no_session: bool,
+    agents: bool,
+) -> Vec<String> {
     let mut args = Vec::new();
     if no_session || session.is_none() {
         args.push("--no-session".to_string());
@@ -397,6 +425,11 @@ pub fn reload_args(llm: &LlmOpts, session: Option<&Path>, no_session: bool) -> V
     );
     args.push("--effort".to_string());
     args.push(llm.effort.clone().unwrap_or_else(|| "-".to_string()));
+    // Keep the orchestrator/team across a re-exec: a resumed session must still
+    // satisfy the `[team] requires --agents` guard (D16).
+    if agents {
+        args.push("--agents".to_string());
+    }
     args
 }
 
@@ -434,7 +467,13 @@ fn build_dir() -> Option<PathBuf> {
 /// replaced) binary with `--resume <current>` so the session continues.
 /// build is not specially cancellable — Ctrl-C is a developer-session
 /// non-case, so a build is simply awaited to completion.
-async fn reload(llm: &LlmOpts, session: Option<&Path>, no_session: bool, in_flight: &AtomicBool) {
+async fn reload(
+    llm: &LlmOpts,
+    session: Option<&Path>,
+    no_session: bool,
+    agents: bool,
+    in_flight: &AtomicBool,
+) {
     use std::sync::atomic::Ordering;
     let Some(dir) = build_dir() else {
         eprintln!("reload: no Cargo.toml above cwd or binary");
@@ -471,7 +510,7 @@ async fn reload(llm: &LlmOpts, session: Option<&Path>, no_session: bool, in_flig
             return;
         }
     }
-    let args = reload_args(llm, session, no_session);
+    let args = reload_args(llm, session, no_session, agents);
     println!("reloading {} ...", exe.display());
     let _ = io::stdout().flush();
     exec_self(&args);
@@ -555,6 +594,7 @@ pub async fn run(
     compaction: CompactionPolicy,
     instructions: InstructionSet,
     skills: SkillSet,
+    team: &[TeamMember],
     orchestrator: Option<crate::agents::Orchestrator>,
 ) {
     #[cfg(unix)]
@@ -660,6 +700,7 @@ pub async fn run(
                                 compaction,
                                 instructions: &instructions,
                                 skills: &skills,
+                                team,
                             },
                             session,
                             Vec::new(),
@@ -772,6 +813,7 @@ pub async fn run(
                                 compaction,
                                 instructions: &instructions,
                                 skills: &skills,
+                                team,
                             },
                             Some(s),
                             messages,
@@ -816,7 +858,7 @@ pub async fn run(
                 println!("{DIM}/reload (rebuild + re-exec) is unavailable over a socket{RESET}")
             }
             Some(Command::Reload { no_session }) => {
-                reload(&llm, session_path.as_deref(), no_session, &in_flight).await
+                reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), &in_flight).await
             }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
@@ -1165,6 +1207,7 @@ mod tests {
             &ToolsConfig::default(),
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
+            &[],
             Path::new("/"),
         );
         assert!(off.contains("Inspect with read;"), "{off}");
@@ -1178,6 +1221,7 @@ mod tests {
             },
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
+            &[],
             Path::new("/"),
         );
         assert!(on.contains("Inspect with read, grep and find;"), "{on}");
@@ -1190,12 +1234,55 @@ mod tests {
             },
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
+            &[],
             Path::new("/"),
         );
         assert!(
             only_grep.contains("Inspect with read and grep;"),
             "{only_grep}"
         );
+    }
+
+    #[test]
+    fn system_prompt_renders_the_team_block_only_with_a_team() {
+        let team = vec![
+            TeamMember {
+                name: "explorer".into(),
+                role: Some("recon only; never edit; cite file:line".into()),
+                ..Default::default()
+            },
+            TeamMember {
+                name: "reviewer".into(),
+                ..Default::default()
+            },
+        ];
+        let prompt = system_prompt(
+            &ToolsConfig::default(),
+            &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            &team,
+            Path::new("/"),
+        );
+        assert!(prompt.contains("# Your team"), "{prompt}");
+        assert!(prompt.contains("to: \"<name>\""), "{prompt}");
+        // A member with a role renders `- name — role`...
+        assert!(
+            prompt.contains("- explorer — recon only; never edit; cite file:line"),
+            "{prompt}"
+        );
+        // ...a roleless one renders `- name` only (no dash-role tail).
+        assert!(prompt.ends_with("- reviewer"), "{prompt}");
+        assert!(!prompt.contains("- reviewer —"), "{prompt}");
+
+        // No team → no block at all.
+        let bare = system_prompt(
+            &ToolsConfig::default(),
+            &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            &[],
+            Path::new("/"),
+        );
+        assert!(!bare.contains("# Your team"), "{bare}");
     }
 
     #[test]
@@ -1211,7 +1298,7 @@ mod tests {
             retry: wcode_harness::streamfn::RetryPolicy::default(),
         };
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false),
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false),
             vec![
                 "--resume",
                 "/s/a.jsonl",
@@ -1235,15 +1322,29 @@ mod tests {
         };
         // explicit flag wins, even with a session open
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true)[..2],
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true, false)[..2],
             ["--no-session".to_string(), "--model".to_string()],
         );
         // no session file: fresh start, cleared effort round-trips as "-"
-        let args = reload_args(&llm, None, false);
+        let args = reload_args(&llm, None, false, false);
         assert_eq!(args[0], "--no-session");
         assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
         assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
         assert!(!args.iter().any(|a| a == "--base-url"));
+    }
+
+    #[test]
+    fn reload_args_forwards_agents_only_when_set() {
+        let llm = LlmOpts {
+            model: "m".to_string(),
+            ..LlmOpts::default()
+        };
+        // An orchestrator survives a re-exec (`--agents` forwarded)...
+        let with = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, true);
+        assert!(with.iter().any(|a| a == "--agents"), "{with:?}");
+        // ...a plain session does not grow the flag.
+        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false);
+        assert!(!without.iter().any(|a| a == "--agents"), "{without:?}");
     }
 
     #[test]
@@ -1573,7 +1674,7 @@ mod system_prompt_tests {
                 global: false,
             }],
         };
-        let with = system_prompt(&ToolsConfig::default(), &set, &SkillSet::default(), Path::new("/"));
+        let with = system_prompt(&ToolsConfig::default(), &set, &SkillSet::default(), &[], Path::new("/"));
         assert!(with.contains("You are wcode"), "{with}");
         assert!(
             with.contains("# Project instructions (/repo/AGENTS.md)"),
@@ -1585,6 +1686,7 @@ mod system_prompt_tests {
             &ToolsConfig::default(),
             &InstructionSet::default(),
             &SkillSet::default(),
+            &[],
             Path::new("/"),
         );
         assert!(!base.contains("Project instructions"), "{base}");

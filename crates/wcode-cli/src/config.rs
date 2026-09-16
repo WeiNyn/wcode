@@ -171,6 +171,20 @@ impl CompactionConfig {
     }
 }
 
+/// A `[team]` member (F3): a worker the orchestrator starts with. Reuses the F2
+/// `WorkerSpec` fields; `name` is required and must be unique.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct TeamMember {
+    /// The worker's name — its phonebook key (`message`'s `to`). Must be unique.
+    pub name: String,
+    /// Model id override; `None` inherits the orchestrator's model.
+    pub model: Option<String>,
+    /// Role text appended to the worker's system prompt.
+    pub role: Option<String>,
+    /// Tool allow-list; `None` = all, `Some(vec![])` = only `message`.
+    pub tools: Option<Vec<String>>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -195,6 +209,10 @@ pub struct FileConfig {
     /// (`agent:<id>`/`user`). The phonebook (§13.15) resolves `message`'s `to`.
     #[serde(default)]
     pub peers: std::collections::HashMap<String, String>,
+    /// `[team]`: workers the orchestrator starts with (F3). Passed through as-is;
+    /// no env var (a team is data, not a scalar knob).
+    #[serde(default)]
+    pub team: Vec<TeamMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +230,8 @@ pub struct Config {
     pub retry: RetryPolicy,
     /// Resolved `[peers]` (name → socket path or address): the phonebook (§13.15).
     pub peers: std::collections::HashMap<String, String>,
+    /// Resolved `[team]` (F3): the workers the orchestrator starts with.
+    pub team: Vec<TeamMember>,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -269,6 +289,8 @@ impl EnvLike {
 pub enum ConfigError {
     MissingModel(Box<FileConfig>),
     Io(String),
+    /// Two `[team]` members share a `name` (names are unique phonebook keys).
+    DuplicateTeamMember(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -279,6 +301,10 @@ impl std::fmt::Display for ConfigError {
                 "no model configured: set `model = \"...\"` in ~/.config/wcode/config.toml"
             ),
             ConfigError::Io(msg) => write!(f, "{msg}"),
+            ConfigError::DuplicateTeamMember(name) => write!(
+                f,
+                "duplicate [team] member `{name}`: names must be unique"
+            ),
         }
     }
 }
@@ -377,6 +403,15 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             skills.dirs = Some(dirs);
         }
     }
+    // `[team]` names are phonebook keys: they must be unique (fail loudly).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for member in &file.team {
+            if !seen.insert(member.name.as_str()) {
+                return Err(ConfigError::DuplicateTeamMember(member.name.clone()));
+            }
+        }
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -390,6 +425,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         skills,
         retry,
         peers: file.peers,
+        team: file.team,
     })
 }
 
@@ -679,6 +715,93 @@ mod tests {
             panic!("wrong error: {err:?}")
         };
         assert!(msg.contains("grep"), "names the tool: {msg}");
+    }
+
+    #[test]
+    fn toml_team_parses_members() {
+        let file: FileConfig = toml::from_str(
+            r#"
+model = "m"
+[[team]]
+name = "explorer"
+model = "x"
+role = "recon"
+tools = ["read"]
+[[team]]
+name = "reviewer"
+"#,
+        )
+        .unwrap();
+        assert_eq!(file.team.len(), 2);
+        assert_eq!(file.team[0].name, "explorer");
+        assert_eq!(file.team[0].model.as_deref(), Some("x"));
+        assert_eq!(file.team[0].role.as_deref(), Some("recon"));
+        assert_eq!(file.team[0].tools, Some(vec!["read".to_string()]));
+        assert_eq!(file.team[1].name, "reviewer");
+        assert_eq!(file.team[1].model, None);
+    }
+
+    #[test]
+    fn merge_passes_team_through_and_absent_is_empty() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                team: vec![TeamMember {
+                    name: "explorer".into(),
+                    ..Default::default()
+                }],
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.team.len(), 1);
+        assert_eq!(cfg.team[0].name, "explorer");
+
+        let none = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(none.team.is_empty());
+    }
+
+    #[test]
+    fn duplicate_team_names_are_a_config_error() {
+        let err = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                team: vec![
+                    TeamMember {
+                        name: "dup".into(),
+                        ..Default::default()
+                    },
+                    TeamMember {
+                        name: "dup".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..FileConfig::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::DuplicateTeamMember(name) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert_eq!(name, "dup");
+        assert!(err.to_string().contains("dup"));
+    }
+
+    #[test]
+    fn nameless_team_member_fails_to_parse() {
+        // `name` is mandatory — a `[[team]]` without it is a parse error.
+        let err = toml::from_str::<FileConfig>("model = \"m\"\n[[team]]\nrole = \"no name\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("name"), "names the field: {err}");
     }
 }
 

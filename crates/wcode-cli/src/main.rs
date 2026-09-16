@@ -19,7 +19,9 @@ mod rtk;
 mod skills;
 mod tools;
 
-use crate::config::{Config, ConfigError, EnvLike, FileConfig, config_dir, merge, parse_endpoint};
+use crate::config::{
+    Config, ConfigError, EnvLike, FileConfig, TeamMember, config_dir, merge, parse_endpoint,
+};
 use crate::instructions::{InstructionSet, Mode, load as load_instructions};
 use crate::skills::{SkillSet, discover as discover_skills};
 use crate::repl::{
@@ -326,7 +328,7 @@ async fn main() {
         let skills = discover_skills_for(&args, &cfg, &cwd);
         println!(
             "{}",
-            repl::system_prompt(&cfg.tools, &instructions, &skills, &cwd)
+            repl::system_prompt(&cfg.tools, &instructions, &skills, &cfg.team, &cwd)
         );
         std::process::exit(0);
     }
@@ -409,6 +411,7 @@ async fn main() {
                     cfg.compaction,
                     InstructionSet::default(),
                     SkillSet::default(),
+                    &[],
                     None,
                 )
                 .await;
@@ -491,7 +494,7 @@ async fn main() {
     // (§10.1).
     let orchestrator = args.agents.then(|| {
         let template = crate::agents::WorkerTemplate {
-            system: system_prompt(&cfg.tools, &instructions, &skills, &cwd),
+            system: system_prompt(&cfg.tools, &instructions, &skills, &[], &cwd),
             llm: llm.clone(),
             stream_fn: rig_stream_fn(),
             hooks: hooks.clone(),
@@ -505,6 +508,10 @@ async fn main() {
     // addressable A2A peer reachable over its socket (S4-4).
     if !args.peers.is_empty() && orchestrator.is_none() {
         eprintln!("error: --peer requires --agents");
+        std::process::exit(2);
+    }
+    if !cfg.team.is_empty() && orchestrator.is_none() {
+        eprintln!("error: [team] requires --agents");
         std::process::exit(2);
     }
     #[cfg(unix)]
@@ -542,6 +549,30 @@ async fn main() {
             }
         }
     }
+    // `[team]` (F3): spawn each member through the orchestrator, which validates
+    // the tool allow-list (D14) and registers the name in the phonebook. Only the
+    // root orchestrator spawns — a served `--owner` worker does not.
+    if args.owner.is_none()
+        && let Some(o) = &orchestrator
+    {
+        for member in &cfg.team {
+            let spec = crate::agents::WorkerSpec {
+                name: Some(member.name.clone()),
+                model: member.model.clone(),
+                system: member.role.clone(),
+                tools: member.tools.clone(),
+            };
+            if let Err(e) = o.spawn_worker(spec) {
+                eprintln!("error: team member `{}`: {e}", member.name);
+                std::process::exit(2);
+            }
+        }
+    }
+    if args.owner.is_none() && !cfg.team.is_empty() {
+        let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
+        println!("team: {}", names.join(", "));
+    }
+
     // A session with `--owner` is a **served worker** (S4-4 reply): it gets a
     // `message` tool bound to its owner and a `ReportBack` hook, and the
     // ownership edge is recorded so its report is permitted.
@@ -560,6 +591,8 @@ async fn main() {
         }
         (None, None) => Vec::new(),
     };
+    // The root orchestrator sees the team; a served worker (`--owner`) does not.
+    let root_team: &[TeamMember] = if args.owner.is_some() { &[] } else { &cfg.team };
     let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
@@ -568,6 +601,7 @@ async fn main() {
             compaction: cfg.compaction,
             instructions: &instructions,
             skills: &skills,
+            team: root_team,
         },
         session,
         context,
@@ -639,7 +673,7 @@ async fn main() {
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
                         // with `--resume <path>` (the terminal is already restored).
-                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false));
+                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents));
                         std::process::exit(1); // only reached if the exec failed
                     }
                     Err(e) => {
@@ -656,6 +690,7 @@ async fn main() {
                 cfg.compaction,
                 instructions,
                 skills,
+                root_team,
                 orchestrator,
             )
             .await

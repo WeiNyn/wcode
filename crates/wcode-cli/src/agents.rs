@@ -332,6 +332,18 @@ impl Orchestrator {
         ]
     }
 
+    /// Spawn a worker owned by this orchestrator and register its name in the
+    /// phonebook (F3). Validates the tool allow-list first so a bad preset name
+    /// fails loudly (D14) — the `[team]` path calls the factory directly and
+    /// would otherwise bypass the `spawn` tool's check.
+    pub fn spawn_worker(&self, spec: WorkerSpec) -> Result<SpawnedWorker, String> {
+        self.factory.validate_tools(&spec)?;
+        let worker = self.factory.spawn(&self.id, spec);
+        self.phonebook
+            .insert(short_name(&worker.id), worker.id.clone());
+        Ok(worker)
+    }
+
     /// Record a name → address alias in the phonebook (§13.15) — a `[peers]`
     /// entry whose target is an address rather than a socket.
     pub fn alias(&self, name: impl Into<String>, address: SessionId) {
@@ -671,6 +683,23 @@ mod tests {
         factory.worker_config(&SessionId::agent("w1"), &SessionId::agent("orch"), spec)
     }
 
+    /// An orchestrator over a default (never-streaming) worker template.
+    fn orchestrator() -> Orchestrator {
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let template = WorkerTemplate {
+            system: "sys".into(),
+            llm: LlmOpts::default(),
+            stream_fn,
+            hooks: HooksSet::default(),
+            tools: ToolsConfig::default(),
+            compaction: CompactionPolicy::default(),
+            working_dir: std::env::temp_dir(),
+        };
+        Orchestrator::new(Registry::new(), template)
+    }
+
     fn tool_names(cfg: &AgentConfig) -> Vec<String> {
         cfg.tools.iter().map(|t| t.name().to_string()).collect()
     }
@@ -824,5 +853,33 @@ mod tests {
         );
         assert_eq!(cfg.llm.session_id.as_deref(), Some("agent:w7"));
         assert_ne!(cfg.llm.session_id.as_deref(), Some("root-session"));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_registers_the_name_and_rejects_bad_tools() {
+        let o = orchestrator();
+        let worker = o
+            .spawn_worker(WorkerSpec {
+                name: Some("explorer".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(worker.id.as_str(), "agent:explorer");
+        assert_eq!(o.phonebook.get("explorer"), Some(worker.id.clone()));
+        assert!(
+            o.registry.permitted(&o.id, &worker.id),
+            "owned by the orchestrator"
+        );
+
+        // A bad allow-list name fails loudly — the preset path validates (D14).
+        let err = o
+            .spawn_worker(WorkerSpec {
+                name: Some("dup".into()),
+                tools: Some(vec!["bogus".into()]),
+                ..Default::default()
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("bogus"), "{err}");
     }
 }
