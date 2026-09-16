@@ -67,6 +67,17 @@ disabled = ["noisy-skill"] # optional; names to skip
 max = 3                    # optional; retries after the first attempt (0 disables)
 base_ms = 500              # optional; base backoff for the first retry
 cap_ms = 8000              # optional; cap on a single backoff wait
+
+[team]
+# A preset team the orchestrator starts with (requires --agents). One [[team]]
+# entry per member; names are unique (a duplicate fails the load loudly).
+[[team]]
+name  = "explorer"
+role  = "recon only; never edit; cite file:line"
+
+[[team]]
+name  = "reviewer"
+role  = "verify diffs; PASS / NITS / FAIL"
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
@@ -84,6 +95,10 @@ cannot rescue an unreadable or invalid config.toml — that still exits with
 an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
 `--no-instructions` skips the instruction files; `--dump-system-prompt` prints
 the composed system prompt (instructions included) and exits — no model needed.
+With `--agents` and a `[team]`, wcode spawns each member at startup and the root's
+system prompt gains a `# Your team` block listing them by name (and role); members
+are addressed by name with `message`. A `[team]` without `--agents` is an error,
+and a served `--owner` worker never sees the block.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a

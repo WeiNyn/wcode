@@ -139,7 +139,10 @@ pass-through in `merge` (a team is data, not a scalar knob).
 
 **Decisions.** `[team]` is **local** spawned workers; `[peers]` stays the
 **remote** map (socket/address). They compose — a `[peers]` entry can name one of
-the team's workers if it is served — but they are not merged in v1.
+the team's workers if it is served — but they are not merged in v1. A `[team]`
+requires `--agents` (D16); the block enters the root prompt only when the team is
+non-empty (D17); duplicate member names fail loudly at load (D18); members spawn
+via `Orchestrator::spawn_worker` — `validate_tools` (D14) then the phonebook (D19).
 
 **`/new` semantics.** The team lives in-process, so it persists across `/new`
 (same process, same `Orchestrator`). A `/reload` re-exec re-reads `[team]`.
@@ -189,6 +192,10 @@ Needed only once surfaces cross process boundaries.
 | D13 | F1 alias | `/sessions` aliases `/resume`, so `/ses` completes to it (aliases are dispatchable + suggestable, never shown in `/help`) |
 | D14 | F2 unknown tool | `message` is **always valid** in an allow-list (a no-op — it is kept regardless); any other unavailable name — including `spawn` — **fails loudly** via the reusable `SessionFactory::validate_tools` (used by `spawn` and, in F3, the startup loop), never silently dropped |
 | D15 | F2 session id | a worker gets its **own** `llm.session_id` (its address), not the root's `x-opencode-session` |
+| D16 | F3 gate | a non-empty `[team]` requires `--agents` — else `error: [team] requires --agents`, exit 2 |
+| D17 | F3 prompt | the `# Your team` block renders **only** when the root has a non-empty team; a `--owner` served worker never sees it |
+| D18 | F3 names | duplicate `[team]` member names are a **config error** at load (names are unique phonebook keys) |
+| D19 | F3 spawn | the startup loop spawns via `Orchestrator::spawn_worker`, which runs `validate_tools` (D14) and registers the name in the phonebook |
 
 ## Phased tasks
 
@@ -218,11 +225,11 @@ Needed only once surfaces cross process boundaries.
       the identity blurb retained; allow-list filters but `message` survives;
       `spawn` absent from a worker; empty/absent spec = today's behavior.
 
-**Phase 3 — F3: team preset.** ☐
-- [ ] `TeamMember` in `config.rs` (`[team]`), pass-through in `merge`.
-- [ ] Start-up spawn loop in `main.rs` after `Orchestrator::new` (mirror
+**Phase 3 — F3: team preset.** ☑ landed — reviewed
+- [x] `TeamMember` in `config.rs` (`[team]`), pass-through in `merge`.
+- [x] Start-up spawn loop in `main.rs` after `Orchestrator::new` (mirror
       `[peers]`), registering each name in the phonebook.
-- [ ] Tests: a `[team]` parses; N members spawn and are addressable by name; an
+- [x] Tests: a `[team]` parses; N members spawn and are addressable by name; an
       absent table leaves today's behavior; a bad member fails loudly.
 
 **Phase 4 — F4: sidebar + multi-surface.** ☐
@@ -250,6 +257,9 @@ Needed only once surfaces cross process boundaries.
   (path scopes) would be a `Hooks` impl, not config (stays true to the stance).
 - **`/team` command**: once F3 lands, a `/team` to list/re-spawn members is
   natural — rides on F1's table, so it is cheap; scope with F4.
+- **`reload_args` and `--owner`**: the re-exec forwards `--agents` (F3) but still
+  drops `--owner`, so a served worker resumed interactively would come back as a
+  root. Pre-existing; revisit if `--owner` + interactive resume is supported.
 
 ## Progress
 
@@ -257,7 +267,7 @@ Needed only once surfaces cross process boundaries.
 |-------|-------|--------|
 | 1 | F1 — TUI command table + inline completion (+ `Tab`) | ☑ done (reviewed) |
 | 2 | F2 — customizable workers (`model`/`role`/`tools`) | ☑ done (reviewed) |
-| 3 | F3 — `[team]` preset + startup spawn | ☐ todo |
+| 3 | F3 — `[team]` preset + startup spawn | ☑ done (reviewed) |
 | 4a | F4 — team status sidebar | ☐ todo |
 | 4b | F4 — in-process multi-surface | ☐ todo |
 | 5 | F4 tier 2 — socket multiplexing (deferred) | ☐ todo |
