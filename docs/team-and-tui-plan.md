@@ -91,17 +91,21 @@ would make it impossible to keep typing `/model gpt-…` args. Instead:
 ### F2 — customizable spawned agents
 
 **Shape.** Extend `WorkerSpec` and `SpawnArgs` with the same three optional
-fields, and have `SessionFactory::build` apply them:
+fields. `SessionFactory::build` is a thin `SessionActor::spawn(worker_config(…))`
+wrapper over a **pure** `worker_config(&self, id, owner, spec) -> AgentConfig`
+(the unit the tests exercise) that applies them:
 
 | field | effect | notes |
 |---|---|---|
 | `model: Option<String>` | overrides `llm.model` for the worker | parent's provider (`base_url`/`api_key`/`stream_fn`) is shared — per-agent provider is deferred |
 | `system: Option<String>` | **appended** after the worker identity blurb as `\n\n# Role\n<text>` | the blurb (who it is, who owns it, auto-report) always survives |
-| `tools: Option<Vec<String>>` | allow-list filter over `default_tools(&t.tools)` | `message` is **always** kept (the report path); `spawn` is never present in a worker |
+| `tools: Option<Vec<String>>` | allow-list filter over `default_tools(&t.tools)`: `None` = all, `Some(vec![])` = only `message` | `message` is **always** kept and always valid in the list; `spawn` is never present; any other unavailable name **fails loudly** via `validate_tools` (D14), never silently dropped |
 
 `spawn`'s args stay additive: `{ task, name?, model?, role?, tools? }` (the
 `role` arg maps to `WorkerSpec.system`). A worker never gains `spawn` — bounded
-fan-out by construction stays intact.
+fan-out by construction stays intact. A worker is its own conversation, so
+`worker_config` gives it its own `llm.session_id` (its address) rather than
+inheriting the root's `x-opencode-session` (D15).
 
 **Scope.** In-process only. Customizing a *remote* worker needs a new `Request`
 variant; deferred.
@@ -125,8 +129,11 @@ role   = "verify diffs; PASS / NITS / FAIL"
 
 At startup — after `Orchestrator::new`, mirroring the existing `[peers]`
 registration loop — the composition root spawns each member through the *same*
-`SessionFactory` and records its name in the phonebook. The orchestrator then
-begins with the team already present: no prompt required. `Config`/`FileConfig`
+`SessionFactory` and records its name in the phonebook. Because it calls the
+factory directly (bypassing the `spawn` tool), it must first call
+`SessionFactory::validate_tools` per member so a bad `tools` entry **fails
+loudly** at startup rather than being silently dropped (D14). The orchestrator
+then begins with the team already present: no prompt required. `Config`/`FileConfig`
 gain a `team: Vec<TeamMember>` field with the usual env-is-not-involved
 pass-through in `merge` (a team is data, not a scalar knob).
 
@@ -180,6 +187,8 @@ Needed only once surfaces cross process boundaries.
 | D11 | F1 matching | completion matches case-insensitive **prefix** (canonical names + aliases); the **picker keeps substring** filtering — a separate matcher, not the shared one |
 | D12 | F1 Enter | accept only when the token is not an exact name/alias; a **bare `/` never accepts** (no `/exit` trap) |
 | D13 | F1 alias | `/sessions` aliases `/resume`, so `/ses` completes to it (aliases are dispatchable + suggestable, never shown in `/help`) |
+| D14 | F2 unknown tool | `message` is **always valid** in an allow-list (a no-op — it is kept regardless); any other unavailable name — including `spawn` — **fails loudly** via the reusable `SessionFactory::validate_tools` (used by `spawn` and, in F3, the startup loop), never silently dropped |
+| D15 | F2 session id | a worker gets its **own** `llm.session_id` (its address), not the root's `x-opencode-session` |
 
 ## Phased tasks
 
@@ -201,11 +210,11 @@ Needed only once surfaces cross process boundaries.
       accept inserts `/<name> `; `Esc` dismisses (buffer unchanged); history and
       picker-substring unaffected. Verified via `TestBackend` (no TTY here).
 
-**Phase 2 — F2: worker customization.** ☐
-- [ ] `WorkerSpec` + `SpawnArgs`: `model`, `system` (role), `tools`.
-- [ ] `SessionFactory::build`: apply model override; append the role block; filter
+**Phase 2 — F2: worker customization.** ☑ landed — reviewed
+- [x] `WorkerSpec` + `SpawnArgs`: `model`, `system` (role), `tools`.
+- [x] `SessionFactory::build`: apply model override; append the role block; filter
       tools by allow-list, always keeping `message`.
-- [ ] Tests: model override reaches the built `Agent`'s `llm`; role appended and
+- [x] Tests: model override reaches the built `Agent`'s `llm`; role appended and
       the identity blurb retained; allow-list filters but `message` survives;
       `spawn` absent from a worker; empty/absent spec = today's behavior.
 
@@ -247,7 +256,7 @@ Needed only once surfaces cross process boundaries.
 | phase | scope | status |
 |-------|-------|--------|
 | 1 | F1 — TUI command table + inline completion (+ `Tab`) | ☑ done (reviewed) |
-| 2 | F2 — customizable workers (`model`/`role`/`tools`) | ☐ todo |
+| 2 | F2 — customizable workers (`model`/`role`/`tools`) | ☑ done (reviewed) |
 | 3 | F3 — `[team]` preset + startup spawn | ☐ todo |
 | 4a | F4 — team status sidebar | ☐ todo |
 | 4b | F4 — in-process multi-surface | ☐ todo |

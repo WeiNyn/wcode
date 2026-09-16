@@ -15,7 +15,7 @@ each task completes and keep the status table current.
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) complete — S4-1…S4-5 landed |
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
-| 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1 landed (reviewed); F2 next |
+| 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1, F2 landed; F3 next |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
