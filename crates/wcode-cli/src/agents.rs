@@ -88,12 +88,21 @@ pub struct WorkerTemplate {
     pub working_dir: PathBuf,
 }
 
-/// How to build one worker. v1 uses only `name`; the remaining slots are the
-/// seam for per-worker customization (§10.1), left at their defaults.
+/// How to build one worker. `Default` reproduces v1 behavior: inherit the
+/// orchestrator's model and tool set, with the identity blurb only. The optional
+/// slots are the per-worker customization seam (§10.1) — all in-process (D2), so
+/// only the model changes; `base_url`/`api_key`/`stream_fn` stay shared.
 #[derive(Clone, Default)]
 pub struct WorkerSpec {
     /// The worker's address. Auto-assigned (`w1`, `w2`, …) when absent.
     pub name: Option<String>,
+    /// Override the model id; `None` inherits the orchestrator's model.
+    pub model: Option<String>,
+    /// Extra role text appended to the identity blurb as a `# Role` section.
+    pub system: Option<String>,
+    /// Restrict the worker to these tool names. `None` = the full default set;
+    /// `Some(vec![])` = only `message`. `message` is always kept (D3).
+    pub tools: Option<Vec<String>>,
 }
 
 /// A freshly spawned, registered worker.
@@ -121,31 +130,86 @@ impl SessionFactory {
         &self.registry
     }
 
+    /// The factory's default tool names — the pickable part of a worker's tool
+    /// set. `spawn` is absent by construction (a worker cannot spawn); `message`
+    /// is also always kept. Use [`Self::validate_tools`] as the allow-list gate.
+    pub fn default_tool_names(&self) -> Vec<String> {
+        default_tools(&self.template.tools)
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
+
+    /// Check a spec's tool allow-list against the tools a worker may be given:
+    /// the default set plus the always-kept `message`. Returns `Err` naming the
+    /// first bad entry — an unknown tool, or `spawn` (a worker never gets it).
+    /// `spawn` and F3's `[team]` startup loop both call this so a bad name fails
+    /// loudly (D14) instead of being silently dropped.
+    pub fn validate_tools(&self, spec: &WorkerSpec) -> Result<(), String> {
+        let Some(allow) = &spec.tools else {
+            return Ok(());
+        };
+        let mut valid = self.default_tool_names();
+        valid.push("message".to_string());
+        for name in allow {
+            if name == "spawn" {
+                return Err(format!(
+                    "`spawn` is not available to a worker (a worker never has `spawn`); \
+                     valid tools: {}",
+                    valid.join(", ")
+                ));
+            }
+            if !valid.contains(name) {
+                return Err(format!(
+                    "unknown tool `{name}`; valid tools: {}",
+                    valid.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Build a worker, spawn its actor, and register it under `owner` — the
     /// `report_back_to` edge the permitted set reads (§10.1).
     pub fn spawn(&self, owner: &SessionId, spec: WorkerSpec) -> SpawnedWorker {
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
-        let name = spec.name.unwrap_or_else(|| format!("w{n}"));
+        let name = spec.name.clone().unwrap_or_else(|| format!("w{n}"));
         let id = SessionId::agent(name);
-        let handle = SessionActor::spawn(self.build(&id, owner));
+        let handle = self.build(&id, owner, &spec);
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
         SpawnedWorker { id }
     }
 
-    fn build(&self, id: &SessionId, owner: &SessionId) -> Agent {
+    fn build(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> SessionHandle {
+        SessionActor::spawn(Agent::new(self.worker_config(id, owner, spec)))
+    }
+
+    /// The pure worker config: no actor, no registration — the piece worth
+    /// testing. Applies a spec's model / role / tool-subset over the inherited
+    /// template (D2: in-process only; only the model changes).
+    fn worker_config(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> AgentConfig {
         let t = &self.template;
         // A worker is told who it is; its result is forwarded to the orchestrator
         // automatically when its run ends (the `ReportBack` hook), so it is not
         // asked to report by hand.
-        let system = format!(
+        let mut system = format!(
             "{}\n\n# You are a worker\nYou are the session `{id}`, spawned by \
              `{owner}`. Complete the task you are given. When you finish, your \
              final message is reported back to `{owner}` automatically — you do \
              not need to send it yourself.",
             t.system
         );
+        if let Some(role) = &spec.system {
+            system.push_str("\n\n# Role\n");
+            system.push_str(role);
+        }
+        // `None` = the whole default set; `Some(list)` = only the named tools.
+        // `message` is always kept — the worker's only way to report (D3).
         let mut tools = default_tools(&t.tools);
+        if let Some(allow) = &spec.tools {
+            tools.retain(|tool| allow.iter().any(|name| name == tool.name()));
+        }
         tools.push(erased(Message::new(
             self.registry.clone(),
             id.clone(),
@@ -153,10 +217,17 @@ impl SessionFactory {
             // A worker sends only to its owner; it needs no phonebook.
             Phonebook::default(),
         )));
-        Agent::new(AgentConfig {
+        let mut llm = t.llm.clone();
+        if let Some(model) = &spec.model {
+            llm.model = model.clone();
+        }
+        // The worker is its own conversation, so give it its own routing id
+        // rather than inheriting the root's `x-opencode-session` (D15).
+        llm.session_id = Some(id.as_str().to_string());
+        AgentConfig {
             system,
             tools,
-            llm: t.llm.clone(),
+            llm,
             stream_fn: t.stream_fn.clone(),
             hooks: {
                 let mut hooks = t.hooks.clone();
@@ -173,7 +244,7 @@ impl SessionFactory {
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: true,
             compaction: t.compaction,
-        })
+        }
     }
 }
 
@@ -323,10 +394,14 @@ mod tests {
     }
 
     fn factory_with(stream_fn: StreamFn) -> (Arc<SessionFactory>, Registry) {
+        factory_full(stream_fn, LlmOpts::default())
+    }
+
+    fn factory_full(stream_fn: StreamFn, llm: LlmOpts) -> (Arc<SessionFactory>, Registry) {
         let registry = Registry::new();
         let template = WorkerTemplate {
             system: "sys".into(),
-            llm: LlmOpts::default(),
+            llm,
             stream_fn,
             hooks: HooksSet::default(),
             tools: ToolsConfig::default(),
@@ -346,6 +421,7 @@ mod tests {
             &orch,
             WorkerSpec {
                 name: Some("reviewer".into()),
+                ..Default::default()
             },
         );
 
@@ -587,5 +663,166 @@ mod tests {
                 if from == &me && content == "done"),
             "{event:?}"
         );
+    }
+
+    /// The pure worker config for `spec`, built on a default factory.
+    fn config_for(spec: &WorkerSpec) -> AgentConfig {
+        let (factory, _registry) = factory();
+        factory.worker_config(&SessionId::agent("w1"), &SessionId::agent("orch"), spec)
+    }
+
+    fn tool_names(cfg: &AgentConfig) -> Vec<String> {
+        cfg.tools.iter().map(|t| t.name().to_string()).collect()
+    }
+
+    #[test]
+    fn a_model_override_changes_only_the_model() {
+        let llm = LlmOpts {
+            base_url: Some("http://example/v1".into()),
+            api_key: Some("k".into()),
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let id = SessionId::agent("w1");
+        let owner = SessionId::agent("orch");
+
+        let base = factory.worker_config(&id, &owner, &WorkerSpec::default());
+        let cfg = factory.worker_config(
+            &id,
+            &owner,
+            &WorkerSpec {
+                model: Some("x".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.llm.model, "x");
+        // Only the model changes; the shared routing opts are untouched (D2).
+        assert_eq!(cfg.llm.base_url.as_deref(), Some("http://example/v1"));
+        assert_eq!(cfg.llm.base_url, base.llm.base_url);
+        assert_eq!(cfg.llm.api_key.as_deref(), Some("k"));
+        assert_eq!(cfg.llm.api_key, base.llm.api_key);
+    }
+
+    #[test]
+    fn a_role_is_appended_after_the_identity_blurb() {
+        let cfg = config_for(&WorkerSpec {
+            system: Some("role text".into()),
+            ..Default::default()
+        });
+        // The who-am-I / auto-report blurb survives verbatim, above the role.
+        assert!(
+            cfg.system.starts_with("sys\n\n# You are a worker"),
+            "{}",
+            cfg.system
+        );
+        assert!(cfg.system.contains("# Role\nrole text"), "{}", cfg.system);
+    }
+
+    #[test]
+    fn a_tool_allow_list_keeps_only_those_tools_plus_message() {
+        let cfg = config_for(&WorkerSpec {
+            tools: Some(vec!["read".into(), "bash".into()]),
+            ..Default::default()
+        });
+        assert_eq!(tool_names(&cfg), vec!["read", "bash", "message"]);
+        assert!(!tool_names(&cfg).contains(&"spawn".to_string()));
+    }
+
+    #[test]
+    fn an_empty_tool_list_keeps_only_message() {
+        let cfg = config_for(&WorkerSpec {
+            tools: Some(vec![]),
+            ..Default::default()
+        });
+        assert_eq!(tool_names(&cfg), vec!["message"]);
+    }
+
+    #[test]
+    fn message_in_the_allow_list_is_accepted_and_not_duplicated() {
+        let (factory, _registry) = factory();
+        let spec = WorkerSpec {
+            tools: Some(vec!["read".into(), "message".into()]),
+            ..Default::default()
+        };
+        assert!(
+            factory.validate_tools(&spec).is_ok(),
+            "`message` is always valid"
+        );
+        let cfg = factory.worker_config(&SessionId::agent("w1"), &SessionId::agent("orch"), &spec);
+        assert_eq!(
+            tool_names(&cfg),
+            vec!["read", "message"],
+            "no duplicate `message`"
+        );
+    }
+
+    #[test]
+    fn validate_tools_rejects_spawn_and_unknown_names() {
+        let (factory, _registry) = factory();
+
+        // `spawn` is never available to a worker → a distinct error.
+        let err = factory
+            .validate_tools(&WorkerSpec {
+                tools: Some(vec!["spawn".into()]),
+                ..Default::default()
+            })
+            .unwrap_err();
+        // The DISTINCT branch, not the generic `unknown tool` one.
+        assert!(err.contains("not available"), "distinct wording: {err}");
+        assert!(!err.contains("unknown tool"), "not the generic error: {err}");
+
+        // A genuinely unknown name → an error naming it.
+        let err = factory
+            .validate_tools(&WorkerSpec {
+                tools: Some(vec!["bogus".into()]),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(err.contains("bogus"), "{err}");
+
+        // An absent allow-list is always fine.
+        assert!(factory.validate_tools(&WorkerSpec::default()).is_ok());
+    }
+
+    #[test]
+    fn a_default_spec_is_the_full_inherited_worker() {
+        let (factory, _registry) = factory();
+        let id = SessionId::agent("w1");
+        let owner = SessionId::agent("orch");
+        let cfg = factory.worker_config(&id, &owner, &WorkerSpec::default());
+
+        let mut expected: Vec<String> = default_tools(&factory.template.tools)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        expected.push("message".into());
+        assert_eq!(tool_names(&cfg), expected, "the whole default set + message");
+        assert!(!tool_names(&cfg).contains(&"spawn".to_string()));
+        // Inherited model, and the identity blurb only (no role section).
+        assert_eq!(cfg.llm.model, factory.template.llm.model);
+        assert!(cfg.system.contains("# You are a worker"));
+        assert!(!cfg.system.contains("# Role"));
+    }
+
+    #[test]
+    fn a_worker_gets_its_own_session_id_not_the_roots() {
+        let llm = LlmOpts {
+            session_id: Some("root-session".into()),
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let cfg = factory.worker_config(
+            &SessionId::agent("w7"),
+            &SessionId::agent("orch"),
+            &WorkerSpec::default(),
+        );
+        assert_eq!(cfg.llm.session_id.as_deref(), Some("agent:w7"));
+        assert_ne!(cfg.llm.session_id.as_deref(), Some("root-session"));
     }
 }
