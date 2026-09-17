@@ -5,15 +5,14 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
-use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, ContentBlock};
-use wcode_harness::protocol::Request;
+use wcode_harness::protocol::{Request, SessionId};
 
-use crate::{TeamState, Teammate, TeamUpdate};
+use crate::{SurfaceInfo, TeamState};
 
 /// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
 const WHEEL_LINES: usize = 3;
@@ -52,13 +51,12 @@ pub enum Key {
 pub enum AppEvent {
     Key(Key),
     Paste(String),
-    /// A fact from the session (streamed, or a correlated reply).
-    Agent(AgentEvent),
+    /// A fact from a session, tagged with the surface it belongs to (an
+    /// unmatched id is ignored).
+    Agent(SessionId, AgentEvent),
     Tick,
     /// The terminal was resized; force a redraw and re-measure the scroll.
     Resize,
-    /// A live team-state change (from the composition root's forwarders).
-    Team(TeamUpdate),
 }
 
 /// A side effect the event loop must perform — the app's only outward channel.
@@ -169,6 +167,8 @@ pub enum PickerKind {
     Change,
     /// A resumable session (`/resume`); selecting hands its path back to re-exec.
     Resume,
+    /// A surface (`/surface`); selecting focuses it.
+    Surface,
 }
 
 impl Picker {
@@ -300,6 +300,12 @@ const COMMANDS: &[Command] = &[
         summary: "copy the last reply",
     },
     Command {
+        name: "surface",
+        aliases: &[],
+        args: None,
+        summary: "switch surface",
+    },
+    Command {
         name: "team",
         aliases: &[],
         args: None,
@@ -341,13 +347,13 @@ fn command_named(token: &str) -> Option<&'static Command> {
         .find(|c| c.name == name || c.aliases.contains(&name))
 }
 
-/// The `/team` listing: one `name · model · state` line per member.
-fn team_text(rows: &[(&str, &str, TeamState)]) -> String {
+/// The `/team` listing: one `label · model · state` line per member surface.
+fn team_text(rows: &[(&str, &str, TeamState, bool)]) -> String {
     if rows.is_empty() {
         return "(no team)".to_string();
     }
     rows.iter()
-        .map(|(name, model, state)| format!("{name} · {model} · {}", state.label()))
+        .map(|(label, model, state, _)| format!("{label} · {model} · {}", state.label()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -543,11 +549,20 @@ pub(crate) struct InputView {
     pub(crate) chips: Vec<Range<usize>>,
 }
 
-/// Everything session-scoped: one conversation's transcript, live message, run
-/// state, changeset, and scroll pin. `App` holds a `Vec<Surface>` — today exactly
-/// one (the root); F4b-2 adds the team's.
-#[derive(Default)]
+/// One conversation's state: its identity (the id events route by), the
+/// `label`/`model` the sidebar shows, the transcript, run state, changeset,
+/// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
+/// root, the rest are team members.
 pub struct Surface {
+    /// The id this surface's events route by.
+    id: SessionId,
+    /// A short display name (the sidebar + status line).
+    label: String,
+    /// The effective model id (the sidebar).
+    model: String,
+    /// The root surface (full status line); members are the team.
+    is_root: bool,
+    /// The status line (the root's; members get a reduced one).
     status: Status,
     transcript: Vec<Block>,
     /// The assistant message currently streaming (rendered below the transcript).
@@ -556,6 +571,8 @@ pub struct Surface {
     /// prompt starts a run, kept afterwards so the run stays reviewable.
     changes: Vec<Change>,
     running: bool,
+    /// A run finished (drives the sidebar's `done`).
+    finished: bool,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -569,11 +586,57 @@ pub struct Surface {
     viewport: usize,
     last_total: usize,
     last_width: usize,
+    /// Submitted prompts, oldest first, for Up/Down recall (per-surface, D25).
+    history: Vec<String>,
+    /// Index into `history` while browsing; `None` edits the draft.
+    history_index: Option<usize>,
+    /// The in-progress line, saved while browsing history.
+    draft: String,
 }
 
 impl Surface {
-    fn new() -> Self {
-        Surface::default()
+    fn new(info: SurfaceInfo) -> Self {
+        let status = if info.is_root {
+            Status::default()
+        } else {
+            // A member shows its model and label, nothing else (D28).
+            let mut status = Status::new(info.model.clone());
+            status.session = Some(info.label.clone());
+            status
+        };
+        Surface {
+            id: info.id,
+            label: info.label,
+            model: info.model,
+            is_root: info.is_root,
+            status,
+            transcript: Vec::new(),
+            live: None,
+            changes: Vec::new(),
+            running: false,
+            finished: false,
+            cancelled: false,
+            context_used: None,
+            scroll: 0,
+            max_scroll: 0,
+            viewport: 0,
+            last_total: 0,
+            last_width: 0,
+            history: Vec::new(),
+            history_index: None,
+            draft: String::new(),
+        }
+    }
+
+    /// The sidebar/`/team` state, derived from the run flags.
+    fn state(&self) -> TeamState {
+        if self.running {
+            TeamState::Running
+        } else if self.finished {
+            TeamState::Done
+        } else {
+            TeamState::Idle
+        }
     }
 
     /// Apply one agent event. Returns `true` when the surface changed, so `App`
@@ -645,9 +708,15 @@ impl Surface {
                 }
                 matched
             }
+            AgentEvent::AgentStart => {
+                self.running = true;
+                self.finished = false;
+                true
+            }
             AgentEvent::AgentEnd => {
                 self.flush_live();
                 self.running = false;
+                self.finished = true;
                 if self.cancelled {
                     self.cancelled = false;
                     self.transcript.push(Block::Notice("⏹ aborted".into()));
@@ -901,11 +970,21 @@ impl Surface {
     }
 }
 
+/// The placeholder root surface `App::new` starts with — replaced by
+/// `set_surfaces` at startup, and the fallback that keeps the list non-empty.
+fn default_root() -> Surface {
+    Surface::new(SurfaceInfo {
+        id: SessionId::agent("root"),
+        label: "root".to_string(),
+        model: String::new(),
+        is_root: true,
+    })
+}
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
-#[derive(Default)]
 pub struct App {
-    /// One entry per conversation surface. Today exactly one (the root); F4b-2
-    /// adds the team's.
+    /// One entry per conversation surface. Index 0 is the root; the rest are
+    /// team members. Always non-empty (see [`App::new`]).
     surfaces: Vec<Surface>,
     /// Index into `surfaces` of the focused surface.
     focus: usize,
@@ -914,24 +993,12 @@ pub struct App {
     cursor: usize,
     /// Monotonic id source for [`PasteBlock`]s.
     paste_id: u64,
-    /// Submitted prompts, oldest first, for Up/Down recall.
-    history: Vec<String>,
-    /// Index into `history` while browsing; `None` edits the draft.
-    history_index: Option<usize>,
-    /// The in-progress line, saved while browsing history.
-    draft: String,
     /// Model ids for the `/model` picker — injected by the composition root,
     /// since the TUI holds no `LlmOpts` and cannot list models itself.
     models: Vec<String>,
     /// Resumable sessions for the `/resume` picker — injected by the composition
     /// root, which owns the session dir the TUI cannot see.
     sessions: Vec<SessionItem>,
-    /// The team roster (name + effective model) — injected by the composition
-    /// root; empty when there is no team.
-    teammates: Vec<Teammate>,
-    /// Live per-member state, keyed by name. An absent name reads as
-    /// [`TeamState::Idle`].
-    team_state: HashMap<String, TeamState>,
     /// Set when the user picks a session to resume; the run returns it so the CLI
     /// can re-exec with `--resume <path>`.
     pending_resume: Option<PathBuf>,
@@ -945,16 +1012,51 @@ pub struct App {
     actions: Vec<Action>,
 }
 
+impl Default for App {
+    /// Same as [`App::new`] — a `Default` app still has its (root) surface, so
+    /// the non-empty invariant holds.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
+    /// A fresh app with one root surface — so [`App::focused`] is always valid.
     pub fn new() -> Self {
         App {
-            surfaces: vec![Surface::new()],
+            surfaces: vec![default_root()],
+            focus: 0,
+            input: Vec::new(),
+            cursor: 0,
+            paste_id: 0,
+            models: Vec::new(),
+            sessions: Vec::new(),
+            pending_resume: None,
+            overlay: None,
+            completion: None,
             dirty: true,
-            ..App::default()
+            should_quit: false,
+            actions: Vec::new(),
         }
     }
 
-    /// The focused surface — the one input and commands target today.
+    /// Replace the surface list (index 0 is the root) and focus the root. The
+    /// list is never left empty, so [`App::focused`] cannot panic.
+    pub fn set_surfaces(&mut self, surfaces: Vec<SurfaceInfo>) {
+        self.surfaces = surfaces.into_iter().map(Surface::new).collect();
+        if self.surfaces.is_empty() {
+            self.surfaces.push(default_root());
+        }
+        self.focus = 0;
+        self.dirty = true;
+    }
+
+    /// The focused surface's index (the run loop resolves its backend by it).
+    pub fn focus(&self) -> usize {
+        self.focus
+    }
+
+    /// The focused surface — the one input and commands target.
     pub fn focused(&self) -> &Surface {
         &self.surfaces[self.focus]
     }
@@ -962,6 +1064,49 @@ impl App {
     /// Mutable access to the focused surface.
     pub fn focused_mut(&mut self) -> &mut Surface {
         &mut self.surfaces[self.focus]
+    }
+
+    /// The focused surface's id.
+    pub fn focused_id(&self) -> &SessionId {
+        &self.focused().id
+    }
+
+    fn surface_index(&self, id: &SessionId) -> Option<usize> {
+        self.surfaces.iter().position(|s| &s.id == id)
+    }
+
+    /// Focus the next surface, wrapping.
+    fn focus_next(&mut self) {
+        if !self.surfaces.is_empty() {
+            self.focus = (self.focus + 1) % self.surfaces.len();
+            self.dirty = true;
+        }
+    }
+
+    /// Focus surface `idx`, if it exists.
+    fn set_focus(&mut self, idx: usize) {
+        if idx < self.surfaces.len() {
+            self.focus = idx;
+            self.dirty = true;
+        }
+    }
+
+    /// The non-root surfaces as `(label, model, state, focused)` — the sidebar
+    /// and `/team`.
+    pub fn member_rows(&self) -> Vec<(&str, &str, TeamState, bool)> {
+        self.surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_root)
+            .map(|(i, s)| {
+                (
+                    s.label.as_str(),
+                    s.model.as_str(),
+                    s.state(),
+                    i == self.focus,
+                )
+            })
+            .collect()
     }
 
     /// Apply one event. Pure state transition; sets [`App::dirty`] on a change.
@@ -974,9 +1119,16 @@ impl App {
                     self.on_paste(text);
                 }
             }
-            AppEvent::Agent(event) => self.on_agent(event),
+            AppEvent::Agent(id, event) => {
+                // Route to the surface that owns this session; an unknown id is
+                // ignored (a stray/duplicate event must not panic).
+                if let Some(idx) = self.surface_index(&id)
+                    && self.surfaces[idx].apply(event)
+                {
+                    self.dirty = true;
+                }
+            }
             AppEvent::Tick => {}
-            AppEvent::Team(update) => self.apply_team_update(update),
             AppEvent::Resize => {
                 // Force a redraw; the width change resets the scroll pin.
                 self.dirty = true;
@@ -998,15 +1150,15 @@ impl App {
         }
         match key {
             Key::Char(c) => {
-                self.history_index = None;
+                self.focused_mut().history_index = None;
                 self.insert_char(c);
             }
             Key::Backspace => {
-                self.history_index = None;
+                self.focused_mut().history_index = None;
                 self.backspace();
             }
             Key::Delete => {
-                self.history_index = None;
+                self.focused_mut().history_index = None;
                 self.delete();
             }
             Key::Left => {
@@ -1031,11 +1183,14 @@ impl App {
             }
             Key::Enter => self.submit(),
             Key::Newline => {
-                self.history_index = None;
+                self.focused_mut().history_index = None;
                 self.insert_char('\n');
             }
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
             Key::Ctrl('y') => self.copy_last(),
+            // Ctrl-N cycles the focused surface (Ctrl-C cancels, Ctrl-J/Ctrl-Y
+            // are taken; Tab/Enter/Esc/Up/Down belong to the composer).
+            Key::Ctrl('n') => self.focus_next(),
             Key::PageUp => self.scroll_up(self.page()),
             Key::PageDown => self.scroll_down(self.page()),
             Key::ScrollUp => self.scroll_up(WHEEL_LINES),
@@ -1066,8 +1221,8 @@ impl App {
         self.dirty = true;
         let text: String = atoms.iter().map(Atom::text).collect();
         let text = text.trim().to_string();
-        self.history_index = None;
-        self.draft.clear();
+        self.focused_mut().history_index = None;
+        self.focused_mut().draft.clear();
         if text.is_empty() {
             return;
         }
@@ -1081,9 +1236,10 @@ impl App {
                 .push(Block::Notice("a turn is already running — Esc to cancel".into()));
             return;
         }
-        self.history.push(text.clone());
+        self.focused_mut().history.push(text.clone());
         self.focused_mut().transcript.push(Block::User(text.clone()));
         self.focused_mut().running = true;
+        self.focused_mut().finished = false;
         self.focused_mut().cancelled = false;
         // A new run starts a fresh changeset; the previous one is superseded.
         self.focused_mut().changes.clear();
@@ -1131,7 +1287,8 @@ impl App {
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
             "copy" => self.copy_last(),
-            "team" => self.notice(team_text(&self.team_rows())),
+            "team" => self.notice(team_text(&self.member_rows())),
+            "surface" => self.open_surface_picker(),
             "help" => self.notice(help_text()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
             // assert keeps a table entry from silently shadowing a real arm.
@@ -1233,7 +1390,7 @@ impl App {
         let text = format!("/{} ", COMMANDS[idx].name);
         self.input = Self::atoms(&text);
         self.cursor = self.input.len();
-        self.history_index = None;
+        self.focused_mut().history_index = None;
         self.completion = None;
         self.dirty = true;
     }
@@ -1284,13 +1441,6 @@ impl App {
     fn notice(&mut self, text: impl Into<String>) {
         self.focused_mut().push_notice(text);
         self.dirty = true;
-    }
-
-    /// Apply one agent event to the focused surface.
-    fn on_agent(&mut self, event: AgentEvent) {
-        if self.focused_mut().apply(event) {
-            self.dirty = true;
-        }
     }
 
     fn insert_char(&mut self, c: char) {
@@ -1354,21 +1504,23 @@ impl App {
         text.chars().map(Atom::Char).collect()
     }
 
-    /// Recall the previous prompt (saving the draft on the way up).
+    /// Recall the previous prompt (saving the draft on the way up). The history
+    /// is the focused surface's (per-surface recall, D25).
     fn history_up(&mut self) {
-        if self.history.is_empty() {
+        if self.focused().history.is_empty() {
             return;
         }
-        let next = match self.history_index {
+        let next = match self.focused().history_index {
             None => {
-                self.draft = self.expanded();
-                self.history.len() - 1
+                let draft = self.expanded();
+                self.focused_mut().draft = draft;
+                self.focused().history.len() - 1
             }
             Some(0) => return,
             Some(i) => i - 1,
         };
-        self.history_index = Some(next);
-        let entry = self.history[next].clone();
+        self.focused_mut().history_index = Some(next);
+        let entry = self.focused().history[next].clone();
         self.input = Self::atoms(&entry);
         self.cursor = self.input.len();
         self.dirty = true;
@@ -1376,30 +1528,33 @@ impl App {
 
     /// Recall the next prompt, or restore the draft at the bottom.
     fn history_down(&mut self) {
-        let Some(i) = self.history_index else {
+        let Some(i) = self.focused().history_index else {
             return;
         };
-        if i + 1 < self.history.len() {
-            self.history_index = Some(i + 1);
-            let entry = self.history[i + 1].clone();
+        if i + 1 < self.focused().history.len() {
+            self.focused_mut().history_index = Some(i + 1);
+            let entry = self.focused().history[i + 1].clone();
             self.input = Self::atoms(&entry);
         } else {
-            self.history_index = None;
-            let draft = std::mem::take(&mut self.draft);
+            self.focused_mut().history_index = None;
+            let draft = std::mem::take(&mut self.focused_mut().draft);
             self.input = Self::atoms(&draft);
         }
         self.cursor = self.input.len();
         self.dirty = true;
     }
 
-    /// Seed the prompt history (oldest first), e.g. loaded from disk.
+    /// Seed the **root** surface's prompt history (oldest first), e.g. loaded
+    /// from disk. Member histories stay in-memory (D25).
     pub fn load_history(&mut self, lines: Vec<String>) {
-        self.history = lines;
+        if let Some(root) = self.surfaces.first_mut() {
+            root.history = lines;
+        }
     }
 
-    /// The prompt history, oldest first, for persistence.
+    /// The root surface's prompt history, oldest first, for persistence.
     pub fn history(&self) -> &[String] {
-        &self.history
+        self.surfaces.first().map_or(&[], |s| s.history.as_slice())
     }
 
     pub fn transcript(&self) -> &[Block] {
@@ -1550,6 +1705,23 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open the `/surface` picker over the surfaces.
+    fn open_surface_picker(&mut self) {
+        let items = self
+            .surfaces
+            .iter()
+            .map(|s| format!("{} · {}", s.label, s.model))
+            .collect();
+        let values = (0..self.surfaces.len()).map(|i| i.to_string()).collect();
+        self.overlay = Some(Overlay::Pick(Picker::with_values(
+            PickerKind::Surface,
+            "surface",
+            items,
+            values,
+        )));
+        self.dirty = true;
+    }
+
     /// Keys while a modal is open: ↑/↓ move, printable chars filter, Backspace
     /// deletes, Enter selects, Esc dismisses. Everything else is swallowed.
     fn on_overlay_key(&mut self, key: Key) {
@@ -1595,6 +1767,11 @@ impl App {
                     .push(Action::Ask(Request::SetModel { model: selected }));
             }
             PickerKind::Change => self.show_change(&selected),
+            PickerKind::Surface => {
+                if let Ok(idx) = selected.parse::<usize>() {
+                    self.set_focus(idx);
+                }
+            }
             PickerKind::Resume => {
                 // Hand the choice back and quit; the composition root re-execs
                 // with `--resume <path>` — a client cannot rebuild the agent.
@@ -1623,34 +1800,6 @@ impl App {
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
-    }
-
-    /// Seed the team roster (the sidebar + `/team`).
-    pub fn set_teammates(&mut self, teammates: Vec<Teammate>) {
-        self.teammates = teammates;
-        self.dirty = true;
-    }
-
-    /// Apply a live state change for one member and request a redraw.
-    pub fn apply_team_update(&mut self, update: TeamUpdate) {
-        self.team_state.insert(update.name, update.state);
-        self.dirty = true;
-    }
-
-    /// The roster as `(name, model, state)` rows — the renderer and `/team`.
-    /// A member never updated reads as [`TeamState::Idle`].
-    pub fn team_rows(&self) -> Vec<(&str, &str, TeamState)> {
-        self.teammates
-            .iter()
-            .map(|m| {
-                let state = self
-                    .team_state
-                    .get(&m.name)
-                    .copied()
-                    .unwrap_or(TeamState::Idle);
-                (m.name.as_str(), m.model.as_str(), state)
-            })
-            .collect()
     }
 
     pub fn status(&self) -> &Status {
@@ -1687,8 +1836,10 @@ impl App {
     /// session (or a reconnecting socket client) already has. The event loop
     /// calls this once at startup, before any live event, so the earlier turns
     /// are readable (and scrollable) instead of missing.
-    pub fn seed_history(&mut self, messages: &[AgentMessage]) {
-        if self.focused_mut().seed(messages) {
+    pub fn seed_history(&mut self, id: &SessionId, messages: &[AgentMessage]) {
+        if let Some(idx) = self.surface_index(id)
+            && self.surfaces[idx].seed(messages)
+        {
             self.dirty = true;
         }
     }
@@ -1703,6 +1854,11 @@ mod tests {
         for c in s.chars() {
             app.handle(AppEvent::Key(Key::Char(c)));
         }
+    }
+
+    /// The default root surface's id (`App::new`'s single surface).
+    fn root() -> SessionId {
+        SessionId::agent("root")
     }
 
     fn assistant(text: &str) -> AgentMessage {
@@ -1886,17 +2042,17 @@ mod tests {
         submit(&mut app, "hi");
         let _ = app.take_actions();
 
-        app.handle(AppEvent::Agent(AgentEvent::MessageStart {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageStart {
             message: assistant(""),
         }));
         assert!(app.live().is_some());
-        app.handle(AppEvent::Agent(AgentEvent::MessageUpdate {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageUpdate {
             message: assistant("hel"),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::MessageEnd {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
             message: assistant("hello"),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         assert!(app.live().is_none());
         assert!(!app.running());
@@ -1911,16 +2067,16 @@ mod tests {
     #[test]
     fn tool_lifecycle_becomes_one_tool_block() {
         let mut app = App::new();
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionStart {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
             call_id: "t1".into(),
             name: "bash".into(),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionUpdate {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionUpdate {
             call_id: "t1".into(),
             name: "bash".into(),
             partial: "building\n".into(),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionEnd {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionEnd {
             call_id: "t1".into(),
             name: "bash".into(),
             output: "building\nok".into(),
@@ -1950,7 +2106,7 @@ mod tests {
         assert_eq!(app.take_actions(), vec![Action::Cancel]);
         assert!(!app.should_quit());
 
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
         assert!(!app.running());
         assert_eq!(app.transcript().last(), Some(&Block::Notice("⏹ aborted".into())));
     }
@@ -1969,7 +2125,7 @@ mod tests {
             }),
             model: None,
         };
-        app.handle(AppEvent::Agent(AgentEvent::TurnEnd { message }));
+        app.handle(AppEvent::Agent(root(), AgentEvent::TurnEnd { message }));
         assert_eq!(app.context_used(), Some(14_200));
     }
 
@@ -1994,7 +2150,7 @@ mod tests {
     #[test]
     fn seeding_replays_the_conversation_so_far() {
         let mut app = App::new();
-        app.seed_history(&[
+        app.seed_history(&root(), &[
             AgentMessage::user_text("earlier question"),
             AgentMessage::Assistant {
                 content: vec![
@@ -2048,7 +2204,7 @@ mod tests {
     fn seeding_an_empty_history_changes_nothing() {
         let mut app = App::new();
         app.clear_dirty();
-        app.seed_history(&[]);
+        app.seed_history(&root(), &[]);
         assert!(app.transcript().is_empty());
         assert!(!app.dirty());
     }
@@ -2134,7 +2290,7 @@ mod tests {
     #[test]
     fn a_history_reply_updates_usage() {
         let mut app = App::new();
-        app.handle(AppEvent::Agent(AgentEvent::History {
+        app.handle(AppEvent::Agent(root(), AgentEvent::History {
             messages: vec![AgentMessage::Assistant {
                 content: vec![ContentBlock::Text { text: "x".into() }],
                 stop_reason: StopReason::Stop,
@@ -2159,10 +2315,10 @@ mod tests {
         let mut app = App::new();
         submit(&mut app, "first");
         let _ = app.take_actions();
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd)); // the run finished
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd)); // the run finished
         submit(&mut app, "second");
         let _ = app.take_actions();
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         typed(&mut app, "drafty");
         app.handle(AppEvent::Key(Key::Up));
@@ -2194,13 +2350,13 @@ mod tests {
         let mut app = App::new();
         submit(&mut app, "hi");
         let _ = app.take_actions();
-        app.handle(AppEvent::Agent(AgentEvent::MessageStart {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageStart {
             message: assistant(""),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::MessageEnd {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
             message: assistant("the answer"),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
         let _ = app.take_actions();
 
         submit(&mut app, "/copy");
@@ -2326,11 +2482,11 @@ mod tests {
     #[test]
     fn tool_end_captures_the_ui_only_diff() {
         let mut app = App::new();
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionStart {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
             call_id: "t1".into(),
             name: "edit".into(),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionEnd {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionEnd {
             call_id: "t1".into(),
             name: "edit".into(),
             output: "edited f (lines 1)".into(),
@@ -2348,11 +2504,11 @@ mod tests {
 
     /// Drive a tool lifecycle whose end carries the UI-only (path, diff) pair.
     fn tool_end(app: &mut App, name: &str, path: Option<&str>, diff: Option<&str>) {
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionStart {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
             call_id: "t1".into(),
             name: name.into(),
         }));
-        app.handle(AppEvent::Agent(AgentEvent::ToolExecutionEnd {
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionEnd {
             call_id: "t1".into(),
             name: name.into(),
             output: "ok".into(),
@@ -2378,7 +2534,7 @@ mod tests {
             ),
             (1, 1)
         );
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         // A new prompt starts a fresh changeset; the settled one is superseded.
         submit(&mut app, "again");
@@ -2401,7 +2557,7 @@ mod tests {
         let _ = app.take_actions();
         tool_end(&mut app, "edit", Some("a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
         tool_end(&mut app, "write", Some("b.rs"), Some("@@ -0,0 +1 @@\n+new"));
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         assert!(matches!(
             app.transcript().last(),
@@ -2425,7 +2581,7 @@ mod tests {
         submit(&mut app, "edit");
         let _ = app.take_actions();
         tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         submit(&mut app, "/changes");
         assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "changes"));
@@ -2463,24 +2619,34 @@ mod tests {
     }
 
     #[test]
-    fn apply_team_update_sets_the_named_members_state() {
+    fn a_member_surface_state_follows_its_run_events() {
         let mut app = App::new();
-        app.set_teammates(vec![Teammate {
-            name: "w1".into(),
-            model: "m".into(),
-        }]);
-        assert_eq!(app.team_rows()[0].2, TeamState::Idle);
-        app.apply_team_update(TeamUpdate {
-            name: "w1".into(),
-            state: TeamState::Running,
-        });
-        assert_eq!(app.team_rows()[0].2, TeamState::Running);
-        assert!(app.dirty(), "an update requests a redraw");
+        let id = SessionId::agent("w1");
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: id.clone(),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        assert_eq!(app.member_rows()[0].2, TeamState::Idle);
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
+        assert_eq!(app.member_rows()[0].2, TeamState::Running);
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentEnd));
+        assert_eq!(app.member_rows()[0].2, TeamState::Done);
+        assert!(app.dirty(), "an event requests a redraw");
     }
 
     #[test]
-    fn the_team_command_lists_the_roster_or_says_none() {
-        // An empty roster reads as "(no team)".
+    fn the_team_command_lists_the_member_surfaces() {
+        // No members reads as "(no team)".
         let mut app = App::new();
         submit(&mut app, "/team");
         assert!(matches!(
@@ -2488,28 +2654,143 @@ mod tests {
             Some(Block::Notice(t)) if t == "(no team)"
         ));
 
-        // A populated roster lists one `name · model · state` line per member.
+        // Members list one `label · model · state` line each.
         let mut app = App::new();
-        app.set_teammates(vec![
-            Teammate {
-                name: "explorer".into(),
-                model: "m1".into(),
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
             },
-            Teammate {
-                name: "reviewer".into(),
+            SurfaceInfo {
+                id: SessionId::agent("explorer"),
+                label: "explorer".into(),
+                model: "m1".into(),
+                is_root: false,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("reviewer"),
+                label: "reviewer".into(),
                 model: "m2".into(),
+                is_root: false,
             },
         ]);
-        app.apply_team_update(TeamUpdate {
-            name: "reviewer".into(),
-            state: TeamState::Done,
-        });
+        let reviewer = SessionId::agent("reviewer");
+        app.handle(AppEvent::Agent(reviewer.clone(), AgentEvent::AgentStart));
+        app.handle(AppEvent::Agent(reviewer, AgentEvent::AgentEnd));
         submit(&mut app, "/team");
         let Some(Block::Notice(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
         assert!(text.contains("explorer · m1 · idle"), "{text}");
         assert!(text.contains("reviewer · m2 · done"), "{text}");
+    }
+
+    /// A root + one member surface.
+    fn two_surfaces() -> (App, SessionId, SessionId) {
+        let mut app = App::new();
+        let root_id = root();
+        let member = SessionId::agent("w1");
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root_id.clone(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: member.clone(),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        (app, root_id, member)
+    }
+
+    #[test]
+    fn agent_events_route_by_session_id() {
+        let (mut app, _root_id, member) = two_surfaces();
+        // An event for the member lands there, not on the focused root.
+        app.handle(AppEvent::Agent(
+            member.clone(),
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert!(app.transcript().is_empty(), "the focused root is untouched");
+        // An unknown id is ignored, without panicking.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("ghost"),
+            AgentEvent::AgentEnd,
+        ));
+        // Focusing the member shows its own event.
+        app.set_focus(1);
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Error(m)) if m == "boom"
+        ));
+    }
+
+    #[test]
+    fn two_surfaces_keep_independent_transcripts() {
+        let (mut app, a, b) = two_surfaces();
+        app.handle(AppEvent::Agent(
+            a,
+            AgentEvent::Error { message: "A".into() },
+        ));
+        app.handle(AppEvent::Agent(
+            b,
+            AgentEvent::Error { message: "B".into() },
+        ));
+        app.set_focus(0);
+        assert_eq!(app.transcript().len(), 1);
+        assert!(matches!(&app.transcript()[0], Block::Error(m) if m == "A"));
+        app.set_focus(1);
+        assert_eq!(app.transcript().len(), 1);
+        assert!(matches!(&app.transcript()[0], Block::Error(m) if m == "B"));
+    }
+
+    #[test]
+    fn slash_surface_and_the_cycle_key_switch_focus() {
+        let (mut app, _, _) = two_surfaces();
+        assert_eq!(app.focus(), 0);
+        // Ctrl-N cycles, wrapping.
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 1);
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 0, "wraps back to the root");
+
+        // `/surface` opens the picker; selecting row 1 focuses surface 1.
+        submit(&mut app, "/surface");
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "surface"));
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.focus(), 1);
+    }
+
+    #[test]
+    fn prompt_history_recall_is_per_surface() {
+        let (mut app, root_id, member) = two_surfaces();
+        submit(&mut app, "root one");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(root_id.clone(), AgentEvent::AgentEnd));
+        submit(&mut app, "root two");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(root_id.clone(), AgentEvent::AgentEnd));
+        app.set_focus(1);
+        submit(&mut app, "member one");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(member, AgentEvent::AgentEnd));
+
+        // The member recalls only its own prompt.
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "member one");
+        // The root recalls its own (most recent first).
+        app.set_focus(0);
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "root two");
     }
 
     #[test]
@@ -2562,11 +2843,11 @@ mod tests {
         };
         assert_eq!(
             text,
-            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /team /help"
+            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /surface /team /help"
         );
         for name in [
-            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "team",
-            "help",
+            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "surface",
+            "team", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),
@@ -2643,7 +2924,7 @@ mod tests {
         let mut app = App::new();
         submit(&mut app, "first");
         let _ = app.take_actions();
-        app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         typed(&mut app, "drafty"); // no slash: no completion popup
         assert!(app.completion_rows().is_empty());
@@ -2690,11 +2971,11 @@ mod tests {
     }
     #[test]
     fn completion_matches_a_leading_prefix_only() {
-        // `/s` is a prefix of the `/sessions` alias, so it lands on `/resume`;
-        // `/z` is a prefix of nothing.
+        // `/s` is a prefix of the `/sessions` alias (`/resume`) and of the
+        // `/surface` name; `/z` is a prefix of nothing.
         let mut app = App::new();
         typed(&mut app, "/s");
-        assert_eq!(completion_labels(&app), vec!["/resume"]);
+        assert_eq!(completion_labels(&app), vec!["/resume", "/surface"]);
 
         let mut app = App::new();
         typed(&mut app, "/z");
@@ -2720,7 +3001,7 @@ mod tests {
     #[test]
     fn an_alias_match_carries_the_alias_hint() {
         let mut app = App::new();
-        typed(&mut app, "/s");
+        typed(&mut app, "/se");
         let rows = app.completion_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "/resume");

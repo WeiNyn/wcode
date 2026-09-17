@@ -47,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // The team sidebar splits the `body` band when there is a team and the
     // terminal is wide enough; otherwise the layout is byte-identical to before.
-    let sidebar = !app.team_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
+    let sidebar = !app.member_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
     if sidebar {
         let [left, right] =
             Layout::horizontal([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
@@ -783,11 +783,17 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 
     let width = inner.width as usize;
     let lines: Vec<Line> = app
-        .team_rows()
+        .member_rows()
         .into_iter()
-        .map(|(name, model, state)| {
-            let text = format!("{name} · {model} · {}", state.label());
-            Line::from(Span::styled(clip(&text, width), state_style(state)))
+        .map(|(label, model, state, focused)| {
+            let text = format!("{label} · {model} · {}", state.label());
+            // The focused member is bolded — a style-only highlight, so rows stay
+            // within the fixed sidebar width.
+            let mut style = state_style(state);
+            if focused {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Line::from(Span::styled(clip(&text, width), style))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -848,6 +854,30 @@ mod tests {
     use crate::app::{App, AppEvent, Key};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use wcode_harness::protocol::SessionId;
+
+    /// The default root surface's id (`App::new`'s single surface).
+    fn root() -> SessionId {
+        SessionId::agent("root")
+    }
+
+    /// Give `app` a root + one member surface (`label`/`model`).
+    fn with_member(app: &mut App, label: &str, model: &str) {
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent(label),
+                label: label.into(),
+                model: model.into(),
+                is_root: false,
+            },
+        ]);
+    }
 
     fn render(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -876,7 +906,7 @@ mod tests {
             session: Some("abcdef0123456789".into()),
             context_limit: Some(1_000_000),
         });
-        app.handle(AppEvent::Agent(wcode_harness::event::AgentEvent::TurnEnd {
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::TurnEnd {
             message: AgentMessage::Assistant {
                 content: vec![ContentBlock::Text { text: "x".into() }],
                 stop_reason: wcode_harness::message::StopReason::Stop,
@@ -952,7 +982,7 @@ mod tests {
     #[test]
     fn draws_a_streaming_assistant_message() {
         let mut app = App::new();
-        app.handle(AppEvent::Agent(wcode_harness::event::AgentEvent::MessageStart {
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::MessageStart {
             message: AgentMessage::Assistant {
                 content: vec![ContentBlock::Text {
                     text: "streamed".into(),
@@ -991,12 +1021,14 @@ mod tests {
     fn a_tool_diff_renders_with_a_plus_minus_summary() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
                 call_id: "t1".into(),
                 name: "edit".into(),
             },
         ));
         app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionEnd {
                 call_id: "t1".into(),
                 name: "edit".into(),
@@ -1016,12 +1048,14 @@ mod tests {
     fn the_run_summary_and_changes_picker_render() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
                 call_id: "t1".into(),
                 name: "edit".into(),
             },
         ));
         app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionEnd {
                 call_id: "t1".into(),
                 name: "edit".into(),
@@ -1032,6 +1066,7 @@ mod tests {
             },
         ));
         app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::AgentEnd,
         ));
 
@@ -1227,20 +1262,30 @@ mod tests {
     #[test]
     fn the_team_sidebar_lists_members_and_hides_when_narrow() {
         let mut app = App::new();
-        app.set_teammates(vec![
-            crate::Teammate {
-                name: "explorer".into(),
-                model: "m1".into(),
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
             },
-            crate::Teammate {
-                name: "reviewer".into(),
+            crate::SurfaceInfo {
+                id: SessionId::agent("explorer"),
+                label: "explorer".into(),
+                model: "m1".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("reviewer"),
+                label: "reviewer".into(),
                 model: "m2".into(),
+                is_root: false,
             },
         ]);
-        app.apply_team_update(crate::TeamUpdate {
-            name: "explorer".into(),
-            state: crate::TeamState::Running,
-        });
+        app.handle(AppEvent::Agent(
+            SessionId::agent("explorer"),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
 
         // Wide enough: the sidebar shows the title, each member, and its state.
         let wide = buffer_text(&render(&mut app, 80, 20));
@@ -1261,10 +1306,7 @@ mod tests {
     #[test]
     fn the_sidebar_shows_only_at_the_width_threshold() {
         let mut app = App::new();
-        app.set_teammates(vec![crate::Teammate {
-            name: "explorer".into(),
-            model: "m".into(),
-        }]);
+        with_member(&mut app, "explorer", "m");
         // 59 cols: hidden. 60 (the threshold): shown.
         assert!(!buffer_text(&render(&mut app, 59, 12)).contains("explorer"));
         assert!(buffer_text(&render(&mut app, 60, 12)).contains("explorer"));
@@ -1273,10 +1315,7 @@ mod tests {
     #[test]
     fn a_short_body_draws_the_sidebar_without_panicking() {
         let mut app = App::new();
-        app.set_teammates(vec![crate::Teammate {
-            name: "explorer".into(),
-            model: "m".into(),
-        }]);
+        with_member(&mut app, "explorer", "m");
         // Tiny heights leave a degenerate `body` (even 0–1 rows): no panic.
         for height in [3u16, 4, 5] {
             let _ = buffer_text(&render(&mut app, 80, height));
@@ -1286,10 +1325,7 @@ mod tests {
     #[test]
     fn the_completion_popup_does_not_overdraw_the_sidebar() {
         let mut app = App::new();
-        app.set_teammates(vec![crate::Teammate {
-            name: "explorer".into(),
-            model: "m".into(),
-        }]);
+        with_member(&mut app, "explorer", "m");
         for c in "/mo".chars() {
             app.handle(AppEvent::Key(Key::Char(c)));
         }

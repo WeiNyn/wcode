@@ -13,6 +13,7 @@ use wcode_harness::hooks::HooksSet;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, StopReason, Usage};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
+use wcode_harness::protocol::SessionId;
 use wcode_protocol::Backend;
 use wcode_tui::Status;
 
@@ -74,20 +75,31 @@ async fn main() -> std::io::Result<()> {
         status,
         models: vec!["demo".to_string(), "demo-mini".to_string()],
         sessions: Vec::new(),
-        // A static roster so the example shows the team sidebar (no live feed).
-        teammates: vec![
-            wcode_tui::Teammate {
-                name: "explorer".into(),
-                model: "demo".into(),
-            },
-            wcode_tui::Teammate {
-                name: "reviewer".into(),
-                model: "demo-mini".into(),
-            },
-        ],
         history: None,
     };
-    wcode_tui::run(Backend::Local(handle), options, None)
-        .await
-        .map(|_| ())
+    // A static roster so the example shows the team sidebar (root + two members).
+    let surfaces = vec![
+        wcode_tui::SurfaceSpec {
+            id: SessionId::agent("root"),
+            label: "root".to_string(),
+            model: "demo".to_string(),
+            is_root: true,
+            backend: Backend::from(handle.clone()),
+        },
+        wcode_tui::SurfaceSpec {
+            id: SessionId::agent("explorer"),
+            label: "explorer".to_string(),
+            model: "demo".to_string(),
+            is_root: false,
+            backend: Backend::from(handle.clone()),
+        },
+        wcode_tui::SurfaceSpec {
+            id: SessionId::agent("reviewer"),
+            label: "reviewer".to_string(),
+            model: "demo-mini".to_string(),
+            is_root: false,
+            backend: Backend::from(handle),
+        },
+    ];
+    wcode_tui::run(surfaces, options).await.map(|_| ())
 }

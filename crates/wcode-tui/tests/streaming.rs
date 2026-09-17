@@ -89,7 +89,8 @@ async fn a_submitted_turn_streams_into_the_transcript() {
             .expect("an event within the timeout")
             .expect("the outbox stays open");
         let done = matches!(event, AgentEvent::AgentEnd);
-        app.handle(AppEvent::Agent(event));
+        let id = app.focused_id().clone();
+        app.handle(AppEvent::Agent(id, event));
         if done {
             break;
         }

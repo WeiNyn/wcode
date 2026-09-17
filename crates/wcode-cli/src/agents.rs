@@ -15,12 +15,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::broadcast;
-
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
@@ -347,12 +344,18 @@ impl Orchestrator {
         Ok(worker)
     }
 
-    /// Subscribe to a worker's events by phonebook name — the sidebar's live
-    /// feed. `None` when the name is unknown or the worker cannot be resolved
-    /// from this orchestrator (the registry is otherwise private).
-    pub fn subscribe_worker(&self, name: &str) -> Option<broadcast::Receiver<AgentEvent>> {
+    /// A worker's backend, by phonebook name — so the composition root can build
+    /// a surface for it. `None` when the name is unknown or the worker cannot be
+    /// resolved from this orchestrator (the registry is otherwise private).
+    pub fn worker_backend(&self, name: &str) -> Option<wcode_protocol::Backend> {
         let id = self.phonebook.get(name)?;
-        self.registry.resolve(&self.id, &id).ok().map(|h| h.subscribe())
+        self.registry.resolve(&self.id, &id).ok()
+    }
+
+    /// This orchestrator's own address (`agent:orchestrator`) — the root
+    /// surface's id.
+    pub fn id(&self) -> &SessionId {
+        &self.id
     }
 
     /// Record a name → address alias in the phonebook (§13.15) — a `[peers]`
