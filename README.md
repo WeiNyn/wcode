@@ -96,7 +96,14 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `off`), `WCODE_SKILLS` (extra skill roots, or `off`), and `WCODE_RETRY_MAX`,
 `WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS` (the
 `[retry]` table).
-`--model` / `--base-url` / `--endpoint` / `--effort` override a
+
+`--config <path>` (or `WCODE_CONFIG`; flag beats env, relative to the cwd)
+points at an **overlay** file deep-merged over the global config: tables merge
+per key, so an overlay's `[tools] grep = true` adds that flag without clobbering
+the rest of the global `[tools]`, while a scalar or array is replaced wholesale.
+This keeps team/model overlays (per repo, per project) out of the provider
+config. A missing or unparseable overlay is an error.
+`--model` / `--base-url` / `--endpoint` / `--effort` / `--config` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
 an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
@@ -107,7 +114,12 @@ system prompt gains a `# Your team` block listing them by name (and role); membe
 are addressed by name with `message`. A `[team]` without `--agents` is an error,
 and a served `--owner` worker never sees the block. An `[orchestrator]
 guidelines` string (also requiring `--agents`) is appended as a `# Orchestrator
-workflow` section after the roster, so the workflow can reference the team.
+workflow` section after the roster, so the workflow can reference the team. The
+repo ships `.wcode/team.toml` as exactly this — an overlay that adds the dev team,
+the orchestrator workflow, and `[tools] grep/find = true`, leaving your
+provider/model in the global config: run it with
+`wcode --agents --config .wcode/team.toml` (or
+`WCODE_CONFIG=.wcode/team.toml wcode --agents`).
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a

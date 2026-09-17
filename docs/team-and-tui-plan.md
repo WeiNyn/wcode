@@ -150,6 +150,15 @@ renders as a `# Orchestrator workflow` section **after** the roster, root-only
 **`/new` semantics.** The team lives in-process, so it persists across `/new`
 (same process, same `Orchestrator`). A `/reload` re-exec re-reads `[team]`.
 
+**Overlay config (F3c).** A team belongs in a per-repo file, not the provider
+config. `--config <path>` / `WCODE_CONFIG` (flag beats env) names an **overlay**
+that is deep-merged over the global `config.toml` at the TOML-value level — tables
+recurse per key, a scalar/array is replaced wholesale — so an overlay's
+`[tools] grep = true` adds without clobbering the global `[tools]`. A missing or
+unparseable overlay is a hard error; `MissingModel` carries the post-overlay file
+so `/`-rescue still works. The repo's own `.wcode/team.toml` is this overlay: the
+dev team + workflow + `grep/find`, leaving provider/model global.
+
 ### F4 — TUI multi-surface + team status sidebar
 
 **Two tiers, landed in order.** Tier 1 is UI-only and cheap; tier 2 is the
@@ -200,6 +209,7 @@ Needed only once surfaces cross process boundaries.
 | D18 | F3 names | duplicate `[team]` member names are a **config error** at load (names are unique phonebook keys) |
 | D19 | F3 spawn | the startup loop spawns via `Orchestrator::spawn_worker`, which runs `validate_tools` (D14) and registers the name in the phonebook |
 | D20 | F3b guidelines | an `[orchestrator] guidelines` string renders as `# Orchestrator workflow` **after** the team block, root-only (requires `--agents`); empty/absent adds nothing |
+| D21 | F3c overlay | `--config <path>` / `WCODE_CONFIG` (flag > env) deep-merges a TOML overlay over the global config — tables recurse, scalars/arrays replace; a missing/unparseable overlay is a hard error; `.wcode/team.toml` is the repo's overlay |
 
 ## Phased tasks
 
