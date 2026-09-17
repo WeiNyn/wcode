@@ -543,12 +543,372 @@ pub(crate) struct InputView {
     pub(crate) chips: Vec<Range<usize>>,
 }
 
-/// The whole UI state. Flat by design — grow submodules only when it hurts.
+/// Everything session-scoped: one conversation's transcript, live message, run
+/// state, changeset, and scroll pin. `App` holds a `Vec<Surface>` — today exactly
+/// one (the root); F4b-2 adds the team's.
 #[derive(Default)]
-pub struct App {
+pub struct Surface {
+    status: Status,
     transcript: Vec<Block>,
     /// The assistant message currently streaming (rendered below the transcript).
     live: Option<AgentMessage>,
+    /// Files changed during the current run, in call order; reset when the next
+    /// prompt starts a run, kept afterwards so the run stays reviewable.
+    changes: Vec<Change>,
+    running: bool,
+    /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
+    cancelled: bool,
+    /// Provider-reported input tokens of the last turn: how full the context was.
+    context_used: Option<u64>,
+    /// Lines scrolled up from the bottom; `0` follows the tail.
+    scroll: usize,
+    /// Clamp for [`Surface::scroll`], set by the renderer from the line count.
+    max_scroll: usize,
+    /// Transcript height and total line count from the last draw, so the view
+    /// can stay pinned while new lines stream in.
+    viewport: usize,
+    last_total: usize,
+    last_width: usize,
+}
+
+impl Surface {
+    fn new() -> Self {
+        Surface::default()
+    }
+
+    /// Apply one agent event. Returns `true` when the surface changed, so `App`
+    /// can mark itself dirty (the surface owns no `dirty` flag).
+    fn apply(&mut self, event: AgentEvent) -> bool {
+        match event {
+            AgentEvent::MessageStart { message } => {
+                if matches!(message, AgentMessage::Assistant { .. }) {
+                    self.live = Some(message);
+                }
+                true
+            }
+            AgentEvent::MessageUpdate { message } => {
+                if self.live.is_some() {
+                    self.live = Some(message);
+                    true
+                } else {
+                    false
+                }
+            }
+            AgentEvent::MessageEnd { message } => {
+                self.live = None;
+                self.commit(message);
+                true
+            }
+            AgentEvent::ToolExecutionStart { name, .. } => {
+                self.flush_live();
+                self.transcript.push(Block::Tool(Tool {
+                    name,
+                    output: String::new(),
+                    done: false,
+                    is_error: false,
+                    diff: None,
+                    path: None,
+                }));
+                true
+            }
+            AgentEvent::ToolExecutionUpdate { partial, .. } => {
+                if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
+                    tool.output.push_str(&partial);
+                    true
+                } else {
+                    false
+                }
+            }
+            AgentEvent::ToolExecutionEnd {
+                output,
+                is_error,
+                diff,
+                path,
+                ..
+            } => {
+                let matched = if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
+                    if !output.is_empty() {
+                        tool.output = output;
+                    }
+                    tool.done = true;
+                    tool.is_error = is_error;
+                    tool.path = path.clone();
+                    tool.diff = diff.clone();
+                    true
+                } else {
+                    false
+                };
+                // A mutating tool's UI-only (path, diff) pair feeds the run's
+                // changeset — recorded even if no block matched the call.
+                if let (Some(path), Some(diff)) = (path, diff) {
+                    self.changes.push(Change::new(path, diff));
+                }
+                matched
+            }
+            AgentEvent::AgentEnd => {
+                self.flush_live();
+                self.running = false;
+                if self.cancelled {
+                    self.cancelled = false;
+                    self.transcript.push(Block::Notice("⏹ aborted".into()));
+                }
+                // Surface the run's changes once it settles; they stay for `/changes`.
+                if !self.changes.is_empty() {
+                    self.transcript.push(Block::Notice(self.changes_summary()));
+                }
+                true
+            }
+            AgentEvent::Error { message } => {
+                self.flush_live();
+                self.transcript.push(Block::Error(message));
+                true
+            }
+            AgentEvent::Compaction { summarized, kept } => {
+                self.transcript.push(Block::Notice(format!(
+                    "⋯ compacted {summarized} messages, kept {kept}"
+                )));
+                true
+            }
+            AgentEvent::Retrying {
+                attempt,
+                max,
+                reason,
+            } => {
+                self.transcript.push(Block::Notice(format!(
+                    "⋯ retrying ({attempt}/{max}): {reason}"
+                )));
+                true
+            }
+            AgentEvent::TurnEnd { message } => self.record_usage(&message),
+            AgentEvent::History { messages } => {
+                self.render_usage(&messages);
+                true
+            }
+            // Start and non-streamed replies need no state.
+            _ => false,
+        }
+    }
+
+    /// Commit an assistant message, dropping tool-call blocks (the tool lines
+    /// carry those) and empty messages.
+    fn commit(&mut self, message: AgentMessage) {
+        if let AgentMessage::Assistant { content, .. } = message {
+            let visible: Vec<ContentBlock> = content
+                .into_iter()
+                .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
+                .collect();
+            if !visible.is_empty() {
+                self.transcript.push(Block::Assistant(visible));
+            }
+        }
+    }
+
+    /// Commit a still-streaming message (a tool started, the run ended early).
+    fn flush_live(&mut self) {
+        if let Some(message) = self.live.take() {
+            self.commit(message);
+        }
+    }
+
+    /// Record the context usage the provider reported for a finished turn.
+    /// Returns `true` when it changed.
+    fn record_usage(&mut self, message: &AgentMessage) -> bool {
+        if let AgentMessage::Assistant {
+            usage: Some(u), ..
+        } = message
+        {
+            self.context_used = Some(u.input_tokens);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn push_notice(&mut self, text: impl Into<String>) {
+        self.transcript.push(Block::Notice(text.into()));
+    }
+
+    /// Render a `GetHistory` reply as a one-line usage summary.
+    fn render_usage(&mut self, messages: &[AgentMessage]) {
+        let mut turns = 0u64;
+        let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
+        let mut last_input = None;
+        for message in messages {
+            if let AgentMessage::Assistant {
+                usage: Some(u), ..
+            } = message
+            {
+                turns += 1;
+                input += u.input_tokens;
+                output += u.output_tokens;
+                cache_read += u.cache_read_tokens.unwrap_or(0);
+                cache_write += u.cache_write_tokens.unwrap_or(0);
+                last_input = Some(u.input_tokens);
+            }
+        }
+        if let Some(used) = last_input {
+            self.context_used = Some(used);
+        }
+        if turns == 0 {
+            self.push_notice("usage: no usage reported");
+        } else {
+            let mut parts = vec![
+                format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
+                format!("{input} in"),
+                format!("{output} out"),
+            ];
+            if cache_read > 0 {
+                parts.push(format!("{cache_read} cache read"));
+            }
+            if cache_write > 0 {
+                parts.push(format!("{cache_write} cache write"));
+            }
+            if let (Some(used), Some(limit)) = (last_input, self.status.context_limit) {
+                parts.push(format!("context {used}/{limit}"));
+            }
+            self.push_notice(format!("usage: {}", parts.join(", ")));
+        }
+    }
+
+    /// The text of the most recent assistant reply, if any.
+    fn last_assistant_text(&self) -> Option<String> {
+        self.transcript.iter().rev().find_map(|block| match block {
+            Block::Assistant(content) => {
+                let text: String = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                (!text.trim().is_empty()).then_some(text)
+            }
+            _ => None,
+        })
+    }
+
+    /// Distinct changed paths in first-seen order, with their summed stats.
+    fn changes_by_path(&self) -> Vec<(String, usize, usize)> {
+        let mut out: Vec<(String, usize, usize)> = Vec::new();
+        for change in &self.changes {
+            match out.iter_mut().find(|(p, _, _)| *p == change.path) {
+                Some((_, added, removed)) => {
+                    *added += change.added;
+                    *removed += change.removed;
+                }
+                None => out.push((change.path.clone(), change.added, change.removed)),
+            }
+        }
+        out
+    }
+
+    /// A one-line summary of the run's changes, e.g. `⋯ 2 files changed · +9 −3`.
+    fn changes_summary(&self) -> String {
+        let by_path = self.changes_by_path();
+        let added: usize = by_path.iter().map(|(_, a, _)| a).sum();
+        let removed: usize = by_path.iter().map(|(_, _, r)| r).sum();
+        let files = by_path.len();
+        format!(
+            "⋯ {files} file{} changed · +{added} −{removed} · /changes",
+            if files == 1 { "" } else { "s" }
+        )
+    }
+
+    /// Seed the transcript with the conversation so far — what a resumed session
+    /// (or a reconnecting socket client) already has. Returns `true` when it
+    /// added anything.
+    fn seed(&mut self, messages: &[AgentMessage]) -> bool {
+        if messages.is_empty() {
+            return false;
+        }
+        let start = self.transcript.len();
+        for message in messages {
+            match message {
+                AgentMessage::User { .. } => {
+                    let text = message.as_text();
+                    if !text.trim().is_empty() {
+                        self.transcript.push(Block::User(text));
+                    }
+                }
+                AgentMessage::Assistant { content, .. } => {
+                    // As when committing live: tool calls get their own line.
+                    let visible: Vec<ContentBlock> = content
+                        .iter()
+                        .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
+                        .cloned()
+                        .collect();
+                    if !visible.is_empty() {
+                        self.transcript.push(Block::Assistant(visible));
+                    }
+                    self.record_usage(message);
+                }
+                AgentMessage::ToolResult {
+                    name,
+                    output,
+                    is_error,
+                    ..
+                } => {
+                    self.transcript.push(Block::Tool(Tool {
+                        name: name.clone(),
+                        output: output.clone(),
+                        done: true,
+                        is_error: *is_error,
+                        diff: None,
+                        path: None,
+                    }));
+                }
+            }
+        }
+        // Mark where the replayed prefix ends, mirroring the REPL's divider.
+        self.transcript.insert(
+            start,
+            Block::Notice(format!("⋯ {} earlier message(s)", messages.len())),
+        );
+        true
+    }
+
+    /// A full page of transcript lines, for PgUp/PgDn.
+    fn page(&self) -> usize {
+        self.viewport.saturating_sub(1).max(1)
+    }
+
+    /// Scroll up by `lines`, clamped to the top of the transcript.
+    fn scroll_up(&mut self, lines: usize) {
+        self.scroll = (self.scroll + lines).min(self.max_scroll);
+    }
+
+    /// Scroll down by `lines`; `0` is the tail.
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    /// Reconcile scroll state with the transcript the renderer just measured:
+    /// keep the view pinned while content grows, then clamp to the top.
+    fn sync_scroll(&mut self, total: usize, height: usize, width: usize) {
+        // Pin the view while content grows — but not across a resize, which
+        // re-wraps everything and moves every line.
+        if self.scroll > 0 && width == self.last_width {
+            self.scroll = self
+                .scroll
+                .saturating_add(total.saturating_sub(self.last_total));
+        }
+        let max = total.saturating_sub(height);
+        self.scroll = self.scroll.min(max);
+        self.max_scroll = max;
+        self.viewport = height;
+        self.last_total = total;
+        self.last_width = width;
+    }
+}
+
+/// The whole UI state. Flat by design — grow submodules only when it hurts.
+#[derive(Default)]
+pub struct App {
+    /// One entry per conversation surface. Today exactly one (the root); F4b-2
+    /// adds the team's.
+    surfaces: Vec<Surface>,
+    /// Index into `surfaces` of the focused surface.
+    focus: usize,
     input: Vec<Atom>,
     /// Cursor as a *gap index* between atoms (`0..=input.len()`).
     cursor: usize,
@@ -560,13 +920,9 @@ pub struct App {
     history_index: Option<usize>,
     /// The in-progress line, saved while browsing history.
     draft: String,
-    status: Status,
     /// Model ids for the `/model` picker — injected by the composition root,
     /// since the TUI holds no `LlmOpts` and cannot list models itself.
     models: Vec<String>,
-    /// Files changed during the current run, in call order; reset when the next
-    /// prompt starts a run, kept afterwards so the run stays reviewable.
-    changes: Vec<Change>,
     /// Resumable sessions for the `/resume` picker — injected by the composition
     /// root, which owns the session dir the TUI cannot see.
     sessions: Vec<SessionItem>,
@@ -584,20 +940,6 @@ pub struct App {
     /// The inline command-completion popup, if one is showing. Recomputed after
     /// every buffer edit; non-modal (it never owns the keyboard — see [`Completion`]).
     completion: Option<Completion>,
-    /// Provider-reported input tokens of the last turn: how full the context was.
-    context_used: Option<u64>,
-    /// Lines scrolled up from the bottom; `0` follows the tail.
-    scroll: usize,
-    /// Clamp for [`App::scroll`], set by the renderer from the line count.
-    max_scroll: usize,
-    /// Transcript height and total line count from the last draw, so the view
-    /// can stay pinned while new lines stream in.
-    viewport: usize,
-    last_total: usize,
-    last_width: usize,
-    running: bool,
-    /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
-    cancelled: bool,
     dirty: bool,
     should_quit: bool,
     actions: Vec<Action>,
@@ -606,9 +948,20 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         App {
+            surfaces: vec![Surface::new()],
             dirty: true,
             ..App::default()
         }
+    }
+
+    /// The focused surface — the one input and commands target today.
+    pub fn focused(&self) -> &Surface {
+        &self.surfaces[self.focus]
+    }
+
+    /// Mutable access to the focused surface.
+    pub fn focused_mut(&mut self) -> &mut Surface {
+        &mut self.surfaces[self.focus]
     }
 
     /// Apply one event. Pure state transition; sets [`App::dirty`] on a change.
@@ -694,9 +1047,9 @@ impl App {
 
     /// Esc / Ctrl-C: cancel a run, else quit.
     fn interrupt(&mut self) {
-        if self.running {
-            if !self.cancelled {
-                self.cancelled = true;
+        if self.focused().running {
+            if !self.focused().cancelled {
+                self.focused_mut().cancelled = true;
                 self.actions.push(Action::Cancel);
             }
         } else {
@@ -709,7 +1062,7 @@ impl App {
         // Expand pasted blocks back to their full text before submitting.
         let atoms = std::mem::take(&mut self.input);
         self.cursor = 0;
-        self.scroll = 0;
+        self.focused_mut().scroll = 0;
         self.dirty = true;
         let text: String = atoms.iter().map(Atom::text).collect();
         let text = text.trim().to_string();
@@ -722,17 +1075,18 @@ impl App {
             self.command(&text);
             return;
         }
-        if self.running {
-            self.transcript
+        if self.focused().running {
+            self.focused_mut()
+                .transcript
                 .push(Block::Notice("a turn is already running — Esc to cancel".into()));
             return;
         }
         self.history.push(text.clone());
-        self.transcript.push(Block::User(text.clone()));
-        self.running = true;
-        self.cancelled = false;
+        self.focused_mut().transcript.push(Block::User(text.clone()));
+        self.focused_mut().running = true;
+        self.focused_mut().cancelled = false;
         // A new run starts a fresh changeset; the previous one is superseded.
-        self.changes.clear();
+        self.focused_mut().changes.clear();
         self.actions.push(Action::Submit(text));
     }
 
@@ -917,7 +1271,7 @@ impl App {
     }
     /// Copy the last assistant reply to the terminal clipboard.
     fn copy_last(&mut self) {
-        match self.last_assistant_text() {
+        match self.focused().last_assistant_text() {
             Some(text) => {
                 let chars = text.chars().count();
                 self.actions.push(Action::Copy(text));
@@ -927,197 +1281,14 @@ impl App {
         }
     }
 
-    /// The text of the most recent assistant reply, if any.
-    fn last_assistant_text(&self) -> Option<String> {
-        self.transcript.iter().rev().find_map(|block| match block {
-            Block::Assistant(content) => {
-                let text: String = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                (!text.trim().is_empty()).then_some(text)
-            }
-            _ => None,
-        })
-    }
-
     fn notice(&mut self, text: impl Into<String>) {
-        self.transcript.push(Block::Notice(text.into()));
+        self.focused_mut().push_notice(text);
         self.dirty = true;
     }
 
-    /// Render a `GetHistory` reply as a one-line usage summary.
-    fn render_usage(&mut self, messages: &[AgentMessage]) {
-        let mut turns = 0u64;
-        let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
-        let mut last_input = None;
-        for message in messages {
-            if let AgentMessage::Assistant {
-                usage: Some(u), ..
-            } = message
-            {
-                turns += 1;
-                input += u.input_tokens;
-                output += u.output_tokens;
-                cache_read += u.cache_read_tokens.unwrap_or(0);
-                cache_write += u.cache_write_tokens.unwrap_or(0);
-                last_input = Some(u.input_tokens);
-            }
-        }
-        if let Some(used) = last_input {
-            self.context_used = Some(used);
-        }
-        if turns == 0 {
-            self.notice("usage: no usage reported");
-        } else {
-            let mut parts = vec![
-                format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
-                format!("{input} in"),
-                format!("{output} out"),
-            ];
-            if cache_read > 0 {
-                parts.push(format!("{cache_read} cache read"));
-            }
-            if cache_write > 0 {
-                parts.push(format!("{cache_write} cache write"));
-            }
-            if let (Some(used), Some(limit)) = (last_input, self.status.context_limit) {
-                parts.push(format!("context {used}/{limit}"));
-            }
-            self.notice(format!("usage: {}", parts.join(", ")));
-        }
-        self.dirty = true;
-    }
-
+    /// Apply one agent event to the focused surface.
     fn on_agent(&mut self, event: AgentEvent) {
-        match event {
-            AgentEvent::MessageStart { message } => {
-                if matches!(message, AgentMessage::Assistant { .. }) {
-                    self.live = Some(message);
-                }
-                self.dirty = true;
-            }
-            AgentEvent::MessageUpdate { message } => {
-                if self.live.is_some() {
-                    self.live = Some(message);
-                    self.dirty = true;
-                }
-            }
-            AgentEvent::MessageEnd { message } => {
-                self.live = None;
-                self.commit(message);
-                self.dirty = true;
-            }
-            AgentEvent::ToolExecutionStart { name, .. } => {
-                self.flush_live();
-                self.transcript.push(Block::Tool(Tool {
-                    name,
-                    output: String::new(),
-                    done: false,
-                    is_error: false,
-                    diff: None,
-                    path: None,
-                }));
-                self.dirty = true;
-            }
-            AgentEvent::ToolExecutionUpdate { partial, .. } => {
-                if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
-                    tool.output.push_str(&partial);
-                    self.dirty = true;
-                }
-            }
-            AgentEvent::ToolExecutionEnd {
-                output,
-                is_error,
-                diff,
-                path,
-                ..
-            } => {
-                if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
-                    if !output.is_empty() {
-                        tool.output = output;
-                    }
-                    tool.done = true;
-                    tool.is_error = is_error;
-                    tool.path = path.clone();
-                    tool.diff = diff.clone();
-                    self.dirty = true;
-                }
-                // A mutating tool's UI-only (path, diff) pair feeds the run's
-                // changeset — recorded even if no block matched the call.
-                if let (Some(path), Some(diff)) = (path, diff) {
-                    self.changes.push(Change::new(path, diff));
-                }
-            }
-            AgentEvent::AgentEnd => {
-                self.flush_live();
-                self.running = false;
-                if self.cancelled {
-                    self.cancelled = false;
-                    self.transcript.push(Block::Notice("⏹ aborted".into()));
-                }
-                // Surface the run's changes once it settles; they stay for `/changes`.
-                if !self.changes.is_empty() {
-                    self.transcript.push(Block::Notice(self.changes_summary()));
-                }
-                self.dirty = true;
-            }
-            AgentEvent::Error { message } => {
-                self.flush_live();
-                self.transcript.push(Block::Error(message));
-                self.dirty = true;
-            }
-            AgentEvent::Compaction { summarized, kept } => {
-                self.transcript.push(Block::Notice(format!(
-                    "⋯ compacted {summarized} messages, kept {kept}"
-                )));
-                self.dirty = true;
-            }
-            AgentEvent::Retrying {
-                attempt,
-                max,
-                reason,
-            } => {
-                self.transcript.push(Block::Notice(format!(
-                    "⋯ retrying ({attempt}/{max}): {reason}"
-                )));
-                self.dirty = true;
-            }
-            AgentEvent::TurnEnd { message } => self.record_usage(&message),
-            AgentEvent::History { messages } => self.render_usage(&messages),
-            // Start and non-streamed replies need no state.
-            _ => {}
-        }
-    }
-
-    /// Commit an assistant message, dropping tool-call blocks (the tool lines
-    /// carry those) and empty messages.
-    fn commit(&mut self, message: AgentMessage) {
-        if let AgentMessage::Assistant { content, .. } = message {
-            let visible: Vec<ContentBlock> = content
-                .into_iter()
-                .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
-                .collect();
-            if !visible.is_empty() {
-                self.transcript.push(Block::Assistant(visible));
-            }
-        }
-    }
-
-    /// Commit a still-streaming message (a tool started, the run ended early).
-    fn flush_live(&mut self) {
-        if let Some(message) = self.live.take() {
-            self.commit(message);
-        }
-    }
-
-    /// Record the context usage the provider reported for a finished turn.
-    fn record_usage(&mut self, message: &AgentMessage) {
-        if let AgentMessage::Assistant { usage: Some(u), .. } = message {
-            self.context_used = Some(u.input_tokens);
+        if self.focused_mut().apply(event) {
             self.dirty = true;
         }
     }
@@ -1232,11 +1403,11 @@ impl App {
     }
 
     pub fn transcript(&self) -> &[Block] {
-        &self.transcript
+        &self.focused().transcript
     }
 
     pub fn live(&self) -> Option<&AgentMessage> {
-        self.live.as_ref()
+        self.focused().live.as_ref()
     }
 
     /// The buffer expanded to plain text (paste blocks inlined) — what is sent.
@@ -1271,56 +1442,47 @@ impl App {
 
     /// Provider-reported input tokens of the most recent turn, if any.
     pub fn context_used(&self) -> Option<u64> {
-        self.context_used
+        self.focused().context_used
     }
 
     /// A full page of transcript lines, for PgUp/PgDn.
     fn page(&self) -> usize {
-        self.viewport.saturating_sub(1).max(1)
+        self.focused().page()
     }
 
     /// Scroll up by `lines`, clamped to the top of the transcript.
     fn scroll_up(&mut self, lines: usize) {
-        self.scroll = (self.scroll + lines).min(self.max_scroll);
+        self.focused_mut().scroll_up(lines);
         self.dirty = true;
     }
 
     /// Scroll down by `lines`; `0` is the tail.
     fn scroll_down(&mut self, lines: usize) {
-        self.scroll = self.scroll.saturating_sub(lines);
+        self.focused_mut().scroll_down(lines);
         self.dirty = true;
     }
 
     /// Lines scrolled up from the tail (`0` = following).
     pub fn scroll(&self) -> usize {
-        self.scroll
+        self.focused().scroll
     }
 
     /// Reconcile scroll state with the transcript the renderer just measured:
     /// keep the view pinned while content grows, then clamp to the top.
     pub fn sync_scroll(&mut self, total: usize, height: usize, width: usize) {
-        // Pin the view while content grows — but not across a resize, which
-        // re-wraps everything and moves every line.
-        if self.scroll > 0 && width == self.last_width {
-            self.scroll = self.scroll.saturating_add(total.saturating_sub(self.last_total));
-        }
-        let max = total.saturating_sub(height);
-        self.scroll = self.scroll.min(max);
-        self.max_scroll = max;
-        self.viewport = height;
-        self.last_total = total;
-        self.last_width = width;
+        self.focused_mut().sync_scroll(total, height, width);
     }
 
     /// Open the `/changes` picker over the files this run changed.
     fn open_changes_picker(&mut self) {
-        if self.changes.is_empty() {
+        let rows = self.focused().changes_by_path();
+        if rows.is_empty() {
             self.notice("no changes this run");
             return;
         }
         let mut items = Vec::new();
         let mut values = Vec::new();
-        for (path, added, removed) in self.changes_by_path() {
+        for (path, added, removed) in rows {
             items.push(format!("{path} · +{added} −{removed}"));
             values.push(path);
         }
@@ -1336,6 +1498,7 @@ impl App {
     /// Re-show a changed file's diff from this run in the transcript.
     fn show_change(&mut self, path: &str) {
         let diff: String = self
+            .focused()
             .changes
             .iter()
             .filter(|c| c.path == path)
@@ -1345,38 +1508,11 @@ impl App {
         if diff.is_empty() {
             return;
         }
-        self.transcript.push(Block::Diff {
+        self.focused_mut().transcript.push(Block::Diff {
             path: path.to_string(),
             diff,
         });
         self.dirty = true;
-    }
-
-    /// Distinct changed paths in first-seen order, with their summed stats.
-    fn changes_by_path(&self) -> Vec<(String, usize, usize)> {
-        let mut out: Vec<(String, usize, usize)> = Vec::new();
-        for change in &self.changes {
-            match out.iter_mut().find(|(p, _, _)| *p == change.path) {
-                Some((_, added, removed)) => {
-                    *added += change.added;
-                    *removed += change.removed;
-                }
-                None => out.push((change.path.clone(), change.added, change.removed)),
-            }
-        }
-        out
-    }
-
-    /// A one-line summary of the run's changes, e.g. `⋯ 2 files changed · +9 −3`.
-    fn changes_summary(&self) -> String {
-        let by_path = self.changes_by_path();
-        let added: usize = by_path.iter().map(|(_, a, _)| a).sum();
-        let removed: usize = by_path.iter().map(|(_, _, r)| r).sum();
-        let files = by_path.len();
-        format!(
-            "⋯ {files} file{} changed · +{added} −{removed} · /changes",
-            if files == 1 { "" } else { "s" }
-        )
     }
 
     /// Open the `/resume` picker over the injected session list. An argument
@@ -1453,7 +1589,7 @@ impl App {
         };
         match picker.kind {
             PickerKind::Model => {
-                self.status.model.clone_from(&selected);
+                self.focused_mut().status.model.clone_from(&selected);
                 self.notice(format!("model: {selected}"));
                 self.actions
                     .push(Action::Ask(Request::SetModel { model: selected }));
@@ -1518,16 +1654,16 @@ impl App {
     }
 
     pub fn status(&self) -> &Status {
-        &self.status
+        &self.focused().status
     }
 
     pub fn set_status(&mut self, status: Status) {
-        self.status = status;
+        self.focused_mut().status = status;
         self.dirty = true;
     }
 
     pub fn running(&self) -> bool {
-        self.running
+        self.focused().running
     }
 
     pub fn dirty(&self) -> bool {
@@ -1552,53 +1688,9 @@ impl App {
     /// calls this once at startup, before any live event, so the earlier turns
     /// are readable (and scrollable) instead of missing.
     pub fn seed_history(&mut self, messages: &[AgentMessage]) {
-        if messages.is_empty() {
-            return;
+        if self.focused_mut().seed(messages) {
+            self.dirty = true;
         }
-        let start = self.transcript.len();
-        for message in messages {
-            match message {
-                AgentMessage::User { .. } => {
-                    let text = message.as_text();
-                    if !text.trim().is_empty() {
-                        self.transcript.push(Block::User(text));
-                    }
-                }
-                AgentMessage::Assistant { content, .. } => {
-                    // As when committing live: tool calls get their own line.
-                    let visible: Vec<ContentBlock> = content
-                        .iter()
-                        .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
-                        .cloned()
-                        .collect();
-                    if !visible.is_empty() {
-                        self.transcript.push(Block::Assistant(visible));
-                    }
-                    self.record_usage(message);
-                }
-                AgentMessage::ToolResult {
-                    name,
-                    output,
-                    is_error,
-                    ..
-                } => {
-                    self.transcript.push(Block::Tool(Tool {
-                        name: name.clone(),
-                        output: output.clone(),
-                        done: true,
-                        is_error: *is_error,
-                        diff: None,
-                        path: None,
-                    }));
-                }
-            }
-        }
-        // Mark where the replayed prefix ends, mirroring the REPL's divider.
-        self.transcript.insert(
-            start,
-            Block::Notice(format!("⋯ {} earlier message(s)", messages.len())),
-        );
-        self.dirty = true;
     }
 }
 
@@ -1635,6 +1727,13 @@ mod tests {
         typed(&mut app, "hello");
         assert_eq!(app.input(), "hello");
         assert_eq!(app.cursor(), 5);
+    }
+
+    #[test]
+    fn a_fresh_app_has_one_focused_surface() {
+        let app = App::new();
+        assert_eq!(app.surfaces.len(), 1, "exactly one surface");
+        assert_eq!(app.focus, 0, "focused on it");
     }
 
     #[test]
@@ -2270,14 +2369,20 @@ mod tests {
         let _ = app.take_actions();
         tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
 
-        assert_eq!(app.changes.len(), 1);
-        assert_eq!(app.changes[0].path, "src/a.rs");
-        assert_eq!((app.changes[0].added, app.changes[0].removed), (1, 1));
+        assert_eq!(app.focused().changes.len(), 1);
+        assert_eq!(app.focused().changes[0].path, "src/a.rs");
+        assert_eq!(
+            (
+                app.focused().changes[0].added,
+                app.focused().changes[0].removed
+            ),
+            (1, 1)
+        );
         app.handle(AppEvent::Agent(AgentEvent::AgentEnd));
 
         // A new prompt starts a fresh changeset; the settled one is superseded.
         submit(&mut app, "again");
-        assert!(app.changes.is_empty());
+        assert!(app.focused().changes.is_empty());
     }
 
     #[test]
@@ -2286,7 +2391,7 @@ mod tests {
         submit(&mut app, "read");
         let _ = app.take_actions();
         tool_end(&mut app, "read", None, None);
-        assert!(app.changes.is_empty());
+        assert!(app.focused().changes.is_empty());
     }
 
     #[test]
