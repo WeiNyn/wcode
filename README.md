@@ -78,6 +78,13 @@ role  = "recon only; never edit; cite file:line"
 [[team]]
 name  = "reviewer"
 role  = "verify diffs; PASS / NITS / FAIL"
+
+[orchestrator]
+# Root-only workflow guidance (requires --agents), folded into the system prompt
+# as a `# Orchestrator workflow` section after the team roster.
+guidelines = """
+Step 1: message a member by name; Step 2: verify their result.
+"""
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
@@ -98,7 +105,9 @@ the composed system prompt (instructions included) and exits — no model needed
 With `--agents` and a `[team]`, wcode spawns each member at startup and the root's
 system prompt gains a `# Your team` block listing them by name (and role); members
 are addressed by name with `message`. A `[team]` without `--agents` is an error,
-and a served `--owner` worker never sees the block.
+and a served `--owner` worker never sees the block. An `[orchestrator]
+guidelines` string (also requiring `--agents`) is appended as a `# Orchestrator
+workflow` section after the roster, so the workflow can reference the team.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a

@@ -143,6 +143,9 @@ the team's workers if it is served — but they are not merged in v1. A `[team]`
 requires `--agents` (D16); the block enters the root prompt only when the team is
 non-empty (D17); duplicate member names fail loudly at load (D18); members spawn
 via `Orchestrator::spawn_worker` — `validate_tools` (D14) then the phonebook (D19).
+An optional `[orchestrator] guidelines` string (D20) is the root's workflow: it
+renders as a `# Orchestrator workflow` section **after** the roster, root-only
+(requires `--agents`; a served `--owner` worker and workers never see it).
 
 **`/new` semantics.** The team lives in-process, so it persists across `/new`
 (same process, same `Orchestrator`). A `/reload` re-exec re-reads `[team]`.
@@ -196,6 +199,7 @@ Needed only once surfaces cross process boundaries.
 | D17 | F3 prompt | the `# Your team` block renders **only** when the root has a non-empty team; a `--owner` served worker never sees it |
 | D18 | F3 names | duplicate `[team]` member names are a **config error** at load (names are unique phonebook keys) |
 | D19 | F3 spawn | the startup loop spawns via `Orchestrator::spawn_worker`, which runs `validate_tools` (D14) and registers the name in the phonebook |
+| D20 | F3b guidelines | an `[orchestrator] guidelines` string renders as `# Orchestrator workflow` **after** the team block, root-only (requires `--agents`); empty/absent adds nothing |
 
 ## Phased tasks
 
