@@ -1,8 +1,8 @@
 # Next steps — plan & progress tracker
 
-Follow-ups identified after the compaction work landed, plus pointers to two
-larger projects (items 3, 6, 7, 8, 9). Ordered low-risk → high-risk; tick the boxes as
-each task completes and keep the status table current.
+Follow-ups identified after the compaction work landed, plus pointers to the
+larger projects (items 3, 6, 7, 8, 9, 10). Ordered low-risk → high-risk; tick
+the boxes as each task completes and keep the status table current.
 
 | # | item | status |
 |---|------|--------|
@@ -396,3 +396,6 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
    (ignore) is the smaller independent win; Phase 1 (parallel) touches the loop.
 8. **8** interface & protocol — subsumes item 3 (the TUI is one client of it);
    see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md).
+9. **9** TUI input: wrap & paste — see [`tui-input-plan.md`](tui-input-plan.md).
+10. **10** Team: define, declare, see — see
+    [`team-and-tui-plan.md`](team-and-tui-plan.md).

@@ -1,6 +1,6 @@
 # wcode — team: define, declare, see (plan)
 
-Status: **planned.** Companion to [`next-steps.md`](next-steps.md) (tracker),
+Status: **F1–F4b landed — item 10 complete.** Companion to [`next-steps.md`](next-steps.md) (tracker),
 [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md) (the
 protocol this builds on, §10.1 A2A) and [`tui-plan.md`](tui-plan.md) (the TUI
 project). This is the **team** workstream: how an agent is *defined*, how a team
@@ -305,11 +305,15 @@ Needed only once surfaces cross process boundaries.
   tier 2 lands, the TUI could enumerate the `Registry` itself — decide then.
 - **Tool allow-list granularity**: names only in v1; per-tool argument restrictions
   (path scopes) would be a `Hooks` impl, not config (stays true to the stance).
-- **`/team` command**: once F3 lands, a `/team` to list/re-spawn members is
-  natural — rides on F1's table, so it is cheap; scope with F4.
+- **`/team` command**: the *list* form landed (F4a — `/team` prints the roster).
+  A *re-spawn* / edit-members form is still open — cheap, rides on F1's table.
 - **`reload_args` and `--owner`**: the re-exec forwards `--agents` (F3) but still
   drops `--owner`, so a served worker resumed interactively would come back as a
   root. Pre-existing; revisit if `--owner` + interactive resume is supported.
+- **Tier 2 — socket multiplexing**: one socket serving many sessions (a `serve`
+  accepting a set of handles; a `Client` routing inbound frames by
+  `Frame.session`). Deferred (progress row 5); needed only once surfaces cross
+  process boundaries. See §F4 tier 2.
 
 ## Progress
 
