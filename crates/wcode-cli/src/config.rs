@@ -185,6 +185,15 @@ pub struct TeamMember {
     pub tools: Option<Vec<String>>,
 }
 
+/// The `[orchestrator]` table (F3b): guidance for the root orchestrator. An
+/// absent table adds nothing to the prompt.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Free-text workflow appended to the root's prompt as `# Orchestrator
+    /// workflow`; `None`/empty (or whitespace) adds nothing.
+    pub guidelines: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -213,6 +222,9 @@ pub struct FileConfig {
     /// no env var (a team is data, not a scalar knob).
     #[serde(default)]
     pub team: Vec<TeamMember>,
+    /// `[orchestrator]`: root-only workflow guidance (F3b), passed through.
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +244,8 @@ pub struct Config {
     pub peers: std::collections::HashMap<String, String>,
     /// Resolved `[team]` (F3): the workers the orchestrator starts with.
     pub team: Vec<TeamMember>,
+    /// Resolved `[orchestrator]` (F3b): the root's workflow guidance.
+    pub orchestrator: OrchestratorConfig,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -426,6 +440,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         retry,
         peers: file.peers,
         team: file.team,
+        orchestrator: file.orchestrator,
     })
 }
 
@@ -802,6 +817,27 @@ name = "reviewer"
         let err = toml::from_str::<FileConfig>("model = \"m\"\n[[team]]\nrole = \"no name\"\n")
             .unwrap_err();
         assert!(err.to_string().contains("name"), "names the field: {err}");
+    }
+
+    #[test]
+    fn orchestrator_guidelines_parse_and_pass_through() {
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[orchestrator]\nguidelines = \"do X\"\n").unwrap();
+        assert_eq!(file.orchestrator.guidelines.as_deref(), Some("do X"));
+
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.orchestrator.guidelines.as_deref(), Some("do X"));
+
+        // An absent `[orchestrator]` table → no guidelines.
+        let none = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(none.orchestrator.guidelines, None);
     }
 }
 

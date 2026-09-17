@@ -40,6 +40,7 @@ pub fn system_prompt(
     instructions: &InstructionSet,
     skills: &SkillSet,
     team: &[TeamMember],
+    guidelines: Option<&str>,
     cwd: &Path,
 ) -> String {
     let inspect = match (tools.grep, tools.find) {
@@ -82,6 +83,12 @@ pub fn system_prompt(
         }
         prompt.push_str("\n\n");
         prompt.push_str(&block);
+    }
+    // Root-only workflow guidance (F3b): after the roster, so it can reference
+    // the team. Empty/whitespace adds nothing.
+    if let Some(g) = guidelines.filter(|g| !g.trim().is_empty()) {
+        prompt.push_str("\n\n# Orchestrator workflow\n\n");
+        prompt.push_str(g.trim());
     }
     prompt
 }
@@ -367,6 +374,7 @@ pub struct AgentSpec<'a> {
     pub instructions: &'a InstructionSet,
     pub skills: &'a SkillSet,
     pub team: &'a [TeamMember],
+    pub guidelines: Option<&'a str>,
 }
 
 pub fn build_agent(
@@ -379,7 +387,14 @@ pub fn build_agent(
     let mut tools = default_tools(spec.tools);
     tools.extend(extra_tools);
     Agent::new(AgentConfig {
-        system: system_prompt(spec.tools, spec.instructions, spec.skills, spec.team, &cwd),
+        system: system_prompt(
+            spec.tools,
+            spec.instructions,
+            spec.skills,
+            spec.team,
+            spec.guidelines,
+            &cwd,
+        ),
         tools,
         llm: spec.llm,
         stream_fn: rig_stream_fn(),
@@ -595,6 +610,7 @@ pub async fn run(
     instructions: InstructionSet,
     skills: SkillSet,
     team: &[TeamMember],
+    guidelines: Option<&str>,
     orchestrator: Option<crate::agents::Orchestrator>,
 ) {
     #[cfg(unix)]
@@ -701,6 +717,7 @@ pub async fn run(
                                 instructions: &instructions,
                                 skills: &skills,
                                 team,
+                                guidelines,
                             },
                             session,
                             Vec::new(),
@@ -814,6 +831,7 @@ pub async fn run(
                                 instructions: &instructions,
                                 skills: &skills,
                                 team,
+                                guidelines,
                             },
                             Some(s),
                             messages,
@@ -1208,6 +1226,7 @@ mod tests {
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
             &[],
+            None,
             Path::new("/"),
         );
         assert!(off.contains("Inspect with read;"), "{off}");
@@ -1222,6 +1241,7 @@ mod tests {
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
             &[],
+            None,
             Path::new("/"),
         );
         assert!(on.contains("Inspect with read, grep and find;"), "{on}");
@@ -1235,6 +1255,7 @@ mod tests {
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
             &[],
+            None,
             Path::new("/"),
         );
         assert!(
@@ -1261,6 +1282,7 @@ mod tests {
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
             &team,
+            None,
             Path::new("/"),
         );
         assert!(prompt.contains("# Your team"), "{prompt}");
@@ -1280,9 +1302,53 @@ mod tests {
             &crate::instructions::InstructionSet::default(),
             &SkillSet::default(),
             &[],
+            None,
             Path::new("/"),
         );
         assert!(!bare.contains("# Your team"), "{bare}");
+    }
+
+    #[test]
+    fn system_prompt_renders_guidelines_only_when_non_empty() {
+        let with = system_prompt(
+            &ToolsConfig::default(),
+            &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            &[],
+            Some("Step 1: delegate.\nStep 2: verify."),
+            Path::new("/"),
+        );
+        assert!(with.contains("# Orchestrator workflow"), "{with}");
+        assert!(with.contains("Step 1: delegate."), "{with}");
+
+        // Absent / empty / whitespace-only → no section (prompt unchanged).
+        for missing in [None, Some(""), Some("   \n\t ")] {
+            let p = system_prompt(
+                &ToolsConfig::default(),
+                &crate::instructions::InstructionSet::default(),
+                &SkillSet::default(),
+                &[],
+                missing,
+                Path::new("/"),
+            );
+            assert!(!p.contains("# Orchestrator workflow"), "{missing:?}: {p}");
+        }
+
+        // With a team, the workflow section follows the roster.
+        let both = system_prompt(
+            &ToolsConfig::default(),
+            &crate::instructions::InstructionSet::default(),
+            &SkillSet::default(),
+            &[TeamMember {
+                name: "a".into(),
+                ..Default::default()
+            }],
+            Some("after the team"),
+            Path::new("/"),
+        );
+        let team_at = both.find("# Your team").expect("team block");
+        let wf_at = both.find("# Orchestrator workflow").expect("workflow block");
+        assert!(team_at < wf_at, "workflow must follow the roster: {both}");
     }
 
     #[test]
@@ -1674,7 +1740,7 @@ mod system_prompt_tests {
                 global: false,
             }],
         };
-        let with = system_prompt(&ToolsConfig::default(), &set, &SkillSet::default(), &[], Path::new("/"));
+        let with = system_prompt(&ToolsConfig::default(), &set, &SkillSet::default(), &[], None, Path::new("/"));
         assert!(with.contains("You are wcode"), "{with}");
         assert!(
             with.contains("# Project instructions (/repo/AGENTS.md)"),
@@ -1687,6 +1753,7 @@ mod system_prompt_tests {
             &InstructionSet::default(),
             &SkillSet::default(),
             &[],
+            None,
             Path::new("/"),
         );
         assert!(!base.contains("Project instructions"), "{base}");

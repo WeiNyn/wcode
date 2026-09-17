@@ -328,7 +328,14 @@ async fn main() {
         let skills = discover_skills_for(&args, &cfg, &cwd);
         println!(
             "{}",
-            repl::system_prompt(&cfg.tools, &instructions, &skills, &cfg.team, &cwd)
+            repl::system_prompt(
+                &cfg.tools,
+                &instructions,
+                &skills,
+                &cfg.team,
+                cfg.orchestrator.guidelines.as_deref(),
+                &cwd,
+            )
         );
         std::process::exit(0);
     }
@@ -413,6 +420,7 @@ async fn main() {
                     SkillSet::default(),
                     &[],
                     None,
+                    None,
                 )
                 .await;
                 std::process::exit(0);
@@ -494,7 +502,7 @@ async fn main() {
     // (§10.1).
     let orchestrator = args.agents.then(|| {
         let template = crate::agents::WorkerTemplate {
-            system: system_prompt(&cfg.tools, &instructions, &skills, &[], &cwd),
+            system: system_prompt(&cfg.tools, &instructions, &skills, &[], None, &cwd),
             llm: llm.clone(),
             stream_fn: rig_stream_fn(),
             hooks: hooks.clone(),
@@ -512,6 +520,16 @@ async fn main() {
     }
     if !cfg.team.is_empty() && orchestrator.is_none() {
         eprintln!("error: [team] requires --agents");
+        std::process::exit(2);
+    }
+    if cfg
+        .orchestrator
+        .guidelines
+        .as_deref()
+        .is_some_and(|g| !g.trim().is_empty())
+        && orchestrator.is_none()
+    {
+        eprintln!("error: [orchestrator] requires --agents");
         std::process::exit(2);
     }
     #[cfg(unix)]
@@ -593,6 +611,11 @@ async fn main() {
     };
     // The root orchestrator sees the team; a served worker (`--owner`) does not.
     let root_team: &[TeamMember] = if args.owner.is_some() { &[] } else { &cfg.team };
+    let root_guidelines: Option<&str> = if args.owner.is_some() {
+        None
+    } else {
+        cfg.orchestrator.guidelines.as_deref()
+    };
     let agent = build_agent(
         AgentSpec {
             llm: llm.clone(),
@@ -602,6 +625,7 @@ async fn main() {
             instructions: &instructions,
             skills: &skills,
             team: root_team,
+            guidelines: root_guidelines,
         },
         session,
         context,
@@ -691,6 +715,7 @@ async fn main() {
                 instructions,
                 skills,
                 root_team,
+                root_guidelines,
                 orchestrator,
             )
             .await
