@@ -193,6 +193,22 @@ keeps its **own** prompt history (a change from the shared-composer sketch above
 *is* the sidebar state, so the forwarder channel goes away); and the sidebar shows
 each teammate's **model + state only** — the root keeps the full status line.
 
+**Landed (F4b-1 + F4b-2).** `Surface { id, label, model, is_root, status,
+transcript, live, changes, running, finished, cancelled, context_used, scroll,
+max_scroll, viewport, last_total, last_width, history, history_index, draft }`;
+`App { surfaces, focus, …shared composer… }` with `focused()`/`focused_mut()`
+(total — the list is never empty). `AppEvent::Agent(SessionId, AgentEvent)` routes
+by id (an unknown id is ignored). `run(Vec<SurfaceSpec>, Options)` merges every
+surface's `Backend` subscription into one channel; `Submit`/`Cancel`/`Ask` hit the
+focused backend. `/surface` (`PickerKind::Surface`) + `Ctrl-N` switch focus; the
+sidebar bolds the focused member and derives `label · model · state` from the
+member surfaces (`Surface::state()` = running/finished/idle). The F4a
+`TeamUpdate` / `Options.teammates` / `spawn_team_feed` machinery is gone;
+`Orchestrator::worker_backend(name)` builds a member's backend. (Note: with the
+shared composer + per-surface history, recalling on surface A, switching to B, then
+recalling saves A's recalled buffer into B's `draft` — a benign consequence of the
+D25 split.)
+
 **Tier 2 (deferred).** One socket carrying many sessions: a `serve` that accepts a
 set of handles and demuxes on `Frame.session`, and a `Client` that routes inbound
 frames by that field (today the field is inert — "Single-session server (S2)").
@@ -266,14 +282,14 @@ Needed only once surfaces cross process boundaries.
 - [x] Tests: a `[team]` parses; N members spawn and are addressable by name; an
       absent table leaves today's behavior; a bad member fails loudly.
 
-**Phase 4 — F4: sidebar + multi-surface.** ◐ 1a landed — reviewed; 1b todo
+**Phase 4 — F4: sidebar + multi-surface.** ☑ landed — reviewed
 - [x] **1a** `draw_sidebar` (horizontal split of `body`); `Vec<Teammate>` injected
       by the composition root; `name · model · state` lines.
 - [x] **1a** feed per-teammate state from their event streams (idle/running/done).
-- [ ] **1b** split `App` → `Surface` + focused map; reducer keyed by `SessionId`.
-- [ ] **1b** subscribe to N in-process `Backend`s (via `Registry`); focus switch
+- [x] **1b** split `App` → `Surface` + focused map; reducer keyed by `SessionId`.
+- [x] **1b** subscribe to N in-process `Backend`s (via `Registry`); focus switch
       (`PickerKind::Surface`, reusing F1) or a key.
-- [ ] Tests: sidebar lists the injected team; two surfaces keep independent
+- [x] Tests: sidebar lists the injected team; two surfaces keep independent
       transcripts; focus switch routes input to the focused surface.
 
 ## Open questions
@@ -303,7 +319,7 @@ Needed only once surfaces cross process boundaries.
 | 2 | F2 — customizable workers (`model`/`role`/`tools`) | ☑ done (reviewed) |
 | 3 | F3 — `[team]` preset + startup spawn | ☑ done (reviewed) |
 | 4a | F4 — team status sidebar | ☑ done (reviewed) |
-| 4b | F4 — in-process multi-surface | ☐ todo |
+| 4b | F4 — in-process multi-surface | ☑ done (reviewed) |
 | 5 | F4 tier 2 — socket multiplexing (deferred) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
