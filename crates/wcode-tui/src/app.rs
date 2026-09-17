@@ -5,12 +5,15 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, ContentBlock};
 use wcode_harness::protocol::Request;
+
+use crate::{TeamState, Teammate, TeamUpdate};
 
 /// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
 const WHEEL_LINES: usize = 3;
@@ -54,6 +57,8 @@ pub enum AppEvent {
     Tick,
     /// The terminal was resized; force a redraw and re-measure the scroll.
     Resize,
+    /// A live team-state change (from the composition root's forwarders).
+    Team(TeamUpdate),
 }
 
 /// A side effect the event loop must perform — the app's only outward channel.
@@ -295,6 +300,12 @@ const COMMANDS: &[Command] = &[
         summary: "copy the last reply",
     },
     Command {
+        name: "team",
+        aliases: &[],
+        args: None,
+        summary: "list the team",
+    },
+    Command {
         name: "help",
         aliases: &[],
         args: None,
@@ -328,6 +339,17 @@ fn command_named(token: &str) -> Option<&'static Command> {
     COMMANDS
         .iter()
         .find(|c| c.name == name || c.aliases.contains(&name))
+}
+
+/// The `/team` listing: one `name · model · state` line per member.
+fn team_text(rows: &[(&str, &str, TeamState)]) -> String {
+    if rows.is_empty() {
+        return "(no team)".to_string();
+    }
+    rows.iter()
+        .map(|(name, model, state)| format!("{name} · {model} · {}", state.label()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The generated `/help` line, e.g. `commands: /exit /model <id> …`.
@@ -548,6 +570,12 @@ pub struct App {
     /// Resumable sessions for the `/resume` picker — injected by the composition
     /// root, which owns the session dir the TUI cannot see.
     sessions: Vec<SessionItem>,
+    /// The team roster (name + effective model) — injected by the composition
+    /// root; empty when there is no team.
+    teammates: Vec<Teammate>,
+    /// Live per-member state, keyed by name. An absent name reads as
+    /// [`TeamState::Idle`].
+    team_state: HashMap<String, TeamState>,
     /// Set when the user picks a session to resume; the run returns it so the CLI
     /// can re-exec with `--resume <path>`.
     pending_resume: Option<PathBuf>,
@@ -595,6 +623,7 @@ impl App {
             }
             AppEvent::Agent(event) => self.on_agent(event),
             AppEvent::Tick => {}
+            AppEvent::Team(update) => self.apply_team_update(update),
             AppEvent::Resize => {
                 // Force a redraw; the width change resets the scroll pin.
                 self.dirty = true;
@@ -748,6 +777,7 @@ impl App {
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
             "copy" => self.copy_last(),
+            "team" => self.notice(team_text(&self.team_rows())),
             "help" => self.notice(help_text()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
             // assert keeps a table entry from silently shadowing a real arm.
@@ -1457,6 +1487,34 @@ impl App {
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
+    }
+
+    /// Seed the team roster (the sidebar + `/team`).
+    pub fn set_teammates(&mut self, teammates: Vec<Teammate>) {
+        self.teammates = teammates;
+        self.dirty = true;
+    }
+
+    /// Apply a live state change for one member and request a redraw.
+    pub fn apply_team_update(&mut self, update: TeamUpdate) {
+        self.team_state.insert(update.name, update.state);
+        self.dirty = true;
+    }
+
+    /// The roster as `(name, model, state)` rows — the renderer and `/team`.
+    /// A member never updated reads as [`TeamState::Idle`].
+    pub fn team_rows(&self) -> Vec<(&str, &str, TeamState)> {
+        self.teammates
+            .iter()
+            .map(|m| {
+                let state = self
+                    .team_state
+                    .get(&m.name)
+                    .copied()
+                    .unwrap_or(TeamState::Idle);
+                (m.name.as_str(), m.model.as_str(), state)
+            })
+            .collect()
     }
 
     pub fn status(&self) -> &Status {
@@ -2300,6 +2358,56 @@ mod tests {
     }
 
     #[test]
+    fn apply_team_update_sets_the_named_members_state() {
+        let mut app = App::new();
+        app.set_teammates(vec![Teammate {
+            name: "w1".into(),
+            model: "m".into(),
+        }]);
+        assert_eq!(app.team_rows()[0].2, TeamState::Idle);
+        app.apply_team_update(TeamUpdate {
+            name: "w1".into(),
+            state: TeamState::Running,
+        });
+        assert_eq!(app.team_rows()[0].2, TeamState::Running);
+        assert!(app.dirty(), "an update requests a redraw");
+    }
+
+    #[test]
+    fn the_team_command_lists_the_roster_or_says_none() {
+        // An empty roster reads as "(no team)".
+        let mut app = App::new();
+        submit(&mut app, "/team");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t == "(no team)"
+        ));
+
+        // A populated roster lists one `name · model · state` line per member.
+        let mut app = App::new();
+        app.set_teammates(vec![
+            Teammate {
+                name: "explorer".into(),
+                model: "m1".into(),
+            },
+            Teammate {
+                name: "reviewer".into(),
+                model: "m2".into(),
+            },
+        ]);
+        app.apply_team_update(TeamUpdate {
+            name: "reviewer".into(),
+            state: TeamState::Done,
+        });
+        submit(&mut app, "/team");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a team notice");
+        };
+        assert!(text.contains("explorer · m1 · idle"), "{text}");
+        assert!(text.contains("reviewer · m2 · done"), "{text}");
+    }
+
+    #[test]
     fn resume_opens_the_picker_and_selection_hands_back_the_path() {
         let mut app = App::new();
         app.set_sessions(sessions());
@@ -2349,10 +2457,11 @@ mod tests {
         };
         assert_eq!(
             text,
-            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /help"
+            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /team /help"
         );
         for name in [
-            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "help",
+            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "team",
+            "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),

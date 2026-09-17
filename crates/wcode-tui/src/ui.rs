@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
+use crate::TeamState;
 use crate::app::{App, Block, InputView, Overlay, Tool};
 use crate::markdown;
 
@@ -20,6 +21,11 @@ use crate::markdown;
 /// continuation column).
 const THINK_FIRST: &str = "   ··· ";
 const THINK_CONT: &str = "       ";
+
+/// The team sidebar appears only when the terminal is at least this wide.
+const SIDEBAR_MIN_WIDTH: u16 = 60;
+/// The sidebar's fixed width (`Constraint::Length(26)`).
+const SIDEBAR_WIDTH: u16 = 26;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -39,11 +45,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(area);
 
-    draw_transcript(frame, body, app);
+    // The team sidebar splits the `body` band when there is a team and the
+    // terminal is wide enough; otherwise the layout is byte-identical to before.
+    let sidebar = !app.team_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
+    if sidebar {
+        let [left, right] =
+            Layout::horizontal([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
+                .areas(body);
+        draw_transcript(frame, left, app);
+        draw_sidebar(frame, right, app);
+    } else {
+        draw_transcript(frame, body, app);
+    }
     draw_rule(frame, rule);
     draw_input(frame, input, &view);
     draw_status(frame, status, app);
-    draw_completion(frame, area, rule, app);
+    draw_completion(frame, area, rule, app, sidebar);
     // The modal, if any, is drawn last — over the bands.
     draw_overlay(frame, area, app);
 }
@@ -109,7 +126,7 @@ const MAX_COMPLETION_ROWS: usize = 8;
 /// Draw the inline `/`-command completion popup, floating just above the input
 /// band (its bottom edge rests on the `rule`). Non-modal and non-reflowing: it
 /// is `Clear`ed over the transcript and styled like the picker (design D7).
-fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
+fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App, sidebar: bool) {
     let rows = app.completion_rows();
     if rows.is_empty() {
         return;
@@ -127,7 +144,14 @@ fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
         selected.saturating_sub(visible - 1).min(rows.len() - visible)
     };
     let height = visible as u16 + 2;
-    let width = area.width.saturating_sub(2).clamp(1, 64);
+    // Keep clear of the team sidebar: when it is shown the popup stops at its
+    // left edge (the same split predicate `draw` uses).
+    let avail = if sidebar {
+        area.width.saturating_sub(SIDEBAR_WIDTH)
+    } else {
+        area.width
+    };
+    let width = avail.saturating_sub(2).clamp(1, 64);
     let rect = Rect {
         x: area.x + 1,
         y: above.y - height,
@@ -718,6 +742,57 @@ pub(crate) fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
+/// The `done` state: a quieter grey than `dim()` where colour is available.
+fn muted() -> Style {
+    if no_color() {
+        Style::new().add_modifier(Modifier::DIM)
+    } else {
+        Style::new().fg(Color::DarkGray)
+    }
+}
+
+/// The style for a member's row, keyed by state (idle = dim, running = accent,
+/// done = muted).
+fn state_style(state: TeamState) -> Style {
+    match state {
+        TeamState::Idle => dim(),
+        TeamState::Running => accent(),
+        TeamState::Done => muted(),
+    }
+}
+
+/// Clip a row to `width` display columns (char count; the sidebar is ASCII-ish,
+/// and ratatui clips precisely anyway).
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        text.to_string()
+    } else {
+        text.chars().take(width).collect()
+    }
+}
+
+/// Draw the team status sidebar: a bordered pane, one `name · model · state` row
+/// per member, the row styled by state.
+fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_style(dim())
+        .title(Span::styled(" team ", dim()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let width = inner.width as usize;
+    let lines: Vec<Line> = app
+        .team_rows()
+        .into_iter()
+        .map(|(name, model, state)| {
+            let text = format!("{name} · {model} · {}", state.label());
+            Line::from(Span::styled(clip(&text, width), state_style(state)))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(crate) fn accent() -> Style {
     if no_color() {
         Style::new().add_modifier(Modifier::BOLD)
@@ -1136,9 +1211,108 @@ mod tests {
                         width: area.width,
                         height: 1,
                     };
-                    draw_completion(frame, area, above, &app);
+                    draw_completion(frame, area, above, &app, false);
                 }
             })
             .unwrap();
+    }
+
+    #[test]
+    fn an_empty_roster_draws_no_sidebar() {
+        let mut app = App::new();
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(!text.contains("team"), "no sidebar without a team:\n{text}");
+    }
+
+    #[test]
+    fn the_team_sidebar_lists_members_and_hides_when_narrow() {
+        let mut app = App::new();
+        app.set_teammates(vec![
+            crate::Teammate {
+                name: "explorer".into(),
+                model: "m1".into(),
+            },
+            crate::Teammate {
+                name: "reviewer".into(),
+                model: "m2".into(),
+            },
+        ]);
+        app.apply_team_update(crate::TeamUpdate {
+            name: "explorer".into(),
+            state: crate::TeamState::Running,
+        });
+
+        // Wide enough: the sidebar shows the title, each member, and its state.
+        let wide = buffer_text(&render(&mut app, 80, 20));
+        assert!(wide.contains("team"), "sidebar title missing:\n{wide}");
+        assert!(wide.contains("explorer"), "member missing:\n{wide}");
+        assert!(wide.contains("m1"), "model missing:\n{wide}");
+        assert!(wide.contains("running"), "state missing:\n{wide}");
+        assert!(wide.contains("reviewer"), "member missing:\n{wide}");
+
+        // Narrow (< 60 cols): the sidebar is hidden.
+        let narrow = buffer_text(&render(&mut app, 50, 20));
+        assert!(
+            !narrow.contains("explorer"),
+            "the sidebar should hide when narrow:\n{narrow}"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_shows_only_at_the_width_threshold() {
+        let mut app = App::new();
+        app.set_teammates(vec![crate::Teammate {
+            name: "explorer".into(),
+            model: "m".into(),
+        }]);
+        // 59 cols: hidden. 60 (the threshold): shown.
+        assert!(!buffer_text(&render(&mut app, 59, 12)).contains("explorer"));
+        assert!(buffer_text(&render(&mut app, 60, 12)).contains("explorer"));
+    }
+
+    #[test]
+    fn a_short_body_draws_the_sidebar_without_panicking() {
+        let mut app = App::new();
+        app.set_teammates(vec![crate::Teammate {
+            name: "explorer".into(),
+            model: "m".into(),
+        }]);
+        // Tiny heights leave a degenerate `body` (even 0–1 rows): no panic.
+        for height in [3u16, 4, 5] {
+            let _ = buffer_text(&render(&mut app, 80, height));
+        }
+    }
+
+    #[test]
+    fn the_completion_popup_does_not_overdraw_the_sidebar() {
+        let mut app = App::new();
+        app.set_teammates(vec![crate::Teammate {
+            name: "explorer".into(),
+            model: "m".into(),
+        }]);
+        for c in "/mo".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        assert!(!app.completion_rows().is_empty(), "the popup should be open");
+
+        let width = 80u16;
+        let terminal = render(&mut app, width, 16);
+        let buf = terminal.backend().buffer();
+        // The sidebar owns the rightmost `SIDEBAR_WIDTH` columns; the popup
+        // (title "commands") must never paint there.
+        let sidebar_left = width - SIDEBAR_WIDTH;
+        let mut sidebar = String::new();
+        for y in 0..buf.area.height {
+            for x in sidebar_left..buf.area.width {
+                sidebar.push_str(buf[(x, y)].symbol());
+            }
+            sidebar.push('\n');
+        }
+        assert!(
+            !sidebar.contains("commands"),
+            "the popup overdraws the sidebar:\n{sidebar}"
+        );
+        // Sanity: the popup is still drawn (to the left of the sidebar).
+        assert!(buffer_text(&terminal).contains("commands"));
     }
 }

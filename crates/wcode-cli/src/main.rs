@@ -3,6 +3,8 @@
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
+use tokio::sync::{broadcast, mpsc};
+
 use wcode_harness::actor::SessionActor;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
@@ -413,9 +415,11 @@ async fn main() {
                         // The server owns the session; a socket client cannot see
                         // the session dir, so `/resume` has nothing to offer.
                         sessions: Vec::new(),
+                        // No local roster over a socket.
+                        teammates: Vec::new(),
                         history: Some(repl::history_path()),
                     };
-                    match wcode_tui::run(Backend::from(client), options).await {
+                    match wcode_tui::run(Backend::from(client), options, None).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                         Ok(wcode_tui::Outcome::Resume(_)) => {
                             eprintln!("tui: cannot resume over a socket");
@@ -706,13 +710,21 @@ async fn main() {
                     status,
                     models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
                     sessions: session_items(),
+                    teammates: team_roster(&cfg),
                     history: Some(repl::history_path()),
                 };
                 let handle = SessionActor::spawn(agent);
                 if let Some(o) = &orchestrator {
                     o.register_root(handle.clone());
                 }
-                match wcode_tui::run(Backend::from(handle), options).await {
+                // Live team feed: one forwarder per member — only for the root
+                // orchestrator (a served `--owner` worker has no team of its own).
+                let team = if args.owner.is_none() {
+                    orchestrator.as_ref().map(|o| spawn_team_feed(o, &cfg.team))
+                } else {
+                    None
+                };
+                match wcode_tui::run(Backend::from(handle), options, team).await {
                     Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
@@ -749,6 +761,84 @@ async fn main() {
 fn resolve_overlay(flag: Option<&str>, env: Option<&str>) -> Option<String> {
     flag.map(str::to_string)
         .or_else(|| env.filter(|s| !s.trim().is_empty()).map(str::to_string))
+}
+
+/// The sidebar roster: each member's name and its **effective** model (the
+/// spec's override, else the root's model).
+fn team_roster(cfg: &Config) -> Vec<wcode_tui::Teammate> {
+    cfg.team
+        .iter()
+        .map(|m| wcode_tui::Teammate {
+            name: m.name.clone(),
+            model: m.model.clone().unwrap_or_else(|| cfg.model.clone()),
+        })
+        .collect()
+}
+
+/// Map an agent event to a team-state change. Only a run's start/end move the
+/// sidebar; every other event is ignored.
+fn team_state(event: &AgentEvent) -> Option<wcode_tui::TeamState> {
+    match event {
+        AgentEvent::AgentStart => Some(wcode_tui::TeamState::Running),
+        AgentEvent::AgentEnd => Some(wcode_tui::TeamState::Done),
+        _ => None,
+    }
+}
+
+/// What a forwarder does after one `recv`: forward a state, keep listening, or
+/// stop. A `Lagged` **skips** (never stops — that would freeze the member's
+/// state forever); a closed channel stops.
+enum TeamStep {
+    Forward(wcode_tui::TeamState),
+    Skip,
+    Stop,
+}
+
+fn team_step(result: Result<AgentEvent, broadcast::error::RecvError>) -> TeamStep {
+    match result {
+        Ok(event) => match team_state(&event) {
+            Some(state) => TeamStep::Forward(state),
+            None => TeamStep::Skip,
+        },
+        Err(broadcast::error::RecvError::Lagged(_)) => TeamStep::Skip,
+        Err(broadcast::error::RecvError::Closed) => TeamStep::Stop,
+    }
+}
+
+/// Subscribe to each member and forward its start/end as `TeamUpdate`s. Each
+/// forwarder ends when the receiver is dropped (the channel closes).
+fn spawn_team_feed(
+    orchestrator: &crate::agents::Orchestrator,
+    members: &[TeamMember],
+) -> mpsc::UnboundedReceiver<wcode_tui::TeamUpdate> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    for member in members {
+        let Some(mut events) = orchestrator.subscribe_worker(&member.name) else {
+            continue;
+        };
+        let name = member.name.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match team_step(events.recv().await) {
+                    TeamStep::Forward(state) => {
+                        if tx
+                            .send(wcode_tui::TeamUpdate {
+                                name: name.clone(),
+                                state,
+                            })
+                            .is_err()
+                        {
+                            break; // the TUI dropped the receiver
+                        }
+                    }
+                    TeamStep::Skip => {}
+                    TeamStep::Stop => break,
+                }
+            }
+        });
+    }
+    rx
 }
 
 /// Pick the interactive front-end: the TUI when forced with `--tui`, or by
@@ -1176,6 +1266,40 @@ mod tests {
         // An empty / whitespace-only env var counts as unset.
         assert_eq!(resolve_overlay(None, Some("   ")), None);
         assert_eq!(resolve_overlay(None, None), None);
+    }
+
+    #[test]
+    fn team_state_maps_only_a_run_start_and_end() {
+        use wcode_harness::event::AgentEvent;
+        assert_eq!(
+            team_state(&AgentEvent::AgentStart),
+            Some(wcode_tui::TeamState::Running)
+        );
+        assert_eq!(
+            team_state(&AgentEvent::AgentEnd),
+            Some(wcode_tui::TeamState::Done)
+        );
+        // Anything else leaves the sidebar unchanged.
+        assert_eq!(team_state(&AgentEvent::TurnStart), None);
+    }
+
+    #[test]
+    fn a_lagging_forwarder_keeps_going() {
+        use tokio::sync::broadcast::error::RecvError;
+        // A run's start/end forward; other events are skipped.
+        assert!(matches!(
+            team_step(Ok(AgentEvent::AgentStart)),
+            TeamStep::Forward(wcode_tui::TeamState::Running)
+        ));
+        assert!(matches!(
+            team_step(Ok(AgentEvent::AgentEnd)),
+            TeamStep::Forward(wcode_tui::TeamState::Done)
+        ));
+        assert!(matches!(team_step(Ok(AgentEvent::TurnStart)), TeamStep::Skip));
+        // A lag must NOT stop the forwarder (it used to freeze the member).
+        assert!(matches!(team_step(Err(RecvError::Lagged(3))), TeamStep::Skip));
+        // A closed channel stops it.
+        assert!(matches!(team_step(Err(RecvError::Closed)), TeamStep::Stop));
     }
 }
 

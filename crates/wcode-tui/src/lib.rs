@@ -32,6 +32,43 @@ use wcode_protocol::Backend;
 
 pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, Tool};
 
+/// A team member's live state, shown in the sidebar and by `/team`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamState {
+    /// Not running (the default until an event says otherwise).
+    Idle,
+    /// A run is in flight.
+    Running,
+    /// The run finished.
+    Done,
+}
+
+impl TeamState {
+    /// The lowercase label used in the sidebar and `/team`.
+    pub fn label(self) -> &'static str {
+        match self {
+            TeamState::Idle => "idle",
+            TeamState::Running => "running",
+            TeamState::Done => "done",
+        }
+    }
+}
+
+/// A static roster entry: a member's name and its **effective** model (the
+/// composition root resolves an inherited model to a concrete id).
+#[derive(Debug, Clone)]
+pub struct Teammate {
+    pub name: String,
+    pub model: String,
+}
+
+/// A live state change for one member, pushed by the composition root.
+#[derive(Debug, Clone)]
+pub struct TeamUpdate {
+    pub name: String,
+    pub state: TeamState,
+}
+
 /// Spinner/status refresh cadence, only consulted while a run is in flight.
 const TICK: Duration = Duration::from_millis(120);
 
@@ -45,6 +82,9 @@ pub struct Options {
     /// Resumable sessions for the `/resume` picker (local sessions only; empty
     /// when the client is remote and cannot see the session dir).
     pub sessions: Vec<SessionItem>,
+    /// The team roster (name + effective model) for the sidebar and `/team`;
+    /// empty when there is no team.
+    pub teammates: Vec<Teammate>,
     /// Where prompt history is persisted (`None` keeps it in memory only).
     pub history: Option<PathBuf>,
 }
@@ -63,11 +103,16 @@ pub enum Outcome {
 /// Run the TUI against `backend` until the user quits. Enters the alternate
 /// screen; restores it on every exit path. See [`Options`] for the injected
 /// state and [`Outcome`] for the handoff on exit.
-pub async fn run(backend: Backend, options: Options) -> io::Result<Outcome> {
+pub async fn run(
+    backend: Backend,
+    options: Options,
+    team: Option<mpsc::UnboundedReceiver<TeamUpdate>>,
+) -> io::Result<Outcome> {
     let Options {
         status,
         models,
         sessions,
+        teammates,
         history,
     } = options;
     let (guard, mut terminal) = terminal::enter()?;
@@ -76,6 +121,7 @@ pub async fn run(backend: Backend, options: Options) -> io::Result<Outcome> {
     app.set_status(status);
     app.set_models(models);
     app.set_sessions(sessions);
+    app.set_teammates(teammates);
     // Attach-replay: a resumed session already has turns; show them, so the
     // transcript is never mysteriously empty (`GetHistory` is the seam for it).
     if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
@@ -85,7 +131,7 @@ pub async fn run(backend: Backend, options: Options) -> io::Result<Outcome> {
         app.load_history(read_history(path));
     }
 
-    let result = event_loop(&mut terminal, backend, &mut app).await;
+    let result = event_loop(&mut terminal, backend, &mut app, team).await;
 
     if let Some(path) = &history {
         write_history(path, app.history());
@@ -106,6 +152,7 @@ async fn event_loop(
     terminal: &mut terminal::Tui,
     backend: Backend,
     app: &mut App,
+    mut team: Option<mpsc::UnboundedReceiver<TeamUpdate>>,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
     let mut session = backend.subscribe();
@@ -136,6 +183,8 @@ async fn event_loop(
                 Err(broadcast::error::RecvError::Closed) => {}
             },
             Some(event) = replies.recv() => app.handle(event),
+            // Live team status from the composition root's forwarders.
+            Some(update) = recv_team(&mut team) => app.handle(AppEvent::Team(update)),
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
             _ = tick.tick(), if app.running() => app.handle(AppEvent::Tick),
@@ -164,6 +213,15 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+/// Await the next team update; parks forever when there is no receiver (so the
+/// `select!` branch simply never fires).
+async fn recv_team(team: &mut Option<mpsc::UnboundedReceiver<TeamUpdate>>) -> Option<TeamUpdate> {
+    match team {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Ask the session and feed the reply back as an app event. Runs off the main

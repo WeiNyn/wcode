@@ -74,7 +74,20 @@ async fn main() -> std::io::Result<()> {
         status,
         models: vec!["demo".to_string(), "demo-mini".to_string()],
         sessions: Vec::new(),
+        // A static roster so the example shows the team sidebar (no live feed).
+        teammates: vec![
+            wcode_tui::Teammate {
+                name: "explorer".into(),
+                model: "demo".into(),
+            },
+            wcode_tui::Teammate {
+                name: "reviewer".into(),
+                model: "demo-mini".into(),
+            },
+        ],
         history: None,
     };
-    wcode_tui::run(Backend::Local(handle), options).await.map(|_| ())
+    wcode_tui::run(Backend::Local(handle), options, None)
+        .await
+        .map(|_| ())
 }

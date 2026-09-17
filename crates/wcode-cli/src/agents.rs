@@ -15,9 +15,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokio::sync::broadcast;
+
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
+use wcode_harness::event::AgentEvent;
 use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
@@ -342,6 +345,14 @@ impl Orchestrator {
         self.phonebook
             .insert(short_name(&worker.id), worker.id.clone());
         Ok(worker)
+    }
+
+    /// Subscribe to a worker's events by phonebook name — the sidebar's live
+    /// feed. `None` when the name is unknown or the worker cannot be resolved
+    /// from this orchestrator (the registry is otherwise private).
+    pub fn subscribe_worker(&self, name: &str) -> Option<broadcast::Receiver<AgentEvent>> {
+        let id = self.phonebook.get(name)?;
+        self.registry.resolve(&self.id, &id).ok().map(|h| h.subscribe())
     }
 
     /// Record a name → address alias in the phonebook (§13.15) — a `[peers]`
