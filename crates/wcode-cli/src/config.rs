@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wcode_harness::compaction::CompactionPolicy;
@@ -347,6 +347,26 @@ fn parse_tool_flag(tool: &str, value: &str) -> Result<bool, String> {
     }
 }
 
+/// Deep-merge `overlay` into `base` at the `toml::Value` level: table keys
+/// recurse; anything else (a scalar or array) is replaced wholesale by the
+/// overlay. Used to fold a `--config` overlay over the global config.
+fn merge_values(base: toml::Value, overlay: toml::Value) -> toml::Value {
+    match (base, overlay) {
+        (toml::Value::Table(mut b), toml::Value::Table(o)) => {
+            for (key, val) in o {
+                let merged = match b.remove(&key) {
+                    Some(existing) => merge_values(existing, val),
+                    None => val,
+                };
+                b.insert(key, merged);
+            }
+            toml::Value::Table(b)
+        }
+        // A scalar/array (or a table/type change) is replaced wholesale.
+        (_, over) => over,
+    }
+}
+
 pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let model = match file.model.clone() {
         Some(m) => m,
@@ -464,17 +484,58 @@ pub fn config_dir() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
-        let file = match Self::default_path().map(std::fs::read_to_string) {
+        Self::load_with(None)
+    }
+
+    /// Load the global `config.toml`, then optionally deep-merge an overlay file
+    /// on top of it (`--config`/`WCODE_CONFIG`). The overlay wins per key: two
+    /// tables recurse, a scalar or array is replaced wholesale. Both files are
+    /// parsed to `toml::Value` first, so a partial table (e.g. `[tools] grep`)
+    /// overrides without clobbering its siblings. A missing or unparseable
+    /// overlay is a hard error; only a missing *global* file counts as absent.
+    pub fn load_with(overlay: Option<&Path>) -> Result<Config, ConfigError> {
+        Self::load_paths(Self::default_path().as_deref(), overlay)
+    }
+
+    /// Load `global` (if present), then deep-merge `overlay` on top. Split out so
+    /// tests can point both at temp files.
+    fn load_paths(global: Option<&Path>, overlay: Option<&Path>) -> Result<Config, ConfigError> {
+        let base = match global.map(std::fs::read_to_string) {
             Some(Ok(text)) => Some(
-                toml::from_str::<FileConfig>(&text)
+                toml::from_str::<toml::Value>(&text)
                     .map_err(|e| ConfigError::Io(format!("config parse error: {e}")))?,
             ),
-            // Only a missing file counts as absent; unreadable/corrupt surfaces the real cause.
+            // Only a missing global file counts as absent; unreadable/corrupt surfaces the real cause.
             Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
             Some(Err(e)) => return Err(ConfigError::Io(format!("config read error: {e}"))),
             None => None,
         };
-        merge(EnvLike::from_env(), file.unwrap_or_default())
+        let value = match overlay {
+            Some(path) => {
+                let text = std::fs::read_to_string(path).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        ConfigError::Io(format!("config overlay not found: {}", path.display()))
+                    } else {
+                        ConfigError::Io(format!(
+                            "config overlay read error ({}): {e}",
+                            path.display()
+                        ))
+                    }
+                })?;
+                let over = toml::from_str::<toml::Value>(&text).map_err(|e| {
+                    ConfigError::Io(format!(
+                        "config overlay parse error ({}): {e}",
+                        path.display()
+                    ))
+                })?;
+                merge_values(base.unwrap_or_else(|| toml::Value::Table(toml::Table::new())), over)
+            }
+            None => base.unwrap_or_else(|| toml::Value::Table(toml::Table::new())),
+        };
+        // The post-overlay file is what a `MissingModel` rescue must carry.
+        let file = FileConfig::deserialize(value)
+            .map_err(|e| ConfigError::Io(format!("config parse error: {e}")))?;
+        merge(EnvLike::from_env(), file)
     }
 
     pub fn default_path() -> Option<PathBuf> {
@@ -838,6 +899,112 @@ name = "reviewer"
         )
         .unwrap();
         assert_eq!(none.orchestrator.guidelines, None);
+    }
+
+    #[test]
+    fn overlay_deep_merge_scalars_tables_and_arrays() {
+        let base: toml::Value =
+            toml::from_str("model = \"global\"\n[tools]\ngrep = false\nfind = true\n").unwrap();
+        let over: toml::Value =
+            toml::from_str("model = \"overlay\"\n[team]\nx = 1\n[tools]\ngrep = true\n").unwrap();
+        let merged = merge_values(base, over);
+        let t = merged.as_table().unwrap();
+        // A scalar is replaced by the overlay.
+        assert_eq!(t["model"].as_str(), Some("overlay"));
+        // An overlay-only table is added.
+        assert!(t["team"].is_table());
+        // A nested table recurses: overlay `grep` wins, global `find` survives.
+        let tools = t["tools"].as_table().unwrap();
+        assert_eq!(tools["grep"].as_bool(), Some(true));
+        assert_eq!(tools["find"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn overlay_replaces_arrays_wholesale() {
+        let base: toml::Value = toml::from_str("xs = [1, 2, 3]\n").unwrap();
+        let over: toml::Value = toml::from_str("xs = [9]\n").unwrap();
+        let merged = merge_values(base, over);
+        let xs = merged.get("xs").unwrap().as_array().unwrap();
+        assert_eq!(xs.len(), 1);
+        assert_eq!(xs[0].as_integer(), Some(9));
+    }
+
+    #[test]
+    fn overlay_replaces_the_team_array_wholesale() {
+        // The real shape: an overlay `[[team]]` replaces the global `[[team]]`
+        // (an array-of-tables); it must not concatenate.
+        let base: toml::Value =
+            toml::from_str("[[team]]\nname = \"global-a\"\n[[team]]\nname = \"global-b\"\n")
+                .unwrap();
+        let over: toml::Value = toml::from_str("[[team]]\nname = \"overlay-a\"\n").unwrap();
+        let merged = merge_values(base, over);
+        let file: FileConfig = FileConfig::deserialize(merged).unwrap();
+        assert_eq!(file.team.len(), 1);
+        assert_eq!(file.team[0].name, "overlay-a");
+    }
+
+    #[test]
+    fn load_merges_an_overlay_over_the_global_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("config.toml");
+        let overlay = dir.path().join("team.toml");
+        std::fs::write(
+            &global,
+            "model = \"g\"\nbase_url = \"http://g\"\n[tools]\nfind = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &overlay,
+            "[[team]]\nname = \"a\"\n[orchestrator]\nguidelines = \"do\"\n[tools]\ngrep = true\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load_paths(Some(&global), Some(&overlay)).unwrap();
+        // Provider/model come from the global file, untouched by the overlay.
+        assert_eq!(cfg.model, "g");
+        assert_eq!(cfg.base_url.as_deref(), Some("http://g"));
+        // The overlay added the team, guidelines, and one tool flag...
+        assert_eq!(cfg.team.len(), 1);
+        assert_eq!(cfg.team[0].name, "a");
+        assert_eq!(cfg.orchestrator.guidelines.as_deref(), Some("do"));
+        assert!(cfg.tools.grep);
+        // ...without clobbering the global `[tools]` sibling.
+        assert!(cfg.tools.find, "the global sibling key survives");
+    }
+
+    #[test]
+    fn a_missing_overlay_is_a_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("config.toml");
+        std::fs::write(&global, "model = \"g\"\n").unwrap();
+        let missing = dir.path().join("nope.toml");
+        let err = Config::load_paths(Some(&global), Some(&missing)).unwrap_err();
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("overlay not found"), "{msg}");
+        assert!(msg.contains("nope.toml"), "{msg}");
+    }
+
+    #[test]
+    fn missing_model_rescue_carries_the_overlaid_file() {
+        // The global file lacks `model`; the overlay adds a team. The MissingModel
+        // error must carry the *overlaid* file so rescue() re-merges it.
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("config.toml");
+        let overlay = dir.path().join("team.toml");
+        std::fs::write(&global, "base_url = \"http://g\"\n").unwrap();
+        std::fs::write(&overlay, "[[team]]\nname = \"a\"\n").unwrap();
+        let err = Config::load_paths(Some(&global), Some(&overlay)).unwrap_err();
+        let ConfigError::MissingModel(file) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert_eq!(file.base_url.as_deref(), Some("http://g"));
+        assert_eq!(
+            file.team.len(),
+            1,
+            "the overlay team survives into the rescue file"
+        );
     }
 }
 

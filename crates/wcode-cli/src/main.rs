@@ -32,13 +32,14 @@ use crate::repl::{
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
   --no-session       don't record a session file
    --model <id>       override the configured model
    --base-url <url>   override the configured base URL
+   --config <path>    overlay config file, deep-merged over the global config (also WCODE_CONFIG)
    --endpoint <e>     override the configured endpoint (chat|responses)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
@@ -96,6 +97,8 @@ struct Args {
     no_session: bool,
     model: Option<String>,
     base_url: Option<String>,
+    /// `--config <path>`: an overlay config file, deep-merged over the global one.
+    config: Option<String>,
     endpoint: Option<String>,
     /// None = flag absent; Some(None) = clear; Some(Some(level)) = set.
     effort: Option<Option<String>>,
@@ -160,6 +163,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             }
             "--base-url" => {
                 a.base_url = Some(args.get(i).ok_or("--base-url requires a url")?.clone());
+                i += 1;
+            }
+            "--config" => {
+                a.config = Some(args.get(i).ok_or("--config requires a path")?.clone());
                 i += 1;
             }
             "--endpoint" => {
@@ -259,7 +266,15 @@ async fn main() {
 
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
-    let mut cfg = match Config::load() {
+    // `--config` / `WCODE_CONFIG`: an overlay file deep-merged over the global
+    // config (flag beats env; an empty env var is ignored).
+    let env_overlay = std::env::var("WCODE_CONFIG").ok();
+    let overlay = resolve_overlay(args.config.as_deref(), env_overlay.as_deref());
+    let loaded = match overlay.as_deref() {
+        Some(path) => Config::load_with(Some(Path::new(path))),
+        None => Config::load(),
+    };
+    let mut cfg = match loaded {
         Ok(c) => c,
         Err(ConfigError::MissingModel(file)) if args.model.is_some() || args.dump_system_prompt => {
             // merge() never ran (file lacked model): rescue re-runs it with
@@ -281,13 +296,17 @@ async fn main() {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            eprintln!(
-                "  set `model = \"...\"` in {} or pass --model",
-                Config::default_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.config/wcode/config.toml".into())
-            );
-            eprintln!("  env: WCODE_BASE_URL, WCODE_API_KEY (OPENAI_API_KEY fallback)");
+            // The "set model" / env hints only fit a missing model; any other
+            // error (overlay not found, duplicate team, IO) is shown alone.
+            if matches!(e, ConfigError::MissingModel(_)) {
+                eprintln!(
+                    "  set `model = \"...\"` in {} or pass --model",
+                    Config::default_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "~/.config/wcode/config.toml".into())
+                );
+                eprintln!("  env: WCODE_BASE_URL, WCODE_API_KEY (OPENAI_API_KEY fallback)");
+            }
             std::process::exit(1);
         }
     };
@@ -419,6 +438,7 @@ async fn main() {
                     InstructionSet::default(),
                     SkillSet::default(),
                     &[],
+                    None,
                     None,
                     None,
                 )
@@ -697,7 +717,7 @@ async fn main() {
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
                         // with `--resume <path>` (the terminal is already restored).
-                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents));
+                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents, args.config.as_deref()));
                         std::process::exit(1); // only reached if the exec failed
                     }
                     Err(e) => {
@@ -716,11 +736,19 @@ async fn main() {
                 skills,
                 root_team,
                 root_guidelines,
+                args.config.as_deref(),
                 orchestrator,
             )
             .await
         }
     }
+}
+
+/// The config overlay path: the `--config` flag beats `WCODE_CONFIG`; an empty
+/// (or whitespace-only) env var counts as unset.
+fn resolve_overlay(flag: Option<&str>, env: Option<&str>) -> Option<String> {
+    flag.map(str::to_string)
+        .or_else(|| env.filter(|s| !s.trim().is_empty()).map(str::to_string))
 }
 
 /// Pick the interactive front-end: the TUI when forced with `--tui`, or by
@@ -1124,6 +1152,30 @@ mod tests {
             },
             true
         ));
+    }
+
+    #[test]
+    fn parse_config_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--config", ".wcode/team.toml"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.config.as_deref(), Some(".wcode/team.toml"));
+        assert!(parse_args(&args(&["--config"])).is_err());
+    }
+
+    #[test]
+    fn overlay_precedence_flag_beats_env() {
+        assert_eq!(
+            resolve_overlay(Some("flag.toml"), Some("env.toml")),
+            Some("flag.toml".to_string())
+        );
+        assert_eq!(
+            resolve_overlay(None, Some("env.toml")),
+            Some("env.toml".to_string())
+        );
+        // An empty / whitespace-only env var counts as unset.
+        assert_eq!(resolve_overlay(None, Some("   ")), None);
+        assert_eq!(resolve_overlay(None, None), None);
     }
 }
 

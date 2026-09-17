@@ -416,6 +416,7 @@ pub fn reload_args(
     session: Option<&Path>,
     no_session: bool,
     agents: bool,
+    config: Option<&str>,
 ) -> Vec<String> {
     let mut args = Vec::new();
     if no_session || session.is_none() {
@@ -444,6 +445,12 @@ pub fn reload_args(
     // satisfy the `[team] requires --agents` guard (D16).
     if agents {
         args.push("--agents".to_string());
+    }
+    // Forward a flag-supplied config overlay; a `WCODE_CONFIG` overlay survives
+    // on its own (the environment is inherited across the re-exec).
+    if let Some(path) = config {
+        args.push("--config".to_string());
+        args.push(path.to_string());
     }
     args
 }
@@ -487,6 +494,7 @@ async fn reload(
     session: Option<&Path>,
     no_session: bool,
     agents: bool,
+    overlay: Option<&str>,
     in_flight: &AtomicBool,
 ) {
     use std::sync::atomic::Ordering;
@@ -525,7 +533,7 @@ async fn reload(
             return;
         }
     }
-    let args = reload_args(llm, session, no_session, agents);
+    let args = reload_args(llm, session, no_session, agents, overlay);
     println!("reloading {} ...", exe.display());
     let _ = io::stdout().flush();
     exec_self(&args);
@@ -611,6 +619,7 @@ pub async fn run(
     skills: SkillSet,
     team: &[TeamMember],
     guidelines: Option<&str>,
+    overlay: Option<&str>,
     orchestrator: Option<crate::agents::Orchestrator>,
 ) {
     #[cfg(unix)]
@@ -876,7 +885,7 @@ pub async fn run(
                 println!("{DIM}/reload (rebuild + re-exec) is unavailable over a socket{RESET}")
             }
             Some(Command::Reload { no_session }) => {
-                reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), &in_flight).await
+                reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overlay, &in_flight).await
             }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
@@ -1364,7 +1373,7 @@ mod tests {
             retry: wcode_harness::streamfn::RetryPolicy::default(),
         };
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false),
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None),
             vec![
                 "--resume",
                 "/s/a.jsonl",
@@ -1388,11 +1397,11 @@ mod tests {
         };
         // explicit flag wins, even with a session open
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true, false)[..2],
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true, false, None)[..2],
             ["--no-session".to_string(), "--model".to_string()],
         );
         // no session file: fresh start, cleared effort round-trips as "-"
-        let args = reload_args(&llm, None, false, false);
+        let args = reload_args(&llm, None, false, false, None);
         assert_eq!(args[0], "--no-session");
         assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
         assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
@@ -1406,11 +1415,35 @@ mod tests {
             ..LlmOpts::default()
         };
         // An orchestrator survives a re-exec (`--agents` forwarded)...
-        let with = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, true);
+        let with = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, true, None);
         assert!(with.iter().any(|a| a == "--agents"), "{with:?}");
         // ...a plain session does not grow the flag.
-        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false);
+        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None);
         assert!(!without.iter().any(|a| a == "--agents"), "{without:?}");
+    }
+
+    #[test]
+    fn reload_args_forwards_config_overlay_when_set() {
+        let llm = LlmOpts {
+            model: "m".to_string(),
+            ..LlmOpts::default()
+        };
+        // A flag-supplied overlay must survive the re-exec...
+        let with = reload_args(
+            &llm,
+            Some(Path::new("/s/a.jsonl")),
+            false,
+            false,
+            Some(".wcode/team.toml"),
+        );
+        assert!(
+            with.windows(2)
+                .any(|w| w == ["--config", ".wcode/team.toml"]),
+            "{with:?}"
+        );
+        // ...with no overlay, no `--config` is emitted.
+        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None);
+        assert!(!without.iter().any(|a| a == "--config"), "{without:?}");
     }
 
     #[test]
