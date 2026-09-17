@@ -164,12 +164,16 @@ dev team + workflow + `grep/find`, leaving provider/model global.
 **Two tiers, landed in order.** Tier 1 is UI-only and cheap; tier 2 is the
 separable socket work.
 
-**Tier 1a — status sidebar.** Split the `body` band horizontally in `ui.rs`
-`draw` and render a `draw_sidebar` pane: one line per teammate — `name · model ·
-state` (idle / running / done) and, optionally, the first line of its last
-result. The TUI learns the team from the composition root, which **injects** a
-`Vec<Teammate>` (the same pattern as `models`/`sessions` today), since the TUI
-owns no `Registry` and cannot enumerate one.
+**Tier 1a — status sidebar (F4a).** Split the `body` band horizontally in `ui.rs`
+`draw` — only when the injected roster is non-empty **and** the terminal is ≥ 60
+cols, so a teamless/narrow frame is byte-identical to before — and render a
+`draw_sidebar` pane: one line per teammate, `name · model · state` (idle /
+running / done, the row styled by state). The TUI learns the team from the
+composition root, which **injects** a `Vec<Teammate>` (same pattern as
+`models`/`sessions`) plus, for live state, an `mpsc::UnboundedReceiver<TeamUpdate>`
+fed by one forwarder per member (`Orchestrator::subscribe_worker` → `AgentStart` =
+running, `AgentEnd` = done). `/team` lists the same roster. (The optional "last
+result" line is not built yet.)
 
 **Tier 1b — multi-surface.** Split `App`'s single-session state into a
 `Surface { transcript, live, changes, status, running, cancelled, context_used,
@@ -210,6 +214,7 @@ Needed only once surfaces cross process boundaries.
 | D19 | F3 spawn | the startup loop spawns via `Orchestrator::spawn_worker`, which runs `validate_tools` (D14) and registers the name in the phonebook |
 | D20 | F3b guidelines | an `[orchestrator] guidelines` string renders as `# Orchestrator workflow` **after** the team block, root-only (requires `--agents`); empty/absent adds nothing |
 | D21 | F3c overlay | `--config <path>` / `WCODE_CONFIG` (flag > env) deep-merges a TOML overlay over the global config — tables recurse, scalars/arrays replace; a missing/unparseable overlay is a hard error; `.wcode/team.toml` is the repo's overlay |
+| D22 | F4a sidebar | the team sidebar splits `body` only when the roster is non-empty **and** the terminal is ≥ 60 cols; rows are `name · model · state` (idle/running/done), fed live by per-member `AgentStart`/`AgentEnd`; `/team` prints the roster |
 
 ## Phased tasks
 
@@ -246,10 +251,10 @@ Needed only once surfaces cross process boundaries.
 - [x] Tests: a `[team]` parses; N members spawn and are addressable by name; an
       absent table leaves today's behavior; a bad member fails loudly.
 
-**Phase 4 — F4: sidebar + multi-surface.** ☐
-- [ ] **1a** `draw_sidebar` (horizontal split of `body`); `Vec<Teammate>` injected
+**Phase 4 — F4: sidebar + multi-surface.** ◐ 1a landed — reviewed; 1b todo
+- [x] **1a** `draw_sidebar` (horizontal split of `body`); `Vec<Teammate>` injected
       by the composition root; `name · model · state` lines.
-- [ ] **1a** feed per-teammate state from their event streams (idle/running/done).
+- [x] **1a** feed per-teammate state from their event streams (idle/running/done).
 - [ ] **1b** split `App` → `Surface` + focused map; reducer keyed by `SessionId`.
 - [ ] **1b** subscribe to N in-process `Backend`s (via `Registry`); focus switch
       (`PickerKind::Surface`, reusing F1) or a key.
@@ -282,7 +287,7 @@ Needed only once surfaces cross process boundaries.
 | 1 | F1 — TUI command table + inline completion (+ `Tab`) | ☑ done (reviewed) |
 | 2 | F2 — customizable workers (`model`/`role`/`tools`) | ☑ done (reviewed) |
 | 3 | F3 — `[team]` preset + startup spawn | ☑ done (reviewed) |
-| 4a | F4 — team status sidebar | ☐ todo |
+| 4a | F4 — team status sidebar | ☑ done (reviewed) |
 | 4b | F4 — in-process multi-surface | ☐ todo |
 | 5 | F4 tier 2 — socket multiplexing (deferred) | ☐ todo |
 

@@ -151,10 +151,13 @@ prompts · `PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-
 copy the last reply (OSC-52). The input box wraps and grows (scrolling past ~8
 rows); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
-[level]`, `/compact [text]`, `/usage`, `/copy`, `/help` — the subset that maps to
-a `Request` under the current session — plus `/changes` (list the files this run
-changed, re-showing a diff) and `/resume` (pick a session; the CLI re-execs into
-it). The session-lifecycle commands below stay in the REPL.
+[level]`, `/compact [text]`, `/usage`, `/copy`, `/team`, `/help` — the subset that
+maps to a `Request` under the current session — plus `/changes` (list the files
+this run changed, re-showing a diff) and `/resume` (pick a session; the CLI
+re-execs into it). The session-lifecycle commands below stay in the REPL. When a
+team is configured, a right-hand sidebar lists each member (`name · model ·
+state`, idle/running/done) — shown on terminals at least 60 columns wide; `/team`
+prints the same roster.
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
 
