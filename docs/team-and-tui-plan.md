@@ -175,14 +175,23 @@ fed by one forwarder per member (`Orchestrator::subscribe_worker` → `AgentStar
 running, `AgentEnd` = done). `/team` lists the same roster. (The optional "last
 result" line is not built yet.)
 
-**Tier 1b — multi-surface.** Split `App`'s single-session state into a
-`Surface { transcript, live, changes, status, running, cancelled, context_used,
-scroll }` and make `App` hold `surfaces: Vec<Surface>` + `focus: usize` + the
-**shared** composer (`input`, `cursor`, `history`, `overlay`, `completion`). The
+**Tier 1b — multi-surface.** Split `App`'s single-session state into a `Surface`
+(`status`, `transcript`, `live`, `changes`, `running`, `cancelled`,
+`context_used`, `scroll`, `max_scroll`, `viewport`, `last_total`, `last_width`)
+and make `App` hold `surfaces: Vec<Surface>` + `focus: usize` + the **shared**
+composer (`input`, `cursor`, `history`, `overlay`, `completion`). Lands in two
+steps: **F4b-1** is the pure refactor (exactly one surface, byte-identical
+frames); **F4b-2** is the feature (multiple surfaces, `SessionId` on events). The
 reducer becomes `(SessionId, AgentEvent)`; the TUI subscribes to N `Backend`s —
 the in-process `Registry` already maps `SessionId → Backend`, so no wire change is
 needed. Focus switches via a picker — **reusing F1's `Picker`/selection
-machinery** (a new `PickerKind::Surface`) or a key.
+machinery** (a new `PickerKind::Surface`) — or a cycle key; the sidebar highlights
+the focused surface. Per the locked decisions (D23–D28): surfaces are the root plus
+one per member; `Submit`/`Cancel`/`Ask` target the focused surface; each surface
+keeps its **own** prompt history (a change from the shared-composer sketch above);
+**F4b-2 subsumes F4a's `TeamUpdate` feed** (a surface's own `AgentStart`/`AgentEnd`
+*is* the sidebar state, so the forwarder channel goes away); and the sidebar shows
+each teammate's **model + state only** — the root keeps the full status line.
 
 **Tier 2 (deferred).** One socket carrying many sessions: a `serve` that accepts a
 set of handles and demuxes on `Frame.session`, and a `Client` that routes inbound
@@ -215,6 +224,12 @@ Needed only once surfaces cross process boundaries.
 | D20 | F3b guidelines | an `[orchestrator] guidelines` string renders as `# Orchestrator workflow` **after** the team block, root-only (requires `--agents`); empty/absent adds nothing |
 | D21 | F3c overlay | `--config <path>` / `WCODE_CONFIG` (flag > env) deep-merges a TOML overlay over the global config — tables recurse, scalars/arrays replace; a missing/unparseable overlay is a hard error; `.wcode/team.toml` is the repo's overlay |
 | D22 | F4a sidebar | the team sidebar splits `body` only when the roster is non-empty **and** the terminal is ≥ 60 cols; rows are `name · model · state` (idle/running/done), fed live by per-member `AgentStart`/`AgentEnd`; `/team` prints the roster |
+| D23 | F4b surfaces | surfaces = the **root + one per team member** |
+| D24 | F4b routing | `Submit`/`Cancel`/`Ask` route to the **focused** surface |
+| D25 | F4b history | **per-surface** prompt history (a change from the shared-composer sketch in §F4) |
+| D26 | F4b focus | a `/surface` picker (F1 machinery, `PickerKind::Surface`) **plus** a cycle key; the sidebar highlights the focused surface |
+| D27 | F4b feed | F4b-2 **subsumes** F4a's `TeamUpdate` feed — a surface's own `AgentStart`/`AgentEnd` is the sidebar state, so the forwarder channel goes away |
+| D28 | F4b rows | teammates show **model + state only**; the root keeps the full status line |
 
 ## Phased tasks
 
