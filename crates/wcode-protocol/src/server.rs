@@ -38,6 +38,30 @@ pub type Roster = watch::Receiver<Vec<(SessionId, SessionHandle)>>;
 /// and the handle the server reads events from / writes requests to.
 pub type Root = (SessionId, SessionHandle);
 
+/// The arguments of a [`wcode_harness::protocol::Request::Define`], passed to a
+/// [`DefineHandler`]. Mirrors the CLI's worker spec.
+#[derive(Clone, Debug, Default)]
+pub struct DefineArgs {
+    /// The worker's address; auto-assigned when absent.
+    pub name: Option<String>,
+    /// Model id override; `None` inherits the server's model.
+    pub model: Option<String>,
+    /// Role text appended to the worker's system prompt.
+    pub role: Option<String>,
+    /// Tool allow-list; `None` = the full default set.
+    pub tools: Option<Vec<String>>,
+    /// Provider base URL override; `None` inherits the server's.
+    pub base_url: Option<String>,
+    /// Provider API key override; `None` inherits the server's.
+    pub api_key: Option<String>,
+}
+
+/// Builds a worker from [`DefineArgs`] and returns its address. A socket server
+/// uses it to answer [`wcode_harness::protocol::Request::Define`]; the
+/// composition root injects one, since this crate cannot name a session factory.
+pub type DefineHandler =
+    std::sync::Arc<dyn Fn(DefineArgs) -> Result<SessionId, String> + Send + Sync>;
+
 /// Bind `path` and serve the root session plus `roster` until the listener
 /// errors.
 ///
@@ -46,21 +70,42 @@ pub type Root = (SessionId, SessionHandle);
 /// named by `roster` is served too, now and as it grows. A client addresses a
 /// session by `frame.session`; a server whose *current* served set is exactly
 /// one session also accepts any id, preserving the single-session flow (the
-/// `--socket` client's placeholder `"remote"` still reaches it).
-pub async fn serve(roster: Roster, root: Root, listener: UnixListener) -> io::Result<()> {
+/// `--socket` client's placeholder `"remote"` still reaches it). `define`, when
+/// installed, answers `Request::Define` — the composition root's worker factory.
+pub async fn serve(
+    roster: Roster,
+    root: Root,
+    define: Option<DefineHandler>,
+    listener: UnixListener,
+) -> io::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
-        tokio::spawn(connection(roster.clone(), root.clone(), stream));
+        tokio::spawn(connection(
+            roster.clone(),
+            root.clone(),
+            define.clone(),
+            stream,
+        ));
     }
 }
 
 /// Bind `path`, then [`serve`].
-pub async fn serve_at(roster: Roster, root: Root, path: &Path) -> io::Result<()> {
+pub async fn serve_at(
+    roster: Roster,
+    root: Root,
+    define: Option<DefineHandler>,
+    path: &Path,
+) -> io::Result<()> {
     let listener = crate::socket::bind(path).await?;
-    serve(roster, root, listener).await
+    serve(roster, root, define, listener).await
 }
 
-async fn connection(mut roster: Roster, root: Root, stream: UnixStream) {
+async fn connection(
+    mut roster: Roster,
+    root: Root,
+    define: Option<DefineHandler>,
+    stream: UnixStream,
+) {
     let (read, write) = stream.into_split();
     let (out, out_rx) = mpsc::unbounded_channel::<Frame<AgentEvent>>();
     tokio::spawn(write_loop(write, out_rx));
@@ -160,6 +205,47 @@ async fn connection(mut roster: Roster, root: Root, stream: UnixStream) {
                 session,
                 sender: None,
                 body: AgentEvent::Sessions { ids },
+            });
+            continue;
+        }
+
+        // `Define` names no session either: the server answers it directly, via
+        // the injected handler (or a clean error when none is installed). The
+        // handler registers into the same registry the roster watches, so the
+        // new worker is pushed to every client with no extra work.
+        if let Request::Define {
+            name,
+            model,
+            role,
+            tools,
+            base_url,
+            api_key,
+        } = &body
+        {
+            let reply = match &define {
+                Some(handler) => match handler(DefineArgs {
+                    name: name.clone(),
+                    model: model.clone(),
+                    role: role.clone(),
+                    tools: tools.clone(),
+                    base_url: base_url.clone(),
+                    api_key: api_key.clone(),
+                }) {
+                    Ok(id) => AgentEvent::Spawned { worker: id },
+                    Err(message) => AgentEvent::Error { message },
+                },
+                None => AgentEvent::Error {
+                    message: "agent definition is not enabled on this server (serve --agents)"
+                        .into(),
+                },
+            };
+            let _ = out.send(Frame {
+                v: PROTOCOL_VERSION,
+                id,
+                reply_to: Some(id),
+                session,
+                sender: None,
+                body: reply,
             });
             continue;
         }

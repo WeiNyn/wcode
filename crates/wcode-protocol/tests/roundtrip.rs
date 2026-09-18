@@ -63,6 +63,7 @@ fn serve_static(
     tokio::spawn(wcode_protocol::serve(
         tokio::sync::watch::channel(rest).1,
         root,
+        None,
         listener,
     ));
 }
@@ -567,6 +568,7 @@ async fn a_registration_racing_the_connect_is_served() {
     tokio::spawn(wcode_protocol::serve(
         registry.subscribe(),
         (root_id.clone(), root),
+        None,
         listener,
     ));
 
@@ -624,6 +626,7 @@ async fn list_sessions_reads_the_live_roster() {
     tokio::spawn(wcode_protocol::serve(
         registry.subscribe(),
         (root_id.clone(), root),
+        None,
         listener,
     ));
 
@@ -663,6 +666,7 @@ async fn a_growth_push_reaches_an_established_client() {
     tokio::spawn(wcode_protocol::serve(
         registry.subscribe(),
         (root_id.clone(), root),
+        None,
         listener,
     ));
 
@@ -706,4 +710,102 @@ async fn a_growth_push_reaches_an_established_client() {
         }
     }
     assert!(saw, "an event from the grown session reached the client");
+}
+
+/// R1: `Define` is intercepted by the socket server and answered by its injected
+/// handler, which builds a worker and registers it — so the new id is pushed to
+/// the client's roster like any other late session.
+#[tokio::test]
+async fn a_define_request_spawns_on_a_served_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let root = SessionActor::spawn(agent(vec![]));
+    // The injected handler registers a worker into the served registry (exactly
+    // what the CLI's `Orchestrator` factory does), so it is served too.
+    let spawn_registry = registry.clone();
+    let handler: wcode_protocol::DefineHandler = Arc::new(move |args| {
+        let name = args.name.unwrap_or_else(|| "w1".into());
+        let id = SessionId::agent(name);
+        spawn_registry.register(id.clone(), SessionActor::spawn(agent(vec![])));
+        Ok(id)
+    });
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.subscribe(),
+        (root_id.clone(), root),
+        Some(handler),
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut roster = client.subscribe_roster();
+    // Round-trip first, so the connection's snapshot is root-only: the new id
+    // must arrive through growth.
+    client.ask(Request::ListSessions).await.unwrap();
+
+    let reply = client
+        .ask(Request::Define {
+            name: Some("w1".into()),
+            model: Some("m".into()),
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+        })
+        .await
+        .unwrap();
+    let AgentEvent::Spawned { worker: id } = reply else {
+        panic!("expected a Spawned reply, got {reply:?}");
+    };
+    assert_eq!(id, SessionId::agent("w1"));
+
+    // The defined worker is served: it appears in the pushed roster.
+    let ids = loop {
+        let ids = roster.borrow_and_update().clone();
+        if ids.contains(&id) {
+            break ids;
+        }
+        tokio::time::timeout(Duration::from_secs(5), roster.changed())
+            .await
+            .expect("a roster change")
+            .expect("open");
+    };
+    assert_eq!(ids, vec![root_id.clone(), id.clone()]);
+}
+
+/// R1: `Define` with no handler installed is a correlated error, not a silent
+/// drop — an older or non-orchestrator server must say so.
+#[tokio::test]
+async fn define_without_a_handler_is_a_correlated_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        tokio::sync::watch::channel(Vec::new()).1,
+        (SessionId::new("root"), root),
+        None,
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let reply = client
+        .ask(Request::Define {
+            name: Some("w1".into()),
+            model: None,
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+        })
+        .await
+        .unwrap();
+    match reply {
+        AgentEvent::Error { message } => assert!(message.contains("not enabled"), "{message}"),
+        other => panic!("expected an Error reply, got {other:?}"),
+    }
 }

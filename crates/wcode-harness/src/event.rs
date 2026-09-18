@@ -116,6 +116,16 @@ pub enum AgentEvent {
     Sessions {
         ids: Vec<crate::protocol::SessionId>,
     },
+    /// Reply: a peer defined a worker and returns its address, answering a
+    /// [`crate::protocol::Request::Define`]. Never streamed (see
+    /// [`AgentEvent::Ack`]).
+    ///
+    /// The field is `worker`, not `id`: the envelope already carries a top-level
+    /// `id` (the request it replies to), and a flattened duplicate key would not
+    /// deserialize.
+    Spawned {
+        worker: crate::protocol::SessionId,
+    },
     AgentEnd,
 }
 
@@ -246,6 +256,12 @@ mod tests {
                 ],
             },
             "sessions",
+        );
+        roundtrip(
+            AgentEvent::Spawned {
+                worker: crate::protocol::SessionId::agent("w1"),
+            },
+            "spawned",
         );
     }
 

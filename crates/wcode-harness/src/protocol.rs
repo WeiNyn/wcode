@@ -176,6 +176,28 @@ pub enum Request {
     /// [`AgentEvent::Sessions`].
     ListSessions,
 
+    /// Define a worker **on a served peer** (§8, S4). Like [`Request::ListSessions`]
+    /// it names no `Agent` method: a socket server intercepts it and asks an
+    /// injected handler to build a session, replying [`AgentEvent::Spawned`] with
+    /// its address (or a correlated [`AgentEvent::Error`]). Mirrors the CLI's
+    /// worker spec, so a peer can customize the worker's model, role, tool set,
+    /// and provider. An in-process session has no factory, so the actor answers
+    /// it with [`AgentEvent::Error`].
+    Define {
+        /// The worker's address; auto-assigned (`w1`, `w2`, …) when absent.
+        name: Option<String>,
+        /// Model id override; `None` inherits the server's model.
+        model: Option<String>,
+        /// Role text appended to the worker's system prompt.
+        role: Option<String>,
+        /// Tool allow-list; `None` = the full default set.
+        tools: Option<Vec<String>>,
+        /// Provider base URL override; `None` inherits the server's.
+        base_url: Option<String>,
+        /// Provider API key override; `None` inherits the server's.
+        api_key: Option<String>,
+    },
+
     /// Forward-compatibility catch-all: an older peer must skip a request it
     /// does not understand rather than fail the connection.
     #[serde(other)]
@@ -268,6 +290,28 @@ mod tests {
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
         roundtrip(Request::ListSessions, "list_sessions");
+        roundtrip(
+            Request::Define {
+                name: Some("w1".into()),
+                model: Some("m".into()),
+                role: Some("reviewer".into()),
+                tools: Some(vec!["read".into()]),
+                base_url: Some("http://w/v1".into()),
+                api_key: Some("k".into()),
+            },
+            "define",
+        );
+        roundtrip(
+            Request::Define {
+                name: None,
+                model: None,
+                role: None,
+                tools: None,
+                base_url: None,
+                api_key: None,
+            },
+            "define",
+        );
     }
 
     #[test]
@@ -293,6 +337,14 @@ mod tests {
         assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::Cancel));
         assert!(!is_inbound(&Request::ListSessions));
+        assert!(!is_inbound(&Request::Define {
+            name: None,
+            model: None,
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+        }));
     }
 
     #[test]

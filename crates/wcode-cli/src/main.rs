@@ -762,7 +762,7 @@ async fn main() {
             println!("serving session on {}", path.display());
             println!("serving {} session(s): {}", ids.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
-            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), &path).await {
+            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), None, &path).await {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
             }

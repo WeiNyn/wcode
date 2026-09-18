@@ -38,6 +38,6 @@ mod socket;
 #[cfg(unix)]
 pub use client::Client;
 #[cfg(unix)]
-pub use server::{Root, Roster, serve, serve_at};
+pub use server::{DefineArgs, DefineHandler, Root, Roster, serve, serve_at};
 #[cfg(unix)]
 pub use socket::{bind, connect};

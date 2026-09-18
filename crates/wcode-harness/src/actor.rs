@@ -394,6 +394,11 @@ async fn dispatch(
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },
+        // A served peer is defined by a socket server's injected handler; an
+        // in-process session has no factory, so it can only refuse.
+        Request::Define { .. } => AgentEvent::Error {
+            message: "agent definition is served, not in-process".into(),
+        },
         Request::ListSessions | Request::Unknown => AgentEvent::Ack,
     };
 
@@ -804,6 +809,27 @@ mod tests {
         handle.send(Request::Submit { text: "go".into() }).unwrap();
         wait_for_end(&mut rx).await;
         assert_eq!(rec.models(), ["m2"], "the swap applied to the next run");
+    }
+
+    #[tokio::test]
+    async fn define_on_a_local_session_is_an_error() {
+        let rec = Recorder::default();
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let reply = handle
+            .ask(Request::Define {
+                name: Some("w1".into()),
+                model: None,
+                role: None,
+                tools: None,
+                base_url: None,
+                api_key: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(&reply, AgentEvent::Error { message } if message.contains("served")),
+            "{reply:?}"
+        );
     }
 
     #[tokio::test]
