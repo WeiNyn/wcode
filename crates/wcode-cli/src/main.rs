@@ -448,6 +448,8 @@ async fn main() {
                     &[],
                     None,
                     None,
+                    args.owner.as_deref(),
+                    args.name.as_deref(),
                     None,
                 )
                 .await;
@@ -752,7 +754,7 @@ async fn main() {
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
                         // with `--resume <path>` (the terminal is already restored).
-                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents, args.config.as_deref()));
+                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents, args.config.as_deref(), args.owner.as_deref(), args.name.as_deref()));
                         std::process::exit(1); // only reached if the exec failed
                     }
                     Err(e) => {
@@ -772,6 +774,8 @@ async fn main() {
                 root_team,
                 root_guidelines,
                 args.config.as_deref(),
+                args.owner.as_deref(),
+                args.name.as_deref(),
                 orchestrator,
             )
             .await
