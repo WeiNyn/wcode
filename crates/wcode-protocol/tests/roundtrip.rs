@@ -809,3 +809,68 @@ async fn define_without_a_handler_is_a_correlated_error() {
         other => panic!("expected an Error reply, got {other:?}"),
     }
 }
+
+/// Item 11: a fire-and-forget `send` followed by `flush` guarantees the queued
+/// frame is written — the server observes it — and, when the peer is connected,
+/// `flush` returns promptly rather than waiting out its timeout.
+#[tokio::test]
+async fn a_flush_guarantees_prior_frames_are_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+    let handle = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        tokio::sync::watch::channel(Vec::new()).1,
+        (SessionId::new("test"), handle),
+        None,
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+
+    // Fire-and-forget, then the barrier: the Notify is written before `flush`
+    // returns, so the server has observed it.
+    client
+        .send(Request::Notify {
+            content: "hi".into(),
+        })
+        .unwrap();
+    let start = std::time::Instant::now();
+    client.flush(Duration::from_secs(2)).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "flush returned promptly when connected: {elapsed:?}"
+    );
+
+    // The server observed it: the Notify is surfaced on the stream (after the
+    // connect-time roster seed).
+    let (_, content) = next_message(&mut events).await;
+    assert_eq!(content, "hi");
+}
+
+/// Item 11: `flush` against a peer that is not listening returns within the
+/// timeout — it must never hang a one-shot exit. It *waits* because the barrier
+/// is queued behind a supervisor stuck reconnecting, which also proves the
+/// barrier is actually enqueued and awaited (a no-op flush would return at once).
+#[tokio::test]
+async fn flush_is_bounded_when_the_peer_is_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("nobody.sock");
+    // Lazy: never fails; the supervisor keeps retrying the dead path and never
+    // reaches the queued barrier.
+    let client = Client::lazy(&sock);
+    let timeout = Duration::from_millis(300);
+    let start = std::time::Instant::now();
+    client.flush(timeout).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= timeout / 2,
+        "flush waited for the barrier: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "flush gave up within the timeout rather than hanging: {elapsed:?}"
+    );
+}

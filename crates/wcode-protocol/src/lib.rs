@@ -36,7 +36,7 @@ mod server;
 mod socket;
 
 #[cfg(unix)]
-pub use client::Client;
+pub use client::{Client, FLUSH_TIMEOUT, flush_all};
 #[cfg(unix)]
 pub use server::{DefineArgs, DefineHandler, Root, Roster, serve, serve_at};
 #[cfg(unix)]

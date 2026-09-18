@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use tokio::io::BufReader;
@@ -43,6 +43,56 @@ const RECONNECT_CAP: Duration = Duration::from_secs(5);
 /// knowing the served id.
 const DEFAULT_SESSION: &str = "remote";
 
+/// Default bound for [`Client::flush`] and [`flush_all`]: long enough to drain a
+/// healthy socket, short enough that an unreachable or reconnecting peer never
+/// stalls a one-shot exit.
+pub const FLUSH_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// One item on a connection's outbound queue: a request to write, or a **flush
+/// barrier** that completes once every earlier frame has been written. The
+/// barrier is client-local — it is never sent to the server.
+// A `Frame` is much larger than a barrier, but boxing every request would add an
+// allocation to the fire-and-forget hot path; the variant skew is harmless here.
+#[allow(clippy::large_enum_variant)]
+enum Out {
+    Frame(Frame<Request>),
+    Flush(oneshot::Sender<()>),
+}
+
+/// Every live connection this process holds, as weak handles so a dropped
+/// [`Client`] is pruned. Populated in [`Client::adopt`]; drained by [`flush_all`].
+static CONNECTIONS: OnceLock<Mutex<Vec<Weak<Inner>>>> = OnceLock::new();
+
+fn connections() -> &'static Mutex<Vec<Weak<Inner>>> {
+    CONNECTIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register(inner: &Arc<Inner>) {
+    let mut list = connections().lock().unwrap();
+    list.retain(|handle| handle.strong_count() > 0);
+    list.push(Arc::downgrade(inner));
+}
+
+/// Best-effort flush of **every** live connection this process holds, so queued
+/// fire-and-forget frames are written before a one-shot exit drops the runtime.
+/// Each connection is bounded by `timeout` and they run concurrently, so the
+/// call returns within ~`timeout` even if some peers are unreachable. The hot
+/// path ([`Client::send`]/[`Client::send_from`]) stays fire-and-forget.
+pub async fn flush_all(timeout: Duration) {
+    let inners: Vec<Arc<Inner>> = {
+        let mut list = connections().lock().unwrap();
+        list.retain(|handle| handle.strong_count() > 0);
+        list.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut handles = Vec::with_capacity(inners.len());
+    for inner in inners {
+        handles.push(tokio::spawn(async move { inner.flush(timeout).await }));
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
 /// A connection to a remote session, reconnecting automatically if it drops.
 ///
 /// A clone is a **view**: it shares the connection and request queue but may
@@ -50,8 +100,6 @@ const DEFAULT_SESSION: &str = "remote";
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
-    /// Requests, drained by the supervisor across reconnects.
-    out: mpsc::UnboundedSender<Frame<Request>>,
     /// The session this view addresses; `None` is the connection-wide view.
     session: Option<SessionId>,
 }
@@ -72,6 +120,10 @@ struct Inner {
     /// Reply waiters, keyed by request id.
     pending: Mutex<HashMap<u64, oneshot::Sender<AgentEvent>>>,
     next_id: AtomicU64,
+    /// Requests (and flush barriers) queued for the supervisor, drained across
+    /// reconnects. On `Inner` — shared by every view — so [`flush_all`] reaches a
+    /// connection through its weak handle.
+    out: mpsc::UnboundedSender<Out>,
 }
 
 impl Client {
@@ -93,7 +145,7 @@ impl Client {
     }
 
     fn adopt(path: PathBuf, stream: Option<UnixStream>) -> Client {
-        let (out, out_rx) = mpsc::unbounded_channel();
+        let (out, out_rx) = mpsc::unbounded_channel::<Out>();
         let inner = Arc::new(Inner {
             path,
             events: Mutex::new(HashMap::new()),
@@ -101,11 +153,12 @@ impl Client {
             roster: watch::channel(Vec::new()).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            out,
         });
+        register(&inner);
         tokio::spawn(supervise(inner.clone(), out_rx, stream));
         Client {
             inner,
-            out,
             session: None,
         }
     }
@@ -123,7 +176,6 @@ impl Client {
     pub fn with_session(&self, session: SessionId) -> Client {
         Client {
             inner: self.inner.clone(),
-            out: self.out.clone(),
             session: Some(session),
         }
     }
@@ -133,7 +185,10 @@ impl Client {
     /// once every clone has dropped and the supervisor has ended.
     pub fn send(&self, request: Request) -> Result<(), Closed> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.out.send(self.frame(id, None, request)).map_err(|_| Closed)
+        self.inner
+            .out
+            .send(Out::Frame(self.frame(id, None, request)))
+            .map_err(|_| Closed)
     }
 
     /// Fire-and-forget, attributing the request to a remote `from` address
@@ -141,8 +196,9 @@ impl Client {
     /// sender tag, exactly as an in-process `send_from` does.
     pub fn send_from(&self, from: SessionId, request: Request) -> Result<(), Closed> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        self.out
-            .send(self.frame(id, Some(from), request))
+        self.inner
+            .out
+            .send(Out::Frame(self.frame(id, Some(from), request)))
             .map_err(|_| Closed)
     }
 
@@ -152,7 +208,12 @@ impl Client {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
-        if self.out.send(self.frame(id, None, request)).is_err() {
+        if self
+            .inner
+            .out
+            .send(Out::Frame(self.frame(id, None, request)))
+            .is_err()
+        {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err(Closed);
         }
@@ -178,6 +239,15 @@ impl Client {
     /// shares it, so an unnarrowed and a `with_session` view see the same ids.
     pub fn subscribe_roster(&self) -> watch::Receiver<Vec<SessionId>> {
         self.inner.roster.subscribe()
+    }
+
+    /// Best-effort barrier: resolves once every frame queued **before** this call
+    /// has been written to the socket — the queue is FIFO and the supervisor
+    /// writes in order — or after `timeout` if the peer is unreachable or
+    /// reconnecting, so a one-shot exit flushes its fire-and-forget deliveries
+    /// without hanging. [`flush_all`] flushes every connection at once.
+    pub async fn flush(&self, timeout: Duration) {
+        self.inner.flush(timeout).await;
     }
 
     fn frame(&self, id: u64, sender: Option<SessionId>, body: Request) -> Frame<Request> {
@@ -212,13 +282,23 @@ impl Inner {
                 .clone(),
         }
     }
+
+    /// Enqueue a flush barrier and await it, bounded by `timeout`. Best-effort: a
+    /// timeout or a closed queue simply returns.
+    async fn flush(&self, timeout: Duration) {
+        let (tx, rx) = oneshot::channel();
+        if self.out.send(Out::Flush(tx)).is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, rx).await;
+    }
 }
 
 /// Own the connection: write queued requests and read events, reconnecting on
 /// drop until every [`Client`] clone is gone.
 async fn supervise(
     inner: Arc<Inner>,
-    mut out: mpsc::UnboundedReceiver<Frame<Request>>,
+    mut out: mpsc::UnboundedReceiver<Out>,
     mut next: Option<UnixStream>,
 ) {
     let mut backoff = RECONNECT_BASE;
@@ -240,11 +320,16 @@ async fn supervise(
         let mut read = BufReader::new(read);
         loop {
             tokio::select! {
-                request = out.recv() => match request {
-                    Some(frame) => {
+                item = out.recv() => match item {
+                    Some(Out::Frame(frame)) => {
                         if write_frame(&mut write, &frame).await.is_err() {
                             break;
                         }
+                    }
+                    // FIFO: reaching a barrier means every earlier frame was
+                    // written, so completing it is a real flush.
+                    Some(Out::Flush(done)) => {
+                        let _ = done.send(());
                     }
                     // Every clone dropped: nothing left to serve.
                     None => return,
@@ -298,6 +383,7 @@ mod tests {
             roster: watch::channel(Vec::new()).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            out: mpsc::unbounded_channel().0,
         }
     }
 

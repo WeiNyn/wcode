@@ -16,7 +16,7 @@ the boxes as each task completes and keep the status table current.
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d (+ multiplexed multi-surface); S4 (A2A) complete — S4-1…S4-5 landed; socket multiplexing + live roster, per-agent provider, and remote agent definition (R1/R2) landed |
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
-| 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☐ todo |
+| 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -403,15 +403,23 @@ tool, `crates/wcode-cli/src/tools/message.rs`) and R2's remote `spawn { to }`
 (its `Wake`, `crates/wcode-cli/src/tools/spawn.rs`) can be lost. The interactive
 REPL is unaffected. `Define` itself is safe — it uses `ask`, which round-trips.
 
-**Fix direction.** Make `deliver` awaitable, or drain the client's outbound queue
-before `process::exit` — a `wcode-protocol`/`main` change that benefits `message`
-too.
+**Fixed.** `Client` gained a flush **barrier**: the outbound queue now carries an
+`Out` enum (`Frame` | `Flush(oneshot::Sender<()>)`), and the supervisor completes
+the oneshot the moment it reaches it — the queue is FIFO and frames are written in
+order, so every earlier frame is already written. `Client::flush(timeout)` enqueues
+the barrier and awaits it, **bounded** (a dead or reconnecting peer simply times
+out). `wcode_protocol::flush_all(timeout)` flushes **every** live connection the
+process holds (weak handles registered in `Client::adopt`, pruned as clients drop)
+concurrently, and both one-shot `-p` exit sites (`crates/wcode-cli/src/main.rs`)
+call it before `std::process::exit`. The hot path stays fire-and-forget.
 
 **Tasks**
-- [ ] Flush (or await) the client's outbound queue before `main` exits `-p`.
+- [x] Flush the client's outbound queue before `main` exits `-p` (barrier +
+      `flush_all`), bounded so an unreachable peer never hangs the exit.
 
 **Open questions.** None — the reviewer classified this as a pre-existing
-transport property, not an R2 regression.
+transport property, not an R2 regression. Nothing is left open: the barrier is
+best-effort by design, and the REPL/TUI never `process::exit` mid-flight.
 
 ---
 

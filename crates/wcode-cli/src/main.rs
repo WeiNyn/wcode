@@ -404,7 +404,11 @@ async fn main() {
                     Some(root) => Backend::from(client.with_session(root.clone())),
                     None => Backend::from(client),
                 };
-                std::process::exit(one_shot(backend, &prompt).await)
+                let code = one_shot(backend, &prompt).await;
+                // Write any queued fire-and-forget frames (a `message`/`spawn`
+                // sent during the turn) before the runtime is dropped.
+                wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+                std::process::exit(code)
             }
             None => {
                 if choose_tui(&args, is_tty()) {
@@ -800,7 +804,13 @@ async fn main() {
             if let Some(o) = &orchestrator {
                 o.register_root(handle.clone());
             }
-            std::process::exit(one_shot(Backend::from(handle), &prompt).await)
+            let code = one_shot(Backend::from(handle), &prompt).await;
+            // Flush queued fire-and-forget deliveries to any `--peer`/`[peers]`
+            // remotes (a `message`/`spawn { to }` sent during the turn) before
+            // the runtime is dropped.
+            #[cfg(unix)]
+            wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+            std::process::exit(code)
         }
         None => {
             if choose_tui(&args, is_tty()) {
