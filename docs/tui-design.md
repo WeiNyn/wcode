@@ -41,6 +41,8 @@ TUI reads as the same product, given a full screen.
 | tool error | `✗ name · note` | red |
 | compaction / retry | `⋯` | dim |
 | live cursor | `▌` | accent, steady |
+| selection bar (browse) | `▌` | accent |
+| mode indicator (browse) | `▤ browse` | accent |
 | spinner (running) | `⠋⠙⠹⠸…` | accent |
 | status separators | `·` | dim |
 | inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
@@ -152,7 +154,14 @@ replayed prefix.
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
 continuation lines align under the text, as in draft B's `···` block). The
-gutter is also the natural home for a `▌` selection bar (P3, copy).
+gutter is also the natural home for a `▌` selection bar.
+
+**Browse mode** — `Ctrl-G` moves a `▌` selection over the committed transcript.
+The bar occupies the gutter's first column (the 1-col margin), *replacing* the
+blank there so no glyph shifts; a `▤ browse` token rides the status band just
+before `state`. Movement is `j`/`k`, `g`/`G`, `PgUp`/`PgDn`; `Esc`/`q`/`Ctrl-G`
+leave. The live block is never a target (it is transient). Phase 1 selects and
+reveals only; expand / copy / `$PAGER` actions are later phases.
 
 **Input** — `❯ ` prefix on the first row, block cursor `▌`. Wraps and grows with
 its content (Shift-Enter or Ctrl-J inserts a newline); the band grows to ~8 rows
@@ -186,7 +195,10 @@ reply (OSC-52) · `Ctrl-O` expands/collapses the last tool's output (a collapsed
 shows a 4-line preview, a failed tool always shows its error) · `Ctrl-T` does all of them ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface, `Alt-1..9` jumps to the Nth · `Ctrl-B`
 toggles the team sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
-same `KEYS` table is printed by `/help`). `/changes` lists
+same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
+(a `▌` selection over the committed blocks — `j`/`k` next/prev, `g`/`G` first/last,
+`PgUp`/`PgDn` by a page, the wheel scrolls the view), where `Esc`/`q`/`Ctrl-G`
+leave: in browse `Esc` leaves the mode and does **not** cancel or quit. `/changes` lists
 the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same

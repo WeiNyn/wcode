@@ -13,7 +13,7 @@ use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{App, Block, InputView, KEYS, Overlay, Picker, Tool};
+use crate::app::{App, Block, InputView, KEYS, Mode, Overlay, Picker, Tool};
 use crate::markdown;
 use crate::theme;
 
@@ -260,13 +260,22 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width as usize;
     let mut lines: Vec<Line> = Vec::new();
+    // Record each committed block's line range so the selection bar can be drawn
+    // in a second pass. A range starts *after* the separator, so it never spans
+    // the blank line above the block.
+    let mut ranges: Vec<Range<usize>> = Vec::new();
     for (i, block) in app.transcript().iter().enumerate() {
         if i > 0 {
             lines.push(Line::default());
         }
-        lines.extend(block_lines(block, width));
+        let start = lines.len();
+        let block_lines = block_lines(block, width);
+        let len = block_lines.len();
+        lines.extend(block_lines);
+        ranges.push(start..start + len);
     }
-    // The in-flight message trails the committed transcript.
+    // The in-flight message trails the committed transcript (it is transient, so
+    // it is never a selection target).
     if let Some(message) = app.live() {
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -275,15 +284,54 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             lines.extend(content_lines(content, width, true));
         }
     }
-    // Follow the tail unless the user has scrolled up; the renderer measures
-    // the transcript and reconciles the scroll window.
     let height = area.height as usize;
     let total = lines.len();
+    let grew = total != app.total_lines();
+    app.set_block_ranges(ranges);
+    // Follow the tail unless the user has scrolled up; the renderer measures
+    // the transcript and reconciles the scroll window.
     app.sync_scroll(total, height, area.width as usize);
+    // While browsing, re-anchor the view across transcript growth so a run that
+    // appends blocks never yanks the view to the tail; a deliberate wheel scroll
+    // is left alone (this fires only when the content changed).
+    if app.mode() == Mode::Browse && app.selected().is_some() && grew {
+        app.reveal_selected();
+    }
     let end = total.saturating_sub(app.scroll());
     let start = end.saturating_sub(height);
-    let window: Vec<Line> = lines.drain(start..end).collect();
+    let mut window: Vec<Line> = lines.drain(start..end).collect();
+    // Second pass: replace column 0 of the selected block's visible rows with the
+    // bar. Replacing (not prepending) keeps every glyph in its column.
+    if let Some(range) = app.selected_range() {
+        for (r, line) in window.iter_mut().enumerate() {
+            if range.contains(&(start + r)) {
+                paint_bar(line);
+            }
+        }
+    }
     frame.render_widget(Paragraph::new(window), area);
+}
+
+/// Overwrite column 0 of a transcript row with the selection bar, keeping the
+/// rest of the row's text and its styles (split, so the bar does not recolor
+/// the gutter marker that follows).
+fn paint_bar(line: &mut Line<'static>) {
+    let (rest, style) = {
+        let Some(first) = line.spans.first_mut() else {
+            line.spans.push(Span::styled("▌", accent()));
+            return;
+        };
+        let mut chars = first.content.chars();
+        chars.next();
+        let rest: String = chars.collect();
+        let style = first.style;
+        first.content = "▌".into();
+        first.style = accent();
+        (rest, style)
+    };
+    if !rest.is_empty() {
+        line.spans.insert(1, Span::styled(rest, style));
+    }
 }
 
 fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
@@ -784,6 +832,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         if show_session && let Some(session) = &status.session {
             spans.push(sep());
             spans.push(Span::styled(format!("session {}", short_id(session)), dim()));
+        }
+        if app.mode() == Mode::Browse {
+            spans.push(sep());
+            spans.push(Span::styled("▤ browse", accent()));
         }
         spans.push(sep());
         spans.push(Span::styled(state, dim()));
@@ -1864,5 +1916,110 @@ mod tests {
         assert!(!text.contains("more lines"), "all tools show their whole output:\n{text}");
         assert!(text.contains("line-20"), "the last line should show:\n{text}");
     }
+
+    // --- transcript browse mode ---------------------------------------------
+
+    /// An assistant message with a single text block.
+    fn reply(text: &str) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            stop_reason: wcode_harness::message::StopReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    /// The transcript rows that begin with the selection bar.
+    fn barred(text: &str) -> Vec<&str> {
+        text.lines().filter(|l| l.starts_with('▌')).collect()
+    }
+
+    #[test]
+    fn input_mode_renders_no_browse_affordance() {
+        let mut app = App::new();
+        app.seed_history(
+            &root(),
+            &[AgentMessage::user_text("hello world"), reply("a reply")],
+        );
+        let first = buffer_text(&render(&mut app, 60, 16));
+        let second = buffer_text(&render(&mut app, 60, 16));
+        assert_eq!(first, second, "rendering is not stable");
+        // With the mode off the frame carries no bar and no mode token.
+        assert!(!first.contains("▤ browse"), "the mode token leaked:\n{first}");
+        assert!(
+            barred(&first).is_empty(),
+            "the selection bar leaked in input mode:\n{first}"
+        );
+    }
+
+    #[test]
+    fn the_bar_lands_on_the_selected_block_only() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("alpha\nbeta\ngamma")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // select the last block
+        assert_eq!(app.selected(), Some(1));
+
+        let text = buffer_text(&render(&mut app, 40, 20));
+        let bars = barred(&text);
+        assert_eq!(bars.len(), 3, "one bar per block row:\n{text}");
+        for (row, word) in bars.iter().zip(["alpha", "beta", "gamma"]) {
+            assert!(row.contains(word), "row {row:?} is not {word}:\n{text}");
+        }
+        // The divider row above (index 0) is not barred.
+        assert!(
+            !text.lines().next().unwrap().starts_with('▌'),
+            "the divider row is barred:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_resize_re_measures_the_selected_range() {
+        let mut app = App::new();
+        app.seed_history(
+            &root(),
+            &[AgentMessage::user_text("aaaa bbbb cccc dddd eeee ffff gggg")],
+        );
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        let wide = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(barred(&wide).len(), 1, "one row at 60 cols:\n{wide}");
+        // A narrower width re-wraps: the ranges are re-measured, not stale.
+        let narrow = buffer_text(&render(&mut app, 20, 20));
+        assert_eq!(barred(&narrow).len(), 3, "re-wrapped at 20 cols:\n{narrow}");
+        assert_eq!(app.selected(), Some(1), "the same block stays selected");
+    }
+
+    #[test]
+    fn streaming_below_the_cursor_does_not_yank_or_move_the_selection() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("KEEP")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(1));
+        let _ = render(&mut app, 40, 10); // measure ranges + viewport first
+
+        // A run appends blocks below the selection.
+        for i in 0..20 {
+            app.handle(AppEvent::Agent(
+                root(),
+                wcode_harness::event::AgentEvent::MessageEnd {
+                    message: reply(&format!("tail line {i}")),
+                },
+            ));
+        }
+
+        let text = buffer_text(&render(&mut app, 40, 10));
+        assert_eq!(app.selected(), Some(1), "the selection names the same block");
+        assert!(
+            text.contains("KEEP"),
+            "the selected block must stay in view:\n{text}"
+        );
+        assert!(
+            !text.contains("tail line 19"),
+            "the view must not be yanked to the tail:\n{text}"
+        );
+        assert!(app.scroll() > 0, "the view is anchored, not at the tail");
+    }
 }
+
 

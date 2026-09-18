@@ -18,7 +18,7 @@ the boxes as each task completes and keep the status table current.
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
-| 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ◐ phase 1 |
+| 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ☑ phase 1 |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

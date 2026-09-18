@@ -1,6 +1,6 @@
 # wcode TUI — transcript browse mode (plan)
 
-Status: **planned — phase 1 (skeleton) landing.** Companion to
+Status: **☑ phase 1 (skeleton) landed.** Companion to
 [`tui-plan.md`](tui-plan.md) (the project), [`tui-design.md`](tui-design.md) (the
 visual spec) and [`tui-polish-plan.md`](tui-polish-plan.md) (the pass this
 extends). `wcode-tui` only; the kernel and the protocol are untouched.
@@ -80,7 +80,7 @@ wrapping are untouched: the bar injects no rows and the ranges add no lines.
 
 | phase | scope | status |
 |-------|-------|--------|
-| 1 | skeleton: mode, per-surface selection, second-pass bar, ranges feedback, scroll-to-reveal, mode indicator | ◐ landing |
+| 1 | skeleton: mode, per-surface selection, second-pass bar, ranges feedback, scroll-to-reveal, mode indicator | ☑ done |
 | 2 | actions on the selection: `Enter` expand/collapse a tool, `y` copy a block | ☐ todo |
 | 3 | navigation polish: `Home` / `End`, block-wise `{` / `}`, search | ☐ todo |
 | 4 | unlocks: a `$PAGER` viewer, structured jumps (to the last error, …) | ☐ todo |
@@ -101,6 +101,6 @@ own design, not this pass.
 | # | commit | status |
 |---|--------|--------|
 | 1 | plan + tracker | ☑ done |
-| 2 | browse-mode skeleton | ☐ todo |
+| 2 | browse-mode skeleton | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

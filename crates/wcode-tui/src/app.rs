@@ -388,6 +388,8 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
     ("Alt-1..9", "focus the Nth surface"),
     ("Ctrl-B", "toggle the team sidebar"),
+    ("Ctrl-G", "browse the transcript (Esc / q to leave)"),
+    ("j / k · g / G", "browse: next / previous · first / last"),
     ("F1", "toggle this help"),
     ("Ctrl-Y", "copy the last reply"),
     ("Esc / Ctrl-C", "cancel a run; quit when idle"),
@@ -637,6 +639,13 @@ pub struct Surface {
     history_index: Option<usize>,
     /// The in-progress line, saved while browsing history.
     draft: String,
+    /// The selected committed block while browsing. Indexes `transcript` only —
+    /// never the live block, which is transient. Clamped/reset when the
+    /// transcript changes.
+    selected: Option<usize>,
+    /// Each committed block's line range from the last drawn frame — the
+    /// renderer's feedback for drawing the selection bar.
+    ranges: Vec<Range<usize>>,
 }
 
 impl Surface {
@@ -670,6 +679,8 @@ impl Surface {
             history: Vec::new(),
             history_index: None,
             draft: String::new(),
+            selected: None,
+            ranges: Vec::new(),
         }
     }
 
@@ -1041,6 +1052,14 @@ fn default_root() -> Surface {
     })
 }
 
+/// The app's top-level input mode. `Input` is the composer (the default);
+/// `Browse` moves a selection over the committed transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Input,
+    Browse,
+}
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 pub struct App {
     /// One entry per conversation surface. Index 0 is the root; the rest are
@@ -1073,6 +1092,8 @@ pub struct App {
     /// Hide the team sidebar even when there is a team and the terminal is wide
     /// enough (`Ctrl-B`).
     hide_sidebar: bool,
+    /// The active input mode (composer vs transcript browse).
+    mode: Mode,
 }
 
 impl Default for App {
@@ -1101,6 +1122,7 @@ impl App {
             should_quit: false,
             actions: Vec::new(),
             hide_sidebar: false,
+            mode: Mode::Input,
         }
     }
 
@@ -1315,6 +1337,146 @@ impl App {
             .collect()
     }
 
+    /// The active input mode (composer vs transcript browse).
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The focused surface's selected committed-block index, if any.
+    pub fn selected(&self) -> Option<usize> {
+        self.focused().selected
+    }
+
+    /// The selected block's line range from the last measured frame.
+    pub(crate) fn selected_range(&self) -> Option<Range<usize>> {
+        let surface = self.focused();
+        surface.selected.and_then(|i| surface.ranges.get(i).cloned())
+    }
+
+    /// The transcript row count the renderer measured on the previous frame.
+    pub(crate) fn total_lines(&self) -> usize {
+        self.focused().last_total
+    }
+
+    /// Record each committed block's line range from the frame just built — the
+    /// renderer's feedback channel for the selection bar. Clamps a stale
+    /// selection to the last block (or clears it when the transcript is empty).
+    pub fn set_block_ranges(&mut self, ranges: Vec<Range<usize>>) {
+        let len = ranges.len();
+        let surface = self.focused_mut();
+        surface.ranges = ranges;
+        if let Some(i) = surface.selected {
+            if len == 0 {
+                surface.selected = None;
+            } else if i >= len {
+                surface.selected = Some(len - 1);
+            }
+        }
+    }
+
+    /// Enter transcript browse (`Ctrl-G`): select the last committed block. The
+    /// composer draft and cursor are untouched; the completion popup is closed
+    /// so browse owns the arrows.
+    fn enter_browse(&mut self) {
+        let last = self.focused().transcript.len().checked_sub(1);
+        self.mode = Mode::Browse;
+        self.completion = None;
+        self.focused_mut().selected = last;
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
+    /// Leave browse (`Esc` / `q` / `Ctrl-G`).
+    fn exit_browse(&mut self) {
+        self.mode = Mode::Input;
+        self.focused_mut().selected = None;
+        self.dirty = true;
+    }
+
+    /// Handle a key while browsing. Browse owns every key, so `Esc` leaves it and
+    /// never reaches `interrupt()`.
+    fn on_browse_key(&mut self, key: Key) {
+        match key {
+            Key::Esc | Key::Ctrl('g') | Key::Char('q') => self.exit_browse(),
+            Key::Char('j') | Key::Down => self.select_by(1),
+            Key::Char('k') | Key::Up => self.select_by(-1),
+            Key::Char('g') => self.select_first(),
+            Key::Char('G') => self.select_last(),
+            Key::PageDown => self.select_by(self.page() as isize),
+            Key::PageUp => self.select_by(-(self.page() as isize)),
+            // The wheel scrolls the view without moving the selection.
+            Key::ScrollUp => self.scroll_up(WHEEL_LINES),
+            Key::ScrollDown => self.scroll_down(WHEEL_LINES),
+            _ => {}
+        }
+    }
+
+    /// Move the selection by `delta` blocks, clamped to the transcript; then
+    /// bring it into view.
+    fn select_by(&mut self, delta: isize) {
+        let len = self.focused().transcript.len();
+        if len == 0 {
+            self.focused_mut().selected = None;
+            return;
+        }
+        let next = match self.focused().selected {
+            None => 0, // nothing selected yet: start at the first block
+            Some(i) => (i as isize + delta).clamp(0, len as isize - 1) as usize,
+        };
+        self.focused_mut().selected = Some(next);
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
+    /// Select the first committed block.
+    fn select_first(&mut self) {
+        if !self.focused().transcript.is_empty() {
+            self.focused_mut().selected = Some(0);
+            self.reveal_selected();
+            self.dirty = true;
+        }
+    }
+
+    /// Select the last committed block.
+    fn select_last(&mut self) {
+        let len = self.focused().transcript.len();
+        if len > 0 {
+            self.focused_mut().selected = Some(len - 1);
+            self.reveal_selected();
+            self.dirty = true;
+        }
+    }
+
+    /// Adjust `scroll` so the selected block is visible, biased to its top (a
+    /// block taller than the viewport shows its first line). A no-op before the
+    /// renderer has measured a frame, or when the block is already fully in view.
+    pub(crate) fn reveal_selected(&mut self) {
+        let surface = self.focused_mut();
+        let Some(idx) = surface.selected else {
+            return;
+        };
+        let Some(range) = surface.ranges.get(idx).cloned() else {
+            return;
+        };
+        let (height, total) = (surface.viewport, surface.last_total);
+        if height == 0 || total == 0 {
+            return;
+        }
+        let (b_start, b_end) = (range.start, range.end.min(total));
+        let top = total.saturating_sub(height).saturating_sub(surface.scroll);
+        let bottom = top.saturating_add(height).min(total);
+        let target = if b_end.saturating_sub(b_start) > height || b_start < top {
+            // A tall block, or its top is off-screen above: show its top.
+            total.saturating_sub(height).saturating_sub(b_start)
+        } else if b_end > bottom {
+            // Its bottom is below the window: scroll down to show it.
+            total.saturating_sub(b_end)
+        } else {
+            return;
+        };
+        surface.scroll = target.min(surface.max_scroll);
+    }
+
     /// Apply one event. Pure state transition; sets [`App::dirty`] on a change.
     pub fn handle(&mut self, event: AppEvent) {
         match event {
@@ -1352,6 +1514,12 @@ impl App {
         // Enter with something left to complete); Char/Backspace fall through to
         // the buffer below.
         if self.completion.is_some() && self.on_completion_key(key) {
+            return;
+        }
+        // Browse owns the keyboard: `Esc`/`q`/`Ctrl-G` leave it, and no key
+        // reaches the composer — so `Esc` here never cancels or quits.
+        if self.mode == Mode::Browse {
+            self.on_browse_key(key);
             return;
         }
         match key {
@@ -1400,6 +1568,7 @@ impl App {
             Key::BackTab => self.focus_prev(),
             Key::Alt(c) => self.focus_digit(c),
             Key::F(1) => self.open_help(),
+            Key::Ctrl('g') => self.enter_browse(),
             // Tool detail: Ctrl-O the last tool, Ctrl-T all of them.
             Key::Ctrl('o') => self.toggle_last_tool(),
             Key::Ctrl('t') => self.toggle_all_tools(),
@@ -3550,5 +3719,125 @@ mod tests {
         assert_eq!(app.cursor(), 0);
         app.handle(AppEvent::Key(Key::Ctrl('e')));
         assert_eq!(app.cursor(), 3);
+    }
+
+    // --- transcript browse mode ---------------------------------------------
+
+    #[test]
+    fn ctrl_g_enters_browse_on_the_last_block_and_clamps_movement() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        // transcript: [Notice(divider), User, Assistant]
+        assert_eq!(app.mode(), Mode::Input);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+        assert_eq!(app.selected(), Some(2), "the last committed block");
+
+        app.handle(AppEvent::Key(Key::Char('j'))); // clamp at the end
+        assert_eq!(app.selected(), Some(2));
+        app.handle(AppEvent::Key(Key::Char('k')));
+        assert_eq!(app.selected(), Some(1));
+        app.handle(AppEvent::Key(Key::Char('g')));
+        assert_eq!(app.selected(), Some(0));
+        app.handle(AppEvent::Key(Key::Char('k'))); // clamp at the start
+        assert_eq!(app.selected(), Some(0));
+        app.handle(AppEvent::Key(Key::Char('G')));
+        assert_eq!(app.selected(), Some(2));
+    }
+
+    #[test]
+    fn esc_in_browse_exits_without_cancelling_or_quitting() {
+        let mut app = App::new();
+        submit(&mut app, "go"); // a run is in flight
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.mode(), Mode::Input, "Esc leaves browse");
+        assert!(!app.should_quit(), "Esc in browse must not quit");
+        assert!(app.take_actions().is_empty(), "Esc in browse must not cancel");
+        assert!(app.running(), "the run is untouched");
+
+        // In input mode Esc still cancels a run.
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.take_actions(), vec![Action::Cancel]);
+    }
+
+    #[test]
+    fn q_and_ctrl_g_also_leave_browse() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('q')));
+        assert_eq!(app.mode(), Mode::Input);
+
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Input);
+    }
+
+    #[test]
+    fn browsing_preserves_the_composer_draft_and_cursor() {
+        let mut app = App::new();
+        typed(&mut app, "draft");
+        app.handle(AppEvent::Key(Key::Left));
+        let (draft, cursor) = (app.input(), app.cursor());
+        assert_eq!(cursor, 4);
+
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        // Keys in browse never reach the composer.
+        app.handle(AppEvent::Key(Key::Char('j')));
+        app.handle(AppEvent::Key(Key::Char('x')));
+        assert_eq!(app.input(), draft, "the draft is untouched while browsing");
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.input(), draft);
+        assert_eq!(app.cursor(), cursor);
+    }
+
+    #[test]
+    fn a_front_inserted_seed_divider_does_not_strand_the_selection() {
+        let mut app = App::new();
+        // Browse an empty transcript: nothing to select yet.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), None);
+        // Seed replays a session; on an empty transcript the divider lands first.
+        app.seed_history(&root(), &[AgentMessage::user_text("q"), assistant("a")]);
+        assert!(matches!(app.transcript()[0], Block::Notice(_)), "divider first");
+        assert_eq!(app.transcript().len(), 3);
+        // The selection is still absent — never a stale index — and moving picks a
+        // real block.
+        assert_eq!(app.selected(), None);
+        app.handle(AppEvent::Key(Key::Char('j')));
+        assert_eq!(app.selected(), Some(0));
+    }
+
+    #[test]
+    fn seeding_an_existing_transcript_keeps_the_selection_on_the_same_block() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("live one"),
+            },
+        ));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(0));
+        // A seed on a non-empty transcript drops its divider at the end, so index
+        // 0 still names the same block.
+        app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
+        assert!(matches!(app.transcript()[0], Block::Assistant(_)));
+        assert_eq!(app.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_stale_selection_clamps_when_the_transcript_shrinks_out_of_reach() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(2));
+        // The renderer reports a shorter block list: the selection clamps, never
+        // pointing past the end.
+        app.set_block_ranges(std::iter::once(0..1).collect());
+        assert_eq!(app.selected(), Some(0));
     }
 }
