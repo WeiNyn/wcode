@@ -55,12 +55,12 @@ it builds the **command table** that F3/F4 extend, and its `Picker` machinery is
 exactly the "surface switcher" F4 will want. So F1 lands first (cheap, useful),
 then the F2 → F3 → F4 chain.
 
-The whole chain is **in-process first.** No agent-definition crosses the wire:
-`Request` has no define/spawn variant. Socket multiplexing has since **landed**
-(`Client`/`serve` carry many sessions and the roster is live — `c52df8c`,
-`6f3ef23`), so a remote agent definition is now unblocked from that wire work: it
-still needs a new `Request` (e.g. `Define`), and the per-agent provider (a worker
-on its own `base_url`/key) likewise remains open.
+The whole chain was **in-process first.** Agent definitions now cross the wire:
+`Request::Define` lets a client ask a served peer to build a worker, answered with
+`AgentEvent::Spawned` via a server-injected handler (`49b227e`), and `spawn { to }`
+defines one on a served peer (`7627b9e`). The socket layer multiplexes many sessions
+with a live roster (`c52df8c`, `6f3ef23`), and the per-agent provider landed too
+(`9c02e96`).
 
 ### F1 — TUI slash-command completion
 
@@ -92,25 +92,26 @@ would make it impossible to keep typing `/model gpt-…` args. Instead:
 
 ### F2 — customizable spawned agents
 
-**Shape.** Extend `WorkerSpec` and `SpawnArgs` with the same three optional
-fields. `SessionFactory::build` is a thin `SessionActor::spawn(worker_config(…))`
+**Shape.** Extend `WorkerSpec` and `SpawnArgs` with the same optional fields.
+`SessionFactory::build` is a thin `SessionActor::spawn(worker_config(…))`
 wrapper over a **pure** `worker_config(&self, id, owner, spec) -> AgentConfig`
 (the unit the tests exercise) that applies them:
 
 | field | effect | notes |
 |---|---|---|
-| `model: Option<String>` | overrides `llm.model` for the worker | parent's provider (`base_url`/`api_key`/`stream_fn`) is shared — per-agent provider is deferred |
+| `model: Option<String>` | overrides `llm.model` for the worker | the parent's `stream_fn` is shared; a per-agent `base_url`/`api_key` also landed, a worker on its own provider (`9c02e96`) |
 | `system: Option<String>` | **appended** after the worker identity blurb as `\n\n# Role\n<text>` | the blurb (who it is, who owns it, auto-report) always survives |
 | `tools: Option<Vec<String>>` | allow-list filter over `default_tools(&t.tools)`: `None` = all, `Some(vec![])` = only `message` | `message` is **always** kept and always valid in the list; `spawn` is never present; any other unavailable name **fails loudly** via `validate_tools` (D14), never silently dropped |
 
-`spawn`'s args stay additive: `{ task, name?, model?, role?, tools? }` (the
-`role` arg maps to `WorkerSpec.system`). A worker never gains `spawn` — bounded
+`spawn`'s args stay additive: `{ task, to?, name?, model?, role?, tools?,
+base_url?, api_key? }` (the `role` arg maps to `WorkerSpec.system`; `to` names a
+served peer, so the worker is defined there). A worker never gains `spawn` — bounded
 fan-out by construction stays intact. A worker is its own conversation, so
 `worker_config` gives it its own `llm.session_id` (its address) rather than
 inheriting the root's `x-opencode-session` (D15).
 
-**Scope.** In-process only. Customizing a *remote* worker needs a new `Request`
-variant; deferred.
+**Scope.** In-process by default; a *remote* worker is defined on a served peer via
+`Request::Define` / `spawn { to }` (`49b227e`, `7627b9e`).
 
 ### F3 — team preset
 
@@ -225,7 +226,7 @@ runtime-spawned worker is thus visible to a `--socket` client.
 | # | question | decision |
 |---|----------|----------|
 | D1 | F2 fields | `model` + appended `system` role + `tools` allow-list |
-| D2 | F2 scope | **in-process only**; per-agent provider and remote-agent definition deferred (need new wire) |
+| D2 | F2 scope | per-agent provider (`9c02e96`) and remote-agent definition (`Request::Define`, `49b227e`/`7627b9e`) both **landed** — originally deferred |
 | D3 | worker `message` tool | **always** kept regardless of the `tools` allow-list (the report path) |
 | D4 | F3 shape | `[team]` = **local** spawned workers; `[peers]` stays the **remote** map |
 | D5 | F3 startup | spawn the team after `Orchestrator::new`, mirroring the `[peers]` loop; `/new` keeps it |
@@ -300,13 +301,14 @@ runtime-spawned worker is thus visible to a `--socket` client.
 
 ## Open questions
 
-- **Per-agent provider** (a worker on a different `base_url`/key): a real need
-  (cheap model for exploration, strong model for review), but bigger — `StreamFn`
-  is built once. Deferred; revisit if the single-provider assumption bites.
-- **Remote agent definition**: a new `Request` variant (e.g. `Define`) so a served
-  peer can be customized. The multiplexing half of that wire work has landed
-  (`6f3ef23`), so this is unblocked from it — the `Define`-like `Request` itself is
-  the remaining piece.
+- **Per-agent provider** (a worker on a different `base_url`/key) — **landed**
+  (`9c02e96`): `WorkerSpec`/`TeamMember`/`SpawnArgs` carry `base_url`/`api_key` and
+  `worker_config` applies them. `StreamFn` stays shared — rig rekeys per
+  `ClientKey(base_url, api_key, session_id)`.
+- **Remote agent definition** — **landed** (`49b227e`, `7627b9e`):
+  `Request::Define`, answered by a served peer with `AgentEvent::Spawned` through a
+  server-injected handler, and `spawn { to }`, which defines a worker on a served
+  peer.
 - **Role as a preset vs free text**: `role` is free text appended to the prompt in
   v1; a named-role registry (skills-like) is a possible later layer.
 - **Team in the TUI vs the CLI**: the sidebar is fed by injection today; surfaces
