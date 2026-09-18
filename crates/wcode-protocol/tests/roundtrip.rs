@@ -810,11 +810,12 @@ async fn define_without_a_handler_is_a_correlated_error() {
     }
 }
 
-/// Item 11: a fire-and-forget `send` followed by `flush` guarantees the queued
-/// frame is written — the server observes it — and, when the peer is connected,
-/// `flush` returns promptly rather than waiting out its timeout.
+/// Item 11 (smoke): with a connected peer, `flush` returns promptly — it does not
+/// wait out its timeout — and the request ordered behind it is delivered. The
+/// barrier's *ordering* guarantee is proven by `a_flush_waits_behind_an_unwritten_frame`
+/// and its bound by `flush_is_bounded_when_the_peer_is_unreachable`.
 #[tokio::test]
-async fn a_flush_guarantees_prior_frames_are_written() {
+async fn a_flush_returns_promptly_when_connected() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("w.sock");
     let handle = SessionActor::spawn(agent(vec![]));
@@ -872,5 +873,54 @@ async fn flush_is_bounded_when_the_peer_is_unreachable() {
     assert!(
         elapsed < Duration::from_secs(2),
         "flush gave up within the timeout rather than hanging: {elapsed:?}"
+    );
+}
+
+/// Item 11 (load-bearing): `flush` does not complete while an earlier frame is
+/// still unwritten. A peer that accepts but never reads jams the supervisor's
+/// write of a frame larger than any socket buffer, so a `flush` queued behind it
+/// must **wait** — a no-op flush would return at once and this assertion fails.
+#[tokio::test]
+async fn a_flush_waits_behind_an_unwritten_frame() {
+    use tokio::io::AsyncReadExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    // Accept the connection but do not read until released, so the client's write
+    // of an oversized frame blocks in the supervisor.
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _ = release_rx.await;
+        // Drain so the client's blocked write completes.
+        let mut buf = [0u8; 8192];
+        while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+    });
+
+    let client = Client::connect(&sock).await.unwrap();
+    // Far larger than any unix-socket buffer: the write cannot complete yet.
+    client
+        .send(Request::Notify {
+            content: "x".repeat(8 << 20),
+        })
+        .unwrap();
+
+    let timeout = Duration::from_millis(150);
+    let start = std::time::Instant::now();
+    client.flush(timeout).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= timeout / 2,
+        "flush waited behind the unwritten frame: {elapsed:?}"
+    );
+
+    // Release the reader: the frame drains and a fresh flush completes promptly.
+    let _ = release_tx.send(());
+    let start = std::time::Instant::now();
+    client.flush(Duration::from_secs(2)).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "flush completed once the reader drained"
     );
 }

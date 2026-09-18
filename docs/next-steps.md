@@ -409,17 +409,21 @@ the oneshot the moment it reaches it — the queue is FIFO and frames are writte
 order, so every earlier frame is already written. `Client::flush(timeout)` enqueues
 the barrier and awaits it, **bounded** (a dead or reconnecting peer simply times
 out). `wcode_protocol::flush_all(timeout)` flushes **every** live connection the
-process holds (weak handles registered in `Client::adopt`, pruned as clients drop)
-concurrently, and both one-shot `-p` exit sites (`crates/wcode-cli/src/main.rs`)
-call it before `std::process::exit`. The hot path stays fire-and-forget.
+process holds concurrently — weak handles registered in `Client::adopt`, and the
+`Client` supervisor holds only a `Weak`, so a dropped client's handle dies and is
+pruned on the next `register`/`flush_all`. Both one-shot `-p` exit sites
+(`crates/wcode-cli/src/main.rs`) call it before `std::process::exit`. The hot path
+stays fire-and-forget.
 
 **Tasks**
 - [x] Flush the client's outbound queue before `main` exits `-p` (barrier +
       `flush_all`), bounded so an unreachable peer never hangs the exit.
 
 **Open questions.** None — the reviewer classified this as a pre-existing
-transport property, not an R2 regression. Nothing is left open: the barrier is
-best-effort by design, and the REPL/TUI never `process::exit` mid-flight.
+transport property, not an R2 regression. Nothing is left open for the one-shot
+`-p` path: the barrier is best-effort by design, and the REPL keeps its connection
+open. (The TUI also exits via `process::exit` on `/quit`, so a quit mid-run could
+still drop an in-flight remote frame — out of scope here.)
 
 ---
 

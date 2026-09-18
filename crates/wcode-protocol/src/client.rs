@@ -156,7 +156,7 @@ impl Client {
             out,
         });
         register(&inner);
-        tokio::spawn(supervise(inner.clone(), out_rx, stream));
+        tokio::spawn(supervise(Arc::downgrade(&inner), out_rx, stream));
         Client {
             inner,
             session: None,
@@ -295,17 +295,26 @@ impl Inner {
 }
 
 /// Own the connection: write queued requests and read events, reconnecting on
-/// drop until every [`Client`] clone is gone.
+/// drop until every [`Client`] clone is gone. Holds only a [`Weak`] reference to
+/// [`Inner`], so it never pins a connection to life: the last `Client` dropping
+/// ends the queue (the sender on `Inner` drops, so `out.recv()` reaches `None`)
+/// and this task (the upgrade fails, including in the reconnect/backoff loop).
 async fn supervise(
-    inner: Arc<Inner>,
+    inner: Weak<Inner>,
     mut out: mpsc::UnboundedReceiver<Out>,
     mut next: Option<UnixStream>,
 ) {
     let mut backoff = RECONNECT_BASE;
     loop {
+        // Never hold a strong reference across an await: a dropped `Client` must
+        // be able to end this task.
+        let path = match inner.upgrade() {
+            Some(inner) => inner.path.clone(),
+            None => return,
+        };
         let stream = match next.take() {
             Some(stream) => stream,
-            None => match crate::socket::connect(&inner.path).await {
+            None => match crate::socket::connect(&path).await {
                 Ok(stream) => stream,
                 Err(_) => {
                     tokio::time::sleep(backoff).await;
@@ -335,7 +344,10 @@ async fn supervise(
                     None => return,
                 },
                 event = read_frame::<_, AgentEvent>(&mut read) => match event {
-                    Ok(Some(frame)) => deliver(&inner, frame),
+                    Ok(Some(frame)) => match inner.upgrade() {
+                        Some(inner) => deliver(&inner, frame),
+                        None => return,
+                    },
                     // EOF or a broken read: the connection is gone.
                     _ => break,
                 },
@@ -343,7 +355,10 @@ async fn supervise(
         }
         // The connection dropped: fail every in-flight `ask` (its reply is not
         // coming), then loop to reconnect.
-        inner.pending.lock().unwrap().clear();
+        match inner.upgrade() {
+            Some(inner) => inner.pending.lock().unwrap().clear(),
+            None => return,
+        }
     }
 }
 
@@ -375,16 +390,34 @@ fn deliver(inner: &Inner, frame: Frame<AgentEvent>) {
 mod tests {
     use super::*;
 
-    fn inner() -> Inner {
-        Inner {
+    fn inner_with_out() -> (Inner, mpsc::UnboundedReceiver<Out>) {
+        let (out, out_rx) = mpsc::unbounded_channel();
+        let inner = Inner {
             path: PathBuf::from("/nonexistent"),
             events: Mutex::new(HashMap::new()),
             all_events: broadcast::channel(EVENT_BUFFER).0,
             roster: watch::channel(Vec::new()).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            out: mpsc::unbounded_channel().0,
-        }
+            out,
+        };
+        (inner, out_rx)
+    }
+
+    fn inner() -> Inner {
+        inner_with_out().0
+    }
+
+    /// The registered weak handle whose connection has this unique path (so a
+    /// concurrently-running test's client is never mistaken for ours).
+    #[cfg(unix)]
+    fn weak_with_path(path: &Path) -> Option<Weak<Inner>> {
+        connections()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|handle| handle.upgrade().is_some_and(|inner| inner.path.as_path() == path))
+            .cloned()
     }
 
     fn stream_frame(session: SessionId, body: AgentEvent) -> Frame<AgentEvent> {
@@ -432,5 +465,59 @@ mod tests {
         assert!(matches!(ra.try_recv().unwrap(), AgentEvent::AgentEnd));
         assert!(matches!(all.try_recv().unwrap(), AgentEvent::AgentEnd));
         assert!(rb.try_recv().is_err(), "b did not hear a's event");
+    }
+
+    /// A dropped `Client` must end its supervisor. The supervisor holds only a
+    /// `Weak<Inner>`, so the last strong reference dropping makes it return — a
+    /// strong reference would pin it retrying the dead path forever (the queue
+    /// sender lives on `Inner`, so `out.recv()` would never reach `None`).
+    #[tokio::test]
+    async fn the_supervisor_exits_when_the_last_client_drops() {
+        let (inner, out_rx) = inner_with_out();
+        let inner = Arc::new(inner);
+        let supervisor = tokio::spawn(supervise(Arc::downgrade(&inner), out_rx, None));
+
+        // It runs (retrying the dead path) while the client is alive...
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !supervisor.is_finished(),
+            "the supervisor runs while a client holds the connection"
+        );
+
+        // ...and returns as soon as the last strong reference is dropped.
+        drop(inner);
+        tokio::time::timeout(Duration::from_secs(2), supervisor)
+            .await
+            .expect("the supervisor returns once the last client drops")
+            .expect("the supervisor task did not panic");
+    }
+
+    /// And through the real constructor: `Client::lazy`'s registered weak dies
+    /// with the client, so `flush_all`'s pruning sees no live entry (and the
+    /// supervisor, holding no strong reference, tears the connection down).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_client_leaves_no_live_connection() {
+        let path = PathBuf::from("/nonexistent-teardown-xyz.sock");
+        let client = Client::lazy(&path);
+        // Let the supervisor actually start (it upgrades `Inner` when it runs) —
+        // otherwise this would not exercise the pin.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let weak = weak_with_path(&path).expect("the lazy client registered its connection");
+        assert!(weak.upgrade().is_some(), "registered while the client lives");
+
+        drop(client);
+        let mut dead = false;
+        for _ in 0..200 {
+            if weak.upgrade().is_none() {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            dead,
+            "a dropped client leaves no live connection (the supervisor released it)"
+        );
     }
 }
