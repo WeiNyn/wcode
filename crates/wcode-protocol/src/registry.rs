@@ -90,6 +90,12 @@ impl Registry {
             .insert(id, Backend::Remote(client));
     }
 
+    /// Whether a peer is already registered at `id`. A plain existence probe —
+    /// unlike [`Self::resolve`], it needs no `from` and enforces no permitted set.
+    pub fn contains(&self, id: &SessionId) -> bool {
+        self.inner.peers.lock().unwrap().contains_key(id)
+    }
+
     /// Record the `report_back_to` edge: `worker` reports to `owner` (its
     /// orchestrator). This is the whole ownership tree — a star in v1.
     pub fn set_owner(&self, worker: SessionId, owner: SessionId) {

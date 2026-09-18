@@ -88,7 +88,16 @@ impl TypedTool for Spawn {
                 ..ToolOutput::default()
             };
         }
-        let worker = self.factory.spawn(&self.me, spec);
+        let worker = match self.factory.spawn(&self.me, spec) {
+            Ok(worker) => worker,
+            Err(e) => {
+                return ToolOutput {
+                    output: e,
+                    is_error: true,
+                    ..ToolOutput::default()
+                };
+            }
+        };
         // The worker joins the phonebook, so the model can address it by name.
         self.phonebook
             .insert(short_name(&worker.id), worker.id.clone());

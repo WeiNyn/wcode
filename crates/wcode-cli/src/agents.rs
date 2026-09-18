@@ -106,6 +106,7 @@ pub struct WorkerSpec {
 }
 
 /// A freshly spawned, registered worker.
+#[derive(Debug)]
 pub struct SpawnedWorker {
     pub id: SessionId,
 }
@@ -171,14 +172,33 @@ impl SessionFactory {
 
     /// Build a worker, spawn its actor, and register it under `owner` — the
     /// `report_back_to` edge the permitted set reads (§10.1).
-    pub fn spawn(&self, owner: &SessionId, spec: WorkerSpec) -> SpawnedWorker {
-        let n = self.seq.fetch_add(1, Ordering::Relaxed);
-        let name = spec.name.clone().unwrap_or_else(|| format!("w{n}"));
+    pub fn spawn(&self, owner: &SessionId, spec: WorkerSpec) -> Result<SpawnedWorker, String> {
+        let name = match &spec.name {
+            // An explicit name is the caller's claim: a collision is a mistake to
+            // report loudly (D18 rejects the same for `[team]` at config load),
+            // not to paper over. Every spawn still consumes a `seq` number.
+            Some(n) => {
+                if self.registry.contains(&SessionId::agent(n)) {
+                    return Err(format!("a worker named `{n}` already exists"));
+                }
+                let _ = self.seq.fetch_add(1, Ordering::Relaxed);
+                n.clone()
+            }
+            // A generated name must never collide — even with an explicit `w1`
+            // already registered — so bump `seq` past any that are taken.
+            None => loop {
+                let n = self.seq.fetch_add(1, Ordering::Relaxed);
+                let candidate = format!("w{n}");
+                if !self.registry.contains(&SessionId::agent(&candidate)) {
+                    break candidate;
+                }
+            },
+        };
         let id = SessionId::agent(name);
         let handle = self.build(&id, owner, &spec);
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
-        SpawnedWorker { id }
+        Ok(SpawnedWorker { id })
     }
 
     fn build(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> SessionHandle {
@@ -334,11 +354,13 @@ impl Orchestrator {
 
     /// Spawn a worker owned by this orchestrator and register its name in the
     /// phonebook (F3). Validates the tool allow-list first so a bad preset name
-    /// fails loudly (D14) — the `[team]` path calls the factory directly and
-    /// would otherwise bypass the `spawn` tool's check.
+    /// Spawn a worker owned by this orchestrator and register its name in the
+    /// phonebook (F3). Validates the tool allow-list and rejects a duplicate
+    /// name first, so the `[team]` startup path (which also calls this) and the
+    /// `spawn` tool both fail loudly (D14) rather than silently overwriting.
     pub fn spawn_worker(&self, spec: WorkerSpec) -> Result<SpawnedWorker, String> {
         self.factory.validate_tools(&spec)?;
-        let worker = self.factory.spawn(&self.id, spec);
+        let worker = self.factory.spawn(&self.id, spec)?;
         self.phonebook
             .insert(short_name(&worker.id), worker.id.clone());
         Ok(worker)
@@ -442,14 +464,14 @@ mod tests {
         let (factory, registry) = factory();
         let orch = SessionId::agent("orch");
 
-        let w1 = factory.spawn(&orch, WorkerSpec::default());
+        let w1 = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         let w2 = factory.spawn(
             &orch,
             WorkerSpec {
                 name: Some("reviewer".into()),
                 ..Default::default()
             },
-        );
+        ).unwrap();
 
         assert_eq!(w1.id.as_str(), "agent:w1");
         assert_eq!(w2.id.as_str(), "agent:reviewer");
@@ -464,10 +486,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_duplicate_explicit_name_is_rejected() {
+        let (factory, _registry) = factory();
+        let orch = SessionId::agent("orch");
+        factory.spawn(&orch, WorkerSpec::default()).unwrap();
+
+        let err = factory
+            .spawn(
+                &orch,
+                WorkerSpec {
+                    name: Some("w1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("w1"), "names the clashing worker: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_default_name_skips_an_explicitly_taken_id() {
+        let (factory, _registry) = factory();
+        let orch = SessionId::agent("orch");
+
+        let explicit = factory
+            .spawn(
+                &orch,
+                WorkerSpec {
+                    name: Some("w1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(explicit.id.as_str(), "agent:w1");
+
+        // The next generated name must not re-use `w1` — it auto-bumps past it.
+        let generated = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        assert_ne!(generated.id.as_str(), "agent:w1");
+    }
+
+    #[tokio::test]
+    async fn two_default_spawns_get_distinct_ids() {
+        let (factory, _registry) = factory();
+        let orch = SessionId::agent("orch");
+        let a = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        let b = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        assert_ne!(a.id, b.id);
+    }
+
+    #[tokio::test]
     async fn a_spawned_worker_is_a_live_session() {
         let (factory, registry) = factory();
         let orch = SessionId::agent("orch");
-        let worker = factory.spawn(&orch, WorkerSpec::default());
+        let worker = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         let mut rx = registry.resolve(&orch, &worker.id).unwrap().subscribe();
 
         registry
@@ -573,7 +643,7 @@ mod tests {
         let root = session();
         registry.register(orch.clone(), root.clone());
 
-        let worker = factory.spawn(&orch, WorkerSpec::default());
+        let worker = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         let mut root_rx = root.subscribe();
 
         // Hand the worker a task — a `Wake` starts its run.
