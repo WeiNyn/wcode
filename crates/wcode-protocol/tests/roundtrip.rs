@@ -551,11 +551,12 @@ async fn list_sessions_returns_the_roster() {
     assert_eq!(ids, vec![root, a]);
 }
 
-/// T2: a session registered into a live registry **after** the server started is
-/// fanned to a connected client, and the client learns its id from the pushed
-/// roster — no polling, no restart. This is the runtime-spawned-worker path.
+/// T2: a registration that races the connection's snapshot is still served — the
+/// id is folded into the connect-time snapshot, fanned by the initial fan, and
+/// named by the seed push. (The **growth** push, for a registration *after* the
+/// snapshot, is covered by `a_growth_push_reaches_an_established_client`.)
 #[tokio::test]
-async fn a_late_registered_session_reaches_the_client() {
+async fn a_registration_racing_the_connect_is_served() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("w.sock");
 
@@ -608,9 +609,11 @@ async fn a_late_registered_session_reaches_the_client() {
 }
 
 /// T2: `ListSessions` is answered from the **live** roster, so a session
-/// registered after the server started appears in order (root first).
+/// registered after the server started appears in order (root first). This
+/// covers the live read; the pushed roster is covered by
+/// `a_growth_push_reaches_an_established_client`.
 #[tokio::test]
-async fn list_sessions_reflects_a_late_registration() {
+async fn list_sessions_reads_the_live_roster() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("w.sock");
 
@@ -641,4 +644,66 @@ async fn list_sessions_reflects_a_late_registration() {
         panic!("expected a Sessions reply, got {reply:?}");
     };
     assert_eq!(ids, vec![root_id, w1]);
+}
+
+/// T2: a session registered **after** the connection's snapshot is fanned and
+/// pushed to the client — the growth path. The `ListSessions` round-trip below
+/// forces the connection task to take its snapshot (root only) first, so the
+/// late id can only arrive through the roster watch (unlike
+/// `a_registration_racing_the_connect_is_served`).
+#[tokio::test]
+async fn a_growth_push_reaches_an_established_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.subscribe(),
+        (root_id.clone(), root),
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    // Force the server's connection task to take its snapshot (root only) before
+    // the late registration: a round-trip needs the read loop, which the
+    // connection reaches only after the snapshot.
+    client.ask(Request::ListSessions).await.unwrap();
+
+    let mut roster = client.subscribe_roster();
+    let w1 = SessionId::agent("w1");
+    registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
+
+    // The growth push carries the grown roster (awaited past any seed push).
+    let ids = loop {
+        let ids = roster.borrow_and_update().clone();
+        if ids.contains(&w1) {
+            break ids;
+        }
+        tokio::time::timeout(Duration::from_secs(5), roster.changed())
+            .await
+            .expect("a roster change")
+            .expect("open");
+    };
+    assert_eq!(ids, vec![root_id.clone(), w1.clone()]);
+
+    // ...and the late session's events reach this connection's fan for it.
+    let mut events = client.with_session(w1.clone()).subscribe();
+    client
+        .with_session(w1.clone())
+        .send(Request::Notify {
+            content: "hi".into(),
+        })
+        .unwrap();
+    let mut saw = false;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+        if let AgentEvent::MessageReceived { content, .. } = event {
+            assert_eq!(content, "hi");
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "an event from the grown session reached the client");
 }
