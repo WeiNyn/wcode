@@ -1879,11 +1879,12 @@ mod tests {
     fn f1_renders_the_help_overlay_with_the_keymap() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
-        let text = buffer_text(&render(&mut app, 60, 24));
+        let text = buffer_text(&render(&mut app, 64, 30));
         assert!(text.contains("keys"), "help title missing:\n{text}");
-        // The frame carries real chords from `KEYS`.
-        assert!(text.contains("Ctrl-O"), "a chord is missing:\n{text}");
-        assert!(text.contains("Alt-1..9"), "a chord is missing:\n{text}");
+        // Every chord in `KEYS` must be rendered — so this can never go stale.
+        for (chord, _) in KEYS {
+            assert!(text.contains(chord), "chord {chord:?} missing:\n{text}");
+        }
         assert!(text.contains("toggle this help"), "F1's description missing:\n{text}");
     }
 

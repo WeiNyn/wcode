@@ -388,8 +388,9 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
     ("Alt-1..9", "focus the Nth surface"),
     ("Ctrl-B", "toggle the team sidebar"),
-    ("Ctrl-G", "browse the transcript (Esc / q to leave)"),
+    ("Ctrl-G", "browse the transcript"),
     ("j / k · g / G", "browse: next / previous · first / last"),
+    ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
     ("F1", "toggle this help"),
     ("Ctrl-Y", "copy the last reply"),
     ("Esc / Ctrl-C", "cancel a run; quit when idle"),
@@ -1393,11 +1394,17 @@ impl App {
         self.dirty = true;
     }
 
-    /// Handle a key while browsing. Browse owns every key, so `Esc` leaves it and
-    /// never reaches `interrupt()`.
+    /// Handle a key while browsing. Browse owns the text and navigation keys;
+    /// `F1`/`?` (help) and `Ctrl-C` (cancel / quit) stay **global**, and
+    /// `Esc`/`q`/`Ctrl-G` leave. Every other key is deliberately ignored — the
+    /// composer must not be edited behind the mode.
     fn on_browse_key(&mut self, key: Key) {
         match key {
             Key::Esc | Key::Ctrl('g') | Key::Char('q') => self.exit_browse(),
+            // Global: the keymap overlay and the panic button. Neither leaves
+            // browse — closing help returns to the mode you opened it from.
+            Key::F(1) | Key::Char('?') => self.open_help(),
+            Key::Ctrl('c') => self.interrupt(),
             Key::Char('j') | Key::Down => self.select_by(1),
             Key::Char('k') | Key::Up => self.select_by(-1),
             Key::Char('g') => self.select_first(),
@@ -3839,5 +3846,56 @@ mod tests {
         // pointing past the end.
         app.set_block_ranges(std::iter::once(0..1).collect());
         assert_eq!(app.selected(), Some(0));
+    }
+
+    #[test]
+    fn f1_opens_help_from_browse_and_returns_to_browse() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("q")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Help)),
+            "F1 opens help from browse"
+        );
+        assert_eq!(app.mode(), Mode::Browse, "browse survives under the overlay");
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.overlay().is_none(), "Esc closes help");
+        assert_eq!(app.mode(), Mode::Browse, "closing help returns to browse");
+        assert_eq!(app.selected(), Some(1), "the selection is preserved");
+
+        // `?` is the same overlay.
+        app.handle(AppEvent::Key(Key::Char('?')));
+        assert!(matches!(app.overlay(), Some(Overlay::Help)));
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert_eq!(app.mode(), Mode::Browse);
+    }
+
+    #[test]
+    fn ctrl_c_cancels_a_run_while_browsing_and_stays_in_browse() {
+        let mut app = App::new();
+        submit(&mut app, "go"); // a run is in flight
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
+        assert_eq!(app.mode(), Mode::Browse, "Ctrl-C does not leave browse");
+        assert_eq!(app.take_actions(), vec![Action::Cancel]);
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn ctrl_c_quits_when_idle_and_browsing() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("q")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert!(!app.should_quit());
+
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
+        assert!(app.should_quit(), "Ctrl-C quits when idle, in browse too");
+        assert_eq!(app.mode(), Mode::Browse);
     }
 }
