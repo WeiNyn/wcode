@@ -16,6 +16,7 @@ mod clipboard;
 mod event;
 mod markdown;
 mod terminal;
+mod theme;
 mod ui;
 
 use std::io;

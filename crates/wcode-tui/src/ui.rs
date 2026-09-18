@@ -4,11 +4,10 @@
 //! `docs/tui-design.md` for the visual spec.
 
 use std::ops::Range;
-use std::sync::OnceLock;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
@@ -16,6 +15,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 use crate::TeamState;
 use crate::app::{App, Block, InputView, Overlay, Tool};
 use crate::markdown;
+use crate::theme;
 
 /// First/continuation prefixes for a thinking block (`···` then an aligned
 /// continuation column).
@@ -107,8 +107,8 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
-        .border_style(dim())
-        .title(Span::styled(format!(" {} ", picker.title), dim()));
+        .border_style(border())
+        .title(Span::styled(format!(" {} ", picker.title), border()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -171,8 +171,8 @@ fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App, sideba
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
-        .border_style(dim())
-        .title(Span::styled(" commands ", dim()));
+        .border_style(border())
+        .title(Span::styled(" commands ", border()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
@@ -249,7 +249,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
-        Block::User(text) => wrap(text, width, " ❯ ", "   ", accent()),
+        Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
         Block::Assistant(content) => content_lines(content, width, false),
         Block::Tool(tool) => tool_lines(tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
@@ -268,7 +268,7 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
                 lines.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
-                lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, dim()));
+                lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, thinking()));
             }
             ContentBlock::ToolCall { .. } => {}
         }
@@ -295,7 +295,7 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     if !tool.done {
         let mut header = vec![
             Span::styled("   ⚙ ", dim()),
-            Span::styled(tool.name.clone(), dim()),
+            Span::styled(tool.name.clone(), tool_name()),
         ];
         header.extend(path_span(tool));
         let mut lines = vec![Line::from(header)];
@@ -318,11 +318,11 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let (mark, style) = if tool.is_error {
         ("✗", error_style())
     } else {
-        ("✓", dim())
+        ("✓", success())
     };
     let mut spans = vec![
         Span::styled(format!("   {mark} "), style),
-        Span::styled(tool.name.clone(), style),
+        Span::styled(tool.name.clone(), tool_name()),
     ];
     spans.extend(path_span(tool));
     let note = first_line(&tool.output);
@@ -376,7 +376,7 @@ fn diff_block_lines(path: &str, diff: &str) -> Vec<Line<'static>> {
 fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
     let mut header = vec![
         Span::styled("   ⚙ ", dim()),
-        Span::styled(tool.name.clone(), dim()),
+        Span::styled(tool.name.clone(), tool_name()),
     ];
     header.extend(path_span(tool));
     let mut lines = vec![Line::from(header)];
@@ -408,11 +408,11 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
     let (mark, style) = if tool.is_error {
         ("✗", error_style())
     } else {
-        ("✓", dim())
+        ("✓", success())
     };
     lines.push(Line::from(vec![
         Span::styled(format!("   {mark} "), style),
-        Span::styled(tool.name.clone(), style),
+        Span::styled(tool.name.clone(), tool_name()),
         Span::styled(format!(" · +{added} −{removed}"), dim()),
     ]));
     lines
@@ -765,17 +765,12 @@ fn token_spans(app: &App) -> Option<Vec<Span<'static>>> {
             } else {
                 used as f64 / limit as f64
             };
-            let color = if ratio >= 0.85 {
-                Color::Red
+            let bar_style = if ratio >= 0.85 {
+                error_style()
             } else if ratio >= 0.6 {
-                Color::Yellow
+                theme::theme().warn
             } else {
-                Color::Green
-            };
-            let bar_style = if no_color() {
-                dim()
-            } else {
-                Style::new().fg(color)
+                success()
             };
             vec![
                 Span::styled(bar(ratio, 8), bar_style),
@@ -830,17 +825,39 @@ fn split_at_char(text: &str, n: usize) -> (String, String) {
     (text[..idx].to_string(), text[idx..].to_string())
 }
 
+/// The workhorse: secondary chrome and quiet prose.
 pub(crate) fn dim() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
+    theme::theme().dim
 }
 
-/// The `done` state: a quieter grey than `dim()` where colour is available.
+/// A quieter grey than [`dim`] where color is available.
 fn muted() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::DIM)
-    } else {
-        Style::new().fg(Color::DarkGray)
-    }
+    theme::theme().muted
+}
+
+/// The overlay / sidebar border and its title.
+fn border() -> Style {
+    theme::theme().border
+}
+
+/// A thinking block.
+fn thinking() -> Style {
+    theme::theme().thinking
+}
+
+/// A tool's name in its `⚙` / `✓` header.
+fn tool_name() -> Style {
+    theme::theme().tool_name
+}
+
+/// The user's own prompt block.
+fn user() -> Style {
+    theme::theme().user
+}
+
+/// A completed tool's `✓` mark.
+fn success() -> Style {
+    theme::theme().success
 }
 
 /// The style for a member's row, keyed by state (idle = dim, running = accent,
@@ -868,8 +885,8 @@ fn clip(text: &str, width: usize) -> String {
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
-        .border_style(dim())
-        .title(Span::styled(" team ", dim()));
+        .border_style(border())
+        .title(Span::styled(" team ", border()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -892,52 +909,26 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 pub(crate) fn accent() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    }
+    theme::theme().accent
 }
 
-/// Added (`+`) and removed (`-`) diff lines. Colored when available; bold (vs
-/// the dim context) under `NO_COLOR`.
+/// An added (`+`) diff line.
 fn added_style() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Green)
-    }
+    theme::theme().diff_add
 }
 
+/// A removed (`-`) diff line.
 fn removed_style() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Red)
-    }
+    theme::theme().diff_del
 }
 
 fn error_style() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Red)
-    }
+    theme::theme().error
 }
 
 /// Inline code and code blocks.
 pub(crate) fn code_style() -> Style {
-    if no_color() {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(Color::Yellow)
-    }
-}
-
-/// Honor `NO_COLOR` (https://no-color.org) — resolved once.
-pub(crate) fn no_color() -> bool {
-    static NO_COLOR: OnceLock<bool> = OnceLock::new();
-    *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some())
+    theme::theme().code
 }
 
 #[cfg(test)]

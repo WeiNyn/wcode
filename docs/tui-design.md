@@ -17,7 +17,14 @@ TUI reads as the same product, given a full screen.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
    glance; wrapped continuation lines align under it.
-3. **A small palette, dim is the workhorse.** Accent (cyan) for the user prompt
+3. **A small palette, dim is the workhorse.** The roles live in one place —
+   `theme.rs` (`accent, dim, muted, border, user, body, error, success, warn,
+   code, heading, link, tool_name, thinking, diff_add, diff_del`) — named ANSI
+   colors only. Accent (cyan) for the user prompt and running state; red for
+   errors; green for success; yellow for inline code; a green→yellow→red gauge
+   for context fill. Assistant prose stays default and dim stays the workhorse.
+   Honor `NO_COLOR` (every role drops its `fg`, keeping only bold/italic/dim);
+   **truecolor / 256-color detection is still open** (§5).
    and running state; red for errors; yellow for inline code; a green→yellow→red
    gauge for context fill. Everything else is default-fg or dim. Honor
    `NO_COLOR` (styles collapse to bold/dim); degrade to 256-color when
@@ -194,7 +201,8 @@ Agreed for P0 (see also `tui-plan.md` §9):
 - **Crate**: new `wcode-tui`, depending on `wcode-protocol`.
 - **Versions**: `ratatui` 0.30, `crossterm` 0.29 (jcode's; both exist).
 - **Alt-screen**: yes, with a custom scrollback (P1).
-- **Palette**: accent + red only at P0; theme detection at P2.
+- **Palette**: one `theme.rs` of named roles (`Theme::colored` / `Theme::plain`),
+  named ANSI colors only; not yet configurable (that is P4).
 - **Markdown**: hand-rolled, applied live and committed (P1/P2). **Clipboard**:
   OSC-52, no `arboard` (P2).
 - **Theme detection** (truecolor via `COLORTERM`): still open.

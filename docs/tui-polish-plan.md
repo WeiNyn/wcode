@@ -96,7 +96,7 @@ at every commit, and a headless rendered-frame assertion proving the behavior.
 |---|--------|--------|
 | 1 | plan + tracker | ☑ done |
 | 2 | tool output expand / collapse | ☑ done |
-| 3 | central theme | ☐ todo |
+| 3 | central theme | ☑ done |
 | 4 | keys: help overlay, surface jumps, detail toggle | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

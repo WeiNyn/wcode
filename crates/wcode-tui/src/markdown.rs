@@ -5,10 +5,26 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::theme;
 use crate::ui::{code_style, dim};
 
 /// The 3-column gutter every assistant line shares.
 const GUTTER: &str = "   ";
+
+/// A markdown heading.
+fn heading_style() -> Style {
+    theme::theme().heading
+}
+
+/// A markdown link.
+fn link_style() -> Style {
+    theme::theme().link
+}
+
+/// Assistant prose — the uncolorized default.
+fn body_style() -> Style {
+    theme::theme().body
+}
 
 /// Render markdown `text` to transcript lines wrapped to `width`.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
@@ -45,7 +61,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 width,
                 GUTTER,
                 GUTTER,
-                Style::new().add_modifier(Modifier::BOLD),
+                heading_style(),
             ));
         } else if let Some(item) = bullet(line) {
             lines.extend(wrap(
@@ -53,7 +69,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 width,
                 &format!("{GUTTER}• "),
                 &format!("{GUTTER}  "),
-                Style::default(),
+                body_style(),
             ));
         } else if line.is_empty() {
             lines.push(Line::default());
@@ -63,7 +79,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                 width,
                 GUTTER,
                 GUTTER,
-                Style::default(),
+                body_style(),
             ));
         }
         i += 1;
@@ -196,7 +212,7 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         &table.header,
         &widths,
         &table.aligns,
-        Style::new().add_modifier(Modifier::BOLD),
+        heading_style(),
     )];
     let rule = widths
         .iter()
@@ -208,7 +224,7 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         dim(),
     ))]);
     for row in &table.rows {
-        out.push(row_lines(row, &widths, &table.aligns, Style::default()));
+        out.push(row_lines(row, &widths, &table.aligns, body_style()));
     }
     out.into_iter().flatten().collect()
 }
@@ -312,7 +328,7 @@ fn disp(text: &str) -> usize {
 
 /// Split a line into styled runs for inline `` `code` `` and `**bold**`.
 fn inline(text: &str) -> Vec<(String, Style)> {
-    let plain = Style::default();
+    let plain = body_style();
     let mut runs = Vec::new();
     let mut buf = String::new();
     let mut rest = text;
@@ -324,6 +340,18 @@ fn inline(text: &str) -> Vec<(String, Style)> {
             flush(&mut runs, &mut buf);
             runs.push((after[..end].to_string(), plain.add_modifier(Modifier::BOLD)));
             rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('[')
+            && let Some(close) = after.find(']')
+            && let Some(url) = after[close + 1..].strip_prefix('(')
+            && let Some(end) = url.find(')')
+        {
+            // `[label](url)` renders the label alone, in the link style (the TUI
+            // cannot follow a link, so the URL would only add noise).
+            flush(&mut runs, &mut buf);
+            runs.push((after[..close].to_string(), link_style()));
+            rest = &url[end + 1..];
             continue;
         }
         if let Some(after) = rest.strip_prefix('`')
@@ -344,7 +372,7 @@ fn inline(text: &str) -> Vec<(String, Style)> {
 
 fn flush(runs: &mut Vec<(String, Style)>, buf: &mut String) {
     if !buf.is_empty() {
-        runs.push((std::mem::take(buf), Style::default()));
+        runs.push((std::mem::take(buf), body_style()));
     }
 }
 
@@ -501,5 +529,21 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(rejoined, "one two three four five six seven");
+    }
+
+    #[test]
+    fn links_render_the_label_in_the_link_style() {
+        let lines = render("see [docs](https://example.com/x) now", 60);
+        let text = text_of(&lines).join(" ");
+        assert!(text.contains("docs"), "label missing: {text}");
+        assert!(!text.contains("https://"), "the url should not be shown: {text}");
+        let link = link_style();
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.style == link && s.content.as_ref() == "docs"),
+            "the label is not in the link style: {lines:?}"
+        );
     }
 }
