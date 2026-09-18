@@ -13,7 +13,7 @@ use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{App, Block, InputView, Overlay, Tool};
+use crate::app::{App, Block, InputView, KEYS, Overlay, Picker, Tool};
 use crate::markdown;
 use crate::theme;
 
@@ -56,7 +56,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // The team sidebar splits the `body` band when there is a team and the
     // terminal is wide enough; otherwise the layout is byte-identical to before.
-    let sidebar = !app.member_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
+    let sidebar = !app.hide_sidebar() && !app.member_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
     if sidebar {
         let [left, right] =
             Layout::horizontal([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
@@ -74,13 +74,52 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_overlay(frame, area, app);
 }
 
-/// Draw the open modal, centered over everything else. `Clear` first so the
+/// Draw the open modal, if any — the picker or the `F1` keymap.
+fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    match app.overlay() {
+        Some(Overlay::Pick(picker)) => draw_picker(frame, area, picker),
+        Some(Overlay::Help) => draw_help(frame, area),
+        None => {}
+    }
+}
+
+/// Draw the `F1` keymap, centered like the picker.
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = KEYS
+        .iter()
+        .map(|(chord, what)| {
+            Line::from(vec![
+                Span::styled(format!(" {chord:<22}"), accent()),
+                Span::styled((*what).to_string(), dim()),
+            ])
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(" esc / F1 to close", dim())));
+
+    let width = area.width.saturating_sub(4).clamp(1, 64);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, rect);
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_style(border())
+        .title(Span::styled(" keys ", border()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Draw a picker modal, centered over everything else. `Clear` first so the
 /// bands beneath do not bleed through (design §1: an overlay never reflows the
 /// base layout).
-fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(Overlay::Pick(picker)) = app.overlay() else {
-        return;
-    };
+fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     let rows = picker.rows();
 
     // Borders (2) + the filter line (1) + at least one item row.
@@ -1539,5 +1578,47 @@ mod tests {
             !expanded.contains("more lines · Ctrl+O"),
             "the hint should be gone when expanded:\n{expanded}"
         );
+    }
+
+    #[test]
+    fn f1_renders_the_help_overlay_with_the_keymap() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(1)));
+        let text = buffer_text(&render(&mut app, 60, 24));
+        assert!(text.contains("keys"), "help title missing:\n{text}");
+        // The frame carries real chords from `KEYS`.
+        assert!(text.contains("Ctrl-O"), "a chord is missing:\n{text}");
+        assert!(text.contains("Alt-1..9"), "a chord is missing:\n{text}");
+        assert!(text.contains("toggle this help"), "F1's description missing:\n{text}");
+    }
+
+    #[test]
+    fn ctrl_b_hides_the_team_sidebar() {
+        let mut app = App::new();
+        with_member(&mut app, "explorer", "m");
+        assert!(buffer_text(&render(&mut app, 80, 16)).contains("explorer"));
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert!(
+            !buffer_text(&render(&mut app, 80, 16)).contains("explorer"),
+            "the sidebar should be hidden after Ctrl-B"
+        );
+    }
+
+    #[test]
+    fn ctrl_t_expands_all_tool_output_at_once() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, false, None);
+        push_tool(&mut app, "bash", &output, false, None);
+        // Collapsed, the tail is elided (a hint is drawn).
+        assert!(buffer_text(&render(&mut app, 70, 40)).contains("more lines"));
+
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        let text = buffer_text(&render(&mut app, 70, 40));
+        assert!(!text.contains("more lines"), "all tools show their whole output:\n{text}");
+        assert!(text.contains("line-20"), "the last line should show:\n{text}");
     }
 }

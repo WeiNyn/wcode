@@ -17,7 +17,7 @@ the boxes as each task completes and keep the status table current.
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
-| 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☐ todo |
+| 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

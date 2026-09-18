@@ -44,6 +44,13 @@ pub enum Key {
     Esc,
     /// A control chord, e.g. `Ctrl('c')` for Ctrl-C.
     Ctrl(char),
+    /// An Alt chord, e.g. `Alt('3')` for Alt-3. An Alt chord never inserts the
+    /// character it carries.
+    Alt(char),
+    /// A function key, e.g. `F(1)` for F1.
+    F(u8),
+    /// Shift-Tab: focus the previous surface (`Tab` still accepts completion).
+    BackTab,
 }
 
 /// Everything the app can react to, from any source.
@@ -146,6 +153,8 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
 #[derive(Clone, Debug)]
 pub enum Overlay {
     Pick(Picker),
+    /// The `F1` keymap. A pure modal: it dismisses only on `Esc` / `F1`.
+    Help,
 }
 
 /// A filterable list the user navigates and selects from. `items` is the full
@@ -362,7 +371,29 @@ fn team_text(rows: &[(&str, &str, TeamState, bool)]) -> String {
         .join("\n")
 }
 
-/// The generated `/help` line, e.g. `commands: /exit /model <id> …`.
+/// The keymap — the single source of truth for the `F1` help overlay and the
+/// keys section of `/help`. Chord → what it does.
+pub(crate) const KEYS: &[(&str, &str)] = &[
+    ("Enter", "submit the prompt"),
+    ("Shift-Enter / Ctrl-J", "insert a newline"),
+    ("Up / Down", "recall prompt history"),
+    ("Ctrl-A / Ctrl-E", "move to the start / end of the input"),
+    ("Ctrl-W", "delete the previous word"),
+    ("Ctrl-U", "delete to the start of the line"),
+    ("Ctrl-K", "delete to the end of the line"),
+    ("PgUp / PgDn", "scroll the transcript a page"),
+    ("wheel", "scroll three lines"),
+    ("Ctrl-O", "expand / collapse the last tool's output"),
+    ("Ctrl-T", "expand / collapse all tool output"),
+    ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
+    ("Alt-1..9", "focus the Nth surface"),
+    ("Ctrl-B", "toggle the team sidebar"),
+    ("F1", "toggle this help"),
+    ("Ctrl-Y", "copy the last reply"),
+    ("Esc / Ctrl-C", "cancel a run; quit when idle"),
+];
+
+/// The generated `/help` text: the command list, then the keymap from [`KEYS`].
 fn help_text() -> String {
     let mut out = String::from("commands:");
     for cmd in COMMANDS {
@@ -373,6 +404,10 @@ fn help_text() -> String {
             out.push(' ');
             out.push_str(args);
         }
+    }
+    out.push_str("\nkeys:");
+    for (chord, what) in KEYS {
+        out.push_str(&format!("\n  {chord} — {what}"));
     }
     out
 }
@@ -515,6 +550,12 @@ impl Atom {
             Atom::Char(c) => c.to_string(),
             Atom::Paste(p) => p.chip(),
         }
+    }
+
+    /// Whether this atom is a whitespace character. A paste block never is, so
+    /// it reads as one "word" for `Ctrl-W`.
+    fn is_space(&self) -> bool {
+        matches!(self, Atom::Char(c) if c.is_whitespace())
     }
 }
 
@@ -1029,6 +1070,9 @@ pub struct App {
     dirty: bool,
     should_quit: bool,
     actions: Vec<Action>,
+    /// Hide the team sidebar even when there is a team and the terminal is wide
+    /// enough (`Ctrl-B`).
+    hide_sidebar: bool,
 }
 
 impl Default for App {
@@ -1056,6 +1100,7 @@ impl App {
             dirty: true,
             should_quit: false,
             actions: Vec::new(),
+            hide_sidebar: false,
         }
     }
 
@@ -1129,6 +1174,126 @@ impl App {
         } else {
             return;
         }
+        self.dirty = true;
+    }
+
+    /// Expand or collapse every tool block on the focused surface — the
+    /// complement of `Ctrl-O`. All expanded collapses; anything else expands all.
+    fn toggle_all_tools(&mut self) {
+        let tools: Vec<&mut Tool> = self
+            .focused_mut()
+            .transcript
+            .iter_mut()
+            .filter_map(|block| match block {
+                Block::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .collect();
+        if tools.is_empty() {
+            return;
+        }
+        let expand = !tools.iter().all(|tool| tool.expanded);
+        for tool in tools {
+            tool.expanded = expand;
+        }
+        self.dirty = true;
+    }
+
+    /// `Alt-1..9`: focus the Nth surface. `Alt-0` and an out-of-range N are a
+    /// no-op.
+    fn focus_digit(&mut self, c: char) {
+        if let Some(n) = c.to_digit(10)
+            && n >= 1
+        {
+            self.set_focus(n as usize - 1);
+        }
+    }
+
+    /// Focus the previous surface, wrapping — the mirror of `focus_next`, bound
+    /// to `Shift-Tab`.
+    fn focus_prev(&mut self) {
+        if !self.surfaces.is_empty() {
+            self.focus = (self.focus + self.surfaces.len() - 1) % self.surfaces.len();
+            self.dirty = true;
+        }
+    }
+
+    /// Show or hide the team sidebar (`Ctrl-B`).
+    fn toggle_sidebar(&mut self) {
+        self.hide_sidebar = !self.hide_sidebar;
+        self.dirty = true;
+    }
+
+    /// Whether the team sidebar is hidden (`Ctrl-B`) — read by the renderer.
+    pub(crate) fn hide_sidebar(&self) -> bool {
+        self.hide_sidebar
+    }
+
+    /// Open the keymap overlay (`F1`).
+    fn open_help(&mut self) {
+        self.overlay = Some(Overlay::Help);
+        self.dirty = true;
+    }
+
+    /// Ctrl-A: move the cursor to the start of the input.
+    fn move_cursor_start(&mut self) {
+        self.cursor = 0;
+        self.dirty = true;
+    }
+
+    /// Ctrl-E: move the cursor to the end of the input.
+    fn move_cursor_end(&mut self) {
+        self.cursor = self.input.len();
+        self.dirty = true;
+    }
+
+    /// Ctrl-W: delete the word before the cursor. A paste chip is one word, so
+    /// this removes the whole chip rather than reaching inside it.
+    fn delete_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut start = self.cursor;
+        while start > 0 && self.input[start - 1].is_space() {
+            start -= 1;
+        }
+        while start > 0 && !self.input[start - 1].is_space() {
+            start -= 1;
+        }
+        self.input.drain(start..self.cursor);
+        self.cursor = start;
+        self.focused_mut().history_index = None;
+        self.dirty = true;
+    }
+
+    /// Ctrl-U: delete from the cursor back to the start of the current line
+    /// (readline's `unix-line-discard`). Stops at a newline, so it is
+    /// multi-line aware; a paste chip is one atom and is never split.
+    fn kill_to_line_start(&mut self) {
+        let start = (0..self.cursor)
+            .rev()
+            .find(|&i| matches!(self.input[i], Atom::Char('\n')))
+            .map_or(0, |i| i + 1);
+        if start == self.cursor {
+            return;
+        }
+        self.input.drain(start..self.cursor);
+        self.cursor = start;
+        self.focused_mut().history_index = None;
+        self.dirty = true;
+    }
+
+    /// Ctrl-K: delete from the cursor to the end of the current line (the
+    /// newline itself is kept).
+    fn kill_to_line_end(&mut self) {
+        let end = (self.cursor..self.input.len())
+            .find(|&i| matches!(self.input[i], Atom::Char('\n')))
+            .unwrap_or(self.input.len());
+        if end == self.cursor {
+            return;
+        }
+        self.input.drain(self.cursor..end);
+        self.focused_mut().history_index = None;
         self.dirty = true;
     }
 
@@ -1229,12 +1394,22 @@ impl App {
             }
             Key::Esc | Key::Ctrl('c') => self.interrupt(),
             Key::Ctrl('y') => self.copy_last(),
-            // Ctrl-N cycles the focused surface (Ctrl-C cancels, Ctrl-J/Ctrl-Y
-            // are taken; Tab/Enter/Esc/Up/Down belong to the composer).
+            // Ctrl-N / Shift-Tab cycle the focused surface (Ctrl-C cancels,
+            // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
             Key::Ctrl('n') => self.focus_next(),
-            // Ctrl-O toggles the last tool's detail (Ctrl-T, in the keymap, does
-            // them all); the wheel and PgUp/PgDn cover scrolling.
+            Key::BackTab => self.focus_prev(),
+            Key::Alt(c) => self.focus_digit(c),
+            Key::F(1) => self.open_help(),
+            // Tool detail: Ctrl-O the last tool, Ctrl-T all of them.
             Key::Ctrl('o') => self.toggle_last_tool(),
+            Key::Ctrl('t') => self.toggle_all_tools(),
+            Key::Ctrl('b') => self.toggle_sidebar(),
+            // Readline word/line editing on the atom buffer.
+            Key::Ctrl('a') => self.move_cursor_start(),
+            Key::Ctrl('e') => self.move_cursor_end(),
+            Key::Ctrl('w') => self.delete_word(),
+            Key::Ctrl('u') => self.kill_to_line_start(),
+            Key::Ctrl('k') => self.kill_to_line_end(),
             Key::PageUp => self.scroll_up(self.page()),
             Key::PageDown => self.scroll_down(self.page()),
             Key::ScrollUp => self.scroll_up(WHEEL_LINES),
@@ -1381,6 +1556,12 @@ impl App {
     fn on_completion_key(&mut self, key: Key) -> bool {
         match key {
             Key::Up => {
+                self.move_completion(-1);
+                true
+            }
+            // Shift-Tab moves the selection up too, so it is consumed here and
+            // never reaches the surface switch while the popup is open.
+            Key::BackTab => {
                 self.move_completion(-1);
                 true
             }
@@ -1766,9 +1947,19 @@ impl App {
         self.dirty = true;
     }
 
-    /// Keys while a modal is open: ↑/↓ move, printable chars filter, Backspace
-    /// deletes, Enter selects, Esc dismisses. Everything else is swallowed.
+    /// Keys while a modal is open. The help overlay dismisses only on `Esc` /
+    /// `F1` — every other key is ignored (a modal that silently swallowed a
+    /// keystroke would be worse than one you must dismiss deliberately). The
+    /// picker: ↑/↓ move, printable chars filter, Backspace deletes, Enter
+    /// selects, Esc dismisses; everything else is swallowed.
     fn on_overlay_key(&mut self, key: Key) {
+        if matches!(self.overlay, Some(Overlay::Help)) {
+            if matches!(key, Key::Esc | Key::F(1)) {
+                self.overlay = None;
+                self.dirty = true;
+            }
+            return;
+        }
         match key {
             Key::Esc => self.overlay = None,
             Key::Up => self.map_picker(|p| p.move_selection(-1)),
@@ -2933,15 +3124,18 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_every_command_from_the_table() {
+    fn help_lists_every_command_and_the_keymap_from_the_tables() {
         let mut app = App::new();
         submit(&mut app, "/help");
         let Some(Block::Notice(text)) = app.transcript().last() else {
             panic!("expected a help notice");
         };
-        assert_eq!(
-            text,
-            "commands: /exit /model <id> /effort [level] /compact [text] /changes /resume /usage /copy /surface /team /help"
+        assert!(
+            text.starts_with(
+                "commands: /exit /model <id> /effort [level] /compact [text] /changes \
+                 /resume /usage /copy /surface /team /help"
+            ),
+            "the command listing changed: {text}"
         );
         for name in [
             "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "surface",
@@ -2950,6 +3144,14 @@ mod tests {
             assert!(
                 text.contains(&format!("/{name}")),
                 "{name} missing from help: {text}"
+            );
+        }
+        // The keymap is generated from `KEYS`, so discovery has a path without F1.
+        assert!(text.contains("keys:"), "keys section missing: {text}");
+        for (chord, _) in KEYS {
+            assert!(
+                text.contains(chord),
+                "{chord} missing from /help: {text}"
             );
         }
     }
@@ -3146,5 +3348,207 @@ mod tests {
                 model: "beta".into()
             })]
         );
+    }
+
+    /// Give `app` a root plus `labels` (index 0 is the root).
+    fn set_surfaces(app: &mut App, labels: &[&str]) {
+        app.set_surfaces(
+            labels
+                .iter()
+                .enumerate()
+                .map(|(i, label)| crate::SurfaceInfo {
+                    id: SessionId::agent(label),
+                    label: (*label).to_string(),
+                    model: "m".to_string(),
+                    is_root: i == 0,
+                })
+                .collect(),
+        );
+    }
+
+    /// Commit one finished `bash` tool block with `output`.
+    fn push_done_tool(app: &mut App, output: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "bash".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: "bash".into(),
+                output: output.into(),
+                is_error: false,
+                diff: None,
+                path: None,
+            },
+        ));
+    }
+
+    fn tool_expanded(app: &App, nth_from_end: usize) -> bool {
+        app.transcript()
+            .iter()
+            .rev()
+            .filter_map(|b| match b {
+                Block::Tool(t) => Some(t.expanded),
+                _ => None,
+            })
+            .nth(nth_from_end)
+            .expect("a tool block")
+    }
+
+    #[test]
+    fn alt_digit_focuses_the_nth_surface() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "a", "b"]);
+        app.handle(AppEvent::Key(Key::Alt('3')));
+        assert_eq!(app.focus(), 2, "Alt-3 focuses the third surface");
+        // Alt-0 and an out-of-range surface are a no-op.
+        app.handle(AppEvent::Key(Key::Alt('0')));
+        assert_eq!(app.focus(), 2);
+        app.handle(AppEvent::Key(Key::Alt('9')));
+        assert_eq!(app.focus(), 2);
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 0);
+    }
+
+    #[test]
+    fn backtab_moves_focus_backwards_and_wraps() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "a", "b"]);
+        app.handle(AppEvent::Key(Key::BackTab));
+        assert_eq!(app.focus(), 2, "Shift-Tab wraps to the last surface");
+        app.handle(AppEvent::Key(Key::BackTab));
+        assert_eq!(app.focus(), 1);
+    }
+
+    #[test]
+    fn backtab_is_consumed_by_the_completion_popup_before_the_surface_switch() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "a"]);
+        typed(&mut app, "/mo"); // opens the completion popup
+        assert!(!app.completion_rows().is_empty());
+        app.handle(AppEvent::Key(Key::BackTab));
+        // The popup owns the key while it is open; the surface must not change.
+        assert_eq!(app.focus(), 0, "the popup consumed BackTab");
+        assert!(!app.completion_rows().is_empty(), "the popup stays open");
+        // Once dismissed, BackTab reaches the surface switch again.
+        app.handle(AppEvent::Key(Key::Esc));
+        app.handle(AppEvent::Key(Key::BackTab));
+        assert_eq!(app.focus(), 1);
+    }
+
+    #[test]
+    fn f1_opens_the_help_overlay_and_only_esc_or_f1_closes_it() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(matches!(app.overlay(), Some(Overlay::Help)));
+        // Every other key is ignored — it neither closes the modal nor edits.
+        app.handle(AppEvent::Key(Key::Char('x')));
+        assert!(matches!(app.overlay(), Some(Overlay::Help)));
+        assert_eq!(app.input(), "", "the modal gates the input");
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.overlay().is_none());
+        // F1 also closes it.
+        app.handle(AppEvent::Key(Key::F(1)));
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(app.overlay().is_none());
+    }
+
+    #[test]
+    fn ctrl_b_toggles_the_sidebar_flag() {
+        let mut app = App::new();
+        assert!(!app.hide_sidebar());
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert!(app.hide_sidebar());
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert!(!app.hide_sidebar());
+    }
+
+    #[test]
+    fn ctrl_t_flips_every_tool_at_once() {
+        let mut app = App::new();
+        push_done_tool(&mut app, "one");
+        push_done_tool(&mut app, "two");
+        assert!(!tool_expanded(&app, 0) && !tool_expanded(&app, 1));
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        assert!(tool_expanded(&app, 0) && tool_expanded(&app, 1), "all expanded");
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        assert!(!tool_expanded(&app, 0) && !tool_expanded(&app, 1), "all collapsed");
+    }
+
+    #[test]
+    fn ctrl_w_deletes_the_previous_word_and_a_paste_chip_whole() {
+        let mut app = App::new();
+        typed(&mut app, "hello world");
+        app.handle(AppEvent::Key(Key::Ctrl('w')));
+        assert_eq!(app.input(), "hello ");
+        app.handle(AppEvent::Key(Key::Ctrl('w')));
+        assert_eq!(app.input(), "");
+    }
+
+    #[test]
+    fn ctrl_w_next_to_a_paste_chip_deletes_the_whole_chip() {
+        let mut app = App::new();
+        app.handle(AppEvent::Paste("a\nb\nc\nd".into())); // one atomic chip
+        typed(&mut app, " done");
+        app.handle(AppEvent::Key(Key::Ctrl('w')));
+        assert_eq!(app.input(), "a\nb\nc\nd ", "the chip survives the word kill");
+        app.handle(AppEvent::Key(Key::Ctrl('w')));
+        // The chip is one atom: it goes whole, never partially.
+        assert_eq!(app.input(), "", "the second kill takes the chip whole");
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_the_start_of_the_current_line() {
+        let mut app = App::new();
+        typed(&mut app, "abc def");
+        for _ in 0..3 {
+            app.handle(AppEvent::Key(Key::Left)); // cursor after "abc "
+        }
+        app.handle(AppEvent::Key(Key::Ctrl('u')));
+        assert_eq!(app.input(), "def");
+
+        // Line-aware: it stops at the newline, keeping the earlier line.
+        let mut app = App::new();
+        typed(&mut app, "keep");
+        app.handle(AppEvent::Key(Key::Newline));
+        typed(&mut app, "drop");
+        app.handle(AppEvent::Key(Key::Ctrl('u')));
+        assert_eq!(app.input(), "keep\n");
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_the_end_of_the_current_line() {
+        let mut app = App::new();
+        typed(&mut app, "abc def");
+        for _ in 0..3 {
+            app.handle(AppEvent::Key(Key::Left)); // cursor after "abc "
+        }
+        app.handle(AppEvent::Key(Key::Ctrl('k')));
+        assert_eq!(app.input(), "abc ");
+
+        // The newline itself is kept.
+        let mut app = App::new();
+        typed(&mut app, "drop");
+        app.handle(AppEvent::Key(Key::Newline));
+        typed(&mut app, "keep");
+        app.handle(AppEvent::Key(Key::Ctrl('a'))); // to the very start
+        app.handle(AppEvent::Key(Key::Right)); // just past 'd'
+        app.handle(AppEvent::Key(Key::Ctrl('k')));
+        assert_eq!(app.input(), "d\nkeep");
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_move_the_cursor() {
+        let mut app = App::new();
+        typed(&mut app, "abc");
+        app.handle(AppEvent::Key(Key::Ctrl('a')));
+        assert_eq!(app.cursor(), 0);
+        app.handle(AppEvent::Key(Key::Ctrl('e')));
+        assert_eq!(app.cursor(), 3);
     }
 }

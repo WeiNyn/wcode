@@ -28,11 +28,15 @@ pub fn translate(event: Event) -> Vec<AppEvent> {
 
 fn translate_key(k: KeyEvent) -> Option<Key> {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
     Some(match k.code {
         // Ctrl-J is a portable newline: many terminals deliver it as a bare LF,
         // so map the chord (Shift-Enter still works) to an explicit Newline.
         KeyCode::Char('j') if ctrl => Key::Newline,
         KeyCode::Char(c) if ctrl => Key::Ctrl(c),
+        // An Alt chord is its own thing — it must never fall through to the
+        // plain `Char` arm and insert the character.
+        KeyCode::Char(c) if alt => Key::Alt(c),
         KeyCode::Char(c) => Key::Char(c),
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
@@ -44,9 +48,12 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
         KeyCode::End => Key::End,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
-        // Tab accepts the inline command completion. BackTab (Shift-Tab) is a
-        // distinct code and stays unmapped.
+        // Tab accepts the inline command completion; BackTab (Shift-Tab) focuses
+        // the previous surface — but only once the popup is closed, since the
+        // popup's own handler (`App::on_completion_key`) consumes it first.
         KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::F(n) => Key::F(n),
         KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => Key::Newline,
         KeyCode::Enter => Key::Enter,
         KeyCode::Esc => Key::Esc,
@@ -140,12 +147,29 @@ mod tests {
     }
 
     #[test]
-    fn tab_accepts_completion_and_backtab_stays_unmapped() {
+    fn tab_accepts_completion_and_backtab_is_the_previous_surface_chord() {
         assert_eq!(
             keys(translate(key(KeyCode::Tab, KeyModifiers::NONE))),
             vec![Key::Tab]
         );
-        // BackTab is a distinct code; we never mapped it and still do not.
-        assert!(keys(translate(key(KeyCode::BackTab, KeyModifiers::SHIFT))).is_empty());
+        // BackTab (Shift-Tab) is now mapped: the previous-surface chord. It only
+        // switches surface while the completion popup is closed — the popup's
+        // handler (`App::on_completion_key`) consumes it first (tested in app.rs).
+        assert_eq!(
+            keys(translate(key(KeyCode::BackTab, KeyModifiers::SHIFT))),
+            vec![Key::BackTab]
+        );
+    }
+
+    #[test]
+    fn alt_chords_and_function_keys_are_mapped_and_never_insert_a_char() {
+        assert_eq!(
+            keys(translate(key(KeyCode::Char('3'), KeyModifiers::ALT))),
+            vec![Key::Alt('3')]
+        );
+        assert_eq!(
+            keys(translate(key(KeyCode::F(1), KeyModifiers::NONE))),
+            vec![Key::F(1)]
+        );
     }
 }

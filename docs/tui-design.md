@@ -180,11 +180,17 @@ When narrow, fields drop least-important-first: **session, then effort, then
 tokens** (model and state always stay). The session id is shortened to 8 chars.
 
 **Keys** — `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Del` forward-delete · `Up`/`Down` history ·
+`Ctrl-A`/`Ctrl-E` move to the start/end of the input · `Ctrl-W` delete the previous word,
+`Ctrl-U`/`Ctrl-K` delete to the start/end of the current line (readline word editing on the
+atom buffer; a paste chip is one unit, never split) ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52) · `Ctrl-O` expands/collapses the last tool's output (a collapsed tool
-shows a 4-line preview, a failed tool always shows its error). `/changes` lists
+shows a 4-line preview, a failed tool always shows its error) · `Ctrl-T` does all of them ·
+`Ctrl-N`/`Shift-Tab` focus the next/previous surface, `Alt-1..9` jumps to the Nth · `Ctrl-B`
+toggles the team sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
+same `KEYS` table is printed by `/help`). `/changes` lists
 the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same
