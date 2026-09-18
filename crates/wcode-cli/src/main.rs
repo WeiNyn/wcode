@@ -759,10 +759,29 @@ async fn main() {
             let ids: Vec<String> = std::iter::once(session_id.to_string())
                 .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
                 .collect();
+            // With `--agents`, the served root can define workers for a peer:
+            // install the handler over this orchestrator's factory. Without it a
+            // `Define` is refused cleanly (the protocol default). The factory
+            // registers into the same registry the roster watches, so a defined
+            // worker is pushed to every client with no extra work.
+            let define = orchestrator.as_ref().map(|o| {
+                let o = o.clone();
+                std::sync::Arc::new(move |args: wcode_protocol::DefineArgs| {
+                    o.spawn_worker(crate::agents::WorkerSpec {
+                        name: args.name,
+                        model: args.model,
+                        system: args.role,
+                        tools: args.tools,
+                        base_url: args.base_url,
+                        api_key: args.api_key,
+                    })
+                    .map(|worker| worker.id)
+                }) as wcode_protocol::DefineHandler
+            });
             println!("serving session on {}", path.display());
             println!("serving {} session(s): {}", ids.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
-            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), None, &path).await {
+            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), define, &path).await {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
             }
