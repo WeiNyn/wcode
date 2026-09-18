@@ -319,15 +319,22 @@ Needed only once surfaces cross process boundaries.
     reuses `SessionId::agent("explorer")`; `Registry::register` and
     `Phonebook::insert` both overwrite, orphaning the original actor (its handle
     is replaced). D18 guards only `[team]` **load**, never a runtime spawn.
-    **Fix direction:** reject a duplicate name in `spawn_worker` (fail loudly,
-    like D14), or auto-suffix it.
+    **Fixed** (`201b9f1`) — `SessionFactory::spawn` now rejects an explicit
+    duplicate name loudly (and auto-bumps generated `w{n}` names); it is the
+    single chokepoint both `spawn_worker` and the `spawn` tool call.
+- **`[peers]` address-alias shadowing (low severity, follow-up).** `spawn`'s
+  duplicate guard checks the `Registry` *ids*, but an address-valued `[peers]`
+  entry is only a `Phonebook` alias (`Orchestrator::alias`), so
+  `spawn { name: "bob" }` can shadow a `[peers]` alias named `bob` (no actor is
+  orphaned — only the name mapping is shadowed). Distinct namespace from the
+  worker-id collision the guard fixes; revisit if name shadowing bites.
 - **Tool allow-list granularity**: names only in v1; per-tool argument restrictions
   (path scopes) would be a `Hooks` impl, not config (stays true to the stance).
 - **`/team` command**: the *list* form landed (F4a — `/team` prints the roster).
   A *re-spawn* / edit-members form is still open — cheap, rides on F1's table.
-- **`reload_args` and `--owner`**: the re-exec forwards `--agents` (F3) but still
-  drops `--owner`, so a served worker resumed interactively would come back as a
-  root. Pre-existing; revisit if `--owner` + interactive resume is supported.
+- **`reload_args` and `--owner`**: **resolved** (`7cd385d`) — the re-exec now
+  forwards `--owner`/`--name`, so a served worker resumed interactively keeps
+  its address and ownership edge.
 - **Tier 2 — socket multiplexing**: one socket serving many sessions (a `serve`
   accepting a set of handles; a `Client` routing inbound frames by
   `Frame.session`). Deferred (progress row 5); needed only once surfaces cross
