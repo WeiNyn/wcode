@@ -394,7 +394,7 @@ async fn dispatch(
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },
-        Request::Unknown => AgentEvent::Ack,
+        Request::ListSessions | Request::Unknown => AgentEvent::Ack,
     };
 
     if let Some(reply) = reply {

@@ -90,6 +90,28 @@ impl Registry {
             .insert(id, Backend::Remote(client));
     }
 
+    /// The **local** peers — the in-process handles this registry holds, sorted
+    /// by address for a deterministic roster. A socket server serves exactly
+    /// these ([`Self::register`]ed sessions: the root and its team); a peer
+    /// reached across a socket ([`Self::register_remote`]) is not a local handle
+    /// and is omitted, so it is never re-served.
+    pub fn locals(&self) -> Vec<(SessionId, SessionHandle)> {
+        let mut locals: Vec<(SessionId, SessionHandle)> = self
+            .inner
+            .peers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(id, backend)| match backend {
+                Backend::Local(handle) => Some((id.clone(), handle.clone())),
+                #[cfg(unix)]
+                Backend::Remote(_) => None,
+            })
+            .collect();
+        locals.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        locals
+    }
+
     /// Whether a peer is already registered at `id`. A plain existence probe —
     /// unlike [`Self::resolve`], it needs no `from` and enforces no permitted set.
     pub fn contains(&self, id: &SessionId) -> bool {
@@ -280,6 +302,22 @@ mod tests {
             reg.deliver(&orch, &ghost, Request::Notify { content: "?".into() }),
             Err(RouteError::Unknown(ghost))
         );
+    }
+
+    #[tokio::test]
+    async fn locals_lists_only_local_peers_sorted_by_id() {
+        let reg = Registry::new();
+        let b = SessionId::agent("b");
+        let a = SessionId::agent("a");
+        reg.register(b.clone(), session());
+        reg.register(a.clone(), session());
+        #[cfg(unix)]
+        reg.register_remote(
+            SessionId::agent("remote"),
+            Client::lazy(std::path::Path::new("/nonexistent-t2.sock")),
+        );
+        let ids: Vec<SessionId> = reg.locals().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec![a, b]);
     }
 
     #[tokio::test]

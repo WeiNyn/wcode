@@ -273,6 +273,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::Ack => "ack",
         AgentEvent::Stopped { .. } => "stopped",
         AgentEvent::History { .. } => "history",
+        AgentEvent::Sessions { .. } => "sessions",
         AgentEvent::AgentEnd => "agent_end",
     }
 }

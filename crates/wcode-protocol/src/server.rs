@@ -86,6 +86,21 @@ async fn connection(sessions: Arc<[(SessionId, SessionHandle)]>, stream: UnixStr
             id, session, sender, body, ..
         } = frame;
 
+        // `ListSessions` names no session: the server answers it directly with
+        // the roster (serve order, root first), before any demux.
+        if matches!(body, Request::ListSessions) {
+            let ids: Vec<SessionId> = sessions.iter().map(|(id, _)| id.clone()).collect();
+            let _ = out.send(Frame {
+                v: PROTOCOL_VERSION,
+                id,
+                reply_to: Some(id),
+                session,
+                sender: None,
+                body: AgentEvent::Sessions { ids },
+            });
+            continue;
+        }
+
         // Demux on `frame.session`: the served session of that name; the sole
         // session of a single-session server (any id — the legacy default); or,
         // on a multi-session server, a correlated error echoing the request.

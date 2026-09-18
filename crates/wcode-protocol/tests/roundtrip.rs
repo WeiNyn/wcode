@@ -497,3 +497,30 @@ async fn single_session_server_routes_the_default() {
         "the default view heard the sole session's stream"
     );
 }
+
+/// T2: the server answers `ListSessions` with its roster, in serve order (root
+/// first), before any per-session demux.
+#[tokio::test]
+async fn list_sessions_returns_the_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let root = SessionId::new("root");
+    let a = SessionId::agent("a");
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        vec![
+            (root.clone(), SessionActor::spawn(agent(vec![]))),
+            (a.clone(), SessionActor::spawn(agent(vec![]))),
+        ],
+        listener,
+    ));
+
+    // The legacy client addresses "remote"; the roster is answered regardless.
+    let client = Client::connect(&sock).await.unwrap();
+    let reply = client.ask(Request::ListSessions).await.unwrap();
+    let AgentEvent::Sessions { ids } = reply else {
+        panic!("expected a Sessions reply, got {reply:?}");
+    };
+    assert_eq!(ids, vec![root, a]);
+}

@@ -114,6 +114,9 @@ impl std::fmt::Display for SessionId {
 /// | `SetEffort` | `Agent::set_effort` |
 /// | `Compact` | `Agent::compact` |
 ///
+/// The one exception is [`Request::ListSessions`]: a transport-level probe the
+/// server answers, not an `Agent` method.
+///
 /// Inbound payloads carry user **content**, not an `AgentMessage`: a remote peer
 /// must not be able to inject an `Assistant`/`ToolResult` message and impersonate
 /// the model. The session wraps content as a user message, exactly as
@@ -165,6 +168,13 @@ pub enum Request {
     /// Read back the conversation so far. Reply:
     /// [`AgentEvent::History`].
     GetHistory,
+
+    /// Ask the **transport** for the sessions a server serves — serve order,
+    /// root first. The one request that names no `Agent` method: an in-process
+    /// session has no roster, so the actor answers it with [`AgentEvent::Ack`]
+    /// (like [`Request::Unknown`]); a socket server intercepts it and replies
+    /// [`AgentEvent::Sessions`].
+    ListSessions,
 
     /// Forward-compatibility catch-all: an older peer must skip a request it
     /// does not understand rather than fail the connection.
@@ -257,6 +267,7 @@ mod tests {
         roundtrip(Request::Notify { content: "n".into() }, "notify");
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
+        roundtrip(Request::ListSessions, "list_sessions");
     }
 
     #[test]
@@ -281,6 +292,7 @@ mod tests {
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
         assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::Cancel));
+        assert!(!is_inbound(&Request::ListSessions));
     }
 
     #[test]
