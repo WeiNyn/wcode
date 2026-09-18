@@ -142,14 +142,16 @@ impl Spawn {
                 };
             }
         };
-        if !matches!(backend, Backend::Remote(_)) {
+        // The peer's client, narrowed to the worker's own session once it is
+        // known: the server routes inbound frames on `frame.session`.
+        let Backend::Remote(client) = backend else {
             return ToolOutput {
                 output: format!("`{to}` is not a served peer; `to` needs a socket peer"),
                 is_error: true,
                 ..ToolOutput::default()
             };
-        }
-        match backend
+        };
+        match client
             .ask(Request::Define {
                 name: args.name,
                 model: args.model,
@@ -161,12 +163,28 @@ impl Spawn {
             .await
         {
             Ok(AgentEvent::Spawned { worker }) => {
-                // The worker lives on the peer; remember its name so the model
-                // can address it (over the same peer) with `message`.
+                // Register the worker as a remote peer — narrowed to its own
+                // session — so the caller can reach it, and record the ownership
+                // edge (the caller owns it). Mirrors `Orchestrator::register_remote`
+                // and the local path's post-spawn semantics.
+                let registry = self.factory.registry();
+                registry.register_remote(worker.clone(), client.with_session(worker.clone()));
+                registry.set_owner(worker.clone(), self.me.clone());
                 self.phonebook.insert(short_name(&worker), worker.clone());
-                ToolOutput {
-                    output: format!("spawned {worker} on {to}"),
-                    ..ToolOutput::default()
+                // Hand the task over at once — a `Wake`, so the worker runs even
+                // if idle, exactly as the in-process path does.
+                match registry.deliver(&self.me, &worker, Request::Wake { content: args.task }) {
+                    Ok(()) => ToolOutput {
+                        output: format!("spawned {worker} on {to}"),
+                        ..ToolOutput::default()
+                    },
+                    Err(e) => ToolOutput {
+                        output: format!(
+                            "spawned {worker} on {to} but could not deliver its task: {e}"
+                        ),
+                        is_error: true,
+                        ..ToolOutput::default()
+                    },
                 }
             }
             Ok(AgentEvent::Error { message }) => ToolOutput {
@@ -332,45 +350,53 @@ mod tests {
         assert_eq!(spec.api_key.as_deref(), Some("wk"));
     }
 
-    /// R2: `spawn { to }` resolves a served peer and sends `Request::Define`
-    /// over the socket, returning the peer's `Spawned` worker.
+    /// R2: `spawn { to }` defines a worker on a served peer, registers it as a
+    /// reachable **remote peer**, and delivers the task as a `Wake` — the same
+    /// post-spawn semantics the local path has.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_spawn_to_a_remote_peer_defines_there() {
-        // A peer serving a Define handler that names the requested worker.
+    async fn a_spawn_to_a_remote_peer_defines_and_starts_the_worker() {
+        // Peer A: a live roster; its Define handler registers a real worker it
+        // can then route a task to.
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("A.sock");
-        let listener = wcode_protocol::bind(&sock).await.unwrap();
+        let peer_registry = Registry::new();
+        let worker_handle = session();
+        let mut worker_events = worker_handle.subscribe();
         let (seen_tx, mut seen_rx) =
             tokio::sync::mpsc::unbounded_channel::<wcode_protocol::DefineArgs>();
-        let handler: wcode_protocol::DefineHandler = Arc::new(move |args| {
-            let name = args.name.clone().unwrap_or_else(|| "w1".into());
-            let _ = seen_tx.send(args);
-            Ok(SessionId::agent(name))
-        });
+        let handler: wcode_protocol::DefineHandler = {
+            let peer_registry = peer_registry.clone();
+            let worker_handle = worker_handle.clone();
+            Arc::new(move |args| {
+                let name = args.name.clone().unwrap_or_else(|| "w1".into());
+                let id = SessionId::agent(name);
+                let _ = seen_tx.send(args);
+                peer_registry.register(id.clone(), worker_handle.clone());
+                Ok(id)
+            })
+        };
+        let listener = wcode_protocol::bind(&sock).await.unwrap();
         tokio::spawn(wcode_protocol::serve(
-            tokio::sync::watch::channel(Vec::new()).1,
+            peer_registry.subscribe(),
             (SessionId::new("A"), session()),
             Some(handler),
             listener,
         ));
 
-        // This process registers the peer `r`, then spawns on it.
+        // This process registers the peer `r`, then spawns on it with a task.
         let factory = factory();
         let registry = factory.registry().clone();
         let client = wcode_protocol::Client::connect(&sock).await.unwrap();
         registry.register_remote(SessionId::agent("r"), client);
         registry.set_owner(SessionId::agent("r"), SessionId::agent("orch"));
 
+        let root = SessionId::agent("orch");
         let book = Phonebook::default();
-        let tool = erased(Spawn::new(
-            factory.clone(),
-            SessionId::agent("orch"),
-            book.clone(),
-        ));
+        let tool = erased(Spawn::new(factory.clone(), root.clone(), book.clone()));
         let out = tool
             .execute(
-                serde_json::json!({ "task": "hi", "to": "agent:r", "name": "reviewer" }),
+                serde_json::json!({ "task": "DO THE THING", "to": "agent:r", "name": "reviewer" }),
                 ctx(),
             )
             .await;
@@ -379,9 +405,28 @@ mod tests {
         // The `Define` crossed the socket with the requested name...
         let args = seen_rx.try_recv().expect("the peer saw a Define");
         assert_eq!(args.name.as_deref(), Some("reviewer"));
-        assert_eq!(args.model, None);
-        // ...and the new worker joined this side's phonebook.
-        assert_eq!(book.get("reviewer"), Some(SessionId::agent("reviewer")));
+
+        // (a) ...and the worker was woken with the task (B1): its
+        // `MessageReceived` carries the exact task text.
+        let mut got_task = false;
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), worker_events.recv()).await
+        {
+            if let AgentEvent::MessageReceived { content, .. } = event {
+                assert_eq!(content, "DO THE THING");
+                got_task = true;
+                break;
+            }
+        }
+        assert!(got_task, "the worker was woken with the task");
+
+        // (b) The caller can reach the worker it just defined (B2).
+        let worker = SessionId::agent("reviewer");
+        assert!(
+            registry.resolve(&root, &worker).is_ok(),
+            "the defined worker is a reachable remote peer"
+        );
+        assert_eq!(book.get("reviewer"), Some(worker));
     }
 
     /// A `to` that names no served peer is an error, not a silent in-process
