@@ -390,8 +390,6 @@ impl Orchestrator {
     }
 
     /// Spawn a worker owned by this orchestrator and register its name in the
-    /// phonebook (F3). Validates the tool allow-list first so a bad preset name
-    /// Spawn a worker owned by this orchestrator and register its name in the
     /// phonebook (F3). Validates the tool allow-list and rejects a duplicate
     /// name first, so the `[team]` startup path (which also calls this) and the
     /// `spawn` tool both fail loudly (D14) rather than silently overwriting.
