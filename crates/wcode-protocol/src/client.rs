@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use wcode_harness::actor::EVENT_BUFFER;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId};
@@ -65,6 +65,10 @@ struct Inner {
     /// session's events, exactly as the single-session client did before
     /// multiplexing.
     all_events: broadcast::Sender<AgentEvent>,
+    /// The connection-wide roster of served sessions, updated when the server
+    /// pushes an unsolicited `AgentEvent::Sessions` frame (a session registered
+    /// at runtime). Shared across every view — see [`Client::subscribe_roster`].
+    roster: watch::Sender<Vec<SessionId>>,
     /// Reply waiters, keyed by request id.
     pending: Mutex<HashMap<u64, oneshot::Sender<AgentEvent>>>,
     next_id: AtomicU64,
@@ -94,6 +98,7 @@ impl Client {
             path,
             events: Mutex::new(HashMap::new()),
             all_events: broadcast::channel(EVENT_BUFFER).0,
+            roster: watch::channel(Vec::new()).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         });
@@ -163,6 +168,16 @@ impl Client {
     /// [`Client::with_session`]).
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.inner.sender(self.session.as_ref()).subscribe()
+    }
+
+    /// A live view of the **connection-wide** roster of served sessions,
+    /// **seeded** with the current value. The server pushes an unsolicited
+    /// [`AgentEvent::Sessions`] frame when the roster grows (a session
+    /// registered at runtime); this receiver yields the new list. It is
+    /// connection-wide, *not* per-session: every view over this connection
+    /// shares it, so an unnarrowed and a `with_session` view see the same ids.
+    pub fn subscribe_roster(&self) -> watch::Receiver<Vec<SessionId>> {
+        self.inner.roster.subscribe()
     }
 
     fn frame(&self, id: u64, sender: Option<SessionId>, body: Request) -> Frame<Request> {
@@ -255,6 +270,12 @@ fn deliver(inner: &Inner, frame: Frame<AgentEvent>) {
             }
         }
         None => {
+            // An unsolicited `Sessions` frame is the server's roster push (a
+            // session registered at runtime): record it connection-wide, so a
+            // `subscribe_roster` view learns the new id without polling.
+            if let AgentEvent::Sessions { ids } = &frame.body {
+                let _ = inner.roster.send(ids.clone());
+            }
             // Ids are unique per connection (a single `next_id` atomic), so a
             // reply and a streamed event never collide — no re-namespacing is
             // needed. Route the event to its own session's fan *and* the
@@ -274,6 +295,7 @@ mod tests {
             path: PathBuf::from("/nonexistent"),
             events: Mutex::new(HashMap::new()),
             all_events: broadcast::channel(EVENT_BUFFER).0,
+            roster: watch::channel(Vec::new()).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         }

@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::protocol::{Request, SessionId};
 
@@ -59,10 +60,23 @@ pub struct Registry {
     inner: Arc<Inner>,
 }
 
-#[derive(Default)]
 struct Inner {
     peers: Mutex<HashMap<SessionId, Backend>>,
     owners: Mutex<HashMap<SessionId, SessionId>>,
+    /// The live **local** roster (see [`Registry::locals`]), refreshed on every
+    /// `register`/`register_remote` so a socket server can fan a session that
+    /// appears after it started. Read via [`Registry::subscribe`].
+    roster: watch::Sender<Vec<(SessionId, SessionHandle)>>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            peers: Mutex::new(HashMap::new()),
+            owners: Mutex::new(HashMap::new()),
+            roster: watch::channel(Vec::new()).0,
+        }
+    }
 }
 
 impl Registry {
@@ -77,6 +91,7 @@ impl Registry {
             .lock()
             .unwrap()
             .insert(id, Backend::Local(handle));
+        self.refresh_roster();
     }
 
     /// Register a peer reachable **across a socket** — a served session this
@@ -88,6 +103,7 @@ impl Registry {
             .lock()
             .unwrap()
             .insert(id, Backend::Remote(client));
+        self.refresh_roster();
     }
 
     /// The **local** peers — the in-process handles this registry holds, sorted
@@ -110,6 +126,20 @@ impl Registry {
             .collect();
         locals.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         locals
+    }
+
+    /// A live view of [`Self::locals`]: a receiver **seeded** with the current
+    /// local roster and updated whenever it changes (a session is
+    /// `register`ed). A socket server serves it, so a session that appears
+    /// *after* the server started is still reachable — see [`crate::serve`].
+    pub fn subscribe(&self) -> watch::Receiver<Vec<(SessionId, SessionHandle)>> {
+        self.inner.roster.subscribe()
+    }
+
+    /// Recompute the local roster and publish it to every [`Self::subscribe`]r.
+    /// A send with no receivers is a no-op (there is simply no server watching).
+    fn refresh_roster(&self) {
+        let _ = self.inner.roster.send(self.locals());
     }
 
     /// Whether a peer is already registered at `id`. A plain existence probe —
@@ -318,6 +348,17 @@ mod tests {
         );
         let ids: Vec<SessionId> = reg.locals().into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn subscribe_yields_the_new_roster_after_register() {
+        let reg = Registry::new();
+        let mut rx = reg.subscribe();
+        let w1 = SessionId::agent("w1");
+        reg.register(w1.clone(), session());
+        rx.changed().await.unwrap();
+        let ids: Vec<SessionId> = rx.borrow().iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, vec![w1]);
     }
 
     #[tokio::test]

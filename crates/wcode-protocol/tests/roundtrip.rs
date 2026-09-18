@@ -49,6 +49,40 @@ fn done() -> LlmStreamEvent {
     }
 }
 
+/// Spawn a server with a **frozen** roster: the first session is the root, the
+/// rest are already-present extras. The common case — the live-roster tests
+/// (`a_late_registered_session_reaches_the_client`,
+/// `list_sessions_reflects_a_late_registration`) build the `watch` themselves.
+fn serve_static(
+    sessions: Vec<(SessionId, wcode_harness::actor::SessionHandle)>,
+    listener: tokio::net::UnixListener,
+) {
+    let mut sessions = sessions.into_iter();
+    let root = sessions.next().expect("at least one session");
+    let rest: Vec<_> = sessions.collect();
+    tokio::spawn(wcode_protocol::serve(
+        tokio::sync::watch::channel(rest).1,
+        root,
+        listener,
+    ));
+}
+
+/// Drain `rx` until a `MessageReceived` arrives (skipping a leading roster
+/// push), returning `(from, content)`. Panics on timeout.
+async fn next_message(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+) -> (SessionId, String) {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        if let AgentEvent::MessageReceived { from, content } = event {
+            return (from, content);
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_remote_client_drives_the_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -59,10 +93,10 @@ async fn a_remote_client_drives_the_session() {
         done(),
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("test"), handle)],
         listener,
-    ));
+    );
 
     let client = Client::connect(&sock).await.unwrap();
     let mut events = client.subscribe();
@@ -120,10 +154,10 @@ async fn a_second_client_observes_the_same_session() {
         done(),
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("test"), handle)],
         listener,
-    ));
+    );
 
     // Two independent connections to one session.
     let a = Client::connect(&sock).await.unwrap();
@@ -179,10 +213,10 @@ async fn a_client_reconnects_after_the_connection_drops() {
         done(),
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("test"), handle)],
         listener,
-    ));
+    );
 
     // Wait until the supervisor has reconnected to the real server: a read-back
     // that resolves proves the request path is live again. (A request sent while
@@ -225,10 +259,10 @@ async fn a_notify_crosses_the_socket() {
 
     let handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("test"), handle)],
         listener,
-    ));
+    );
 
     let client = Client::connect(&sock).await.unwrap();
     let mut events = client.subscribe();
@@ -274,10 +308,10 @@ async fn a_remote_peer_delivery_carries_the_sender() {
 
     let w_handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("w1"), w_handle)],
         listener,
-    ));
+    );
 
     let orch = SessionId::agent("orchestrator");
     let w1 = SessionId::agent("w1");
@@ -299,14 +333,10 @@ async fn a_remote_peer_delivery_carries_the_sender() {
         .unwrap();
 
     // The served session received it, attributed to `agent:orchestrator`.
-    let event = tokio::time::timeout(Duration::from_secs(3), events.recv())
-        .await
-        .expect("an event")
-        .expect("open");
+    let (from, content) = next_message(&mut events).await;
     assert!(
-        matches!(&event, AgentEvent::MessageReceived { from, content }
-            if from == &orch && content == "hi"),
-        "{event:?}"
+        from == orch && content == "hi",
+        "from={from:?} content={content:?}"
     );
 }
 
@@ -332,19 +362,15 @@ async fn a_lazy_client_connects_once_the_peer_appears() {
     // Now bring the server up.
     let handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("w1"), handle)],
         listener,
-    ));
+    );
 
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
-        .await
-        .expect("an event")
-        .expect("open");
+    let (from, content) = next_message(&mut events).await;
     assert!(
-        matches!(&event, AgentEvent::MessageReceived { from, content }
-            if from.as_str() == "agent:orchestrator" && content == "hi"),
-        "{event:?}"
+        from.as_str() == "agent:orchestrator" && content == "hi",
+        "from={from:?} content={content:?}"
     );
 }
 
@@ -367,10 +393,10 @@ async fn two_sessions_demux_over_one_socket() {
     let sa = SessionId::agent("a");
     let sb = SessionId::agent("b");
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(sa.clone(), a), (sb.clone(), b)],
         listener,
-    ));
+    );
 
     // Two per-session views over one connection.
     let conn = Client::connect(&sock).await.unwrap();
@@ -445,13 +471,13 @@ async fn unknown_session_is_rejected_on_a_multi_session_server() {
     let sock = dir.path().join("w.sock");
 
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![
             (SessionId::agent("a"), SessionActor::spawn(agent(vec![]))),
             (SessionId::agent("b"), SessionActor::spawn(agent(vec![]))),
         ],
         listener,
-    ));
+    );
 
     let conn = Client::connect(&sock).await.unwrap();
     let ghost = conn.with_session(SessionId::agent("ghost"));
@@ -474,10 +500,10 @@ async fn single_session_server_routes_the_default() {
         done(),
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![(SessionId::new("test"), handle)],
         listener,
-    ));
+    );
 
     // The legacy client addresses "remote"; the one served session answers.
     let client = Client::connect(&sock).await.unwrap();
@@ -508,13 +534,13 @@ async fn list_sessions_returns_the_roster() {
     let root = SessionId::new("root");
     let a = SessionId::agent("a");
     let listener = wcode_protocol::bind(&sock).await.unwrap();
-    tokio::spawn(wcode_protocol::serve(
+    serve_static(
         vec![
             (root.clone(), SessionActor::spawn(agent(vec![]))),
             (a.clone(), SessionActor::spawn(agent(vec![]))),
         ],
         listener,
-    ));
+    );
 
     // The legacy client addresses "remote"; the roster is answered regardless.
     let client = Client::connect(&sock).await.unwrap();
@@ -523,4 +549,96 @@ async fn list_sessions_returns_the_roster() {
         panic!("expected a Sessions reply, got {reply:?}");
     };
     assert_eq!(ids, vec![root, a]);
+}
+
+/// T2: a session registered into a live registry **after** the server started is
+/// fanned to a connected client, and the client learns its id from the pushed
+/// roster — no polling, no restart. This is the runtime-spawned-worker path.
+#[tokio::test]
+async fn a_late_registered_session_reaches_the_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.subscribe(),
+        (root_id.clone(), root),
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut roster = client.subscribe_roster();
+
+    // A worker appears *after* the connection: register it into the live
+    // registry (exactly what a runtime `spawn` does).
+    let w1 = SessionId::agent("w1");
+    registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
+
+    // The client learns the new id from the pushed roster.
+    tokio::time::timeout(Duration::from_secs(5), roster.changed())
+        .await
+        .expect("a roster change")
+        .expect("open");
+    assert!(
+        roster.borrow().contains(&w1),
+        "the pushed roster names the late session: {:?}",
+        roster.borrow()
+    );
+
+    // ...and the new session's events reach this connection's fan for it.
+    let mut events = client.with_session(w1.clone()).subscribe();
+    client
+        .with_session(w1.clone())
+        .send(Request::Notify {
+            content: "hi".into(),
+        })
+        .unwrap();
+    let mut saw = false;
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+        if let AgentEvent::MessageReceived { content, .. } = event {
+            assert_eq!(content, "hi");
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "an event from the late session reached the client");
+}
+
+/// T2: `ListSessions` is answered from the **live** roster, so a session
+/// registered after the server started appears in order (root first).
+#[tokio::test]
+async fn list_sessions_reflects_a_late_registration() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.subscribe(),
+        (root_id.clone(), root),
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let w1 = SessionId::agent("w1");
+    registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
+
+    // Wait until the server has observed the change (its push reaches us)...
+    let mut roster = client.subscribe_roster();
+    tokio::time::timeout(Duration::from_secs(5), roster.changed())
+        .await
+        .expect("a roster change")
+        .expect("open");
+
+    // ...then `ListSessions` reflects it, root first.
+    let reply = client.ask(Request::ListSessions).await.unwrap();
+    let AgentEvent::Sessions { ids } = reply else {
+        panic!("expected a Sessions reply, got {reply:?}");
+    };
+    assert_eq!(ids, vec![root_id, w1]);
 }
