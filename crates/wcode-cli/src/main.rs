@@ -430,13 +430,14 @@ async fn main() {
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
                     // single connection-wide root surface.
+                    let root_id = roster.first().cloned();
                     let surfaces: Vec<wcode_tui::SurfaceSpec> = if roster.is_empty() {
                         vec![wcode_tui::SurfaceSpec {
                             id: SessionId::agent("root"),
                             label: "root".to_string(),
                             model: llm.model.clone(),
                             is_root: true,
-                            backend: Backend::from(client),
+                            backend: Backend::from(client.clone()),
                         }]
                     } else {
                         let root = &roster[0];
@@ -451,7 +452,43 @@ async fn main() {
                             })
                             .collect()
                     };
-                    match wcode_tui::run(surfaces, options, None).await {
+                    // Runtime-spawned sessions reach the TUI through this feed:
+                    // the server pushes the connection-wide roster when it grows,
+                    // and a task emits a surface for each id not already seeded
+                    // from the initial `ListSessions`.
+                    let new_surfaces = {
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        let mut roster_rx = client.subscribe_roster();
+                        let mut seeded: std::collections::HashSet<SessionId> =
+                            roster.iter().cloned().collect();
+                        let client = client.clone();
+                        let model = llm.model.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                for id in roster_rx.borrow_and_update().clone() {
+                                    if !seeded.insert(id.clone()) {
+                                        continue;
+                                    }
+                                    let spec = wcode_tui::SurfaceSpec {
+                                        id: id.clone(),
+                                        label: crate::agents::short_name(&id),
+                                        model: model.clone(),
+                                        is_root: Some(&id) == root_id.as_ref(),
+                                        backend: Backend::from(client.with_session(id)),
+                                    };
+                                    // A closed receiver means the TUI has exited.
+                                    if tx.send(spec).is_err() {
+                                        return;
+                                    }
+                                }
+                                if roster_rx.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                        });
+                        Some(rx)
+                    };
+                    match wcode_tui::run(surfaces, options, new_surfaces).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                         Ok(wcode_tui::Outcome::Resume(_)) => {
                             eprintln!("tui: cannot resume over a socket");
@@ -709,22 +746,21 @@ async fn main() {
             if let Some(o) = &orchestrator {
                 o.register_root(handle.clone());
             }
-            // Serve the root first, then the team (`--agents`): the local
-            // sessions the registry holds, minus the root's own registry entry.
-            let mut served = vec![(session_id, handle)];
-            if let Some(o) = &orchestrator {
-                served.extend(
-                    o.registry()
-                        .locals()
-                        .into_iter()
-                        .filter(|(id, _)| id != o.id()),
-                );
-            }
-            let ids: Vec<String> = served.iter().map(|(id, _)| id.to_string()).collect();
+            // Serve the root first (labelled by its session id), then the live
+            // team: the registry's local sessions minus the root's own
+            // `agent:orchestrator` alias. The roster stays live, so a worker
+            // spawned at runtime is served without a restart.
+            let roster = match &orchestrator {
+                Some(o) => live_roster(o.registry(), o.id().clone()),
+                None => tokio::sync::watch::channel(Vec::new()).1,
+            };
+            let ids: Vec<String> = std::iter::once(session_id.to_string())
+                .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
+                .collect();
             println!("serving session on {}", path.display());
-            println!("serving {} session(s): {}", served.len(), ids.join(", "));
+            println!("serving {} session(s): {}", ids.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
-            if let Err(e) = wcode_protocol::serve_at(served, &path).await {
+            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), &path).await {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
             }
@@ -875,6 +911,38 @@ fn default_socket_path() -> PathBuf {
     config_dir()
         .map(|d| d.join("wcode.sock"))
         .unwrap_or_else(|| std::env::temp_dir().join("wcode.sock"))
+}
+
+/// A live roster for `serve`: the registry's local sessions, minus `exclude`
+/// (the root's own `agent:orchestrator` alias — the served root is labelled by
+/// its session id instead). Kept fresh, so a worker spawned at runtime is
+/// served without a restart.
+#[cfg(unix)]
+fn live_roster(
+    registry: &wcode_protocol::Registry,
+    exclude: SessionId,
+) -> tokio::sync::watch::Receiver<Vec<(SessionId, wcode_harness::actor::SessionHandle)>> {
+    fn filter(
+        sessions: &[(SessionId, wcode_harness::actor::SessionHandle)],
+        exclude: &SessionId,
+    ) -> Vec<(SessionId, wcode_harness::actor::SessionHandle)> {
+        sessions
+            .iter()
+            .filter(|(id, _)| id != exclude)
+            .cloned()
+            .collect()
+    }
+    let mut src = registry.subscribe();
+    let (tx, rx) = tokio::sync::watch::channel(filter(&src.borrow_and_update(), &exclude));
+    tokio::spawn(async move {
+        loop {
+            if src.changed().await.is_err() {
+                break;
+            }
+            let _ = tx.send(filter(&src.borrow_and_update(), &exclude));
+        }
+    });
+    rx
 }
 
 /// The `/resume` picker's list: one entry per session file, newest first, each
