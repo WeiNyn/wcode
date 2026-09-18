@@ -500,13 +500,14 @@ fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The dim hint under an elided tool body: `… +N more lines · Ctrl+O` when the
-/// preview cuts whole lines, or `… Ctrl+O to show the full line` when only the
-/// summary is truncated (a single long line, whose body is empty). `None` when
-/// expansion would reveal nothing more.
+/// The dim hint under an elided tool body: `… +N more line(s) · Ctrl+O` when the
+/// preview cuts whole lines (singular for one), or `… Ctrl+O to show the full
+/// line` when only the summary is truncated (a single long line, empty body).
+/// `None` when expansion would reveal nothing more.
 fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
     let text = if more_lines > 0 {
-        format!("{TOOL_INDENT}… +{more_lines} more lines · Ctrl+O")
+        let line = if more_lines == 1 { "line" } else { "lines" };
+        format!("{TOOL_INDENT}… +{more_lines} more {line} · Ctrl+O")
     } else if wide {
         format!("{TOOL_INDENT}… Ctrl+O to show the full line")
     } else {
@@ -1660,6 +1661,30 @@ mod tests {
             !expanded.contains("more lines · Ctrl+O"),
             "the hint should be gone:\n{expanded}"
         );
+    }
+
+    #[test]
+    fn the_more_hint_pluralizes_one_hidden_line() {
+        // 6 output lines = summary + 5 body lines → 4 previewed, 1 hidden.
+        let mut app = App::new();
+        let six = (1..=6)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &six, false, None);
+        let text = buffer_text(&render(&mut app, 70, 20));
+        assert!(text.contains("… +1 more line · Ctrl+O"), "{text}");
+        assert!(!text.contains("+1 more lines"), "not pluralized:\n{text}");
+
+        // 7 output lines = summary + 6 body lines → 2 hidden (plural).
+        let mut app = App::new();
+        let seven = (1..=7)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &seven, false, None);
+        let text = buffer_text(&render(&mut app, 70, 20));
+        assert!(text.contains("… +2 more lines · Ctrl+O"), "{text}");
     }
 
     #[test]
