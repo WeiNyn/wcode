@@ -374,8 +374,11 @@ extend.
 > spine, per-feature design, locked decisions, phased tasks, open questions,
 > progress tracker.
 
-**Status.** Planned. Sequence: F1 → F2 → F3 → F4. In-process first; per-agent
-provider, remote-agent definition, and socket multiplexing are deferred (tier 2).
+**Status.** Complete — all phases landed (F1 → F2 → F3 → F4, including F4b-1/F4b-2).
+In-process first; the remaining follow-ups are tier 2: socket multiplexing (one
+socket serving many sessions) and the per-agent provider (a worker on its own
+`base_url`/key). Remote/served workers still wait on that wire work. Design and
+progress tracker: [`team-and-tui-plan.md`](team-and-tui-plan.md).
 
 This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 

@@ -674,10 +674,13 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     `agent:<name>`); `spawn`/`register_remote` add names, and `[peers]` config
     adds persistent ones (a socket path, or an `agent:<id>`/`user` alias). A
     `peers` tool lists them. Landed.
-  - *(future surface)* **Worker visibility / perspective switch.** A worker
-    emits to its *own* event stream and nothing renders it; letting the TUI
-    switch to a worker's view (and/or forwarding its activity into the root's
-    transcript) is a later surface — out of scope for S4.
+  - **Worker visibility / perspective switch — landed in-process (F4b-2).** A
+    worker emits to its *own* event stream; F4b-2's multi-surface TUI renders it —
+    `/surface` (`PickerKind::Surface`) or `Ctrl-N` switches to a worker's view,
+    and the sidebar shows each teammate's model + state (see
+    [`team-and-tui-plan.md`](team-and-tui-plan.md)). The gap that remains is
+    remote: a **served** worker's stream is not multiplexed over a socket, so
+    that view still requires tier-2 socket multiplexing.
 - **S5 — (optional, far)** Task-DAG / deep swarm, only if wanted.
 
 The dependency is linear and each stage is independently useful: S0 unblocks S1
