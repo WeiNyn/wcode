@@ -2,10 +2,12 @@
 //!
 //! The client demuxes the connection the same way the actor demuxes its
 //! channels: a supervisor writes queued requests and reads inbound frames,
-//! routing *streaming* events to [`Client::subscribe`] and *replies* to
-//! [`Client::ask`] (matched by the envelope's `reply_to`). So a caller cannot
-//! tell a [`Client`] from a [`SessionHandle`] — which is the whole point of
-//! [`crate::Backend`].
+//! routing *streaming* events by `Frame::session` to [`Client::subscribe`] and
+//! *replies* to [`Client::ask`] (matched by the envelope's `reply_to`). A
+//! [`Client`] is a per-session **view** over one connection: [`Client::with_session`]
+//! narrows it to one session, while [`Client::connect`]/[`Client::lazy`] is the
+//! legacy connection-wide view. So a caller cannot tell a [`Client`] from a
+//! [`SessionHandle`] — which is the whole point of [`crate::Backend`].
 //!
 //! It also **reconnects**: if the connection drops (a server restart, a blip),
 //! the supervisor re-establishes it with backoff and keeps going. Requests
@@ -36,21 +38,36 @@ use crate::frame::{read_frame, write_frame};
 const RECONNECT_BASE: Duration = Duration::from_millis(200);
 const RECONNECT_CAP: Duration = Duration::from_secs(5);
 
+/// The wire placeholder an unnarrowed view addresses: a single-session server
+/// routes any id to its sole session, so `connect`/`lazy` reach it without
+/// knowing the served id.
+const DEFAULT_SESSION: &str = "remote";
+
 /// A connection to a remote session, reconnecting automatically if it drops.
+///
+/// A clone is a **view**: it shares the connection and request queue but may
+/// address a different session ([`Client::with_session`]).
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<Inner>,
     /// Requests, drained by the supervisor across reconnects.
     out: mpsc::UnboundedSender<Frame<Request>>,
+    /// The session this view addresses; `None` is the connection-wide view.
+    session: Option<SessionId>,
 }
 
 struct Inner {
     path: PathBuf,
-    events: broadcast::Sender<AgentEvent>,
+    /// Per-session event fans, created on first use — a [`Client::with_session`]
+    /// view hears only its own session's.
+    events: Mutex<HashMap<SessionId, broadcast::Sender<AgentEvent>>>,
+    /// The connection-wide fan: the legacy view (`connect`/`lazy`) hears every
+    /// session's events, exactly as the single-session client did before
+    /// multiplexing.
+    all_events: broadcast::Sender<AgentEvent>,
     /// Reply waiters, keyed by request id.
     pending: Mutex<HashMap<u64, oneshot::Sender<AgentEvent>>>,
     next_id: AtomicU64,
-    session: SessionId,
 }
 
 impl Client {
@@ -73,17 +90,31 @@ impl Client {
 
     fn adopt(path: PathBuf, stream: Option<UnixStream>) -> Client {
         let (out, out_rx) = mpsc::unbounded_channel();
-        let (events, _) = broadcast::channel(EVENT_BUFFER);
         let inner = Arc::new(Inner {
             path,
-            events,
+            events: Mutex::new(HashMap::new()),
+            all_events: broadcast::channel(EVENT_BUFFER).0,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
-            // Single-session server (S2): the routing field is inert here.
-            session: SessionId::new("remote"),
         });
         tokio::spawn(supervise(inner.clone(), out_rx, stream));
-        Client { inner, out }
+        Client {
+            inner,
+            out,
+            session: None,
+        }
+    }
+
+    /// A per-session view over the same connection: a cheap clone sharing the
+    /// `Inner` and request queue but addressed to `session`. Its
+    /// [`Client::subscribe`] hears only `session`'s events; replies are matched
+    /// by `reply_to` and are independent of the view.
+    pub fn with_session(&self, session: SessionId) -> Client {
+        Client {
+            inner: self.inner.clone(),
+            out: self.out.clone(),
+            session: Some(session),
+        }
     }
 
     /// Fire-and-forget: queue a request. Streaming events (and the eventual
@@ -117,10 +148,12 @@ impl Client {
         rx.await.map_err(|_| Closed)
     }
 
-    /// Stream the server's events. Each subscriber gets its own receiver, which
-    /// survives a reconnect (only events during the gap are lost).
+    /// Stream the events this view hears: its own session's, or — for the
+    /// connection-wide view (`connect`/`lazy`) — every session's. Each subscriber
+    /// gets its own receiver, which survives a reconnect (only events during the
+    /// gap are lost).
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
-        self.inner.events.subscribe()
+        self.inner.sender(self.session.as_ref()).subscribe()
     }
 
     fn frame(&self, id: u64, sender: Option<SessionId>, body: Request) -> Frame<Request> {
@@ -128,9 +161,31 @@ impl Client {
             v: PROTOCOL_VERSION,
             id,
             reply_to: None,
-            session: self.inner.session.clone(),
+            session: self
+                .session
+                .clone()
+                .unwrap_or_else(|| SessionId::new(DEFAULT_SESSION)),
             sender,
             body,
+        }
+    }
+}
+
+impl Inner {
+    /// The event fan for a view: the connection-wide one for an unnarrowed view,
+    /// else the (lazily created) fan for that session. Kept in the shared `Inner`,
+    /// not on a view, so subscribers survive a reconnect — only events during the
+    /// gap are lost.
+    fn sender(&self, session: Option<&SessionId>) -> broadcast::Sender<AgentEvent> {
+        match session {
+            None => self.all_events.clone(),
+            Some(session) => self
+                .events
+                .lock()
+                .unwrap()
+                .entry(session.clone())
+                .or_insert_with(|| broadcast::channel(EVENT_BUFFER).0)
+                .clone(),
         }
     }
 }
@@ -191,7 +246,74 @@ fn deliver(inner: &Inner, frame: Frame<AgentEvent>) {
             }
         }
         None => {
-            let _ = inner.events.send(frame.body);
+            // Ids are unique per connection (a single `next_id` atomic), so a
+            // reply and a streamed event never collide — no re-namespacing is
+            // needed. Route the event to its own session's fan *and* the
+            // connection-wide fan, so the legacy view still hears it all.
+            let _ = inner.all_events.send(frame.body.clone());
+            let _ = inner.sender(Some(&frame.session)).send(frame.body);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inner() -> Inner {
+        Inner {
+            path: PathBuf::from("/nonexistent"),
+            events: Mutex::new(HashMap::new()),
+            all_events: broadcast::channel(EVENT_BUFFER).0,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn stream_frame(session: SessionId, body: AgentEvent) -> Frame<AgentEvent> {
+        Frame {
+            v: PROTOCOL_VERSION,
+            id: 0,
+            reply_to: None,
+            session,
+            sender: None,
+            body,
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_splits_replies_from_streamed_events() {
+        let inner = inner();
+        // A reply resolves the matching waiter and is never streamed.
+        let (tx, rx) = oneshot::channel();
+        inner.pending.lock().unwrap().insert(7, tx);
+        let mut stream = inner.sender(None).subscribe();
+        deliver(
+            &inner,
+            Frame {
+                v: PROTOCOL_VERSION,
+                id: 7,
+                reply_to: Some(7),
+                session: SessionId::new("s"),
+                sender: None,
+                body: AgentEvent::Ack,
+            },
+        );
+        assert!(matches!(rx.await.unwrap(), AgentEvent::Ack));
+        assert!(stream.try_recv().is_err(), "a reply is not streamed");
+    }
+
+    #[tokio::test]
+    async fn deliver_routes_a_streamed_event_by_session() {
+        let inner = inner();
+        let a = SessionId::agent("a");
+        let b = SessionId::agent("b");
+        let mut ra = inner.sender(Some(&a)).subscribe();
+        let mut rb = inner.sender(Some(&b)).subscribe();
+        let mut all = inner.sender(None).subscribe();
+        deliver(&inner, stream_frame(a.clone(), AgentEvent::AgentEnd));
+        assert!(matches!(ra.try_recv().unwrap(), AgentEvent::AgentEnd));
+        assert!(matches!(all.try_recv().unwrap(), AgentEvent::AgentEnd));
+        assert!(rb.try_recv().is_err(), "b did not hear a's event");
     }
 }

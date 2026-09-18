@@ -60,8 +60,7 @@ async fn a_remote_client_drives_the_session() {
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        handle,
-        SessionId::new("test"),
+        vec![(SessionId::new("test"), handle)],
         listener,
     ));
 
@@ -122,8 +121,7 @@ async fn a_second_client_observes_the_same_session() {
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        handle,
-        SessionId::new("test"),
+        vec![(SessionId::new("test"), handle)],
         listener,
     ));
 
@@ -182,8 +180,7 @@ async fn a_client_reconnects_after_the_connection_drops() {
     ]]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        handle,
-        SessionId::new("test"),
+        vec![(SessionId::new("test"), handle)],
         listener,
     ));
 
@@ -229,8 +226,7 @@ async fn a_notify_crosses_the_socket() {
     let handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        handle,
-        SessionId::new("test"),
+        vec![(SessionId::new("test"), handle)],
         listener,
     ));
 
@@ -279,8 +275,7 @@ async fn a_remote_peer_delivery_carries_the_sender() {
     let w_handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        w_handle,
-        SessionId::new("w1"),
+        vec![(SessionId::new("w1"), w_handle)],
         listener,
     ));
 
@@ -338,8 +333,7 @@ async fn a_lazy_client_connects_once_the_peer_appears() {
     let handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
-        handle,
-        SessionId::new("w1"),
+        vec![(SessionId::new("w1"), handle)],
         listener,
     ));
 
@@ -351,5 +345,155 @@ async fn a_lazy_client_connects_once_the_peer_appears() {
         matches!(&event, AgentEvent::MessageReceived { from, content }
             if from.as_str() == "agent:orchestrator" && content == "hi"),
         "{event:?}"
+    );
+}
+
+/// T1: one socket carrying **many** sessions — a per-session view demuxes on
+/// `Frame.session`, so each `ask` correlates to its own request and each
+/// session's streamed text reaches only that session's subscription.
+#[tokio::test]
+async fn two_sessions_demux_over_one_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let a = SessionActor::spawn(agent(vec![vec![
+        LlmStreamEvent::TextDelta("from-a".into()),
+        done(),
+    ]]));
+    let b = SessionActor::spawn(agent(vec![vec![
+        LlmStreamEvent::TextDelta("from-b".into()),
+        done(),
+    ]]));
+    let sa = SessionId::agent("a");
+    let sb = SessionId::agent("b");
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        vec![(sa.clone(), a), (sb.clone(), b)],
+        listener,
+    ));
+
+    // Two per-session views over one connection.
+    let conn = Client::connect(&sock).await.unwrap();
+    let va = conn.with_session(sa.clone());
+    let vb = conn.with_session(sb.clone());
+    let mut ea = va.subscribe();
+    let mut eb = vb.subscribe();
+
+    // Each reply correlates to its own request...
+    let ra = va.ask(Request::Submit { text: "hi-a".into() }).await.unwrap();
+    let rb = vb.ask(Request::Submit { text: "hi-b".into() }).await.unwrap();
+    assert!(
+        matches!(
+            ra,
+            AgentEvent::Stopped {
+                stop_reason: StopReason::Stop
+            }
+        ),
+        "{ra:?}"
+    );
+    assert!(
+        matches!(
+            rb,
+            AgentEvent::Stopped {
+                stop_reason: StopReason::Stop
+            }
+        ),
+        "{rb:?}"
+    );
+
+    // ...and each session's text arrives only on that session's subscription.
+    assert!(
+        drains_text(&mut ea, "from-a", "from-b").await,
+        "a heard its own stream"
+    );
+    assert!(
+        drains_text(&mut eb, "from-b", "from-a").await,
+        "b heard its own stream"
+    );
+}
+
+/// Drain `rx` to `AgentEnd`, asserting `want` arrives and `foreign` never does.
+/// Returns whether `want` was seen.
+async fn drains_text(
+    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
+    want: &str,
+    foreign: &str,
+) -> bool {
+    let mut saw = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        match event {
+            AgentEvent::MessageUpdate { message } if message.as_text() == want => saw = true,
+            AgentEvent::MessageUpdate { message } if message.as_text() == foreign => {
+                panic!("{foreign:?} leaked onto the {want:?} subscription")
+            }
+            AgentEvent::AgentEnd => break,
+            _ => {}
+        }
+    }
+    saw
+}
+
+/// T1: a request for a session a **multi**-session server does not serve is
+/// rejected with a correlated `AgentEvent::Error`.
+#[tokio::test]
+async fn unknown_session_is_rejected_on_a_multi_session_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        vec![
+            (SessionId::agent("a"), SessionActor::spawn(agent(vec![]))),
+            (SessionId::agent("b"), SessionActor::spawn(agent(vec![]))),
+        ],
+        listener,
+    ));
+
+    let conn = Client::connect(&sock).await.unwrap();
+    let ghost = conn.with_session(SessionId::agent("ghost"));
+    let reply = ghost.ask(Request::Submit { text: "?".into() }).await.unwrap();
+    match reply {
+        AgentEvent::Error { message } => assert!(message.contains("ghost"), "{message}"),
+        other => panic!("expected an Error reply, got {other:?}"),
+    }
+}
+
+/// T1: a **single**-session server routes any `frame.session` to its sole
+/// session — the byte-compat guarantee for the `--socket` client's placeholder.
+#[tokio::test]
+async fn single_session_server_routes_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let handle = SessionActor::spawn(agent(vec![vec![
+        LlmStreamEvent::TextDelta("only".into()),
+        done(),
+    ]]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        vec![(SessionId::new("test"), handle)],
+        listener,
+    ));
+
+    // The legacy client addresses "remote"; the one served session answers.
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+    let reply = client.ask(Request::Submit { text: "hi".into() }).await.unwrap();
+    assert!(
+        matches!(
+            reply,
+            AgentEvent::Stopped {
+                stop_reason: StopReason::Stop
+            }
+        ),
+        "{reply:?}"
+    );
+    assert!(
+        drains_text(&mut events, "only", "from-other").await,
+        "the default view heard the sole session's stream"
     );
 }
