@@ -423,7 +423,7 @@ async fn main() {
                         is_root: true,
                         backend: Backend::from(client),
                     }];
-                    match wcode_tui::run(surfaces, options).await {
+                    match wcode_tui::run(surfaces, options, None).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                         Ok(wcode_tui::Outcome::Resume(_)) => {
                             eprintln!("tui: cannot resume over a socket");
@@ -749,7 +749,24 @@ async fn main() {
                         }
                     }
                 }
-                match wcode_tui::run(surfaces, options).await {
+                // Runtime-spawned workers reach the TUI through this feed. Install
+                // the sink only AFTER the `[team]` loop above, so preset members
+                // (already in `surfaces`) are not re-emitted. A served worker
+                // (`--owner`) has no team surfaces, so it installs nothing.
+                let new_surfaces = if args.owner.is_none() {
+                    match &orchestrator {
+                        Some(o) => {
+                            let (tx, rx) =
+                                tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
+                            o.set_spawn_sink(tx);
+                            Some(rx)
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                match wcode_tui::run(surfaces, options, new_surfaces).await {
                     Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing

@@ -74,6 +74,19 @@ pub struct SurfaceSpec {
     pub backend: Backend,
 }
 
+impl SurfaceSpec {
+    /// The sidebar/`/team` identity for this spec — the fields the reducer
+    /// tracks (the `backend` belongs to the loop, not the app).
+    fn info(&self) -> SurfaceInfo {
+        SurfaceInfo {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            model: self.model.clone(),
+            is_root: self.is_root,
+        }
+    }
+}
+
 /// Spinner/status refresh cadence, only consulted while a run is in flight.
 const TICK: Duration = Duration::from_millis(120);
 
@@ -105,7 +118,11 @@ pub enum Outcome {
 
 /// Run the TUI over `surfaces` (index 0 is the root) until the user quits.
 /// Enters the alternate screen; restores it on every exit path.
-pub async fn run(surfaces: Vec<SurfaceSpec>, options: Options) -> io::Result<Outcome> {
+pub async fn run(
+    surfaces: Vec<SurfaceSpec>,
+    options: Options,
+    new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+) -> io::Result<Outcome> {
     // Index 0 (the root) is mandatory — its backend drives the loop. Guard the
     // `pub` API against an empty list rather than panicking on `backends[0]`.
     if surfaces.is_empty() {
@@ -122,17 +139,7 @@ pub async fn run(surfaces: Vec<SurfaceSpec>, options: Options) -> io::Result<Out
     let mut app = App::new();
     app.set_models(models);
     app.set_sessions(sessions);
-    app.set_surfaces(
-        surfaces
-            .iter()
-            .map(|s| SurfaceInfo {
-                id: s.id.clone(),
-                label: s.label.clone(),
-                model: s.model.clone(),
-                is_root: s.is_root,
-            })
-            .collect(),
-    );
+    app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
     // The root's full status line (members derive a reduced one).
     app.set_status(status);
 
@@ -152,7 +159,7 @@ pub async fn run(surfaces: Vec<SurfaceSpec>, options: Options) -> io::Result<Out
         app.load_history(read_history(path));
     }
 
-    let result = event_loop(&mut terminal, backends, &mut app).await;
+    let result = event_loop(&mut terminal, backends, &mut app, new_surfaces).await;
 
     if let Some(path) = &history {
         write_history(path, app.history());
@@ -171,35 +178,21 @@ pub async fn run(surfaces: Vec<SurfaceSpec>, options: Options) -> io::Result<Out
 
 async fn event_loop(
     terminal: &mut terminal::Tui,
-    backends: Vec<(SessionId, Backend)>,
+    mut backends: Vec<(SessionId, Backend)>,
     app: &mut App,
+    mut new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
 
     // Merge every surface's event stream into one channel of `(id, event)`, so
-    // the reducer can route by session.
+    // the reducer can route by session. A runtime-added surface spawns its own
+    // forwarder into the same channel (below).
     let (agent_tx, mut agents) = mpsc::unbounded_channel::<(SessionId, AgentEvent)>();
     for (id, backend) in &backends {
-        let mut rx = backend.subscribe();
-        let id = id.clone();
-        let tx = agent_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if tx.send((id.clone(), event)).is_err() {
-                            break; // the loop is gone
-                        }
-                    }
-                    // A lagging subscriber drops events rather than stalling.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    // The session is gone; stop forwarding it.
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
+        spawn_forwarder(&agent_tx, id, backend);
     }
-    drop(agent_tx); // no sender here: `agents` ends when the forwarders do
+    // `agent_tx` stays alive: the runtime-add branch spawns a further forwarder
+    // with it, and the loop is driven by input/tick, not by this channel closing.
 
     // Replies to `ask`ed requests (e.g. `/usage`) arrive here as app events.
     let (reply_tx, mut replies) = mpsc::unbounded_channel::<AppEvent>();
@@ -221,6 +214,12 @@ async fn event_loop(
                 Some(Err(_)) | None => break,
             },
             Some((id, event)) = agents.recv() => app.handle(AppEvent::Agent(id, event)),
+            // A worker spawned at runtime: add its surface and forward its stream.
+            Some(spec) = recv_opt(&mut new_surfaces) => {
+                spawn_forwarder(&agent_tx, &spec.id, &spec.backend);
+                app.add_surface(spec.info());
+                backends.push((spec.id.clone(), spec.backend));
+            }
             Some(event) = replies.recv() => app.handle(event),
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
@@ -253,6 +252,45 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+/// Forward one surface's event stream into the merged `agent_tx`, tagged with
+/// its id; the forwarder ends when the subscriber closes or the loop is gone.
+/// Used for the surfaces at startup and for a worker added at runtime.
+fn spawn_forwarder(
+    agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
+    id: &SessionId,
+    backend: &Backend,
+) {
+    let mut rx = backend.subscribe();
+    let id = id.clone();
+    let tx = agent_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if tx.send((id.clone(), event)).is_err() {
+                        break; // the loop is gone
+                    }
+                }
+                // A lagging subscriber drops events rather than stalling.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // The session is gone; stop forwarding it.
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// The next runtime-added surface, or a future that never resolves when the
+/// feed is absent (a socket client, or a served worker which has no team).
+async fn recv_opt(
+    rx: &mut Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+) -> Option<SurfaceSpec> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Ask one surface and feed the reply back as an app event, tagged with that
@@ -351,6 +389,26 @@ mod tests {
         }
     }
 
+    /// A surface handed over the runtime feed is delivered to the loop's arm —
+    /// the headless seam the event loop's runtime-add branch reads.
+    #[tokio::test]
+    async fn recv_opt_yields_a_runtime_surface() {
+        let (tx, rx) = mpsc::unbounded_channel::<SurfaceSpec>();
+        let mut feed = Some(rx);
+        tx.send(SurfaceSpec {
+            id: SessionId::agent("explorer"),
+            label: "explorer".into(),
+            model: "m".into(),
+            is_root: false,
+            backend: backend(),
+        })
+        .unwrap();
+
+        let got = recv_opt(&mut feed).await.expect("a spec");
+        assert_eq!(got.label, "explorer");
+        assert_eq!(got.id.as_str(), "agent:explorer");
+    }
+
     /// An empty surface list quits cleanly — no `backends[0]` panic.
     #[tokio::test]
     async fn run_with_no_surfaces_quits_without_panicking() {
@@ -360,6 +418,6 @@ mod tests {
             sessions: Vec::new(),
             history: None,
         };
-        assert_eq!(run(Vec::new(), options).await.unwrap(), Outcome::Quit);
+        assert_eq!(run(Vec::new(), options, None).await.unwrap(), Outcome::Quit);
     }
 }

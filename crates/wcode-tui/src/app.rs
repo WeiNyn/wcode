@@ -1051,6 +1051,17 @@ impl App {
         self.dirty = true;
     }
 
+    /// Add a surface that appeared mid-run (a runtime-spawned worker). A no-op
+    /// if its id is already present; unlike [`App::set_surfaces`], focus is left
+    /// where it is — a new teammate must not steal the user's perspective.
+    pub fn add_surface(&mut self, info: SurfaceInfo) {
+        if self.surface_index(&info.id).is_some() {
+            return;
+        }
+        self.surfaces.push(Surface::new(info));
+        self.dirty = true;
+    }
+
     /// The focused surface's index (the run loop resolves its backend by it).
     pub fn focus(&self) -> usize {
         self.focus
@@ -2685,6 +2696,60 @@ mod tests {
         };
         assert!(text.contains("explorer · m1 · idle"), "{text}");
         assert!(text.contains("reviewer · m2 · done"), "{text}");
+    }
+
+    #[test]
+    fn add_surface_adds_a_member_row_and_leaves_focus() {
+        let mut app = App::new();
+        assert!(app.member_rows().is_empty());
+
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("explorer"),
+            label: "explorer".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        assert_eq!(app.member_rows().len(), 1);
+        assert_eq!(app.member_rows()[0].0, "explorer");
+        assert_eq!(app.focus(), 0, "focus stays on the root");
+
+        // `/team` reads the added surface too.
+        submit(&mut app, "/team");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a team notice");
+        };
+        assert!(text.contains("explorer"), "{text}");
+
+        // A duplicate id is a no-op.
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("explorer"),
+            label: "dup".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        assert_eq!(app.member_rows().len(), 1);
+    }
+
+    #[test]
+    fn an_event_for_an_added_surface_routes_to_it() {
+        let mut app = App::new();
+        let id = SessionId::agent("explorer");
+        app.add_surface(SurfaceInfo {
+            id: id.clone(),
+            label: "explorer".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        // Focus is still the root, so routing must be by id, not by focus.
+        assert_eq!(app.focus(), 0);
+
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
+        let row = app.member_rows();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].2, TeamState::Running, "the added surface runs");
+
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentEnd));
+        assert_eq!(app.member_rows()[0].2, TeamState::Done);
     }
 
     /// A root + one member surface.

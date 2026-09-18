@@ -101,5 +101,5 @@ async fn main() -> std::io::Result<()> {
             backend: Backend::from(handle),
         },
     ];
-    wcode_tui::run(surfaces, options).await.map(|_| ())
+    wcode_tui::run(surfaces, options, None).await.map(|_| ())
 }

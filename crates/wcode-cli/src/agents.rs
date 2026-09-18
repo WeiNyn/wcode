@@ -12,9 +12,10 @@
 //! those become a child `Hooks` impl, no config.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tokio::sync::mpsc;
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
@@ -24,7 +25,8 @@ use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
 use wcode_harness::tool::{Tool, erased};
-use wcode_protocol::Registry;
+use wcode_protocol::{Backend, Registry};
+use wcode_tui::SurfaceSpec;
 
 use crate::config::ToolsConfig;
 use crate::tools::default_tools;
@@ -116,6 +118,9 @@ pub struct SessionFactory {
     registry: Registry,
     template: WorkerTemplate,
     seq: AtomicUsize,
+    /// The runtime feed a live TUI adds surfaces from (set by the composition
+    /// root after the `[team]` startup loop). `None` until installed.
+    sink: Mutex<Option<mpsc::UnboundedSender<SurfaceSpec>>>,
 }
 
 impl SessionFactory {
@@ -124,11 +129,19 @@ impl SessionFactory {
             registry,
             template,
             seq: AtomicUsize::new(1),
+            sink: Mutex::new(None),
         })
     }
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// Install a sink that receives a [`SurfaceSpec`] for each worker spawned
+    /// after this call — the runtime feed a live TUI adds surfaces from (D27
+    /// removed the old `TeamUpdate` feed; this replaces it).
+    pub fn set_spawn_sink(&self, tx: mpsc::UnboundedSender<SurfaceSpec>) {
+        *self.sink.lock().unwrap() = Some(tx);
     }
 
     /// The factory's default tool names — the pickable part of a worker's tool
@@ -196,8 +209,25 @@ impl SessionFactory {
         };
         let id = SessionId::agent(name);
         let handle = self.build(&id, owner, &spec);
+        let backend = Backend::from(handle.clone());
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
+        // Announce the new surface so a running TUI can add it — D27 removed the
+        // old `TeamUpdate` feed; this is its replacement. A closed receiver is
+        // ignored (the TUI may have exited).
+        if let Some(tx) = &*self.sink.lock().unwrap() {
+            let model = spec
+                .model
+                .clone()
+                .unwrap_or_else(|| self.template.llm.model.clone());
+            let _ = tx.send(SurfaceSpec {
+                id: id.clone(),
+                label: short_name(&id),
+                model,
+                is_root: false,
+                backend,
+            });
+        }
         Ok(SpawnedWorker { id })
     }
 
@@ -350,6 +380,13 @@ impl Orchestrator {
             )),
             erased(crate::tools::peers::Peers::new(self.phonebook.clone())),
         ]
+    }
+
+    /// Forward a spawn sink to the factory, so a live TUI can add runtime-spawned
+    /// workers as surfaces (the `[team]` startup members are added by the
+    /// composition root directly; only runtime spawns come through this feed).
+    pub fn set_spawn_sink(&self, tx: mpsc::UnboundedSender<SurfaceSpec>) {
+        self.factory.set_spawn_sink(tx);
     }
 
     /// Spawn a worker owned by this orchestrator and register its name in the
@@ -531,6 +568,42 @@ mod tests {
         let a = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         let b = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         assert_ne!(a.id, b.id);
+    }
+
+    #[tokio::test]
+    async fn spawn_emits_a_surface_spec_on_success_only() {
+        let (factory, _registry) = factory();
+        let (tx, mut rx) = mpsc::unbounded_channel::<SurfaceSpec>();
+        factory.set_spawn_sink(tx);
+        let orch = SessionId::agent("orch");
+
+        // A successful spawn announces exactly one surface for that worker.
+        factory
+            .spawn(
+                &orch,
+                WorkerSpec {
+                    name: Some("explorer".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let spec = rx.try_recv().expect("one spec");
+        assert_eq!(spec.id.as_str(), "agent:explorer");
+        assert_eq!(spec.label, "explorer");
+        assert!(!spec.is_root);
+
+        // A duplicate name fails (FIX 1) and must NOT announce a surface.
+        let err = factory
+            .spawn(
+                &orch,
+                WorkerSpec {
+                    name: Some("explorer".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("explorer"), "{err}");
+        assert!(rx.try_recv().is_err(), "no spec on a failed spawn");
     }
 
     #[tokio::test]
