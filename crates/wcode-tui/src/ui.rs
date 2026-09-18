@@ -314,13 +314,17 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// Overwrite column 0 of a transcript row with the selection bar, keeping the
 /// rest of the row's text and its styles (split, so the bar does not recolor
-/// the gutter marker that follows).
+/// the gutter marker that follows). Leading *empty* spans render nothing, so the
+/// first non-empty span owns column 0 — skipping them keeps the glyph columns
+/// unshifted (a future constructor could emit one).
 fn paint_bar(line: &mut Line<'static>) {
+    let Some(idx) = line.spans.iter().position(|s| !s.content.is_empty()) else {
+        // A blank row has nothing at column 0 to replace: it just gains the bar.
+        line.spans.push(Span::styled("▌", accent()));
+        return;
+    };
     let (rest, style) = {
-        let Some(first) = line.spans.first_mut() else {
-            line.spans.push(Span::styled("▌", accent()));
-            return;
-        };
+        let first = &mut line.spans[idx];
         let mut chars = first.content.chars();
         chars.next();
         let rest: String = chars.collect();
@@ -330,7 +334,7 @@ fn paint_bar(line: &mut Line<'static>) {
         (rest, style)
     };
     if !rest.is_empty() {
-        line.spans.insert(1, Span::styled(rest, style));
+        line.spans.insert(idx + 1, Span::styled(rest, style));
     }
 }
 
@@ -2021,6 +2025,121 @@ mod tests {
         );
         assert!(app.scroll() > 0, "the view is anchored, not at the tail");
     }
+
+    /// A rendered line's width, in glyphs.
+    fn line_width(line: &Line) -> usize {
+        line.spans.iter().map(|s| s.content.chars().count()).sum()
+    }
+
+    #[test]
+    fn browse_injects_no_rows_so_the_measured_total_is_identical() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+
+        let input = buffer_text(&render(&mut app, 60, 20));
+        let input_total = app.total_lines();
+        assert!(!input.contains("▤ browse"), "the mode token leaked:\n{input}");
+        assert!(barred(&input).is_empty(), "a bar leaked in input mode:\n{input}");
+
+        // The same transcript in browse: the total is unchanged (the bar injects
+        // no rows, so max_scroll stays sane) and the bar is drawn.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        let browse = buffer_text(&render(&mut app, 60, 20));
+        let browse_total = app.total_lines();
+        assert_eq!(
+            browse_total, input_total,
+            "the bar must inject no rows (input {input_total} vs browse {browse_total})"
+        );
+        assert!(browse.contains("▤ browse"), "the mode token is missing:\n{browse}");
+        assert!(!barred(&browse).is_empty(), "the bar is missing:\n{browse}");
+    }
+
+    #[test]
+    fn leaving_browse_restores_the_input_frame() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+        let plain = buffer_text(&render(&mut app, 60, 20));
+        let plain_total = app.total_lines();
+
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // enter
+        let _ = render(&mut app, 60, 20);
+        app.handle(AppEvent::Key(Key::Esc)); // leave
+
+        let after = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(after, plain, "a browse round-trip must restore the frame");
+        assert_eq!(app.total_lines(), plain_total);
+    }
+
+    #[test]
+    fn paint_bar_replaces_the_first_visible_glyph_without_shifting() {
+        // A leading empty span renders nothing, so column 0 is the *next* span's
+        // first glyph; the bar must replace it, not push it right.
+        let mut line = Line::from(vec![Span::raw(""), Span::raw("hello")]);
+        paint_bar(&mut line);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "▌ello", "the bar must replace, not prepend: {text:?}");
+    }
+
+    #[test]
+    fn paint_bar_never_shifts_a_text_row() {
+        // Every block kind the transcript can draw.
+        let assistant = Block::Assistant(vec![
+            ContentBlock::Text {
+                text: "# Heading\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n\
+                       text `code` and [link](http://x) and **bold**"
+                    .to_string(),
+            },
+            ContentBlock::Thinking {
+                text: "a reasoning paragraph that wraps onto more than one line for sure"
+                    .to_string(),
+            },
+        ]);
+        let tool = |expanded, is_error, diff: Option<&str>| {
+            Block::Tool(Tool {
+                name: "bash".into(),
+                output: "a\nb\nc\nd\ne\nf".into(),
+                done: true,
+                is_error,
+                expanded,
+                diff: diff.map(str::to_string),
+                path: Some("f.rs".into()),
+            })
+        };
+        let blocks = [
+            Block::User("hi there".into()),
+            assistant,
+            tool(false, false, None),
+            tool(true, false, None),
+            tool(false, false, Some("@@ -1 +1 @@\n-old\n+new")),
+            tool(true, true, None),
+            Block::Notice("a note".into()),
+            Block::Error("boom".into()),
+            Block::Diff {
+                path: "f.rs".into(),
+                diff: "@@ -1 +1 @@\n-old\n+new".into(),
+            },
+        ];
+
+        for block in &blocks {
+            for line in block_lines(block, 60) {
+                let before = line_width(&line);
+                let mut painted = line.clone();
+                paint_bar(&mut painted);
+                let after = line_width(&painted);
+                if before == 0 {
+                    // A blank markdown row has nothing to replace: it gains the
+                    // bar (0 → 1). Benign — no glyph moves.
+                    assert_eq!(after, 1, "a blank row gains exactly the bar");
+                } else {
+                    assert_eq!(
+                        after, before,
+                        "a text row's width must not change: {line:?}"
+                    );
+                }
+            }
+        }
+    }
 }
+
 
 

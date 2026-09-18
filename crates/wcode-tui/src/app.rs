@@ -3898,4 +3898,18 @@ mod tests {
         assert!(app.should_quit(), "Ctrl-C quits when idle, in browse too");
         assert_eq!(app.mode(), Mode::Browse);
     }
+
+    #[test]
+    fn browsing_an_empty_transcript_selects_nothing() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+        assert_eq!(app.selected(), None, "nothing to select");
+        app.handle(AppEvent::Key(Key::Char('j')));
+        assert_eq!(app.selected(), None, "j stays None with no blocks");
+        app.handle(AppEvent::Key(Key::Char('k')));
+        assert_eq!(app.selected(), None);
+        app.handle(AppEvent::Key(Key::Char('G')));
+        assert_eq!(app.selected(), None, "G stays None with no blocks");
+    }
 }
