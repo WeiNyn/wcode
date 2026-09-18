@@ -25,10 +25,6 @@ TUI reads as the same product, given a full screen.
    for context fill. Assistant prose stays default and dim stays the workhorse.
    Honor `NO_COLOR` (every role drops its `fg`, keeping only bold/italic/dim);
    **truecolor / 256-color detection is still open** (§5).
-   and running state; red for errors; yellow for inline code; a green→yellow→red
-   gauge for context fill. Everything else is default-fg or dim. Honor
-   `NO_COLOR` (styles collapse to bold/dim); degrade to 256-color when
-   truecolor is absent.
 4. **Blocks are separated by a blank line between roles** (tools cluster tight
    under their `⚙`). Noise is dim; only the model's prose and *your* prompt are
    full-strength.
