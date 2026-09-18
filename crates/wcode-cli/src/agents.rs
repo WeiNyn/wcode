@@ -415,6 +415,12 @@ impl Orchestrator {
         &self.id
     }
 
+    /// The shared address book — so the composition root can enumerate the
+    /// **local** sessions to serve ([`Registry::locals`]).
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Record a name → address alias in the phonebook (§13.15) — a `[peers]`
     /// entry whose target is an address rather than a socket.
     pub fn alias(&self, name: impl Into<String>, address: SessionId) {

@@ -392,8 +392,20 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        // The server's roster (root first). A failed ask keeps today's single
+        // connection-wide view.
+        let roster = match client.ask(Request::ListSessions).await {
+            Ok(AgentEvent::Sessions { ids }) => ids,
+            _ => Vec::new(),
+        };
         match args.prompt.clone() {
-            Some(prompt) => std::process::exit(one_shot(Backend::from(client), &prompt).await),
+            Some(prompt) => {
+                let backend = match roster.first() {
+                    Some(root) => Backend::from(client.with_session(root.clone())),
+                    None => Backend::from(client),
+                };
+                std::process::exit(one_shot(backend, &prompt).await)
+            }
             None => {
                 if choose_tui(&args, is_tty()) {
                     let status = wcode_tui::Status {
@@ -415,14 +427,30 @@ async fn main() {
                         sessions: Vec::new(),
                         history: Some(repl::history_path()),
                     };
-                    // A socket client sees just the root surface.
-                    let surfaces = vec![wcode_tui::SurfaceSpec {
-                        id: SessionId::agent("root"),
-                        label: "root".to_string(),
-                        model: llm.model.clone(),
-                        is_root: true,
-                        backend: Backend::from(client),
-                    }];
+                    // One surface per served session (root first), all over the
+                    // one connection. A failed roster falls back to the legacy
+                    // single connection-wide root surface.
+                    let surfaces: Vec<wcode_tui::SurfaceSpec> = if roster.is_empty() {
+                        vec![wcode_tui::SurfaceSpec {
+                            id: SessionId::agent("root"),
+                            label: "root".to_string(),
+                            model: llm.model.clone(),
+                            is_root: true,
+                            backend: Backend::from(client),
+                        }]
+                    } else {
+                        let root = &roster[0];
+                        roster
+                            .iter()
+                            .map(|id| wcode_tui::SurfaceSpec {
+                                id: id.clone(),
+                                label: crate::agents::short_name(id),
+                                model: llm.model.clone(),
+                                is_root: id == root,
+                                backend: Backend::from(client.with_session(id.clone())),
+                            })
+                            .collect()
+                    };
                     match wcode_tui::run(surfaces, options, None).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                         Ok(wcode_tui::Outcome::Resume(_)) => {
@@ -438,7 +466,12 @@ async fn main() {
                 // The server owns the system prompt and skills, so a remote
                 // client discovers none of its own.
                 repl::run(
-                    repl::SessionSource::Remote(client),
+                    match roster.first() {
+                        Some(root) => {
+                            repl::SessionSource::Remote(client.with_session(root.clone()))
+                        }
+                        None => repl::SessionSource::Remote(client),
+                    },
                     llm,
                     default_hooks(&cfg.hooks),
                     cfg.tools,
@@ -676,10 +709,22 @@ async fn main() {
             if let Some(o) = &orchestrator {
                 o.register_root(handle.clone());
             }
+            // Serve the root first, then the team (`--agents`): the local
+            // sessions the registry holds, minus the root's own registry entry.
+            let mut served = vec![(session_id, handle)];
+            if let Some(o) = &orchestrator {
+                served.extend(
+                    o.registry()
+                        .locals()
+                        .into_iter()
+                        .filter(|(id, _)| id != o.id()),
+                );
+            }
+            let ids: Vec<String> = served.iter().map(|(id, _)| id.to_string()).collect();
             println!("serving session on {}", path.display());
-            println!("serving session on {}", path.display());
+            println!("serving {} session(s): {}", served.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
-            if let Err(e) = wcode_protocol::serve_at(vec![(session_id, handle)], &path).await {
+            if let Err(e) = wcode_protocol::serve_at(served, &path).await {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
             }

@@ -109,6 +109,12 @@ impl Client {
     /// `Inner` and request queue but addressed to `session`. Its
     /// [`Client::subscribe`] hears only `session`'s events; replies are matched
     /// by `reply_to` and are independent of the view.
+    ///
+    /// To hear a session's stream, `session` must be the id the server actually
+    /// **serves** (the id it stamps outbound frames with — learn it from
+    /// [`Request::ListSessions`]). A view narrowed to any other id hears
+    /// nothing; over a single-session server, where the served id is not
+    /// otherwise known, only the connection-wide view (`connect`/`lazy`) is safe.
     pub fn with_session(&self, session: SessionId) -> Client {
         Client {
             inner: self.inner.clone(),
@@ -152,6 +158,9 @@ impl Client {
     /// connection-wide view (`connect`/`lazy`) — every session's. Each subscriber
     /// gets its own receiver, which survives a reconnect (only events during the
     /// gap are lost).
+    ///
+    /// The view must address the **served** id to hear its stream (see
+    /// [`Client::with_session`]).
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.inner.sender(self.session.as_ref()).subscribe()
     }
