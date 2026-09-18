@@ -32,8 +32,11 @@ selection bar" — but nothing draws one.
 
 `Esc` in browse must leave browse and **never** reach `interrupt()`. A mode check
 **precedes** the base key match — exactly like `on_overlay_key` /
-`on_completion_key` — and browse owns *every* key while it is up, so a stray
-keystroke cannot edit the composer behind the mode. Movement: `j` / `Down` next,
+`on_completion_key` — and browse owns the text and navigation keys while it is
+up, so a stray
+keystroke cannot edit the composer behind the mode. **`F1`/`?` (help) and `Ctrl-C`
+(cancel / quit) stay global**; every other key is ignored. Movement: `j` / `Down`
+next,
 `k` / `Up` prev, `g` first, `G` last, `PgUp` / `PgDn` by a viewport (`Up` / `Down`
 still recall history in input mode). The wheel keeps scrolling the view without
 moving the selection.
@@ -88,6 +91,26 @@ wrapping are untouched: the bar injects no rows and the ranges add no lines.
 Phase 2+ is deliberately unimplemented here. A `$PAGER` needs a suspend/resume
 path `terminal.rs` does not have (`TerminalGuard` only restores on drop) — its
 own design, not this pass.
+
+Phase 1 landed as the skeleton, then `F1`/`?` and `Ctrl-C` kept
+global in browse, plus a test-only commit pinning the invariants below.
+
+## Invariants future phases must preserve
+
+- **`Mode::Input` is byte-identical.** The bar injects no rows, so the measured
+  transcript `total` — and therefore `max_scroll` — is the same in both modes,
+  and the ranges add no lines. Pinned by
+  `browse_injects_no_rows_so_the_measured_total_is_identical` and
+  `leaving_browse_restores_the_input_frame`.
+- **`paint_bar` replaces, it never prepends.** It skips leading empty spans so
+  the glyph at column 0 is the one replaced; a blank markdown row gains exactly
+  the bar (`0 → 1`), and no text row's width changes. Pinned over every block kind
+  by `paint_bar_never_shifts_a_text_row`. It replaces one glyph with one, so a
+  future block kind whose rows did **not** start with a 1-cell gutter glyph would
+  need a display-width-aware bar.
+- **Browse owns the text and navigation keys; `F1`/`?` and `Ctrl-C` stay global;
+  every other key is ignored.** A new browse key is an arm in `on_browse_key`,
+  not a global binding.
 
 ## Commits
 

@@ -160,7 +160,11 @@ gutter is also the natural home for a `▌` selection bar.
 The bar occupies the gutter's first column (the 1-col margin), *replacing* the
 blank there so no glyph shifts; a `▤ browse` token rides the status band just
 before `state`. Movement is `j`/`k`, `g`/`G`, `PgUp`/`PgDn`; `Esc`/`q`/`Ctrl-G`
-leave. The live block is never a target (it is transient). Phase 1 selects and
+leave — and in browse `Esc` leaves the mode, it does **not** cancel or quit.
+**Browse owns the text and navigation keys**; `F1` / `?` (help) and `Ctrl-C`
+(cancel / quit) stay **global**, and every other key is ignored while browsing
+(so the composer cannot be edited behind the mode). The live block is never a
+target (it is transient). Phase 1 selects and
 reveals only; expand / copy / `$PAGER` actions are later phases.
 
 **Input** — `❯ ` prefix on the first row, block cursor `▌`. Wraps and grows with
@@ -198,7 +202,9 @@ toggles the team sidebar · `F1` opens the keymap overlay (dismissed only by `Es
 same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
 (a `▌` selection over the committed blocks — `j`/`k` next/prev, `g`/`G` first/last,
 `PgUp`/`PgDn` by a page, the wheel scrolls the view), where `Esc`/`q`/`Ctrl-G`
-leave: in browse `Esc` leaves the mode and does **not** cancel or quit. `/changes` lists
+leave (in browse `Esc` leaves the mode and does **not** cancel or quit). Browse owns
+the text and navigation keys; `F1`/`?` (help) and `Ctrl-C` (cancel / quit) stay
+**global**, and every other key is ignored while browsing. `/changes` lists
 the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same
