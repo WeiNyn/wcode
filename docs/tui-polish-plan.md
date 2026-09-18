@@ -1,6 +1,6 @@
 # wcode TUI — polish pass: tool output, theme, keys (plan)
 
-Status: **planned**. Companion to [`tui-plan.md`](tui-plan.md) (the project),
+Status: **☑ landed — reviewed.** Companion to [`tui-plan.md`](tui-plan.md) (the project),
 [`tui-design.md`](tui-design.md) (the visual spec) and
 [`tui-input-plan.md`](tui-input-plan.md) (the input band). This is a small
 presentation pass over the shipped TUI — `wcode-tui` only; the kernel and the
@@ -28,19 +28,24 @@ Three things make the TUI hard to live in.
 
 ### Tool output — expand / collapse (`Ctrl+O`, `Ctrl+T`)
 
-- `Tool` gains `expanded: bool` (default `false`). A finished tool shows a header
-  line (as today) plus a body: the first `TOOL_PREVIEW_LINES = 4` output lines,
-  then a dim `     … +N more lines · Ctrl+O` when the output is longer. Expanded,
-  up to `TOOL_EXPANDED_LINES = 200` lines (still `… +N more` past that).
+- `Tool` gains `expanded: bool` (default `false`). Collapsed, a finished tool
+  shows a header with its 80-char summary plus a `TOOL_PREVIEW_LINES = 4` preview
+  of the lines **after** the summary (a line is never shown twice), then a dim
+  `… +N more line(s) · Ctrl+O` when expansion reveals more. Expanded, the summary
+  moves off the header and the whole output is drawn, wrapped — nothing is left
+  unreachable.
 - A running tool keeps its one-line tail while collapsed; expanded, it shows the
-  last 200 lines of the live output (tail — it grows downward).
+  last `TOOL_EXPANDED_LINES = 200` lines of the live output (tail — it grows
+  downward).
 - **An errored tool renders expanded**, so a failure is never hidden; a tool that
   finishes with `is_error` forces `expanded = true`.
 - A diff body collapses to `TOOL_DIFF_PREVIEW_LINES = 8` diff lines + the hint;
   expanded, up to 200. The `+a −r` footer and `diff_counts` summary stay.
   `/changes` still re-shows the full diff — that path is **uncapped**.
-- Body lines **wrap** at the transcript content width through the existing `wrap`
-  helper (5-space continuation gutter) instead of clipping at the pane edge.
+- Body lines **wrap** at the transcript content width, char-exact (`wrap_input`:
+  spaces kept, an over-long token hard-broken) under the 5-space gutter, instead
+  of clipping at the pane edge. (It counts chars, not display columns — see
+  [Known limitations](#known-limitations).)
 - **Paste chips are not touched.** `tui-input-plan.md` (B7) decided the
   transcript is the record of truth and never collapses a large paste; that
   stands — this pass is about *tool* output only.
@@ -82,21 +87,61 @@ Three things make the TUI hard to live in.
 
 ## Commits
 
-One logical change each; tests + `cargo clippy --workspace --all-targets` clean
-at every commit, and a headless rendered-frame assertion proving the behavior.
+One logical change each; `cargo test --workspace` and `cargo clippy --workspace
+--all-targets -- -D warnings` clean at every commit, each with a headless
+rendered-frame assertion proving the behavior.
 
-1. `docs: plan the TUI polish pass` — this doc + the tracker row.
-2. `tui: expand/collapse tool output (Ctrl+O)`.
-3. `tui: a central theme with named color roles`.
-4. `tui: keys — help overlay, surface jumps, detail toggle`.
+| commit | subject |
+|--------|---------|
+| `0f51576` | `docs: plan the TUI polish pass` |
+| `f84489e` | `tui: expand/collapse tool output (Ctrl+O)` |
+| `9afafc2` | `tui: a central theme with named color roles` |
+| `f7bbfaa` | `tui: keys — help overlay, surface jumps, detail toggle` |
+| `0371dc4` | `tui: expand a single-line tool output in full` |
+| `ad6f5d6` | `docs: drop a stale palette fragment in the design spec` |
+| `de0933f` | `tui: close the tool-output test gaps` |
+| `7031582` | `tui: pluralize the tool-output hint` |
+
+## Review
+
+**APPROVE** — every rendered-frame test goes red under its own regression. Two
+blockers were found and fixed before approval:
+
+1. **A single-line tool output was unreadable.** `body_after_summary` dropped the
+   first line, so a `bash` one-liner / single-line JSON had an empty body: `Ctrl-O`
+   revealed nothing and the tail was unreachable *even expanded* (measured: a
+   299-char line exposed 79 chars, 220 lost). Fixed in `0371dc4` — expanded now
+   drops the summary and draws the whole output.
+2. **A stale palette fragment.** `tui-design.md` §1.3 carried leftover lines
+   asserting a 256-color fallback the code does not have. Fixed in `ad6f5d6`.
+
+Four vacuous tests (the `/changes` uncap, a multi-tool `Ctrl-O`, a resumed errored
+tool, and a wrapped running-tool body's scroll height) were tightened in
+`de0933f`; the singular hint wording in `7031582`.
+
+## Known limitations
+
+Landed and reviewed; two things are deliberately left as-is.
+
+1. **Wide characters can still clip.** Tool bodies wrap via `wrap_input`, which
+   counts **chars, not display columns**, so a CJK / emoji output can overflow the
+   pane edge by its width delta. Pre-existing and shared with the transcript
+   (tracked as the wide-character open question in
+   [`tui-input-plan.md`](tui-input-plan.md)); not fixed here.
+2. **A redundant seed assignment.** On a resumed session, `seed` sets a tool's
+   `expanded: *is_error`, which the renderer's `|| tool.is_error` short-circuit
+   already covers. The end-to-end behavior (a replayed failure renders expanded)
+   is tested; the assignment on its own is not — belt-and-suspenders, not
+   load-bearing.
 
 ## Status
 
-| # | commit | status |
-|---|--------|--------|
+| # | item | status |
+|---|------|--------|
 | 1 | plan + tracker | ☑ done |
 | 2 | tool output expand / collapse | ☑ done |
 | 3 | central theme | ☑ done |
 | 4 | keys: help overlay, surface jumps, detail toggle | ☑ done |
+| 5 | review blockers (single-line output · stale palette fragment · test gaps) | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
