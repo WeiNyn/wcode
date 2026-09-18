@@ -301,8 +301,26 @@ Needed only once surfaces cross process boundaries.
   peer can be customized. Blocked on the same wire work as tier-2 multiplexing.
 - **Role as a preset vs free text**: `role` is free text appended to the prompt in
   v1; a named-role registry (skills-like) is a possible later layer.
-- **Team in the TUI vs the CLI**: the sidebar is fed by injection today. Once
-  tier 2 lands, the TUI could enumerate the `Registry` itself — decide then.
+- **Team in the TUI vs the CLI**: the sidebar is fed by injection today; surfaces
+  are built **once at startup** from `cfg.team` (`crates/wcode-cli/src/main.rs`,
+  the `for member in &cfg.team` loop before `wcode_tui::run`). Once tier 2 lands,
+  the TUI could enumerate the `Registry` itself — decide then.
+  - **Known bug (2026-09-18) — a runtime `spawn` is invisible.** A worker created
+    by the `spawn` tool mid-session (`Orchestrator::spawn_worker` →
+    `Registry::register` + `Phonebook::insert`) never reaches the TUI: the
+    surface list was fixed at startup, so the new worker is absent from `/team`,
+    `/surface` (`Ctrl-N`), and the sidebar (which derives from member *surfaces*).
+    **Repro:** start with a `[team]` preset, have the root `spawn { name: "x" }`,
+    then `/team` — `x` is not listed. **Fix direction:** `spawn_worker` emits a
+    "surface added" event (the F4a `TeamUpdate` feed shape that D27 removed) that
+    `wcode-tui::run` merges into its surface set at runtime.
+  - **Known bug (2026-09-18) — a runtime `spawn` can silently collide on name.**
+    `spawn { name: "explorer" }` when a preset worker named `explorer` exists
+    reuses `SessionId::agent("explorer")`; `Registry::register` and
+    `Phonebook::insert` both overwrite, orphaning the original actor (its handle
+    is replaced). D18 guards only `[team]` **load**, never a runtime spawn.
+    **Fix direction:** reject a duplicate name in `spawn_worker` (fail loudly,
+    like D14), or auto-suffix it.
 - **Tool allow-list granularity**: names only in v1; per-tool argument restrictions
   (path scopes) would be a `Hooks` impl, not config (stays true to the stance).
 - **`/team` command**: the *list* form landed (F4a — `/team` prints the roster).
