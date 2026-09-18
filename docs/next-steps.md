@@ -16,6 +16,7 @@ the boxes as each task completes and keep the status table current.
 | 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d (+ multiplexed multi-surface); S4 (A2A) complete — S4-1…S4-5 landed; socket multiplexing + live roster, per-agent provider, and remote agent definition (R1/R2) landed |
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
+| 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -335,7 +336,7 @@ through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 history, multiline, markdown (tables included), a context bar, resize, `/copy`,
 then overlays (the model, `/changes`, and `/resume` pickers), tool-diff
 rendering, a per-run changeset, and a session picker that hands off by re-exec.
-S4 (agent-to-agent) is complete (S4-1…S4-5); the socket layer multiplexes several surfaces over one connection and serves a **live** roster — a runtime-spawned worker reaches a `--socket` client via the pushed roster (`6f3ef23`, `c3eb261`); a worker may run on its own provider (`9c02e96`), and a root may define a worker on a served peer (`Request::Define` → `AgentEvent::Spawned` — `49b227e`, `7627b9e`). Remaining: the optional S5 (task-DAG) only.
+S4 (agent-to-agent) is complete (S4-1…S4-5); the socket layer multiplexes several surfaces over one connection and serves a **live** roster — a runtime-spawned worker reaches a `--socket` client via the pushed roster (`6f3ef23`, `c3eb261`); a worker may run on its own provider (`9c02e96`), and a root may define a worker on a served peer (`Request::Define` → `AgentEvent::Spawned` — `49b227e`, `7627b9e`). Remaining: the optional S5 (task-DAG) only; one transport residual is tracked separately as item 11 (one-shot `-p` can drop fire-and-forget remote deliveries).
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 
@@ -387,6 +388,33 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 
 ---
 
+## 11. One-shot mode drops fire-and-forget remote deliveries
+
+**Problem.** `Registry::deliver` queues and returns — it does **not** await the
+flush. `deliver` → `Backend::send_from` (documented "Fire-and-forget") →
+`Backend::Remote` → `Client::send_from` (`crates/wcode-protocol/src/client.rs`),
+which pushes onto an mpsc that a background supervisor task drains. In one-shot
+`-p` mode, `one_shot` (`crates/wcode-cli/src/main.rs`) returns after `AgentEnd`
+and `main` calls `std::process::exit(...)`, dropping the runtime with the
+outbound queue possibly unwritten.
+
+**Impact.** `wcode --socket … -p "message { to: <remote>, … }"` (the `message`
+tool, `crates/wcode-cli/src/tools/message.rs`) and R2's remote `spawn { to }`
+(its `Wake`, `crates/wcode-cli/src/tools/spawn.rs`) can be lost. The interactive
+REPL is unaffected. `Define` itself is safe — it uses `ask`, which round-trips.
+
+**Fix direction.** Make `deliver` awaitable, or drain the client's outbound queue
+before `process::exit` — a `wcode-protocol`/`main` change that benefits `message`
+too.
+
+**Tasks**
+- [ ] Flush (or await) the client's outbound queue before `main` exits `-p`.
+
+**Open questions.** None — the reviewer classified this as a pre-existing
+transport property, not an R2 regression.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -405,3 +433,5 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 9. **9** TUI input: wrap & paste — see [`tui-input-plan.md`](tui-input-plan.md).
 10. **10** Team: define, declare, see — see
     [`team-and-tui-plan.md`](team-and-tui-plan.md).
+11. **11** one-shot remote-delivery flush — a small transport fix that also
+    hardens the `message` tool.
