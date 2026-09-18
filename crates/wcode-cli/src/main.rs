@@ -679,6 +679,8 @@ async fn main() {
                 model: member.model.clone(),
                 system: member.role.clone(),
                 tools: member.tools.clone(),
+                base_url: member.base_url.clone(),
+                api_key: member.api_key.clone(),
             };
             if let Err(e) = o.spawn_worker(spec) {
                 eprintln!("error: team member `{}`: {e}", member.name);

@@ -25,17 +25,25 @@ pub struct SpawnArgs {
     /// unknown name is rejected). Omit for the full default set.
     #[serde(default)]
     tools: Option<Vec<String>>,
+    /// Optional provider base URL for the worker (default: the orchestrator's).
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Optional provider API key for the worker (default: the orchestrator's).
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 impl SpawnArgs {
     /// Map the tool args onto a worker spec: `role` → `system`; `name`, `model`,
-    /// and `tools` pass through unchanged.
+    /// `tools`, and the provider (`base_url`/`api_key`) pass through unchanged.
     fn to_worker_spec(&self) -> WorkerSpec {
         WorkerSpec {
             name: self.name.clone(),
             model: self.model.clone(),
             system: self.role.clone(),
             tools: self.tools.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
         }
     }
 }
@@ -191,6 +199,8 @@ mod tests {
             model: Some("m".into()),
             role: Some("reviewer".into()),
             tools: Some(vec!["read".into()]),
+            base_url: Some("http://w/v1".into()),
+            api_key: Some("wk".into()),
         };
         let spec = args.to_worker_spec();
         assert_eq!(spec.name.as_deref(), Some("w9"));
@@ -198,5 +208,7 @@ mod tests {
         // `role` lands in `system`; the rest pass through.
         assert_eq!(spec.system.as_deref(), Some("reviewer"));
         assert_eq!(spec.tools, Some(vec!["read".to_string()]));
+        assert_eq!(spec.base_url.as_deref(), Some("http://w/v1"));
+        assert_eq!(spec.api_key.as_deref(), Some("wk"));
     }
 }

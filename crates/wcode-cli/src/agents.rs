@@ -92,8 +92,10 @@ pub struct WorkerTemplate {
 
 /// How to build one worker. `Default` reproduces v1 behavior: inherit the
 /// orchestrator's model and tool set, with the identity blurb only. The optional
-/// slots are the per-worker customization seam (§10.1) — all in-process (D2), so
-/// only the model changes; `base_url`/`api_key`/`stream_fn` stay shared.
+/// slots are the per-worker customization seam (§10.1): the model, and — now
+/// that the per-agent provider has landed — the `base_url`/`api_key`, so a worker
+/// may run on its own provider. `stream_fn` stays shared: the rig keystore rekeys
+/// per `ClientKey(base_url, api_key, session_id)`, so one closure serves them all.
 #[derive(Clone, Default)]
 pub struct WorkerSpec {
     /// The worker's address. Auto-assigned (`w1`, `w2`, …) when absent.
@@ -105,6 +107,10 @@ pub struct WorkerSpec {
     /// Restrict the worker to these tool names. `None` = the full default set;
     /// `Some(vec![])` = only `message`. `message` is always kept (D3).
     pub tools: Option<Vec<String>>,
+    /// Override the provider base URL; `None` inherits the orchestrator's.
+    pub base_url: Option<String>,
+    /// Override the provider API key; `None` inherits the orchestrator's.
+    pub api_key: Option<String>,
 }
 
 /// A freshly spawned, registered worker.
@@ -236,8 +242,8 @@ impl SessionFactory {
     }
 
     /// The pure worker config: no actor, no registration — the piece worth
-    /// testing. Applies a spec's model / role / tool-subset over the inherited
-    /// template (D2: in-process only; only the model changes).
+    /// testing. Applies a spec's model / provider / role / tool-subset over the
+    /// inherited template, so a worker may run on its own model and provider.
     fn worker_config(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> AgentConfig {
         let t = &self.template;
         // A worker is told who it is; its result is forwarded to the orchestrator
@@ -270,6 +276,12 @@ impl SessionFactory {
         let mut llm = t.llm.clone();
         if let Some(model) = &spec.model {
             llm.model = model.clone();
+        }
+        if let Some(base_url) = &spec.base_url {
+            llm.base_url = Some(base_url.clone());
+        }
+        if let Some(api_key) = &spec.api_key {
+            llm.api_key = Some(api_key.clone());
         }
         // The worker is its own conversation, so give it its own routing id
         // rather than inheriting the root's `x-opencode-session` (D15).
@@ -895,6 +907,40 @@ mod tests {
         assert_eq!(cfg.llm.base_url, base.llm.base_url);
         assert_eq!(cfg.llm.api_key.as_deref(), Some("k"));
         assert_eq!(cfg.llm.api_key, base.llm.api_key);
+    }
+
+    #[test]
+    fn a_provider_override_changes_only_the_provider() {
+        let llm = LlmOpts {
+            base_url: Some("http://shared/v1".into()),
+            api_key: Some("shared-key".into()),
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let id = SessionId::agent("w1");
+        let owner = SessionId::agent("orch");
+
+        let base = factory.worker_config(&id, &owner, &WorkerSpec::default());
+        let cfg = factory.worker_config(
+            &id,
+            &owner,
+            &WorkerSpec {
+                base_url: Some("http://worker/v1".into()),
+                api_key: Some("worker-key".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.llm.base_url.as_deref(), Some("http://worker/v1"));
+        assert_eq!(cfg.llm.api_key.as_deref(), Some("worker-key"));
+        // Only the provider changes; the model and the shared routing id are
+        // inherited (the worker still gets its own `session_id`, D15).
+        assert_eq!(cfg.llm.model, base.llm.model);
+        assert_eq!(cfg.llm.session_id, base.llm.session_id);
+        assert_eq!(base.llm.base_url.as_deref(), Some("http://shared/v1"));
+        assert_eq!(base.llm.api_key.as_deref(), Some("shared-key"));
     }
 
     #[test]

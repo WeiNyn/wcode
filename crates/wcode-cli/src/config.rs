@@ -183,6 +183,10 @@ pub struct TeamMember {
     pub role: Option<String>,
     /// Tool allow-list; `None` = all, `Some(vec![])` = only `message`.
     pub tools: Option<Vec<String>>,
+    /// Provider base URL override; `None` inherits the orchestrator's.
+    pub base_url: Option<String>,
+    /// Provider API key override; `None` inherits the orchestrator's.
+    pub api_key: Option<String>,
 }
 
 /// The `[orchestrator]` table (F3b): guidance for the root orchestrator. An
@@ -803,6 +807,8 @@ name = "explorer"
 model = "x"
 role = "recon"
 tools = ["read"]
+base_url = "http://w/v1"
+api_key = "wk"
 [[team]]
 name = "reviewer"
 "#,
@@ -813,8 +819,11 @@ name = "reviewer"
         assert_eq!(file.team[0].model.as_deref(), Some("x"));
         assert_eq!(file.team[0].role.as_deref(), Some("recon"));
         assert_eq!(file.team[0].tools, Some(vec!["read".to_string()]));
+        assert_eq!(file.team[0].base_url.as_deref(), Some("http://w/v1"));
+        assert_eq!(file.team[0].api_key.as_deref(), Some("wk"));
         assert_eq!(file.team[1].name, "reviewer");
         assert_eq!(file.team[1].model, None);
+        assert_eq!(file.team[1].base_url, None);
     }
 
     #[test]
