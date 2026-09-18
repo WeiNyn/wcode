@@ -18,6 +18,7 @@ the boxes as each task completes and keep the status table current.
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
+| 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ◐ phase 1 |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -442,6 +443,21 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 
 ---
 
+## 13. TUI browse mode
+
+**New.** The transcript has no cursor: every shortcut is position-blind
+(`Ctrl-O`/`Ctrl-T` act on "the last tool", `Ctrl-Y` on "the last reply"), so a
+long scrollback cannot be *pointed at*. A browse mode moves a `▌` selection over
+the committed blocks, in the gutter the design already reserved for it, and
+unlocks block-wise actions (expand, copy, a `$PAGER`) one phase at a time.
+
+> ➡️ **[`tui-browse-plan.md`](tui-browse-plan.md)** — problem, design (a mode,
+> a per-surface selection, the second-pass bar, scroll-to-reveal), phases, status.
+
+This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, and 10.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -461,7 +477,9 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 10. **10** Team: define, declare, see — see
     [`team-and-tui-plan.md`](team-and-tui-plan.md).
 11. **11** one-shot remote-delivery flush — a small transport fix that also
-11. **11** one-shot remote-delivery flush — a small transport fix that also
     hardens the `message` tool.
 12. **12** TUI polish: tool output, theme, keys — presentation-only; see
+12. **12** TUI polish: tool output, theme, keys — presentation-only; see
     [`tui-polish-plan.md`](tui-polish-plan.md).
+13. **13** TUI browse mode — select a block, then act on it; see
+    [`tui-browse-plan.md`](tui-browse-plan.md).
