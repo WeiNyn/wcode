@@ -341,6 +341,9 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         if tool.expanded {
             let body: Vec<&str> = tool.output.lines().collect();
             lines.extend(tool_body(&body, width, TOOL_EXPANDED_LINES, dim(), true));
+            if let Some(hint) = more_hint(body.len().saturating_sub(TOOL_EXPANDED_LINES), false) {
+                lines.push(hint);
+            }
         } else if let Some(tail) = last_line(&tool.output) {
             lines.push(Line::from(vec![
                 Span::styled(TOOL_INDENT, dim()),
@@ -359,31 +362,32 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     } else {
         ("✓", success())
     };
+    let expanded = tool.expanded || tool.is_error;
+    let (note, wide) = summary_line(&tool.output);
     let mut spans = vec![
         Span::styled(format!("   {mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
     spans.extend(path_span(tool));
-    let note = first_line(&tool.output);
-    if !note.is_empty() {
+    if !expanded && !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
     let mut lines = vec![Line::from(spans)];
 
-    // The body: a head preview when collapsed, the whole (capped) output when
-    // expanded — and always for a failed tool, so the error text is visible.
-    let limit = if tool.expanded || tool.is_error {
-        TOOL_EXPANDED_LINES
+    // Collapsed: the summary above plus a preview of the rest. Expanded: the
+    // summary is dropped (a line is never shown twice) and the whole output is
+    // drawn, wrapped char-exact — so no line, however long, is left unreachable.
+    if expanded {
+        let all: Vec<&str> = tool.output.lines().collect();
+        lines.extend(tool_body(&all, width, all.len(), dim(), false));
     } else {
-        TOOL_PREVIEW_LINES
-    };
-    lines.extend(tool_body(
-        &body_after_summary(&tool.output),
-        width,
-        limit,
-        dim(),
-        false,
-    ));
+        let body = body_after_summary(&tool.output);
+        lines.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, dim(), false));
+        let more_lines = body.len().saturating_sub(TOOL_PREVIEW_LINES);
+        if let Some(hint) = more_hint(more_lines, wide) {
+            lines.push(hint);
+        }
+    }
     lines
 }
 
@@ -439,8 +443,8 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
             Span::styled((*raw).to_string(), style),
         ]));
     }
-    if all.len() > take {
-        lines.push(more_hint(all.len() - take));
+    if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
+        lines.push(hint);
     }
 
     let (added, removed) = crate::app::diff_counts(diff);
@@ -457,9 +461,8 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// The tool body: `lines` wrapped at `width` under the tool gutter, capped at
-/// `limit`, with a dim `… +N more lines · Ctrl+O` trailer when elided. `tail`
-/// keeps the last `limit` lines (a live tool grows downward); otherwise the head.
+/// The tool body: `lines` sliced to `limit` (the head, or the tail when `tail`)
+/// and wrapped char-exact under the gutter. The caller adds any hint.
 fn tool_body(
     lines: &[&str],
     width: usize,
@@ -480,20 +483,36 @@ fn tool_body(
     } else {
         (0, total)
     };
-    let shown = lines[start..end].join("\n");
-    let mut out = wrap(&shown, width, TOOL_INDENT, TOOL_INDENT, style);
-    if total > limit {
-        out.push(more_hint(total - limit));
-    }
-    out
+    body_rows(&lines[start..end], width, style)
 }
 
-/// The dim `… +N more lines · Ctrl+O` trailer under an elided tool body.
-fn more_hint(more: usize) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("{TOOL_INDENT}… +{more} more lines · Ctrl+O"),
-        dim(),
-    ))
+/// Wrap a tool body to `width`, one physical row per wrapped segment, char-exact
+/// (`wrap_input`: spaces kept, an over-long token hard-broken) so a long line is
+/// reachable rather than clipped at the pane edge.
+fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let avail = width.saturating_sub(TOOL_INDENT.chars().count()).max(1);
+    wrap_input(&lines.join("\n"), avail)
+        .into_iter()
+        .map(|row| prefixed(TOOL_INDENT, &row, style))
+        .collect()
+}
+
+/// The dim hint under an elided tool body: `… +N more lines · Ctrl+O` when the
+/// preview cuts whole lines, or `… Ctrl+O to show the full line` when only the
+/// summary is truncated (a single long line, whose body is empty). `None` when
+/// expansion would reveal nothing more.
+fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
+    let text = if more_lines > 0 {
+        format!("{TOOL_INDENT}… +{more_lines} more lines · Ctrl+O")
+    } else if wide {
+        format!("{TOOL_INDENT}… Ctrl+O to show the full line")
+    } else {
+        return None;
+    };
+    Some(Line::from(Span::styled(text, dim())))
 }
 
 /// The output lines after the summary line shown in the header. The summary is
@@ -506,12 +525,11 @@ fn body_after_summary(text: &str) -> Vec<&str> {
     }
 }
 
-/// First non-blank line, truncated — the one-line tool summary.
-fn first_line(text: &str) -> String {
-    text.lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| truncate(l, 80))
-        .unwrap_or_default()
+/// A tool's header summary — its first non-blank line, truncated to 80 — plus
+/// whether it was cut (so the caller knows expansion reveals more of it).
+fn summary_line(text: &str) -> (String, bool) {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    (truncate(line, 80), line.chars().count() > 80)
 }
 
 /// Last non-blank line, truncated — the live tail of a running tool.
@@ -1581,6 +1599,70 @@ mod tests {
     }
 
     #[test]
+    fn a_single_long_line_renders_its_tail_only_when_expanded() {
+        let mut app = App::new();
+        // A ~300-char line with no spaces: collapsed shows only the 80-char
+        // summary, so the tail is unreachable until expanded (char-exact wrap).
+        let line = format!("{}TAIL-REACHABLE", "x".repeat(285));
+        push_tool(&mut app, "bash", &line, false, None);
+        let collapsed = buffer_text(&render(&mut app, 70, 20));
+        assert!(
+            collapsed.contains("Ctrl+O"),
+            "the truncation must be hinted:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("TAIL-REACHABLE"),
+            "the tail must be hidden while collapsed:\n{collapsed}"
+        );
+
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        let expanded = buffer_text(&render(&mut app, 70, 20));
+        assert!(
+            expanded.contains("TAIL-REACHABLE"),
+            "the whole line must be reachable when expanded:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn a_short_single_line_tool_output_is_shown_once() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "All 41 tests pass.", false, None);
+        let text = buffer_text(&render(&mut app, 70, 10));
+        assert_eq!(
+            text.matches("All 41 tests pass.").count(),
+            1,
+            "the line is shown twice:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_tool_output_previews_four_lines_then_expands_to_all() {
+        let mut app = App::new();
+        let output = (1..=10)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, false, None);
+
+        // Summary "row 1" + a four-line preview ("row 2".."row 5") + the hint.
+        let collapsed = buffer_text(&render(&mut app, 70, 20));
+        assert!(collapsed.contains("row 5"), "preview short:\n{collapsed}");
+        assert!(
+            !collapsed.contains("row 6"),
+            "the fifth body line must be elided:\n{collapsed}"
+        );
+        assert!(collapsed.contains("… +5 more lines · Ctrl+O"), "{collapsed}");
+
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        let expanded = buffer_text(&render(&mut app, 70, 20));
+        assert!(expanded.contains("row 10"), "not all lines shown:\n{expanded}");
+        assert!(
+            !expanded.contains("more lines · Ctrl+O"),
+            "the hint should be gone:\n{expanded}"
+        );
+    }
+
+    #[test]
     fn f1_renders_the_help_overlay_with_the_keymap() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
@@ -1622,3 +1704,4 @@ mod tests {
         assert!(text.contains("line-20"), "the last line should show:\n{text}");
     }
 }
+
