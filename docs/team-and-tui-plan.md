@@ -305,15 +305,20 @@ Needed only once surfaces cross process boundaries.
   are built **once at startup** from `cfg.team` (`crates/wcode-cli/src/main.rs`,
   the `for member in &cfg.team` loop before `wcode_tui::run`). Once tier 2 lands,
   the TUI could enumerate the `Registry` itself — decide then.
-  - **Known bug (2026-09-18) — a runtime `spawn` is invisible.** A worker created
-    by the `spawn` tool mid-session (`Orchestrator::spawn_worker` →
-    `Registry::register` + `Phonebook::insert`) never reaches the TUI: the
-    surface list was fixed at startup, so the new worker is absent from `/team`,
-    `/surface` (`Ctrl-N`), and the sidebar (which derives from member *surfaces*).
-    **Repro:** start with a `[team]` preset, have the root `spawn { name: "x" }`,
-    then `/team` — `x` is not listed. **Fix direction:** `spawn_worker` emits a
-    "surface added" event (the F4a `TeamUpdate` feed shape that D27 removed) that
-    `wcode-tui::run` merges into its surface set at runtime.
+  - **Fixed (2026-09-18, `5d80432`) — a runtime `spawn` now appears in the TUI.**
+    `SessionFactory` gained an optional `SurfaceSpec` sink (`set_spawn_sink`),
+    emitted on a successful spawn only; `main.rs` installs it *after* both startup
+    loops and passes the receiver to `wcode-tui::run`, whose event loop adds a
+    `Surface` at runtime (`App::add_surface`). Seam-tested; mutation-verified.
+    - **Still not visible (tier 2, unchanged):** a served/socket root — the server
+      installs no sink and a `--socket` client passes `None`, so runtime workers
+      stay invisible across the socket. That is the tier-2 multiplexing gap.
+    - **Latent footgun (unreachable today):** the runtime arm pushes to `backends`
+      unconditionally while `add_surface` may no-op; unique ids make it
+      unreachable, but a guard/comment would harden it.
+    - **Minor no-replay race:** `subscribe()` is a live broadcast with no history,
+      so a worker's first events can precede the TUI's subscription (the sidebar
+      may skip `running`). The surface itself is still added.
   - **Known bug (2026-09-18) — a runtime `spawn` can silently collide on name.**
     `spawn { name: "explorer" }` when a preset worker named `explorer` exists
     reuses `SessionId::agent("explorer")`; `Registry::register` and
