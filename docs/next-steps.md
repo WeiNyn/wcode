@@ -17,6 +17,7 @@ the boxes as each task completes and keep the status table current.
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
+| 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -427,6 +428,20 @@ still drop an in-flight remote frame — out of scope here.)
 
 ---
 
+## 12. TUI polish: tool output, theme, keys
+
+**New.** Three presentation gaps in the shipped TUI: a finished tool collapses to
+one line (its output is unreadable), colors are hardcoded across eight ad-hoc
+style fns with no `Theme`, and the keymap is undiscoverable (no help overlay, no
+word/line editing in the composer).
+
+> ➡️ **[`tui-polish-plan.md`](tui-polish-plan.md)** — problem, design
+> (expand/collapse, a named-color theme, the keys), commit list, status.
+
+This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -446,4 +461,7 @@ still drop an in-flight remote frame — out of scope here.)
 10. **10** Team: define, declare, see — see
     [`team-and-tui-plan.md`](team-and-tui-plan.md).
 11. **11** one-shot remote-delivery flush — a small transport fix that also
+11. **11** one-shot remote-delivery flush — a small transport fix that also
     hardens the `message` tool.
+12. **12** TUI polish: tool output, theme, keys — presentation-only; see
+    [`tui-polish-plan.md`](tui-polish-plan.md).
