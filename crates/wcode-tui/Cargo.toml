@@ -12,3 +12,8 @@ tokio = { workspace = true }
 futures = { workspace = true }
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
+
+[dev-dependencies]
+# Only the `demo` example defines a scripted tool, which needs the async-trait
+# macro; the library itself stays free of it.
+async-trait = { workspace = true }

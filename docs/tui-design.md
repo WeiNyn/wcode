@@ -176,7 +176,9 @@ tokens** (model and state always stay). The session id is shortened to 8 chars.
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
-reply (OSC-52). `/changes` lists the files the current run changed (`path · +a −r`)
+reply (OSC-52) · `Ctrl-O` expands/collapses the last tool's output (a collapsed tool
+shows a 4-line preview, a failed tool always shows its error). `/changes` lists
+the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same
 overlay over the sessions on disk; choosing one quits and re-execs into it
@@ -203,7 +205,8 @@ Agreed for P0 (see also `tui-plan.md` §9):
 ## 6. Open questions
 
 - **Thinking**: inline (drafted) vs a collapsed one-liner `⋯ thinking · N chars`,
-  expandable. Lean inline at P0, collapsible at P1.
+  expandable. Lean inline at P0; thinking still stays inline. Tool *output* is now
+  collapsible (`Ctrl-O` / `Ctrl-T`) — see [`tui-polish-plan.md`](tui-polish-plan.md).
 - **Timestamps** on turns: lean no.
 - **Header/title bar** (session, cwd): lean no — the status line carries it.
 - **Block separation**: blank between *roles* (drafted) vs between every block.

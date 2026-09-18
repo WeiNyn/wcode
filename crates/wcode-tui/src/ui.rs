@@ -22,6 +22,15 @@ use crate::markdown;
 const THINK_FIRST: &str = "   ··· ";
 const THINK_CONT: &str = "       ";
 
+/// Indent for a tool's body lines, aligning under the `⚙` marker column.
+const TOOL_INDENT: &str = "     ";
+/// Output lines a collapsed tool shows before a `… +N more` hint.
+const TOOL_PREVIEW_LINES: usize = 4;
+/// Output lines a fully expanded tool shows before the hint returns.
+const TOOL_EXPANDED_LINES: usize = 200;
+/// Diff lines a collapsed tool shows before the hint.
+const TOOL_DIFF_PREVIEW_LINES: usize = 8;
+
 /// The team sidebar appears only when the terminal is at least this wide.
 const SIDEBAR_MIN_WIDTH: u16 = 60;
 /// The sidebar's fixed width (`Constraint::Length(26)`).
@@ -242,7 +251,7 @@ fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", accent()),
         Block::Assistant(content) => content_lines(content, width, false),
-        Block::Tool(tool) => tool_lines(tool),
+        Block::Tool(tool) => tool_lines(tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
@@ -280,7 +289,9 @@ fn path_span(tool: &Tool) -> Option<Span<'static>> {
         .map(|path| Span::styled(format!("  {path}"), dim()))
 }
 
-fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
+fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+    // A live tool: the header, then (collapsed) its last non-blank line or
+    // (expanded) the tail of the live output, because it grows downward.
     if !tool.done {
         let mut header = vec![
             Span::styled("   ⚙ ", dim()),
@@ -288,9 +299,12 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
         ];
         header.extend(path_span(tool));
         let mut lines = vec![Line::from(header)];
-        if let Some(tail) = last_line(&tool.output) {
+        if tool.expanded {
+            let body: Vec<&str> = tool.output.lines().collect();
+            lines.extend(tool_body(&body, width, TOOL_EXPANDED_LINES, dim(), true));
+        } else if let Some(tail) = last_line(&tool.output) {
             lines.push(Line::from(vec![
-                Span::styled("     ", dim()),
+                Span::styled(TOOL_INDENT, dim()),
                 Span::styled(tail, dim()),
             ]));
         }
@@ -315,7 +329,23 @@ fn tool_lines(tool: &Tool) -> Vec<Line<'static>> {
     if !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
-    vec![Line::from(spans)]
+    let mut lines = vec![Line::from(spans)];
+
+    // The body: a head preview when collapsed, the whole (capped) output when
+    // expanded — and always for a failed tool, so the error text is visible.
+    let limit = if tool.expanded || tool.is_error {
+        TOOL_EXPANDED_LINES
+    } else {
+        TOOL_PREVIEW_LINES
+    };
+    lines.extend(tool_body(
+        &body_after_summary(&tool.output),
+        width,
+        limit,
+        dim(),
+        false,
+    ));
+    lines
 }
 
 /// A re-shown change (`/changes`): the file, then its styled diff body.
@@ -350,18 +380,31 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
     ];
     header.extend(path_span(tool));
     let mut lines = vec![Line::from(header)];
-    let (added, removed) = crate::app::diff_counts(diff);
-    for raw in diff.lines() {
+
+    // Collapsed shows a preview; expanded (or a failure) shows the whole diff.
+    let all: Vec<&str> = diff.lines().collect();
+    let limit = if tool.expanded || tool.is_error {
+        TOOL_EXPANDED_LINES
+    } else {
+        TOOL_DIFF_PREVIEW_LINES
+    };
+    let take = all.len().min(limit);
+    for raw in &all[..take] {
         let style = match raw.chars().next() {
             Some('+') => added_style(),
             Some('-') => removed_style(),
             _ => dim(),
         };
         lines.push(Line::from(vec![
-            Span::styled("     ", dim()),
-            Span::styled(raw.to_string(), style),
+            Span::styled(TOOL_INDENT, dim()),
+            Span::styled((*raw).to_string(), style),
         ]));
     }
+    if all.len() > take {
+        lines.push(more_hint(all.len() - take));
+    }
+
+    let (added, removed) = crate::app::diff_counts(diff);
     let (mark, style) = if tool.is_error {
         ("✗", error_style())
     } else {
@@ -373,6 +416,55 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
         Span::styled(format!(" · +{added} −{removed}"), dim()),
     ]));
     lines
+}
+
+/// The tool body: `lines` wrapped at `width` under the tool gutter, capped at
+/// `limit`, with a dim `… +N more lines · Ctrl+O` trailer when elided. `tail`
+/// keeps the last `limit` lines (a live tool grows downward); otherwise the head.
+fn tool_body(
+    lines: &[&str],
+    width: usize,
+    limit: usize,
+    style: Style,
+    tail: bool,
+) -> Vec<Line<'static>> {
+    let total = lines.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let (start, end) = if total > limit {
+        if tail {
+            (total - limit, total)
+        } else {
+            (0, limit)
+        }
+    } else {
+        (0, total)
+    };
+    let shown = lines[start..end].join("\n");
+    let mut out = wrap(&shown, width, TOOL_INDENT, TOOL_INDENT, style);
+    if total > limit {
+        out.push(more_hint(total - limit));
+    }
+    out
+}
+
+/// The dim `… +N more lines · Ctrl+O` trailer under an elided tool body.
+fn more_hint(more: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{TOOL_INDENT}… +{more} more lines · Ctrl+O"),
+        dim(),
+    ))
+}
+
+/// The output lines after the summary line shown in the header. The summary is
+/// the first non-blank line, so the body reads on from there — no duplication.
+fn body_after_summary(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    match lines.iter().position(|line| !line.trim().is_empty()) {
+        Some(first) => lines[first + 1..].to_vec(),
+        None => Vec::new(),
+    }
 }
 
 /// First non-blank line, truncated — the one-line tool summary.
@@ -1350,5 +1442,111 @@ mod tests {
         );
         // Sanity: the popup is still drawn (to the left of the sidebar).
         assert!(buffer_text(&terminal).contains("commands"));
+    }
+
+    /// Push one tool invocation (start → end) into the focused surface.
+    fn push_tool(app: &mut App, name: &str, output: &str, is_error: bool, diff: Option<&str>) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: name.into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: name.into(),
+                output: output.into(),
+                is_error,
+                diff: diff.map(str::to_string),
+                path: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn a_done_tool_collapses_to_a_preview_with_a_more_hint() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, false, None);
+        let text = buffer_text(&render(&mut app, 70, 20));
+        assert!(
+            text.contains("… +15 more lines · Ctrl+O"),
+            "collapsed hint missing:\n{text}"
+        );
+        assert!(text.contains("line-2"), "the head preview is missing:\n{text}");
+        assert!(
+            !text.contains("line-20"),
+            "the tail must be elided when collapsed:\n{text}"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_expands_the_last_tool_fully() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, false, None);
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        let text = buffer_text(&render(&mut app, 70, 30));
+        assert!(text.contains("line-20"), "the full output should show:\n{text}");
+        assert!(
+            !text.contains("more lines · Ctrl+O"),
+            "the hint should be gone when expanded:\n{text}"
+        );
+    }
+
+    #[test]
+    fn an_errored_tool_renders_expanded() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("err-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, true, None);
+        let text = buffer_text(&render(&mut app, 70, 30));
+        assert!(
+            text.contains("err-20"),
+            "a failure must never be hidden:\n{text}"
+        );
+        assert!(
+            !text.contains("more lines · Ctrl+O"),
+            "an errored tool is expanded, so no hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_diff_is_capped_until_expanded() {
+        let mut app = App::new();
+        let diff = (1..=30)
+            .map(|i| format!("+add-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "edit", "edited", false, Some(&diff));
+
+        let collapsed = buffer_text(&render(&mut app, 70, 24));
+        assert!(
+            collapsed.contains("… +22 more lines · Ctrl+O"),
+            "diff cap hint missing:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("+add-30"),
+            "the diff tail must be elided:\n{collapsed}"
+        );
+
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        let expanded = buffer_text(&render(&mut app, 70, 40));
+        assert!(expanded.contains("+add-30"), "the full diff should show:\n{expanded}");
+        assert!(
+            !expanded.contains("more lines · Ctrl+O"),
+            "the hint should be gone when expanded:\n{expanded}"
+        );
     }
 }

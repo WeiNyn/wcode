@@ -90,6 +90,10 @@ pub struct Tool {
     pub output: String,
     pub done: bool,
     pub is_error: bool,
+    /// Whether the transcript shows the full output rather than the collapsed
+    /// preview. Toggled with `Ctrl-O` (all tools with `Ctrl-T`); forced on when
+    /// the tool errored, so a failure is never hidden.
+    pub expanded: bool,
     /// A UI-only unified diff, when the tool changed a file (`ToolOutput::diff`).
     pub diff: Option<String>,
     /// The file this tool changed (UI-only), from `ToolExecutionEnd`: labels the
@@ -639,6 +643,15 @@ impl Surface {
         }
     }
 
+    /// The most recent tool block, if the transcript has one — what `Ctrl-O`
+    /// expands or collapses.
+    fn last_tool_mut(&mut self) -> Option<&mut Tool> {
+        self.transcript.iter_mut().rev().find_map(|block| match block {
+            Block::Tool(tool) => Some(tool),
+            _ => None,
+        })
+    }
+
     /// Apply one agent event. Returns `true` when the surface changed, so `App`
     /// can mark itself dirty (the surface owns no `dirty` flag).
     fn apply(&mut self, event: AgentEvent) -> bool {
@@ -669,6 +682,7 @@ impl Surface {
                     output: String::new(),
                     done: false,
                     is_error: false,
+                    expanded: false,
                     diff: None,
                     path: None,
                 }));
@@ -695,6 +709,10 @@ impl Surface {
                     }
                     tool.done = true;
                     tool.is_error = is_error;
+                    // A failure is never hidden: an errored tool renders expanded.
+                    if is_error {
+                        tool.expanded = true;
+                    }
                     tool.path = path.clone();
                     tool.diff = diff.clone();
                     true
@@ -922,6 +940,7 @@ impl Surface {
                         output: output.clone(),
                         done: true,
                         is_error: *is_error,
+                        expanded: *is_error,
                         diff: None,
                         path: None,
                     }));
@@ -1102,6 +1121,17 @@ impl App {
         }
     }
 
+    /// Expand or collapse the focused surface's most recent tool block — the
+    /// per-tool complement of `Ctrl-T`. A no-op when the surface has no tool.
+    fn toggle_last_tool(&mut self) {
+        if let Some(tool) = self.focused_mut().last_tool_mut() {
+            tool.expanded = !tool.expanded;
+        } else {
+            return;
+        }
+        self.dirty = true;
+    }
+
     /// The non-root surfaces as `(label, model, state, focused)` — the sidebar
     /// and `/team`.
     pub fn member_rows(&self) -> Vec<(&str, &str, TeamState, bool)> {
@@ -1202,6 +1232,9 @@ impl App {
             // Ctrl-N cycles the focused surface (Ctrl-C cancels, Ctrl-J/Ctrl-Y
             // are taken; Tab/Enter/Esc/Up/Down belong to the composer).
             Key::Ctrl('n') => self.focus_next(),
+            // Ctrl-O toggles the last tool's detail (Ctrl-T, in the keymap, does
+            // them all); the wheel and PgUp/PgDn cover scrolling.
+            Key::Ctrl('o') => self.toggle_last_tool(),
             Key::PageUp => self.scroll_up(self.page()),
             Key::PageDown => self.scroll_down(self.page()),
             Key::ScrollUp => self.scroll_up(WHEEL_LINES),
