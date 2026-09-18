@@ -56,9 +56,11 @@ exactly the "surface switcher" F4 will want. So F1 lands first (cheap, useful),
 then the F2 → F3 → F4 chain.
 
 The whole chain is **in-process first.** No agent-definition crosses the wire:
-`Request` has no define/spawn variant, and `Client`/`serve` are one-session-each.
-Remote agents are a separate, deferrable follow-up (they need a new `Request` and
-socket multiplexing).
+`Request` has no define/spawn variant. Socket multiplexing has since **landed**
+(`Client`/`serve` carry many sessions and the roster is live — `c52df8c`,
+`6f3ef23`), so a remote agent definition is now unblocked from that wire work: it
+still needs a new `Request` (e.g. `Define`), and the per-agent provider (a worker
+on its own `base_url`/key) likewise remains open.
 
 ### F1 — TUI slash-command completion
 
@@ -209,10 +211,14 @@ shared composer + per-surface history, recalling on surface A, switching to B, t
 recalling saves A's recalled buffer into B's `draft` — a benign consequence of the
 D25 split.)
 
-**Tier 2 (deferred).** One socket carrying many sessions: a `serve` that accepts a
-set of handles and demuxes on `Frame.session`, and a `Client` that routes inbound
-frames by that field (today the field is inert — "Single-session server (S2)").
-Needed only once surfaces cross process boundaries.
+**Tier 2 — landed.** One socket carries many sessions: `serve` demuxes on
+`Frame.session`, a `Client` routes inbound frames by that field, and
+`Client::with_session` narrows a connection to one session (`c52df8c`, `218aa8c`,
+`d632d0b`). The roster is now **live**: `serve` takes a `Registry::subscribe()` watch,
+a per-connection task fans each newly-seen session and pushes an unsolicited
+`AgentEvent::Sessions` when the roster grows, and the `--socket` TUI feeds
+`new_surfaces` from `Client::subscribe_roster()` (`6f3ef23`, `c3eb261`). A
+runtime-spawned worker is thus visible to a `--socket` client.
 
 ## Decisions (locked)
 
@@ -223,7 +229,7 @@ Needed only once surfaces cross process boundaries.
 | D3 | worker `message` tool | **always** kept regardless of the `tools` allow-list (the report path) |
 | D4 | F3 shape | `[team]` = **local** spawned workers; `[peers]` stays the **remote** map |
 | D5 | F3 startup | spawn the team after `Orchestrator::new`, mirroring the `[peers]` loop; `/new` keeps it |
-| D6 | F4 order | **tier 1 first** — sidebar (1a) then in-process multi-surface (1b); socket multiplexing (tier 2) deferred |
+| D6 | F4 order | **tier 1 first** — sidebar (1a) then in-process multi-surface (1b); socket multiplexing (tier 2) landed (`6f3ef23`, `c3eb261`) |
 | D7 | F1 popup | **non-modal inline**, reusing the picker's render/style — its own prefix matcher (D11) — **not** the modal `Overlay` |
 | D8 | F1 table | TUI-local `Command` table; `/help` generated from it; REPL unification deferred |
 | D9 | F1 keys | popup owns `Up`/`Down`/`Tab`/`Esc`; `Char`/`Backspace`/`Enter` fall through. While the popup is open `Up`/`Down` select rows **even for an exact token** (e.g. `/model`), so history recall is suppressed in that state — a deliberate change from before |
@@ -298,21 +304,26 @@ Needed only once surfaces cross process boundaries.
   (cheap model for exploration, strong model for review), but bigger — `StreamFn`
   is built once. Deferred; revisit if the single-provider assumption bites.
 - **Remote agent definition**: a new `Request` variant (e.g. `Define`) so a served
-  peer can be customized. Blocked on the same wire work as tier-2 multiplexing.
+  peer can be customized. The multiplexing half of that wire work has landed
+  (`6f3ef23`), so this is unblocked from it — the `Define`-like `Request` itself is
+  the remaining piece.
 - **Role as a preset vs free text**: `role` is free text appended to the prompt in
   v1; a named-role registry (skills-like) is a possible later layer.
 - **Team in the TUI vs the CLI**: the sidebar is fed by injection today; surfaces
   are built **once at startup** from `cfg.team` (`crates/wcode-cli/src/main.rs`,
-  the `for member in &cfg.team` loop before `wcode_tui::run`). Once tier 2 lands,
-  the TUI could enumerate the `Registry` itself — decide then.
+  the `for member in &cfg.team` loop before `wcode_tui::run`). Tier 2 landed
+  (`6f3ef23`/`c3eb261`): a `--socket` TUI now adds runtime sessions from the roster
+  push, so a local TUI could likewise enumerate the `Registry` — decide then.
   - **Fixed (2026-09-18, `5d80432`) — a runtime `spawn` now appears in the TUI.**
     `SessionFactory` gained an optional `SurfaceSpec` sink (`set_spawn_sink`),
     emitted on a successful spawn only; `main.rs` installs it *after* both startup
     loops and passes the receiver to `wcode-tui::run`, whose event loop adds a
     `Surface` at runtime (`App::add_surface`). Seam-tested; mutation-verified.
-    - **Still not visible (tier 2, unchanged):** a served/socket root — the server
-      installs no sink and a `--socket` client passes `None`, so runtime workers
-      stay invisible across the socket. That is the tier-2 multiplexing gap.
+    - **Resolved (2026-09-18, `c3eb261`) — a served/socket root is now visible.** The
+      server serves a **live** roster and pushes growth, and a `--socket` client feeds
+      `new_surfaces` from the client's roster push (`Client::subscribe_roster()`), so
+      runtime-spawned workers reach a socket TUI. The earlier gap (the server installed
+      no sink and the `--socket` client passed `None`) is closed.
     - **Latent footgun (unreachable today):** the runtime arm pushes to `backends`
       unconditionally while `add_surface` may no-op; unique ids make it
       unreachable, but a guard/comment would harden it.
@@ -340,10 +351,9 @@ Needed only once surfaces cross process boundaries.
 - **`reload_args` and `--owner`**: **resolved** (`7cd385d`) — the re-exec now
   forwards `--owner`/`--name`, so a served worker resumed interactively keeps
   its address and ownership edge.
-- **Tier 2 — socket multiplexing**: one socket serving many sessions (a `serve`
-  accepting a set of handles; a `Client` routing inbound frames by
-  `Frame.session`). Deferred (progress row 5); needed only once surfaces cross
-  process boundaries. See §F4 tier 2.
+- **Tier 2 — socket multiplexing**: one socket serving many sessions — **landed**
+  (`c52df8c`, `218aa8c`, `d632d0b`; then the live roster + push `6f3ef23`,
+  `c3eb261`). See §F4 tier 2.
 
 ## Progress
 
@@ -354,6 +364,6 @@ Needed only once surfaces cross process boundaries.
 | 3 | F3 — `[team]` preset + startup spawn | ☑ done (reviewed) |
 | 4a | F4 — team status sidebar | ☑ done (reviewed) |
 | 4b | F4 — in-process multi-surface | ☑ done (reviewed) |
-| 5 | F4 tier 2 — socket multiplexing (deferred) | ☐ todo |
+| 5 | F4 tier 2 — socket multiplexing | ☑ done (`c52df8c`, `218aa8c`, `d632d0b`, `6f3ef23`, `c3eb261`) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

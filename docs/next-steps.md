@@ -13,7 +13,7 @@ the boxes as each task completes and keep the status table current.
 | 3 | Interface → full-screen TUI (see [`tui-plan.md`](tui-plan.md)) | ☑ TUI shipped (P0–P3); P4 stretch open |
 | 6 | Skills & references (see [`skills-references-plan.md`](skills-references-plan.md)) | ☑ done |
 | 7 | Parallel tool execution & `.gitignore` awareness (see [`parallel-and-gitignore-plan.md`](parallel-and-gitignore-plan.md)) | ☑ done |
-| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d; S4 (A2A) complete — S4-1…S4-5 landed |
+| 8 | Unified interface & protocol — TUI + multi-agent (see [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)) | ☑ S0–S2 landed; S3 TUI P0–P3d (+ multiplexed multi-surface); S4 (A2A) complete — S4-1…S4-5 landed; socket multiplexing + live roster landed |
 | 9 | TUI input: wrap & paste (see [`tui-input-plan.md`](tui-input-plan.md)) | ☑ done |
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 
@@ -335,7 +335,7 @@ through a `Backend` (local or `--socket`), and `wcode` picks it on a TTY
 history, multiline, markdown (tables included), a context bar, resize, `/copy`,
 then overlays (the model, `/changes`, and `/resume` pickers), tool-diff
 rendering, a per-run changeset, and a session picker that hands off by re-exec.
-S4 (agent-to-agent) is complete (S4-1…S4-5). Remaining: the optional S5 (task-DAG) and the TUI's multi-surface work (one connection serving several surfaces).
+S4 (agent-to-agent) is complete (S4-1…S4-5), and the socket layer now multiplexes several surfaces over one connection and serves a **live** roster — a runtime-spawned worker reaches a `--socket` client via the pushed roster (`6f3ef23`, `c3eb261`). Remaining: the optional S5 (task-DAG) only.
 
 This entry stays as the pointer plus status only, like items 3, 6, and 7.
 
@@ -374,11 +374,12 @@ extend.
 > spine, per-feature design, locked decisions, phased tasks, open questions,
 > progress tracker.
 
-**Status.** Complete — all phases landed (F1 → F2 → F3 → F4, including F4b-1/F4b-2).
-In-process first; the remaining follow-ups are tier 2: socket multiplexing (one
-socket serving many sessions) and the per-agent provider (a worker on its own
-`base_url`/key). Remote/served workers still wait on that wire work. Design and
-progress tracker: [`team-and-tui-plan.md`](team-and-tui-plan.md).
+**Status.** Complete — all phases landed (F1 → F2 → F3 → F4, including F4b-1/F4b-2),
+and tier-2 socket multiplexing has landed (`6f3ef23`, `c3eb261`): a `serve` holds a
+**live** roster and pushes growth, so a runtime-spawned worker reaches a `--socket`
+client. The remaining follow-up is the per-agent provider (a worker on its own
+`base_url`/key). Design and progress tracker:
+[`team-and-tui-plan.md`](team-and-tui-plan.md).
 
 This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 

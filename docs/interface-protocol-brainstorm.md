@@ -1,7 +1,8 @@
 # Interface & protocol — brainstorm
 
-Status: **landed through S2; S3 (TUI) P0–P3d shipped; S4 (A2A) complete —
-S4-1…S4-5 landed** (see §14).
+Status: **landed through S2; S3 (TUI) P0–P3d shipped, with multiplexed multi-surface
+(`c52df8c`/`d632d0b`); S4 (A2A) complete — S4-1…S4-5 landed; the socket now serves a
+live roster and pushes growth (`6f3ef23`/`c3eb261`)** (see §14).
 Companion to [`tui-plan.md`](tui-plan.md) and the deferred "inter-agent
 communication protocol" note in
 [`skills-references-plan.md`](skills-references-plan.md).
@@ -571,8 +572,10 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
   P0–P3d — three bands, streaming, scrollback, `/`-commands, prompt history,
   multiline, markdown, context bar, resize, `/copy`; then the overlay layer (the
   model, `/changes`, and `/resume` pickers), tool-diff rendering, a per-run
-  changeset, and a session picker that hands off by re-exec. Single surface;
-  multi-surface on the same connection (`session` in the frame) is not started.
+  changeset, and a session picker that hands off by re-exec. Multi-surface on the
+  same connection (`session` in the frame) **landed** (`c52df8c`): the server
+  multiplexes many sessions and a `--socket` client builds one surface per served
+  session, adding runtime ones from the roster push (`6f3ef23`/`c3eb261`).
 - ☑ **S4 — A2A.** Route `Notify`/`Interrupt`/`Wake` to a peer (the router
   resolves `to`); a registry for addresses; ownership from `report_back_to`;
   a `before_inbound` hook for policy. Orchestrator v1 (§10.1); DM + report-back
@@ -678,9 +681,10 @@ defers — and optionally a broadcast. None of the v1 sender plumbing (`from`,
     worker emits to its *own* event stream; F4b-2's multi-surface TUI renders it —
     `/surface` (`PickerKind::Surface`) or `Ctrl-N` switches to a worker's view,
     and the sidebar shows each teammate's model + state (see
-    [`team-and-tui-plan.md`](team-and-tui-plan.md)). The gap that remains is
-    remote: a **served** worker's stream is not multiplexed over a socket, so
-    that view still requires tier-2 socket multiplexing.
+    [`team-and-tui-plan.md`](team-and-tui-plan.md)). The remote gap is now closed:
+    a **served** worker's stream is multiplexed over a socket too — the server
+    serves a **live** roster and pushes growth, and a `--socket` client subscribes
+    to the roster (`6f3ef23`/`c3eb261`).
 - **S5 — (optional, far)** Task-DAG / deep swarm, only if wanted.
 
 The dependency is linear and each stage is independently useful: S0 unblocks S1
