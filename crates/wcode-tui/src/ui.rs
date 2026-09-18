@@ -1663,6 +1663,142 @@ mod tests {
     }
 
     #[test]
+    fn changes_re_shows_the_whole_diff_uncapped() {
+        let mut app = App::new();
+        // 20 diff lines: well past the inline collapsed cap of 8.
+        let diff = (1..=20)
+            .map(|i| format!("+line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "edit".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: "edit".into(),
+                output: "ok".into(),
+                is_error: false,
+                diff: Some(diff),
+                path: Some("src/a.rs".into()),
+            },
+        ));
+
+        for c in "/changes".chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
+        app.handle(AppEvent::Key(Key::Enter)); // dispatch → the picker
+        app.handle(AppEvent::Key(Key::Enter)); // select the row → re-show the diff
+
+        // The re-shown change is uncapped: a line past the collapsed limit shows.
+        let text = buffer_text(&render(&mut app, 80, 40));
+        assert!(
+            text.contains("+line-20"),
+            "the re-shown diff must not be capped:\n{text}"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_toggles_only_the_last_tool() {
+        let mut app = App::new();
+        let first = (1..=20)
+            .map(|i| format!("FIRST-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let last = (1..=20)
+            .map(|i| format!("LAST-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &first, false, None);
+        push_tool(&mut app, "bash", &last, false, None);
+
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        let text = buffer_text(&render(&mut app, 70, 45));
+        // The last tool is fully expanded…
+        assert!(text.contains("LAST-20"), "the last tool should expand:\n{text}");
+        // …while the first stays collapsed (its preview stops at line 5).
+        assert!(text.contains("FIRST-5"), "{text}");
+        assert!(
+            !text.contains("FIRST-6"),
+            "only the last tool should toggle:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_resumed_errored_tool_renders_expanded() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("err-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The seeded path (a replayed session) is the one that gets forgotten.
+        app.seed_history(
+            &root(),
+            &[AgentMessage::ToolResult {
+                tool_call_id: "t".into(),
+                name: "bash".into(),
+                output,
+                is_error: true,
+            }],
+        );
+
+        let text = buffer_text(&render(&mut app, 70, 30));
+        assert!(
+            text.contains("err-20"),
+            "a replayed failure must be expanded:\n{text}"
+        );
+        assert!(
+            !text.contains("more lines · Ctrl+O"),
+            "an errored tool is expanded, so no hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_running_tool_body_counts_toward_the_scroll_height() {
+        let mut app = App::new();
+        // One long line, still streaming (not done), expanded with Ctrl-O.
+        let line = format!("START{}END", "y".repeat(300));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "bash".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionUpdate {
+                call_id: "t".into(),
+                name: "bash".into(),
+                partial: line,
+            },
+        ));
+        app.handle(AppEvent::Key(Key::Ctrl('o')));
+
+        // A short terminal: the wrapped body overflows the transcript band.
+        let _ = buffer_text(&render(&mut app, 40, 6));
+        for _ in 0..50 {
+            app.handle(AppEvent::Key(Key::PageUp));
+        }
+        assert!(
+            app.scroll() > 0,
+            "the wrapped rows must count toward the scroll height, not just be drawn"
+        );
+        // Scrolled to the top, the start of the wrapped body is reachable — it
+        // would not be if the body were counted as a single line.
+        let text = buffer_text(&render(&mut app, 40, 6));
+        assert!(
+            text.contains("START"),
+            "the top of the wrapped body must be reachable:\n{text}"
+        );
+    }
+
+    #[test]
     fn f1_renders_the_help_overlay_with_the_keymap() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
