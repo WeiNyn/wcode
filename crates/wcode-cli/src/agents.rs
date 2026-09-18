@@ -549,16 +549,17 @@ mod tests {
             .spawn(
                 &orch,
                 WorkerSpec {
-                    name: Some("w1".into()),
+                    name: Some("w2".into()),
                     ..Default::default()
                 },
             )
             .unwrap();
-        assert_eq!(explicit.id.as_str(), "agent:w1");
+        assert_eq!(explicit.id.as_str(), "agent:w2");
 
-        // The next generated name must not re-use `w1` — it auto-bumps past it.
+        // `w2` is taken and `seq` has already passed it, so a generated name
+        // only avoids it by bumping further — this exercises the auto-bump loop.
         let generated = factory.spawn(&orch, WorkerSpec::default()).unwrap();
-        assert_ne!(generated.id.as_str(), "agent:w1");
+        assert_ne!(generated.id.as_str(), "agent:w2");
     }
 
     #[tokio::test]
