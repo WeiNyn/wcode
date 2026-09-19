@@ -19,7 +19,8 @@ pub(crate) struct Theme {
     pub accent: Style,
     /// The workhorse: secondary chrome and quiet prose.
     pub dim: Style,
-    /// A quieter grey than [`Theme::dim`] where color is available.
+    /// A low-emphasis grey, distinct from [`Theme::border`]: e.g. the sidebar's
+    /// `done` state.
     pub muted: Style,
     /// The overlay and sidebar borders and their titles.
     pub border: Style,
@@ -56,18 +57,20 @@ impl Theme {
         Theme {
             accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().add_modifier(Modifier::DIM),
-            muted: Style::new().fg(Color::DarkGray),
+            muted: Style::new().fg(Color::Gray),
             border: Style::new().fg(Color::DarkGray),
             user: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             body: Style::default(),
             error: Style::new().fg(Color::Red),
             success: Style::new().fg(Color::Green),
-            warn: Style::new().fg(Color::Yellow),
+            warn: Style::new().fg(Color::LightYellow),
             code: Style::new().fg(Color::Yellow),
-            heading: Style::new().add_modifier(Modifier::BOLD),
+            heading: Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
-            tool_name: Style::new().fg(Color::Blue),
-            thinking: Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
+            tool_name: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            thinking: Style::new()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::DIM | Modifier::ITALIC),
             diff_add: Style::new().fg(Color::Green),
             diff_del: Style::new().fg(Color::Red),
         }
@@ -155,5 +158,18 @@ mod tests {
     #[test]
     fn the_colored_theme_signals_errors_in_red() {
         assert_eq!(Theme::colored().error.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn the_semantic_palette_keeps_roles_distinct() {
+        // Palette "B": roles that used to be aliases now read as themselves.
+        let t = Theme::colored();
+        assert_ne!(t.muted.fg, t.border.fg, "muted (Gray) vs border (DarkGray)");
+        assert_ne!(t.code.fg, t.warn.fg, "code (Yellow) vs warn (LightYellow)");
+        assert_ne!(t.tool_name, t.link, "tool_name (bold) vs link (underline)");
+        assert_ne!(t.heading, t.body);
+        assert!(t.heading.fg.is_some(), "headings carry a color now");
+        // Intentional aliases — not asserted distinct:
+        // accent == user (prompt/running), success == diff_add, error == diff_del.
     }
 }
