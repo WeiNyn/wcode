@@ -122,11 +122,12 @@ exit code: 1
       (no file); stderr spills independently; live updates capped.
 
 **Open questions.**
-- Cleanup: v1 leans on the OS temp reaper. Follow-ups: a startup sweep of
-  stale `{temp}/wcode`, or a `ToolContext` scratch-dir field for
-  session-scoped lifetime.
-- A single pathological no-newline line still buffers one line in memory
-  (`read_until`); add a per-line byte cap in a follow-up if it bites.
+- Cleanup: both follow-ups landed — `85ee290` (a startup sweep of stale
+  `{temp}/wcode` spills, age-gated and name-filtered) and `e4d6587` (a
+  per-line byte cap so a pathological no-newline stream chunks instead of
+  buffering unboundedly). The `ToolContext` scratch-dir alternative stays
+  unmade (session-scoped lifetime; fields in `tool.rs`, constructed per
+  call at `loop_.rs:465`).
 - A spill path noted in an early turn only survives as long as the temp
   file (fine within a session).
 
@@ -458,6 +459,13 @@ phase 3 added `Home`/`End`, block-wise `{`/`}`, and `/` search.)
 > ➡️ **[`tui-browse-plan.md`](tui-browse-plan.md)** — problem, design (a mode,
 > a per-surface selection, the second-pass bar, scroll-to-reveal), phases, status.
 
+**Status.** Phases 1–3 landed (`f3b045a` — selection + actions; phase 3 added
+`Home`/`End` viewport-anchored, block-wise `{`/`}`, and `/` search with `n`/`N`)
+plus the routing hardening (`13e3977` Alt-delivered braces, `dcc8605`
+paste-to-search). Phase 4 ($PAGER viewer + structured jumps) is parked: the
+`$PAGER` needs a suspend/resume seam `terminal.rs` lacks (`TerminalGuard` only
+restores on drop) — its own design.
+
 This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, and 10.
 
 ---
@@ -474,6 +482,12 @@ warn=light-yellow), then add capability detection (P2) and an opt-in truecolor
 
 > ➡️ **[`tui-theming-plan.md`](tui-theming-plan.md)** — problem, the B role
 table, the theming tiers, phases, non-goals.
+
+**Status.** T1 (palette B), T3 (`[theme]` overlay), and T2 (`e602c77` — the
+`Plain/Named/Indexed/Rgb` color-mode ladder; hex `#rrggbb` overrides honored
+only under Rgb, else degrade to the role default) have landed. The tier
+palettes themselves (Basic 8-color / 256 / truecolor) remain open — land only
+alongside a tier that needs them.
 
 This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, 10, and 13.
 
