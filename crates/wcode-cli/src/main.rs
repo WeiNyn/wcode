@@ -313,6 +313,9 @@ async fn main() {
     if let Some(m) = args.model.clone() {
         cfg.model = m;
     }
+    // Sweep spill files a previous run left behind (> 24h old) — best-effort,
+    // once per process, before agent construction on every path.
+    let _ = crate::tools::bash::sweep_stale_spills(&crate::tools::bash::spill_root());
     if let Some(u) = args.base_url.clone() {
         cfg.base_url = Some(u);
     }

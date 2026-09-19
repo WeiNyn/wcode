@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use wcode_harness::event::AgentEvent;
@@ -35,8 +35,47 @@ static SPILL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Directory for spilled output — under the OS temp dir, so it is absolute
 /// (the `read` tool resolves absolute paths) and the OS reaps it eventually.
-fn spill_root() -> PathBuf {
+pub(crate) fn spill_root() -> PathBuf {
     std::env::temp_dir().join("wcode")
+}
+
+/// The age past which a spill file is presumed abandoned ([`sweep_stale_spills`])
+/// — a younger file may belong to a live concurrent session mid-write.
+const STALE_SPILL_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Remove stale `bash-*.log` spill files under `root`, best-effort. Only
+/// entries whose name matches the spill pattern (`bash-<pid>-<seq>-<stream>.log`)
+/// are touched — anything else that landed in the directory is left alone — and
+/// a file younger than [`STALE_SPILL_AGE`] is kept (the idle margin is the
+/// safety against a live session). A missing directory is fine; the return
+/// counts what was removed and errors are meant to be ignored by the caller.
+pub(crate) fn sweep_stale_spills(root: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !(name.starts_with("bash-") && name.ends_with(".log")) {
+            continue;
+        }
+        // Best-effort per entry: an unreadable or unterminated (future-mtime)
+        // file is left alone rather than guessed about.
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(modified) = metadata.modified() else { continue };
+        if now.duration_since(modified).is_ok_and(|age| age > STALE_SPILL_AGE)
+            && entry.path().is_file()
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// A bounded preview of one stream with a lazy spill-to-file. Holds at most
@@ -378,6 +417,61 @@ impl TypedTool for Bash {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use std::time::SystemTime;
+
+    /// Rewind (or pin) a file's mtime, mimicking a file written long ago.
+    fn set_mtime(path: &Path, when: SystemTime) {
+        let file = std::fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    #[test]
+    fn sweep_stale_spills_removes_old_spills_and_keeps_fresh_and_foreign_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let old = SystemTime::now() - Duration::from_secs(48 * 60 * 60); // 2 days
+        let fresh = SystemTime::now();
+
+        // Old spill files are removed regardless of which stream/seq.
+        set_mtime(&root.join("bash-111-0-stdout.log"), old);
+        set_mtime(&root.join("bash-111-0-stderr.log"), old);
+        // A fresh spill file is kept — a live session may still be writing it.
+        set_mtime(&root.join("bash-222-5-stdout.log"), fresh);
+        // A non-matching name is never touched, even when ancient.
+        set_mtime(&root.join("notes.txt"), old);
+
+        let removed = sweep_stale_spills(root).unwrap();
+        assert_eq!(removed, 2, "only the two old bash-*.log files");
+        assert!(!root.join("bash-111-0-stdout.log").exists());
+        assert!(!root.join("bash-111-0-stderr.log").exists());
+        assert!(root.join("bash-222-5-stdout.log").exists(), "fresh kept");
+        assert!(root.join("notes.txt").exists(), "foreign file kept");
+
+        // A second sweep finds nothing.
+        assert_eq!(sweep_stale_spills(root).unwrap(), 0);
+    }
+
+    #[test]
+    fn sweep_stale_spills_handles_a_missing_directory_and_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing there yet: not an error.
+        let missing = dir.path().join("no-such-dir");
+        assert_eq!(sweep_stale_spills(&missing).unwrap(), 0);
+
+        // A subdirectory named like a spill file is left alone (not a file).
+        std::fs::create_dir_all(dir.path().join("bash-333-0-stdout.log")).unwrap();
+        assert_eq!(sweep_stale_spills(dir.path()).unwrap(), 0);
+        assert!(
+            dir.path().join("bash-333-0-stdout.log").is_dir(),
+            "a directory is not a spill file to remove"
+        );
+    }
 
     #[tokio::test]
     async fn echo_reports_exit_code_zero() {
