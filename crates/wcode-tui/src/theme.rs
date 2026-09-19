@@ -167,6 +167,15 @@ mod tests {
         assert_ne!(t.muted.fg, t.border.fg, "muted (Gray) vs border (DarkGray)");
         assert_ne!(t.code.fg, t.warn.fg, "code (Yellow) vs warn (LightYellow)");
         assert_ne!(t.tool_name, t.link, "tool_name (bold) vs link (underline)");
+        assert!(
+            t.tool_name.add_modifier.contains(Modifier::BOLD),
+            "tool_name is bold"
+        );
+        assert_eq!(
+            t.thinking.fg,
+            Some(Color::Magenta),
+            "thinking carries the meta hue"
+        );
         assert_ne!(t.heading, t.body);
         assert!(t.heading.fg.is_some(), "headings carry a color now");
         // Intentional aliases — not asserted distinct:
