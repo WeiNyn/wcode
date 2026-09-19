@@ -141,9 +141,12 @@ impl Registry {
     }
 
     /// Recompute the local roster and publish it to every [`Self::subscribe`]r.
-    /// A send with no receivers is a no-op (there is simply no server watching).
+    /// `send_replace` stores the value even when nobody is watching yet, so a
+    /// session registered *before* the first subscriber — a `[team]` member that
+    /// starts ahead of the socket server — still seeds a later [`Self::subscribe`].
+    /// (`watch::Sender::send` would drop it: it is a no-op with no receivers.)
     fn refresh_roster(&self) {
-        let _ = self.inner.roster.send(self.locals());
+        let _ = self.inner.roster.send_replace(self.locals());
     }
 
     /// Whether a peer is already registered at `id`. A plain existence probe —
@@ -385,6 +388,21 @@ mod tests {
         let w1 = SessionId::agent("w1");
         reg.register(w1.clone(), session());
         rx.changed().await.unwrap();
+        let ids: Vec<SessionId> = rx.borrow().iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, vec![w1]);
+    }
+
+    #[tokio::test]
+    async fn subscribe_seeds_a_session_registered_before_it() {
+        // A session registered with **no** subscriber in existence must still be
+        // visible to a `subscribe()` that starts later — the `[team]` startup
+        // members, registered before the socket server's first `subscribe()`.
+        // (`watch::Sender::send` drops a value with no receivers; `send_replace`
+        // keeps it, which is what `refresh_roster` relies on.)
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        reg.register(w1.clone(), session());
+        let rx = reg.subscribe();
         let ids: Vec<SessionId> = rx.borrow().iter().map(|(id, _)| id.clone()).collect();
         assert_eq!(ids, vec![w1]);
     }

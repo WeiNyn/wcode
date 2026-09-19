@@ -558,6 +558,39 @@ async fn list_sessions_returns_the_roster() {
     assert_eq!(ids_of(&sessions), vec![root, a]);
 }
 
+/// A session registered **before** the server's first `subscribe()` — the CLI's
+/// `[team]` startup order (members start ahead of `serve`) — must still be served:
+/// the registry seeds the watch with the roster even with no subscriber yet.
+/// (`watch::Sender::send` would drop it; `send_replace` keeps it.)
+#[tokio::test]
+async fn a_session_registered_before_the_server_is_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let w1 = SessionId::agent("w1");
+    // The member is registered with no subscriber in existence yet.
+    registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
+
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
+        registry.subscribe(),
+        (root_id.clone(), root),
+        None,
+        listener,
+    ));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let reply = client.ask(Request::ListSessions).await.unwrap();
+    let AgentEvent::Sessions { sessions } = reply else {
+        panic!("expected a Sessions reply, got {reply:?}");
+    };
+    assert_eq!(ids_of(&sessions), vec![root_id, w1]);
+}
+
 /// S2: the served roster names each session's **model**, so a client can label a
 /// member by its own model instead of substituting the root's. A session the
 /// registry knows no model for is `None` (the client then falls back).
