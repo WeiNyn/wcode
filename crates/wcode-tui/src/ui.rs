@@ -2139,6 +2139,28 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn enter_in_browse_expands_the_selected_tool_in_the_frame() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_tool(&mut app, "bash", &output, false, None);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+
+        let collapsed = buffer_text(&render(&mut app, 70, 30));
+        assert!(!collapsed.contains("line-20"), "collapsed hides the tail:\n{collapsed}");
+        // The bar covers the whole block: header + 4 preview lines + the hint.
+        assert_eq!(barred(&collapsed).len(), 6, "{collapsed}");
+
+        app.handle(AppEvent::Key(Key::Enter));
+        let expanded = buffer_text(&render(&mut app, 70, 30));
+        assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
+        // Header + all 20 output lines.
+        assert_eq!(barred(&expanded).len(), 21, "{expanded}");
+    }
 }
 
 

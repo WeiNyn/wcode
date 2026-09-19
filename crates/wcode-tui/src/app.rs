@@ -146,6 +146,32 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
+/// The text `y` copies for a block — `None` when there is nothing to copy.
+///
+/// - `User` / `Notice` / `Error`: the block's text.
+/// - `Assistant`: the text blocks only — **thinking is internal reasoning and is
+///   never copied** — with code fences preserved.
+/// - `Tool`: the **full `output`**, never the collapsed preview on screen (the
+///   headline case: yanking the whole `bash` result).
+/// - `Diff`: the diff body.
+fn copy_text(block: &Block) -> Option<String> {
+    let text = match block {
+        Block::User(text) | Block::Notice(text) | Block::Error(text) => text.clone(),
+        Block::Assistant(content) => content
+            .iter()
+            .filter_map(|c| match c {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                // Thinking is reasoning; a tool call has its own line, not text.
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Block::Tool(tool) => tool.output.clone(),
+        Block::Diff { diff, .. } => diff.clone(),
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// A transient modal drawn over the three bands. Shared infrastructure: any
 /// list the user picks from (models now, sessions later) is an [`Overlay`],
 /// opened from a `/`-command, capturing keys until dismissed, and drawn *over*
@@ -391,6 +417,8 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-G", "browse the transcript"),
     ("j / k · g / G", "browse: next / previous · first / last"),
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
+    ("Enter / Space (browse)", "expand / collapse the selected block"),
+    ("y (browse)", "copy the selected block"),
     ("F1", "toggle this help"),
     ("Ctrl-Y", "copy the last reply"),
     ("Esc / Ctrl-C", "cancel a run; quit when idle"),
@@ -1405,6 +1433,9 @@ impl App {
             // browse — closing help returns to the mode you opened it from.
             Key::F(1) | Key::Char('?') => self.open_help(),
             Key::Ctrl('c') => self.interrupt(),
+            // Act on the selected block.
+            Key::Enter | Key::Char(' ') => self.toggle_selected(),
+            Key::Char('y') => self.copy_selected(),
             Key::Char('j') | Key::Down => self.select_by(1),
             Key::Char('k') | Key::Up => self.select_by(-1),
             Key::Char('g') => self.select_first(),
@@ -1451,6 +1482,42 @@ impl App {
             self.focused_mut().selected = Some(len - 1);
             self.reveal_selected();
             self.dirty = true;
+        }
+    }
+
+    /// `Enter` / `Space` in browse: toggle the selected block's detail. Only a
+    /// tool block has expansion state today — a no-op elsewhere, and silent (no
+    /// notice noise).
+    fn toggle_selected(&mut self) {
+        let Some(idx) = self.focused().selected else {
+            return;
+        };
+        let toggled = if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(idx) {
+            tool.expanded = !tool.expanded;
+            true
+        } else {
+            false
+        };
+        if toggled {
+            self.dirty = true;
+        }
+    }
+
+    /// `y` in browse: copy the selected block, mirroring `copy_last` (push the
+    /// `Action::Copy` and a `copied N chars to the clipboard` notice). Nothing to
+    /// copy becomes a notice, with no action pushed.
+    fn copy_selected(&mut self) {
+        let selected = self.focused().selected;
+        let text = selected
+            .and_then(|idx| self.focused().transcript.get(idx))
+            .and_then(copy_text);
+        match text {
+            Some(text) => {
+                let chars = text.chars().count();
+                self.actions.push(Action::Copy(text));
+                self.notice(format!("copied {chars} chars to the clipboard"));
+            }
+            None => self.notice("nothing to copy"),
         }
     }
 
@@ -3911,5 +3978,166 @@ mod tests {
         assert_eq!(app.selected(), None);
         app.handle(AppEvent::Key(Key::Char('G')));
         assert_eq!(app.selected(), None, "G stays None with no blocks");
+    }
+
+    #[test]
+    fn enter_toggles_the_selected_tool_in_browse() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_done_tool(&mut app, &output); // collapsed by default
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse selects the tool
+        assert_eq!(app.selected(), Some(0));
+        assert!(!tool_expanded(&app, 0));
+
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(tool_expanded(&app, 0), "Enter expands the selected tool");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(!tool_expanded(&app, 0), "Enter collapses it again");
+        // Space is the same.
+        app.handle(AppEvent::Key(Key::Char(' ')));
+        assert!(tool_expanded(&app, 0), "Space matches Enter");
+    }
+
+    #[test]
+    fn enter_on_a_non_tool_block_is_a_silent_no_op() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        // transcript: [Notice(divider), User]
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(1), "the User block");
+
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.transcript().len(), 2, "no block was added");
+        assert!(app.take_actions().is_empty(), "Enter pushes no action");
+
+        // The divider (a Notice) too.
+        app.handle(AppEvent::Key(Key::Char('g')));
+        assert_eq!(app.selected(), Some(0));
+        app.handle(AppEvent::Key(Key::Char(' ')));
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.transcript().len(), 2);
+    }
+
+    #[test]
+    fn y_on_a_collapsed_tool_copies_the_whole_output() {
+        let mut app = App::new();
+        let output = (1..=20)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_done_tool(&mut app, &output);
+        assert!(!tool_expanded(&app, 0), "the tool is collapsed");
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('y')));
+        // The whole output, never the collapsed preview — copying the preview
+        // would be a silent data loss.
+        assert_eq!(app.take_actions(), vec![Action::Copy(output.clone())]);
+    }
+
+    #[test]
+    fn y_copies_each_block_kind_by_its_text() {
+        // User
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello world")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // the User block
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(app.take_actions(), vec![Action::Copy("hello world".into())]);
+
+        // Assistant: text only, thinking excluded.
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::Assistant {
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "secret reasoning".into(),
+                },
+                ContentBlock::Text {
+                    text: "the visible answer".into(),
+                },
+            ],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(app.take_actions(), vec![Action::Copy("the visible answer".into())]);
+
+        // Notice
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Compaction {
+                summarized: 3,
+                kept: 1,
+            },
+        ));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Copy("⋯ compacted 3 messages, kept 1".into())]
+        );
+
+        // Error
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(app.take_actions(), vec![Action::Copy("boom".into())]);
+    }
+
+    #[test]
+    fn y_on_a_diff_block_copies_the_diff_body() {
+        let mut app = App::new();
+        // A tool that changed a file records the (path, diff) changeset.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "edit".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: "edit".into(),
+                output: "ok".into(),
+                is_error: false,
+                diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+                path: Some("f.rs".into()),
+            },
+        ));
+        // `/changes` → select → re-shows the diff as a `Block::Diff`.
+        typed(&mut app, "/changes");
+        app.handle(AppEvent::Key(Key::Enter)); // dispatch the command
+        app.handle(AppEvent::Key(Key::Enter)); // select the only row
+        let _ = app.take_actions();
+
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the last block (the diff)
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Copy("@@ -1 +1 @@\n-old\n+new".into())]
+        );
+    }
+
+    #[test]
+    fn y_with_nothing_to_copy_pushes_no_action() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // empty transcript: no selection
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert!(app.take_actions().is_empty(), "no action for an empty selection");
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Notice(t)) if t == "nothing to copy")
+        );
     }
 }
