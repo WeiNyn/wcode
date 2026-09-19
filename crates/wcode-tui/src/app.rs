@@ -1819,8 +1819,16 @@ impl App {
             AppEvent::Key(key) => self.on_key(key),
             AppEvent::Paste(text) => {
                 // A modal owns the input: a paste must not edit the buffer.
+                // With the browse search prompt up (not an `Overlay`, so its
+                // guard would miss it) the paste is appended to the *query*
+                // instead — the composer draft and cursor stay untouched.
                 if self.overlay.is_none() {
-                    self.on_paste(text);
+                    if let Some(search) = self.search.as_mut() {
+                        search.query.push_str(&text);
+                        self.dirty = true;
+                    } else {
+                        self.on_paste(text);
+                    }
                 }
             }
             AppEvent::Agent(id, event) => {
@@ -4746,5 +4754,42 @@ assert_eq!(app.selected(), Some(1), "}} steps forward again");
             "a running turn is only cancelled once"
         );
         assert!(!app.should_quit(), "Ctrl-C never quits a running turn");
+    }
+
+    #[test]
+    fn paste_with_the_search_prompt_up_appends_to_the_query() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        typed(&mut app, "draft");
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse on the last block
+        assert_eq!(app.selected(), Some(3));
+        app.handle(AppEvent::Key(Key::Char('/')));
+
+        // A single-line paste goes into the query, not the composer.
+        app.handle(AppEvent::Paste("needle".into()));
+        assert_eq!(app.search_query(), Some("needle"), "paste edits the query");
+        assert_eq!(app.input(), "draft", "the composer draft is untouched");
+        assert_eq!(app.cursor(), 5, "the composer cursor is untouched");
+        assert_eq!(app.selected(), Some(3), "the selection is untouched");
+
+        // A multi-line paste appends verbatim.
+        app.handle(AppEvent::Paste("alpha\nbeta".into()));
+        assert_eq!(
+            app.search_query(),
+            Some("needlealpha\nbeta"),
+            "multiline paste appends verbatim"
+        );
+        assert_eq!(app.input(), "draft");
+        assert_eq!(app.cursor(), 5);
+
+        // A pasted term is a live filter: reopen with one and jump.
+        app.handle(AppEvent::Key(Key::Esc)); // close without jumping
+        assert_eq!(app.selected(), Some(3));
+        app.handle(AppEvent::Key(Key::Char('/')));
+        app.handle(AppEvent::Paste("alpha".into()));
+        assert_eq!(app.search_hits(), 2, "the pasted term filters live");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.selected(), Some(0), "first match at/after 3 wraps to 0");
+        assert_eq!(app.input(), "draft", "still untouched after the jump");
     }
 }
