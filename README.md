@@ -69,7 +69,6 @@ max = 3                    # optional; retries after the first attempt (0 disabl
 base_ms = 500              # optional; base backoff for the first retry
 cap_ms = 8000              # optional; cap on a single backoff wait
 
-[team]
 # A preset team the orchestrator starts with (requires --agents). One [[team]]
 # entry per member; names are unique (a duplicate fails the load loudly).
 [[team]]
@@ -86,6 +85,13 @@ role  = "verify diffs; PASS / NITS / FAIL"
 guidelines = """
 Step 1: message a member by name; Step 2: verify their result.
 """
+
+[peers]
+# Persistent phonebook entries for `message`'s `to` (requires --agents). A value
+# containing `:` is an address alias (`agent:<id>`); otherwise it is a socket
+# path, connected lazily (Unix only).
+explorer = "/tmp/wcode/explorer.sock"
+helper   = "agent:w7"
 ```
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
