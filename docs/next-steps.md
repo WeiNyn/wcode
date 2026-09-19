@@ -462,9 +462,10 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, and 
 
 ## 14. TUI palette & theming
 
-**New.** The palette names 16 roles but several are byte-identical
-(`muted`==`border`, `warn`==`code`, `tool_name`==`link`), so distinct components
-render the same color and the sidebar's `done` row matches the pane border. Adopt
+**New.** The palette names 16 roles but several share a look — `muted`==`border`
+(both `DarkGray`), `warn`==`code` (both `Yellow`), and `tool_name`/`link` share one
+`Blue` fg — so distinct components are hard to tell apart (the sidebar's `done` row
+matches the pane border). Adopt
 palette **B** (semantic families: meta=magenta, tools=blue+bold, code=yellow,
 warn=light-yellow), then add capability detection (P2) and an opt-in truecolor
 `[theme]` overlay (P4) behind a `Plain/Named/Indexed/Rgb` ladder.

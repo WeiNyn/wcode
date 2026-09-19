@@ -8,12 +8,13 @@ Presentation-only, inside `crates/wcode-tui`. No new deps.
 ## 1. Problem
 
 The shipped palette (`crates/wcode-tui/src/theme.rs`, `Theme::colored`) *names* 16
-roles but they collapse to ~9 looks, so distinct components render identically:
+roles but several share a look, so distinct components are hard to tell apart:
 
 - `muted` == `border` (both `DarkGray`) — the sidebar's `done` row looks like the
   pane border, and every border reads as "quiet prose".
 - `warn` == `code` (both `Yellow`) — the mid context gauge looks like inline code.
-- `tool_name` == `link` (both `Blue`) — a tool header and a hyperlink look alike.
+- `tool_name` / `link` share the same `Blue` fg (differing only by underline) — a
+  tool header and a hyperlink read alike.
 
 Three further pairs are **intentional aliases**, not bugs: `accent` == `user` (the
 prompt and running state), `success` == `diff_add`, `error` == `diff_del` (same
@@ -44,14 +45,16 @@ its `fg` and the `Theme::plain` palette is used unchanged.
 | `code` | Yellow | unchanged |
 | `heading` | **Magenta + Bold** | was Bold-only |
 | `link` | Blue + Underline | |
-| `tool_name` | **Blue + Bold** | was `Blue` (= link) |
+| `tool_name` | **Blue + Bold** | was plain `Blue` (same hue as `link`) |
 | `thinking` | **Magenta + DIM + Italic** | shares the "meta" hue |
 | `diff_add` | Green | alias of `success` |
 | `diff_del` | Red | alias of `error` |
 
 Changed vs. before: `muted`, `warn`, `heading`, `tool_name`, `thinking`. Everything
-else is untouched. A test pins the three collisions above **open** (they must never
-re-merge); the intentional aliases are documented, not asserted distinct.
+else is untouched. A test pins the collisions above **open** — `muted≠border`,
+`code≠warn`, `heading` colored, `tool_name` bold — while the intentional aliases
+(`accent`/`user`, `success`/`diff_add`, `error`/`diff_del`) are documented, not
+asserted distinct.
 
 ## 3. Theming direction — tiers, not a registry
 
@@ -82,8 +85,8 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
 
 ## 4. Phases
 
-- **T1 (landed — `847b569`) — palette B.** Rewrite `Theme::colored` per §2; add a test that
-  `muted≠border`, `warn≠code`, `tool_name≠link` and that `heading` carries a color.
+- **T1 (landed — `847b569`) — palette B.** Rewrite `Theme::colored` per §2; add a test
+  pinning `muted≠border`, `code≠warn`, `heading` colored, and `tool_name` bold.
   Commit `tui: adopt the semantic palette (B) for role distinctness`.
 - **T2 — capability detection (P2).** Introduce `ColorMode { Plain, Named, Indexed,
   Rgb }`, resolve it once in `theme.rs`, and make `colored()` the `Named` tier.
