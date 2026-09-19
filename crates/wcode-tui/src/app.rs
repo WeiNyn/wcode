@@ -4548,7 +4548,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Char('{')));
         assert_eq!(app.selected(), Some(0), "{{ clamps at the first block");
         app.handle(AppEvent::Key(Key::Char('}')));
-assert_eq!(app.selected(), Some(1), "}} steps forward again");
+        assert_eq!(app.selected(), Some(1), "}} steps forward again");
     }
 
     #[test]
