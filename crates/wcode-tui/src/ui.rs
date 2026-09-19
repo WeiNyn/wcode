@@ -70,8 +70,63 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_input(frame, input, &view);
     draw_status(frame, status, app);
     draw_completion(frame, area, rule, app, sidebar);
+    draw_search_prompt(frame, area, rule, app, sidebar);
     // The modal, if any, is drawn last — over the bands.
     draw_overlay(frame, area, app);
+}
+
+/// Draw the browse transcript-search prompt, floating just above the input
+/// band like the command completion. Browse-owned and non-reflowing: it is
+/// `Clear`ed over the transcript only while the prompt is open, so an
+/// input-mode frame stays byte-identical.
+fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App, sidebar: bool) {
+    let Some(query) = app.search_query() else {
+        return;
+    };
+    if app.mode() != Mode::Browse {
+        return; // defensive: the prompt never survives exit_browse
+    }
+    // Two content rows + the borders; keep clear of the team sidebar.
+    let height = 4;
+    if above.y < height {
+        return; // no room above the input band
+    }
+    let avail = if sidebar {
+        area.width.saturating_sub(SIDEBAR_WIDTH)
+    } else {
+        area.width
+    };
+    let width = avail.saturating_sub(2).clamp(1, 64);
+    let rect = Rect {
+        x: area.x + 1,
+        y: above.y - height,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_style(border())
+        .title(Span::styled(" search ", border()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let hits = app.search_hits();
+    let count = if query.is_empty() {
+        "type to search".to_string()
+    } else {
+        format!(
+            "{hits} hit{}",
+            if hits == 1 { "" } else { "s" }
+        )
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(format!("/{query}"), accent()),
+            Span::styled(format!(" — {count}"), dim()),
+        ]),
+        Line::from(Span::styled("enter jump · esc close · n / N repeat", dim())),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Draw the open modal, if any — the picker or the `F1` keymap.
@@ -1069,6 +1124,13 @@ mod tests {
     /// The default root surface's id (`App::new`'s single surface).
     fn root() -> SessionId {
         SessionId::agent("root")
+    }
+
+    /// Feed one `Key::Char` event per character, as if typed.
+    fn typed(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle(AppEvent::Key(Key::Char(c)));
+        }
     }
 
     /// Give `app` a root + one member surface (`label`/`model`).
@@ -2095,6 +2157,74 @@ mod tests {
         let after = buffer_text(&render(&mut app, 60, 20));
         assert_eq!(after, plain, "a browse round-trip must restore the frame");
         assert_eq!(app.total_lines(), plain_total);
+    }
+
+    #[test]
+    fn search_prompt_is_drawn_only_while_open_and_never_reflows() {
+        let mut app = App::new();
+        app.seed_history(
+            &root(),
+            &[
+                AgentMessage::user_text("alpha one"),
+                reply("beta two ALPHA three"),
+                AgentMessage::user_text("gamma"),
+            ],
+        );
+        let plain = buffer_text(&render(&mut app, 60, 16));
+        let plain_total = app.total_lines();
+        assert!(!plain.contains(" search "), "no prompt in input mode:\n{plain}");
+
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        let browse = buffer_text(&render(&mut app, 60, 16));
+        assert!(!browse.contains(" search "), "no prompt in plain browse:\n{browse}");
+
+        // Type: the prompt appears with the query, the live hit count and a
+        // hint, and it injects no rows into the transcript.
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alp");
+        let open = buffer_text(&render(&mut app, 60, 16));
+        assert!(open.contains("/alp"), "the query line is drawn:\n{open}");
+        assert!(open.contains("2 hits"), "the live count is drawn:\n{open}");
+        assert!(
+            open.contains("enter jump · esc close"),
+            "the hint line is drawn:\n{open}"
+        );
+        assert_eq!(app.total_lines(), plain_total, "the prompt adds no rows");
+
+        // A second draw is byte-identical — the overlay is deterministic.
+        let again = buffer_text(&render(&mut app, 60, 16));
+        assert_eq!(open, again, "the prompt frame is stable");
+
+        // Esc closes the prompt and restores the exact plain-browse frame.
+        app.handle(AppEvent::Key(Key::Esc));
+        let closed = buffer_text(&render(&mut app, 60, 16));
+        assert_eq!(closed, browse, "closing the prompt restores the browse frame");
+        assert!(!closed.contains(" search "), "the prompt is gone:\n{closed}");
+    }
+
+    #[test]
+    fn enter_in_search_jumps_and_the_target_keeps_its_bar() {
+        let mut app = App::new();
+        app.seed_history(
+            &root(),
+            &[
+                AgentMessage::user_text("alpha one"),
+                reply("beta two"),
+                AgentMessage::user_text("ALPHA three"),
+            ],
+        );
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the last block (ALPHA three)
+        assert_eq!(app.selected(), Some(3));
+        // transcript: [⋯ 3 earlier, alpha, beta, ALPHA] — "alpha" matches 0 and 3.
+        app.handle(AppEvent::Key(Key::Char('k'))); // step up to "beta two" (block 2)
+        assert_eq!(app.selected(), Some(2));
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.search_query().is_none(), "Enter closes the prompt");
+        assert_eq!(app.selected(), Some(3), "first match at/after block 2 is 3");
+        let text = buffer_text(&render(&mut app, 60, 16));
+        assert!(!barred(&text).is_empty(), "the jumped-to block is drawn with its bar");
     }
 
     #[test]

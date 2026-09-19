@@ -18,7 +18,7 @@ the boxes as each task completes and keep the status table current.
 | 10 | Team: define, declare, see (see [`team-and-tui-plan.md`](team-and-tui-plan.md)) | ☑ F1–F3 (+F3b/F3c) + F4a/F4b landed — complete |
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
-| 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ◐ phases 1–2 |
+| 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ☑ phases 1–3 |
 | 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T3 (`[theme]` overlay) landed; T2 deferred |
 | 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
 
@@ -452,7 +452,8 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 long scrollback cannot be *pointed at*. A browse mode moves a `▌` selection over
 the committed blocks, in the gutter the design already reserved for it, and
 unlocks block-wise actions (expand, copy, a `$PAGER`) one phase at a time. (Phase
-2 retired the old `Ctrl-O` last-tool shortcut in favour of pointing at a block.)
+2 retired the old `Ctrl-O` last-tool shortcut in favour of pointing at a block;
+phase 3 added `Home`/`End`, block-wise `{`/`}`, and `/` search.)
 
 > ➡️ **[`tui-browse-plan.md`](tui-browse-plan.md)** — problem, design (a mode,
 > a per-surface selection, the second-pass bar, scroll-to-reveal), phases, status.

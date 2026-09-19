@@ -86,19 +86,49 @@ wrapping are untouched: the bar injects no rows and the ranges add no lines.
 |-------|-------|--------|
 | 1 | skeleton: mode, per-surface selection, second-pass bar, ranges feedback, scroll-to-reveal, mode indicator | ☑ done |
 | 2 | actions on the selection: `Enter`/`Space` toggle a tool, `y` copy a block; `Ctrl-O` retired from input mode | ☑ done |
-| 3 | navigation polish: `Home` / `End`, block-wise `{` / `}`, search | ☐ todo |
+| 3 | navigation polish: `Home` / `End`, block-wise `{` / `}`, search | ☑ done |
 | 4 | unlocks: a `$PAGER` viewer, structured jumps (to the last error, …) | ☐ todo |
 
 Phase 2 landed: `Enter`/`Space` toggle the selected block and `y` copies it. The
 input-mode `Ctrl-O` last-tool shortcut was **retired** — a shortcut whose target is
 invisible is the defect — so per-block toggling lives only in browse mode, where
 the bar draws the target; `Ctrl-T` (all tools) stays the input-mode escape hatch.
-Phase 3 and the `$PAGER` unlock are still unimplemented: a `$PAGER` needs a
-suspend/resume path `terminal.rs` does not have (`TerminalGuard` only restores on
-drop) — its own design.
+Phase 3 landed: `Home`/`End` anchor to the visible viewport, `{`/`}` step
+block-wise, and `/` opens a search prompt (typing filters live; `Enter` jumps to
+the first block at/after the selection whose copy-text contains the term,
+case-insensitive, wrapping, then closes; `n`/`N` repeat it) — the composer
+draft is never touched, and the search prompt is itself an overlay, so the
+input-mode invariants below hold with it up too. The `$PAGER` unlock is still
+unimplemented: it needs a suspend/resume path `terminal.rs` does not have
+(`TerminalGuard` only restores on drop) — its own design.
 
 Phase 1 landed as the skeleton, then `F1`/`?` and `Ctrl-C` kept
 global in browse, plus a test-only commit pinning the invariants below.
+
+### Browse keys
+
+| key | action |
+|-----|--------|
+| `j` / `k` · `Down` / `Up` | next / previous block |
+| `g` / `G` | first / last committed block |
+| `Home` / `End` | topmost / bottommost block **intersecting the visible viewport** (falls back to first / last before the first frame) |
+| `{` / `}` | previous / next block, clamped at the ends |
+| `PgUp` / `PgDn` | a viewport of blocks |
+| wheel | scroll the view without moving the selection |
+| `Enter` / `Space` | expand / collapse the selected block's detail |
+| `y` | copy the selected block |
+| `/` | open the search prompt (see below) |
+| `n` / `N` | repeat the last search forward / backward |
+| `Esc` / `q` / `Ctrl-G` | leave browse |
+| `F1` / `?` · `Ctrl-C` | global: help · cancel (quit when idle) |
+
+While the **search prompt** is up (an overlay drawn above the input band, so the
+base frame never reflows): typing filters the block list live, `Enter` jumps to
+the first committed block at/after the selection whose copy-text contains the
+term (case-insensitive, wrapping) and closes, `Backspace` edits the query, and
+`Esc` closes without jumping. An empty term or no match is a no-op. `n`/`N`
+repeat the last *executed* search strictly forward/backward from the current
+selection, wrapping. The composer draft and cursor are never touched.
 
 ## Invariants future phases must preserve
 
@@ -123,6 +153,7 @@ global in browse, plus a test-only commit pinning the invariants below.
 |--------|---------|
 | 1 | `docs: plan the transcript browse mode` |
 | 2 | `tui: a browse mode with a selected transcript block` |
+| 3 | `tui: browse navigation & search (Home/End, {/}, /, n/N)` |
 
 ## Status
 
@@ -131,5 +162,6 @@ global in browse, plus a test-only commit pinning the invariants below.
 | 1 | plan + tracker | ☑ done |
 | 2 | browse-mode skeleton | ☑ done |
 | 3 | browse actions (`Enter`/`Space`, `y`) + the last-tool shortcut retirement | ☑ done |
+| 4 | navigation polish: `Home`/`End`, `{`/`}`, `/` search | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

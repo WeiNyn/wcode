@@ -478,6 +478,9 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
     ("Enter / Space (browse)", "expand / collapse the selected block"),
     ("y (browse)", "copy the selected block"),
+    ("Home / End (browse)", "jump to the top / bottom block in view"),
+    ("{ / } (browse)", "previous / next block"),
+    ("/ (browse)", "search the transcript (n / N repeat)"),
     ("F1", "toggle this help"),
     ("Ctrl-Y", "copy the last reply"),
     ("Esc / Ctrl-C", "cancel a run; quit when idle"),
@@ -1142,6 +1145,22 @@ pub enum Mode {
     Browse,
 }
 
+/// The open transcript search prompt (`/` in browse). Browse-owned rather
+/// than an `Overlay` so `n`/`N` can repeat the last jump after the prompt
+/// closes; like a modal it still owns every key while up.
+#[derive(Clone, Debug, Default)]
+struct BrowseSearch {
+    /// The raw term, as typed. Filters the block list live.
+    query: String,
+}
+
+/// The visible-viewport edge a browse `Home` / `End` anchors to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewEdge {
+    Top,
+    Bottom,
+}
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 pub struct App {
     /// One entry per conversation surface. Index 0 is the root; the rest are
@@ -1176,6 +1195,10 @@ pub struct App {
     hide_sidebar: bool,
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
+    /// The open browse search prompt, if any — see [`BrowseSearch`].
+    search: Option<BrowseSearch>,
+    /// The term the last search jumped on; `n`/`N` repeat it in browse.
+    last_search: Option<String>,
 }
 
 impl Default for App {
@@ -1205,6 +1228,8 @@ impl App {
             actions: Vec::new(),
             hide_sidebar: false,
             mode: Mode::Input,
+            search: None,
+            last_search: None,
         }
     }
 
@@ -1462,6 +1487,9 @@ impl App {
     fn exit_browse(&mut self) {
         self.mode = Mode::Input;
         self.focused_mut().selected = None;
+        // An open search prompt never survives browse (defensive — the prompt
+        // keys own Esc, so this only fires when it is already closed).
+        self.search = None;
         self.dirty = true;
     }
 
@@ -1470,6 +1498,13 @@ impl App {
     /// `Esc`/`q`/`Ctrl-G` leave. Every other key is deliberately ignored — the
     /// composer must not be edited behind the mode.
     fn on_browse_key(&mut self, key: Key) {
+        // An open search prompt owns the keys: typing filters live, `Enter`
+        // jumps and closes, `Esc` closes without jumping. The global keys
+        // (`F1`/`?`, `Ctrl-C`) stay global here exactly as in plain browse.
+        if self.search.is_some() {
+            self.on_search_key(key);
+            return;
+        }
         match key {
             Key::Esc | Key::Ctrl('g') | Key::Char('q') => self.exit_browse(),
             // Global: the keymap overlay and the panic button. Neither leaves
@@ -1485,10 +1520,192 @@ impl App {
             Key::Char('G') => self.select_last(),
             Key::PageDown => self.select_by(self.page() as isize),
             Key::PageUp => self.select_by(-(self.page() as isize)),
+            // Viewport-anchored: the topmost / bottommost block in view.
+            Key::Home => self.select_viewport_edge(ViewEdge::Top),
+            Key::End => self.select_viewport_edge(ViewEdge::Bottom),
+            // Block-wise movement, clamped at the ends.
+            Key::Char('{') => self.select_by(-1),
+            Key::Char('}') => self.select_by(1),
+            // Search: `/` opens the prompt; `n` / `N` repeat the last jump.
+            Key::Char('/') => self.open_search(),
+            Key::Char('n') => self.search_repeat(1),
+            Key::Char('N') => self.search_repeat(-1),
             // The wheel scrolls the view without moving the selection.
             Key::ScrollUp => self.scroll_up(WHEEL_LINES),
             Key::ScrollDown => self.scroll_down(WHEEL_LINES),
             _ => {}
+        }
+    }
+
+    /// Keys while the search prompt is open. `Char` appends to the query and
+    /// `Backspace` pops — exactly how the picker edits — while `Enter` jumps
+    /// and closes and `Esc` closes without jumping. `F1`/`?` (help) and
+    /// `Ctrl-C` (cancel / quit) stay **global**, like plain browse.
+    fn on_search_key(&mut self, key: Key) {
+        match key {
+            Key::Esc => self.close_search(),
+            Key::F(1) | Key::Char('?') => self.open_help(),
+            Key::Ctrl('c') => self.interrupt(),
+            Key::Enter => self.accept_search(),
+            Key::Char(c) => {
+                if let Some(search) = self.search.as_mut() {
+                    search.query.push(c);
+                }
+                self.dirty = true;
+            }
+            Key::Backspace => {
+                if let Some(search) = self.search.as_mut() {
+                    search.query.pop();
+                }
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// `/` in browse: open the search prompt with an empty query.
+    fn open_search(&mut self) {
+        self.search = Some(BrowseSearch::default());
+        self.dirty = true;
+    }
+
+    /// `Esc` in the search prompt: close it without jumping.
+    fn close_search(&mut self) {
+        self.search = None;
+        self.dirty = true;
+    }
+
+    /// `Enter` in the search prompt: jump to the first committed block at/after
+    /// the selection whose copy-text contains the term (case-insensitive,
+    /// wrapping), remember the term for `n`/`N`, and close. An empty term or no
+    /// match is a no-op — nothing moves and the prompt stays up.
+    fn accept_search(&mut self) {
+        let term = self.search.as_ref().map(|s| s.query.clone());
+        let Some(term) = term else { return };
+        // At/after the selection: a matching selection stays put.
+        let base = self.focused().selected.unwrap_or(0);
+        if let Some(idx) = self.search_target(&term, 1, base, false) {
+            self.last_search = Some(term);
+            self.focused_mut().selected = Some(idx);
+            self.reveal_selected();
+            self.close_search();
+        }
+    }
+
+    /// `n` / `N` in browse: repeat the remembered search from the current
+    /// selection, wrapping. Nothing remembered, or no further match, is a
+    /// no-op.
+    fn search_repeat(&mut self, dir: isize) {
+        let Some(term) = self.last_search.clone() else { return };
+        // Strictly next/previous: `n`/`N` must move off a matching selection.
+        // No selection means the search starts fresh at the nearest end.
+        let len = self.focused().transcript.len();
+        let (base, strict) = match self.focused().selected {
+            Some(i) => (i, true),
+            None => (if dir > 0 { 0 } else { len }, false),
+        };
+        if let Some(idx) = self.search_target(&term, dir, base, strict) {
+            self.focused_mut().selected = Some(idx);
+            self.reveal_selected();
+            self.dirty = true;
+        }
+    }
+
+    /// The first index in `matches` at/after the selection for `dir` = 1, or
+    /// at/before it for -1, wrapping around the ends. `None` when the term
+    /// matches nothing. With no selection the search starts at the nearest end.
+    fn search_target(&self, term: &str, dir: isize, base: usize, strict: bool) -> Option<usize> {
+        let matches = self.matching_blocks(term);
+        if matches.is_empty() {
+            return None;
+        }
+        if dir > 0 {
+            // First match at/after `base` (or strictly after), else wrap to
+            // the first match overall.
+            matches
+                .iter()
+                .copied()
+                .find(|&i| if strict { i > base } else { i >= base })
+                .or_else(|| matches.first().copied())
+        } else {
+            // Last match at/before `base` (or strictly before), else wrap to
+            // the last match overall.
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|&i| if strict { i < base } else { i <= base })
+                .or_else(|| matches.last().copied())
+        }
+    }
+
+    /// Indices of the committed blocks whose copy-text contains `term`,
+    /// case-insensitively. An empty term matches nothing (every block would
+    /// otherwise contain it).
+    fn matching_blocks(&self, term: &str) -> Vec<usize> {
+        if term.is_empty() {
+            return Vec::new();
+        }
+        let term = term.to_lowercase();
+        let mut hits = Vec::new();
+        for (i, block) in self.focused().transcript.iter().enumerate() {
+            if copy_text(block).is_some_and(|text| text.to_lowercase().contains(&term)) {
+                hits.push(i);
+            }
+        }
+        hits
+    }
+
+    /// The open search query, if the prompt is up (read by the renderer).
+    pub(crate) fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// How many committed blocks match the open query — the live filter count.
+    pub(crate) fn search_hits(&self) -> usize {
+        self.search.as_ref().map_or(0, |s| self.matching_blocks(&s.query).len())
+    }
+
+    /// `Home` / `End` in browse: select the topmost / bottommost committed
+    /// block whose line range intersects the visible viewport, then bring it
+    /// into view. A block that renders no lines is skipped; before the renderer
+    /// has measured a frame, or when nothing intersects the view, it falls back
+    /// to the transcript ends (`g` / `G`).
+    fn select_viewport_edge(&mut self, edge: ViewEdge) {
+        // No measured view yet — there is nothing to anchor to, so behave
+        // like `g`/`G` (which is also exactly right when everything fits).
+        if self.focused().viewport == 0 || self.focused().last_total == 0 {
+            match edge {
+                ViewEdge::Top => self.select_first(),
+                ViewEdge::Bottom => self.select_last(),
+            }
+            return;
+        }
+        let surface = self.focused();
+        let top = surface
+            .last_total
+            .saturating_sub(surface.viewport)
+            .saturating_sub(surface.scroll);
+        let bottom = top.saturating_add(surface.viewport).min(surface.last_total);
+        let visible = surface.ranges.iter().enumerate().filter(|(_, range)| {
+            let (b_start, b_end) = (range.start, range.end);
+            // Renders lines, and intersects the visible window.
+            b_end > b_start && b_end > top && b_start < bottom
+        });
+        if let Some(idx) = match edge {
+            ViewEdge::Top => visible.map(|(i, _)| i).next(),
+            ViewEdge::Bottom => visible.map(|(i, _)| i).next_back(),
+        } {
+            self.focused_mut().selected = Some(idx);
+            self.reveal_selected();
+            self.dirty = true;
+        } else {
+            // Nothing intersects the view (e.g. a sparse transcript): fall
+            // back to the transcript ends.
+            match edge {
+                ViewEdge::Top => self.select_first(),
+                ViewEdge::Bottom => self.select_last(),
+            }
         }
     }
 
@@ -4236,5 +4453,254 @@ mod tests {
         assert!(
             matches!(app.transcript().last(), Some(Block::Notice(t)) if t == "nothing to copy")
         );
+    }
+
+    #[test]
+    fn home_and_end_anchor_to_the_visible_viewport() {
+        let mut app = App::new();
+        // Five blocks; block 1 renders no lines (a tool-call-only slot). The
+        // total is 14 lines and the viewport 8; each press is tested against a
+        // fresh scroll position (reveal re-anchors, so we reset between keys).
+        for text in ["a", "b", "c", "d", "e"] {
+            app.focused_mut().transcript.push(Block::User(text.into()));
+        }
+        {
+            let s = app.focused_mut();
+            s.ranges = vec![0..2, 2..2, 2..6, 6..10, 10..14];
+            s.viewport = 8;
+            s.last_total = 14;
+            s.max_scroll = 6;
+            s.scroll = 0;
+        }
+
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse on the last block
+        assert_eq!(app.selected(), Some(4));
+
+        // Tail view [6,14): blocks 3 and 4.
+        app.handle(AppEvent::Key(Key::Home));
+        assert_eq!(app.selected(), Some(3), "topmost in [6,14)");
+        app.focused_mut().scroll = 0;
+        app.handle(AppEvent::Key(Key::End));
+        assert_eq!(app.selected(), Some(4), "bottommost in [6,14)");
+
+        // Three lines up: view [3,11) shows blocks 2–4 (block 1 is 2..2, a
+        // zero-line slot that must never be a target).
+        app.focused_mut().scroll = 3;
+        app.handle(AppEvent::Key(Key::Home));
+        assert_eq!(app.selected(), Some(2), "topmost in [3,11)");
+        app.focused_mut().scroll = 3;
+        app.handle(AppEvent::Key(Key::End));
+        assert_eq!(app.selected(), Some(4), "bottommost in [3,11)");
+
+        // Six lines up: view [0,8) shows blocks 0, 2 and 3.
+        app.focused_mut().scroll = 6;
+        app.handle(AppEvent::Key(Key::Home));
+        assert_eq!(app.selected(), Some(0), "topmost in [0,8)");
+        app.focused_mut().scroll = 6;
+        app.handle(AppEvent::Key(Key::End));
+        assert_eq!(app.selected(), Some(3), "bottommost in [0,8), skipping 2..2");
+    }
+
+    #[test]
+    fn home_and_end_fall_back_to_the_transcript_ends() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        // transcript: [Notice, User, Assistant] — no frame has been measured.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(2));
+        app.handle(AppEvent::Key(Key::Home));
+        assert_eq!(app.selected(), Some(0), "fallback: the first committed block");
+        app.handle(AppEvent::Key(Key::End));
+        assert_eq!(app.selected(), Some(2), "fallback: the last committed block");
+
+        // With an empty transcript neither key does anything.
+        let mut empty = App::new();
+        empty.handle(AppEvent::Key(Key::Ctrl('g')));
+        empty.handle(AppEvent::Key(Key::Home));
+        empty.handle(AppEvent::Key(Key::End));
+        assert_eq!(empty.selected(), None, "no blocks, no selection");
+    }
+
+    #[test]
+    fn brace_keys_step_blocks_and_clamp_at_the_ends() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        // transcript: [Notice, User, Assistant]
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(2));
+
+        app.handle(AppEvent::Key(Key::Char('}')));
+        assert_eq!(app.selected(), Some(2), "}} clamps at the last block");
+        app.handle(AppEvent::Key(Key::Char('{')));
+        assert_eq!(app.selected(), Some(1));
+        app.handle(AppEvent::Key(Key::Char('{')));
+        assert_eq!(app.selected(), Some(0));
+        app.handle(AppEvent::Key(Key::Char('{')));
+        assert_eq!(app.selected(), Some(0), "{{ clamps at the first block");
+        app.handle(AppEvent::Key(Key::Char('}')));
+        assert_eq!(app.selected(), Some(1), "}} steps forward again");
+    }
+
+    /// A transcript with four blocks; "alpha" occurs in blocks 0 and 2.
+    fn searchable_transcript(app: &mut App) {
+        app.focused_mut().transcript = vec![
+            Block::User("alpha".into()),
+            Block::User("beta".into()),
+            Block::User("ALPHA too".into()),
+            Block::User("gamma".into()),
+        ];
+    }
+
+    #[test]
+    fn slash_opens_the_search_prompt_and_typing_filters_live() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selection: the last block
+        assert_eq!(app.selected(), Some(3));
+
+        app.handle(AppEvent::Key(Key::Char('/')));
+        assert_eq!(app.search_query(), Some(""), "an empty query opens");
+        assert_eq!(app.search_hits(), 0, "an empty term matches nothing");
+
+        typed(&mut app, "ALPHA");
+        assert_eq!(app.search_query(), Some("ALPHA"));
+        assert_eq!(app.search_hits(), 2, "case-insensitive live filter");
+
+        app.handle(AppEvent::Key(Key::Backspace));
+        app.handle(AppEvent::Key(Key::Backspace));
+        app.handle(AppEvent::Key(Key::Backspace));
+        app.handle(AppEvent::Key(Key::Backspace));
+        app.handle(AppEvent::Key(Key::Backspace));
+        assert_eq!(app.search_query(), Some(""), "backspace empties the query");
+    }
+
+    #[test]
+    fn enter_in_search_jumps_at_or_after_the_selection_wrapping_and_closes() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selection: block 3
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "beta");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.search_query(), None, "Enter closes the prompt");
+        assert_eq!(app.selected(), Some(1), "the only match at/after 3 wraps to 1");
+
+        // From block 1, "alpha" (matching blocks 0 and 2) jumps to 2: the
+        // first match at/after the selection.
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.selected(), Some(2), "first match at/after block 1");
+
+        // From a matching selection the same search is a no-op (at/after).
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.selected(), Some(2), "stays on the matching block");
+    }
+
+    #[test]
+    fn n_and_n_repeat_the_search_strictly_and_wrap() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selection: block 3
+        // Jump once to block 0 (the only match at/after 3, wrapping).
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.selected(), Some(0));
+
+        app.handle(AppEvent::Key(Key::Char('n')));
+        assert_eq!(app.selected(), Some(2), "strictly next from block 0");
+        app.handle(AppEvent::Key(Key::Char('n')));
+        assert_eq!(app.selected(), Some(0), "n wraps past the end");
+        app.handle(AppEvent::Key(Key::Char('N')));
+        assert_eq!(app.selected(), Some(2), "N wraps before the start");
+        app.handle(AppEvent::Key(Key::Char('N')));
+        assert_eq!(app.selected(), Some(0), "strictly previous from block 2");
+    }
+
+    #[test]
+    fn empty_and_matchless_searches_are_no_ops() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(3));
+
+        // No remembered search: n / N do nothing.
+        app.handle(AppEvent::Key(Key::Char('n')));
+        app.handle(AppEvent::Key(Key::Char('N')));
+        assert_eq!(app.selected(), Some(3), "nothing to repeat");
+
+        // Enter with an empty term keeps the prompt open and moves nothing.
+        app.handle(AppEvent::Key(Key::Char('/')));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.search_query(), Some(""), "empty Enter is a no-op");
+        assert_eq!(app.selected(), Some(3));
+
+        // A matchless term is a no-op too, and Esc closes without jumping.
+        typed(&mut app, "zzz");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.search_query(), Some("zzz"), "no match: prompt stays up");
+        assert_eq!(app.selected(), Some(3), "no match: nothing moves");
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.search_query(), None, "Esc closes without jumping");
+        assert_eq!(app.selected(), Some(3));
+        // The fruitless term was not remembered.
+        app.handle(AppEvent::Key(Key::Char('n')));
+        assert_eq!(app.selected(), Some(3), "a skip still has nothing to repeat");
+    }
+
+    #[test]
+    fn search_edits_do_not_reach_the_composer_draft() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        typed(&mut app, "draft text");
+        assert_eq!(app.input(), "draft text");
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        // Typing into the search prompt must not touch the composer.
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.input(), "draft text", "the draft is untouched");
+        assert_eq!(
+            app.cursor(),
+            10,
+            "the composer cursor is untouched (10 chars typed)"
+        );
+        app.handle(AppEvent::Key(Key::Esc)); // leave browse
+        assert_eq!(app.input(), "draft text", "still intact after leaving browse");
+    }
+
+    #[test]
+    fn search_prompt_keeps_help_and_ctrl_c_global() {
+        let mut app = App::new();
+        searchable_transcript(&mut app);
+        submit(&mut app, "go"); // a run in flight
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('/')));
+        typed(&mut app, "alpha");
+
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Help)),
+            "F1 opens help from the search prompt"
+        );
+        assert_eq!(app.search_query(), Some("alpha"), "the prompt survives help");
+        app.handle(AppEvent::Key(Key::Esc)); // close help
+        app.handle(AppEvent::Key(Key::Char('?')));
+        assert!(matches!(app.overlay(), Some(Overlay::Help)), "? opens help too");
+        app.handle(AppEvent::Key(Key::Esc));
+
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
+        assert_eq!(app.take_actions(), vec![Action::Cancel], "Ctrl-C cancels");
+        assert_eq!(app.search_query(), Some("alpha"), "still searching after cancel");
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
+        assert!(
+            app.take_actions().is_empty(),
+            "a running turn is only cancelled once"
+        );
+        assert!(!app.should_quit(), "Ctrl-C never quits a running turn");
     }
 }
