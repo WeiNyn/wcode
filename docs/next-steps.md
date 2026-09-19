@@ -19,6 +19,7 @@ the boxes as each task completes and keep the status table current.
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
 | 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ◐ phases 1–2 |
+| 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ◐ T1 landed (palette B); T2/T3 open |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -459,6 +460,22 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, and 
 
 ---
 
+## 14. TUI palette & theming
+
+**New.** The palette names 16 roles but several are byte-identical
+(`muted`==`border`, `warn`==`code`, `tool_name`==`link`), so distinct components
+render the same color and the sidebar's `done` row matches the pane border. Adopt
+palette **B** (semantic families: meta=magenta, tools=blue+bold, code=yellow,
+warn=light-yellow), then add capability detection (P2) and an opt-in truecolor
+`[theme]` overlay (P4) behind a `Plain/Named/Indexed/Rgb` ladder.
+
+> ➡️ **[`tui-theming-plan.md`](tui-theming-plan.md)** — problem, the B role
+table, the theming tiers, phases, non-goals.
+
+This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, 10, and 13.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -481,6 +498,9 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, and 
     hardens the `message` tool.
 12. **12** TUI polish: tool output, theme, keys — presentation-only; see
 12. **12** TUI polish: tool output, theme, keys — presentation-only; see
+12. **12** TUI polish: tool output, theme, keys — presentation-only; see
     [`tui-polish-plan.md`](tui-polish-plan.md).
 13. **13** TUI browse mode — select a block, then act on it; see
     [`tui-browse-plan.md`](tui-browse-plan.md).
+14. **14** TUI palette & theming — presentation-only; see
+    [`tui-theming-plan.md`](tui-theming-plan.md).
