@@ -265,11 +265,14 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // the blank line above the block.
     let mut ranges: Vec<Range<usize>> = Vec::new();
     for (i, block) in app.transcript().iter().enumerate() {
-        if i > 0 {
+        // A tool-call-only assistant block renders no lines. It keeps its slot in
+        // `ranges` (the selection index aligns with the transcript), but it must
+        // not contribute a separator — that would be a stray blank line.
+        let block_lines = block_lines(block, width);
+        if i > 0 && !block_lines.is_empty() && !lines.is_empty() {
             lines.push(Line::default());
         }
         let start = lines.len();
-        let block_lines = block_lines(block, width);
         let len = block_lines.len();
         lines.extend(block_lines);
         ranges.push(start..start + len);
@@ -2184,6 +2187,42 @@ mod tests {
         assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
         // Header + all 20 output lines.
         assert_eq!(barred(&expanded).len(), 21, "{expanded}");
+    }
+
+    #[test]
+    fn a_tool_call_only_assistant_block_leaves_no_stray_blank() {
+        let mut app = App::new();
+        // An assistant turn carrying only a tool call renders zero lines: it must
+        // not add a separator, or the transcript gains a stray blank line.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: "{\"path\":\"a.rs\"}".parse().unwrap(),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "c1".into(),
+                name: "read".into(),
+            },
+        ));
+
+        let text = buffer_text(&render(&mut app, 80, 12));
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("read"),
+            "the tool line is the first row, with no leading blank:\n{text}"
+        );
     }
 }
 
