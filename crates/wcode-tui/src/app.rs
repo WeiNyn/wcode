@@ -1523,9 +1523,11 @@ impl App {
             // Viewport-anchored: the topmost / bottommost block in view.
             Key::Home => self.select_viewport_edge(ViewEdge::Top),
             Key::End => self.select_viewport_edge(ViewEdge::Bottom),
-            // Block-wise movement, clamped at the ends.
-            Key::Char('{') => self.select_by(-1),
-            Key::Char('}') => self.select_by(1),
+            // Block-wise movement, clamped at the ends. Braces arrive as `Alt`
+            // chords on some layouts (macOS Option-8/9, German AltGr), so
+            // both spellings step the same way.
+            Key::Char('{') | Key::Alt('{') => self.select_by(-1),
+            Key::Char('}') | Key::Alt('}') => self.select_by(1),
             // Search: `/` opens the prompt; `n` / `N` repeat the last jump.
             Key::Char('/') => self.open_search(),
             Key::Char('n') => self.search_repeat(1),
@@ -4538,7 +4540,49 @@ mod tests {
         app.handle(AppEvent::Key(Key::Char('{')));
         assert_eq!(app.selected(), Some(0), "{{ clamps at the first block");
         app.handle(AppEvent::Key(Key::Char('}')));
-        assert_eq!(app.selected(), Some(1), "}} steps forward again");
+assert_eq!(app.selected(), Some(1), "}} steps forward again");
+    }
+
+    #[test]
+    fn alt_braces_step_blocks_and_clamp_at_the_ends() {
+        // macOS Option-8/9 and German AltGr deliver braces as Alt chords —
+        // browse accepts them exactly like the plain `Char` spelling.
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        // transcript: [Notice, User, Assistant]
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(2));
+
+        app.handle(AppEvent::Key(Key::Alt('}')));
+        assert_eq!(app.selected(), Some(2), "Alt-}} clamps at the last block");
+        app.handle(AppEvent::Key(Key::Alt('{')));
+        assert_eq!(app.selected(), Some(1));
+        app.handle(AppEvent::Key(Key::Alt('{')));
+        assert_eq!(app.selected(), Some(0));
+        app.handle(AppEvent::Key(Key::Alt('{')));
+        assert_eq!(app.selected(), Some(0), "Alt-{{ clamps at the first block");
+        app.handle(AppEvent::Key(Key::Alt('}')));
+        assert_eq!(app.selected(), Some(1), "Alt-}} steps forward again");
+    }
+
+    #[test]
+    fn non_brace_alt_chords_are_still_ignored_in_browse() {
+        // Alt-1..9 focuses surfaces in input mode; in browse (where browse
+        // owns the keys) an Alt chord that is not a brace does nothing.
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(2));
+
+        app.handle(AppEvent::Key(Key::Alt('x')));
+        assert_eq!(app.selected(), Some(2), "Alt-x is a no-op");
+        app.handle(AppEvent::Key(Key::Alt('y')));
+        assert_eq!(app.selected(), Some(2), "Alt-y must not copy");
+        assert!(app.take_actions().is_empty(), "no action for Alt-y");
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.selected(), Some(2), "Alt-1 must not focus a surface");
+        app.handle(AppEvent::Key(Key::Alt('j')));
+        assert_eq!(app.selected(), Some(2), "Alt-j must not move the selection");
     }
 
     /// A transcript with four blocks; "alpha" occurs in blocks 0 and 2.

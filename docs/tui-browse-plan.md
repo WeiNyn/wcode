@@ -112,7 +112,7 @@ global in browse, plus a test-only commit pinning the invariants below.
 | `j` / `k` · `Down` / `Up` | next / previous block |
 | `g` / `G` | first / last committed block |
 | `Home` / `End` | topmost / bottommost block **intersecting the visible viewport** (falls back to first / last before the first frame) |
-| `{` / `}` | previous / next block, clamped at the ends |
+| `{` / `}` | previous / next block, clamped at the ends (an Alt-delivered chord — macOS Option-8/9, German AltGr — steps the same way) |
 | `PgUp` / `PgDn` | a viewport of blocks |
 | wheel | scroll the view without moving the selection |
 | `Enter` / `Space` | expand / collapse the selected block's detail |
