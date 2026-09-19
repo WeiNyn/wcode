@@ -98,8 +98,9 @@ pub struct Tool {
     pub done: bool,
     pub is_error: bool,
     /// Whether the transcript shows the full output rather than the collapsed
-    /// preview. Toggled with `Ctrl-O` (all tools with `Ctrl-T`); forced on when
-    /// the tool errored, so a failure is never hidden.
+    /// preview. Toggled per block in browse mode (`Enter`/`Space`), or all at
+    /// once with `Ctrl-T`; forced on when the tool errored, so a failure is never
+    /// hidden.
     pub expanded: bool,
     /// A UI-only unified diff, when the tool changed a file (`ToolOutput::diff`).
     pub diff: Option<String>,
@@ -409,7 +410,6 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-K", "delete to the end of the line"),
     ("PgUp / PgDn", "scroll the transcript a page"),
     ("wheel", "scroll three lines"),
-    ("Ctrl-O", "expand / collapse the last tool's output"),
     ("Ctrl-T", "expand / collapse all tool output"),
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
     ("Alt-1..9", "focus the Nth surface"),
@@ -722,15 +722,6 @@ impl Surface {
         } else {
             TeamState::Idle
         }
-    }
-
-    /// The most recent tool block, if the transcript has one — what `Ctrl-O`
-    /// expands or collapses.
-    fn last_tool_mut(&mut self) -> Option<&mut Tool> {
-        self.transcript.iter_mut().rev().find_map(|block| match block {
-            Block::Tool(tool) => Some(tool),
-            _ => None,
-        })
     }
 
     /// Apply one agent event. Returns `true` when the surface changed, so `App`
@@ -1217,19 +1208,9 @@ impl App {
         }
     }
 
-    /// Expand or collapse the focused surface's most recent tool block — the
-    /// per-tool complement of `Ctrl-T`. A no-op when the surface has no tool.
-    fn toggle_last_tool(&mut self) {
-        if let Some(tool) = self.focused_mut().last_tool_mut() {
-            tool.expanded = !tool.expanded;
-        } else {
-            return;
-        }
-        self.dirty = true;
-    }
-
     /// Expand or collapse every tool block on the focused surface — the
-    /// complement of `Ctrl-O`. All expanded collapses; anything else expands all.
+    /// all-tools complement to browse mode's per-block toggle. All expanded
+    /// collapses; anything else expands all.
     fn toggle_all_tools(&mut self) {
         let tools: Vec<&mut Tool> = self
             .focused_mut()
@@ -1643,8 +1624,8 @@ impl App {
             Key::Alt(c) => self.focus_digit(c),
             Key::F(1) => self.open_help(),
             Key::Ctrl('g') => self.enter_browse(),
-            // Tool detail: Ctrl-O the last tool, Ctrl-T all of them.
-            Key::Ctrl('o') => self.toggle_last_tool(),
+            // Tool detail: Ctrl-T toggles every tool at once; the per-block
+            // toggle lives in browse mode, where the target is drawn.
             Key::Ctrl('t') => self.toggle_all_tools(),
             Key::Ctrl('b') => self.toggle_sidebar(),
             // Readline word/line editing on the atom buffer.

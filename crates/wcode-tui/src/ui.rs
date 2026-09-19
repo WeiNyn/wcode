@@ -552,16 +552,17 @@ fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The dim hint under an elided tool body: `… +N more line(s) · Ctrl+O` when the
-/// preview cuts whole lines (singular for one), or `… Ctrl+O to show the full
-/// line` when only the summary is truncated (a single long line, empty body).
-/// `None` when expansion would reveal nothing more.
+/// The dim hint under an elided tool body: `… +N more line(s)` when the preview
+/// cuts whole lines (singular for one), or `… the full line is elided` when only
+/// the summary is truncated (a single long line, empty body). `None` when
+/// expansion would reveal nothing more. Informational only — the per-block
+/// toggle is browse mode's `Enter`.
 fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
     let text = if more_lines > 0 {
         let line = if more_lines == 1 { "line" } else { "lines" };
-        format!("{TOOL_INDENT}… +{more_lines} more {line} · Ctrl+O")
+        format!("{TOOL_INDENT}… +{more_lines} more {line}")
     } else if wide {
-        format!("{TOOL_INDENT}… Ctrl+O to show the full line")
+        format!("{TOOL_INDENT}… the full line is elided")
     } else {
         return None;
     };
@@ -1581,7 +1582,7 @@ mod tests {
         push_tool(&mut app, "bash", &output, false, None);
         let text = buffer_text(&render(&mut app, 70, 20));
         assert!(
-            text.contains("… +15 more lines · Ctrl+O"),
+            text.contains("… +15 more lines"),
             "collapsed hint missing:\n{text}"
         );
         assert!(text.contains("line-2"), "the head preview is missing:\n{text}");
@@ -1592,18 +1593,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_expands_the_last_tool_fully() {
+    fn enter_expands_the_last_tool_fully() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        // Browse selects the last block (this tool); Enter expands it.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
         let text = buffer_text(&render(&mut app, 70, 30));
         assert!(text.contains("line-20"), "the full output should show:\n{text}");
         assert!(
-            !text.contains("more lines · Ctrl+O"),
+            !text.contains("more lines"),
             "the hint should be gone when expanded:\n{text}"
         );
     }
@@ -1622,7 +1625,7 @@ mod tests {
             "a failure must never be hidden:\n{text}"
         );
         assert!(
-            !text.contains("more lines · Ctrl+O"),
+            !text.contains("more lines"),
             "an errored tool is expanded, so no hint:\n{text}"
         );
     }
@@ -1638,7 +1641,7 @@ mod tests {
 
         let collapsed = buffer_text(&render(&mut app, 70, 24));
         assert!(
-            collapsed.contains("… +22 more lines · Ctrl+O"),
+            collapsed.contains("… +22 more lines"),
             "diff cap hint missing:\n{collapsed}"
         );
         assert!(
@@ -1646,11 +1649,12 @@ mod tests {
             "the diff tail must be elided:\n{collapsed}"
         );
 
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 40));
         assert!(expanded.contains("+add-30"), "the full diff should show:\n{expanded}");
         assert!(
-            !expanded.contains("more lines · Ctrl+O"),
+            !expanded.contains("more lines"),
             "the hint should be gone when expanded:\n{expanded}"
         );
     }
@@ -1664,7 +1668,7 @@ mod tests {
         push_tool(&mut app, "bash", &line, false, None);
         let collapsed = buffer_text(&render(&mut app, 70, 20));
         assert!(
-            collapsed.contains("Ctrl+O"),
+            collapsed.contains("the full line is elided"),
             "the truncation must be hinted:\n{collapsed}"
         );
         assert!(
@@ -1672,7 +1676,8 @@ mod tests {
             "the tail must be hidden while collapsed:\n{collapsed}"
         );
 
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 20));
         assert!(
             expanded.contains("TAIL-REACHABLE"),
@@ -1708,13 +1713,14 @@ mod tests {
             !collapsed.contains("row 6"),
             "the fifth body line must be elided:\n{collapsed}"
         );
-        assert!(collapsed.contains("… +5 more lines · Ctrl+O"), "{collapsed}");
+        assert!(collapsed.contains("… +5 more lines"), "{collapsed}");
 
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 20));
         assert!(expanded.contains("row 10"), "not all lines shown:\n{expanded}");
         assert!(
-            !expanded.contains("more lines · Ctrl+O"),
+            !expanded.contains("more lines"),
             "the hint should be gone:\n{expanded}"
         );
     }
@@ -1729,7 +1735,7 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "bash", &six, false, None);
         let text = buffer_text(&render(&mut app, 70, 20));
-        assert!(text.contains("… +1 more line · Ctrl+O"), "{text}");
+        assert!(text.contains("… +1 more line"), "{text}");
         assert!(!text.contains("+1 more lines"), "not pluralized:\n{text}");
 
         // 7 output lines = summary + 6 body lines → 2 hidden (plural).
@@ -1740,7 +1746,7 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "bash", &seven, false, None);
         let text = buffer_text(&render(&mut app, 70, 20));
-        assert!(text.contains("… +2 more lines · Ctrl+O"), "{text}");
+        assert!(text.contains("… +2 more lines"), "{text}");
     }
 
     #[test]
@@ -1785,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_toggles_only_the_last_tool() {
+    fn enter_toggles_only_the_selected_tool() {
         let mut app = App::new();
         let first = (1..=20)
             .map(|i| format!("FIRST-{i}"))
@@ -1798,7 +1804,9 @@ mod tests {
         push_tool(&mut app, "bash", &first, false, None);
         push_tool(&mut app, "bash", &last, false, None);
 
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        // Browse selects the last block; Enter toggles just it.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
         let text = buffer_text(&render(&mut app, 70, 45));
         // The last tool is fully expanded…
         assert!(text.contains("LAST-20"), "the last tool should expand:\n{text}");
@@ -1834,7 +1842,7 @@ mod tests {
             "a replayed failure must be expanded:\n{text}"
         );
         assert!(
-            !text.contains("more lines · Ctrl+O"),
+            !text.contains("more lines"),
             "an errored tool is expanded, so no hint:\n{text}"
         );
     }
@@ -1842,7 +1850,7 @@ mod tests {
     #[test]
     fn a_wrapped_running_tool_body_counts_toward_the_scroll_height() {
         let mut app = App::new();
-        // One long line, still streaming (not done), expanded with Ctrl-O.
+        // One long line, still streaming (not done), expanded in browse mode.
         let line = format!("START{}END", "y".repeat(300));
         app.handle(AppEvent::Agent(
             root(),
@@ -1859,7 +1867,8 @@ mod tests {
                 partial: line,
             },
         ));
-        app.handle(AppEvent::Key(Key::Ctrl('o')));
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
 
         // A short terminal: the wrapped body overflows the transcript band.
         let _ = buffer_text(&render(&mut app, 40, 6));

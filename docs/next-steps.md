@@ -446,10 +446,11 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 9.
 ## 13. TUI browse mode
 
 **New.** The transcript has no cursor: every shortcut is position-blind
-(`Ctrl-O`/`Ctrl-T` act on "the last tool", `Ctrl-Y` on "the last reply"), so a
+(`Ctrl-T` acts on *every* tool, `Ctrl-Y` on "the last reply"), so a
 long scrollback cannot be *pointed at*. A browse mode moves a `▌` selection over
 the committed blocks, in the gutter the design already reserved for it, and
-unlocks block-wise actions (expand, copy, a `$PAGER`) one phase at a time.
+unlocks block-wise actions (expand, copy, a `$PAGER`) one phase at a time. (Phase
+2 retired the old `Ctrl-O` last-tool shortcut in favour of pointing at a block.)
 
 > ➡️ **[`tui-browse-plan.md`](tui-browse-plan.md)** — problem, design (a mode,
 > a per-surface selection, the second-pass bar, scroll-to-reveal), phases, status.

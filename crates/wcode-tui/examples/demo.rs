@@ -3,8 +3,8 @@
 //! a line and press Enter.
 //!
 //! The first turn calls one trivial read-only tool that returns a long,
-//! multi-line listing, so the collapsed/expanded tool output (`Ctrl-O` /
-//! `Ctrl-T`) can be eyeballed live.
+//! multi-line listing, so the collapsed/expanded tool output can be eyeballed
+//! live — `Ctrl-T` toggles all tools, or `Ctrl-G` → `Enter` toggles one.
 
 use std::path::PathBuf;
 use std::sync::Arc;

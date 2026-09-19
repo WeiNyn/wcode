@@ -49,6 +49,10 @@ Three things make the TUI hard to live in.
 - **Paste chips are not touched.** `tui-input-plan.md` (B7) decided the
   transcript is the record of truth and never collapses a large paste; that
   stands — this pass is about *tool* output only.
+- **Update (later):** the input-mode `Ctrl-O` last-tool shortcut was retired in
+  the browse pass — a shortcut whose target is invisible is the defect — and
+  per-block toggling moved to browse mode's `Enter`/`Space` (`Ctrl-G` to enter).
+  `Ctrl-T` (all tools) is unchanged. See [`tui-browse-plan.md`](tui-browse-plan.md).
 
 ### Theme — named roles (`theme.rs`)
 

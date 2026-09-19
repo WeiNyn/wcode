@@ -162,7 +162,7 @@ crates/wcode-tui/
 
 **P1 — transcript & commands.**
 - Scrollback (offset into the rendered transcript), follow-tail while streaming.
-- Thinking + tool blocks styled; tool output collapsible (`Ctrl-O` / `Ctrl-T`). ☑
+- Thinking + tool blocks styled; tool output collapsible (`Ctrl-T`, per block in browse mode). ☑
 - `/`-commands: the TUI ships `/exit /model /effort /compact /changes /resume
   /usage /copy /help`; the session-lifecycle ones (`/new /sessions /reload`) stay
   in the REPL (they need the composition root).
@@ -286,7 +286,7 @@ Resolved (visual ones in [`tui-design.md`](tui-design.md) §5):
 Still open:
 
 - **Thinking** — inline vs collapsed (lean inline P0). Tool *output* is now
-  collapsible (`Ctrl-O` / `Ctrl-T`); thinking still stays inline.
+  collapsible (`Ctrl-T`, or one block at a time in browse mode); thinking still stays inline.
 - **Header/title bar**, **timestamps**, block separation — `tui-design.md` §6.
 - **Do we retire the line REPL?** — no; keep it for pipes/`-p`, the TUI
   replaces only the interactive TTY path.

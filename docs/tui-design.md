@@ -195,8 +195,8 @@ atom buffer; a paste chip is one unit, never split) ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` in the status while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
-reply (OSC-52) · `Ctrl-O` expands/collapses the last tool's output (a collapsed tool
-shows a 4-line preview, a failed tool always shows its error) · `Ctrl-T` does all of them ·
+reply (OSC-52) · `Ctrl-T` expands/collapses every tool's output (a collapsed tool
+shows a 4-line preview, a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface, `Alt-1..9` jumps to the Nth · `Ctrl-B`
 toggles the team sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
@@ -234,7 +234,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 - **Thinking**: inline (drafted) vs a collapsed one-liner `⋯ thinking · N chars`,
   expandable. Lean inline at P0; thinking still stays inline. Tool *output* is now
-  collapsible (`Ctrl-O` / `Ctrl-T`) — see [`tui-polish-plan.md`](tui-polish-plan.md).
+  collapsible (`Ctrl-T`, or one block at a time in browse mode) — see [`tui-polish-plan.md`](tui-polish-plan.md).
 - **Timestamps** on turns: lean no.
 - **Header/title bar** (session, cwd): lean no — the status line carries it.
 - **Block separation**: blank between *roles* (drafted) vs between every block.

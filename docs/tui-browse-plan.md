@@ -1,14 +1,15 @@
 # wcode TUI — transcript browse mode (plan)
 
-Status: **☑ phase 1 (skeleton) landed.** Companion to
+Status: **☑ phases 1–2 landed.** Companion to
 [`tui-plan.md`](tui-plan.md) (the project), [`tui-design.md`](tui-design.md) (the
 visual spec) and [`tui-polish-plan.md`](tui-polish-plan.md) (the pass this
 extends). `wcode-tui` only; the kernel and the protocol are untouched.
 
 ## Problem
 
-Every transcript shortcut is **position-blind**. `Ctrl-O` / `Ctrl-T` act on "the
-last tool", `Ctrl-Y` (`/copy`) on "the last reply" — there is no way to point at
+Every transcript shortcut is **position-blind**. `Ctrl-T` acts on *every* tool
+and `Ctrl-Y` (`/copy`) on "the
+last reply" — there is no way to point at
 *a* block and act on it. A long transcript is a wall you can only scroll: you
 cannot select the `bash` result three turns up to expand it, or the reply two
 turns up to copy it. The gutter ([`tui-design.md`](tui-design.md) §4) already
@@ -84,13 +85,17 @@ wrapping are untouched: the bar injects no rows and the ranges add no lines.
 | phase | scope | status |
 |-------|-------|--------|
 | 1 | skeleton: mode, per-surface selection, second-pass bar, ranges feedback, scroll-to-reveal, mode indicator | ☑ done |
-| 2 | actions on the selection: `Enter` expand/collapse a tool, `y` copy a block | ☐ todo |
+| 2 | actions on the selection: `Enter`/`Space` toggle a tool, `y` copy a block; `Ctrl-O` retired from input mode | ☑ done |
 | 3 | navigation polish: `Home` / `End`, block-wise `{` / `}`, search | ☐ todo |
 | 4 | unlocks: a `$PAGER` viewer, structured jumps (to the last error, …) | ☐ todo |
 
-Phase 2+ is deliberately unimplemented here. A `$PAGER` needs a suspend/resume
-path `terminal.rs` does not have (`TerminalGuard` only restores on drop) — its
-own design, not this pass.
+Phase 2 landed: `Enter`/`Space` toggle the selected block and `y` copies it. The
+input-mode `Ctrl-O` last-tool shortcut was **retired** — a shortcut whose target is
+invisible is the defect — so per-block toggling lives only in browse mode, where
+the bar draws the target; `Ctrl-T` (all tools) stays the input-mode escape hatch.
+Phase 3 and the `$PAGER` unlock are still unimplemented: a `$PAGER` needs a
+suspend/resume path `terminal.rs` does not have (`TerminalGuard` only restores on
+drop) — its own design.
 
 Phase 1 landed as the skeleton, then `F1`/`?` and `Ctrl-C` kept
 global in browse, plus a test-only commit pinning the invariants below.
@@ -125,5 +130,6 @@ global in browse, plus a test-only commit pinning the invariants below.
 |---|--------|--------|
 | 1 | plan + tracker | ☑ done |
 | 2 | browse-mode skeleton | ☑ done |
+| 3 | browse actions (`Enter`/`Space`, `y`) + the last-tool shortcut retirement | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
