@@ -378,6 +378,7 @@ mod tests {
         };
         let listener = wcode_protocol::bind(&sock).await.unwrap();
         tokio::spawn(wcode_protocol::serve(
+            peer_registry.clone(),
             peer_registry.subscribe(),
             (SessionId::new("A"), session()),
             Some(handler),

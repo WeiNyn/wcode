@@ -61,11 +61,17 @@ fn serve_static(
     let root = sessions.next().expect("at least one session");
     let rest: Vec<_> = sessions.collect();
     tokio::spawn(wcode_protocol::serve(
+        wcode_protocol::Registry::new(),
         tokio::sync::watch::channel(rest).1,
         root,
         None,
         listener,
     ));
+}
+
+/// The ids of a roster reply, in order — `Sessions` now carries `SessionInfo`s.
+fn ids_of(sessions: &[wcode_harness::protocol::SessionInfo]) -> Vec<SessionId> {
+    sessions.iter().map(|s| s.id.clone()).collect()
 }
 
 /// Drain `rx` until a `MessageReceived` arrives (skipping a leading roster
@@ -546,10 +552,48 @@ async fn list_sessions_returns_the_roster() {
     // The legacy client addresses "remote"; the roster is answered regardless.
     let client = Client::connect(&sock).await.unwrap();
     let reply = client.ask(Request::ListSessions).await.unwrap();
-    let AgentEvent::Sessions { ids } = reply else {
+    let AgentEvent::Sessions { sessions } = reply else {
         panic!("expected a Sessions reply, got {reply:?}");
     };
-    assert_eq!(ids, vec![root, a]);
+    assert_eq!(ids_of(&sessions), vec![root, a]);
+}
+
+/// S2: the served roster names each session's **model**, so a client can label a
+/// member by its own model instead of substituting the root's. A session the
+/// registry knows no model for is `None` (the client then falls back).
+#[tokio::test]
+async fn the_roster_carries_each_sessions_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("w.sock");
+
+    let registry = wcode_protocol::Registry::new();
+    let root_id = SessionId::new("root");
+    let root = SessionActor::spawn(agent(vec![]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
+        registry.subscribe(),
+        (root_id.clone(), root),
+        None,
+        listener,
+    ));
+
+    // The root and one worker have a known model; a second worker has none.
+    let w1 = SessionId::agent("w1");
+    let w2 = SessionId::agent("w2");
+    registry.set_model(root_id.clone(), "m1");
+    registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
+    registry.set_model(w1.clone(), "m2");
+    registry.register(w2.clone(), SessionActor::spawn(agent(vec![])));
+
+    let client = Client::connect(&sock).await.unwrap();
+    let reply = client.ask(Request::ListSessions).await.unwrap();
+    let AgentEvent::Sessions { sessions } = reply else {
+        panic!("expected a Sessions reply, got {reply:?}");
+    };
+    assert_eq!(ids_of(&sessions), vec![root_id.clone(), w1.clone(), w2.clone()]);
+    let models: Vec<Option<&str>> = sessions.iter().map(|s| s.model.as_deref()).collect();
+    assert_eq!(models, vec![Some("m1"), Some("m2"), None], "{sessions:?}");
 }
 
 /// T2: a registration that races the connection's snapshot is still served — the
@@ -566,6 +610,7 @@ async fn a_registration_racing_the_connect_is_served() {
     let root = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
         registry.subscribe(),
         (root_id.clone(), root),
         None,
@@ -586,7 +631,7 @@ async fn a_registration_racing_the_connect_is_served() {
         .expect("a roster change")
         .expect("open");
     assert!(
-        roster.borrow().contains(&w1),
+        roster.borrow().iter().any(|s| s.id == w1),
         "the pushed roster names the late session: {:?}",
         roster.borrow()
     );
@@ -624,6 +669,7 @@ async fn list_sessions_reads_the_live_roster() {
     let root = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
         registry.subscribe(),
         (root_id.clone(), root),
         None,
@@ -643,10 +689,10 @@ async fn list_sessions_reads_the_live_roster() {
 
     // ...then `ListSessions` reflects it, root first.
     let reply = client.ask(Request::ListSessions).await.unwrap();
-    let AgentEvent::Sessions { ids } = reply else {
+    let AgentEvent::Sessions { sessions } = reply else {
         panic!("expected a Sessions reply, got {reply:?}");
     };
-    assert_eq!(ids, vec![root_id, w1]);
+    assert_eq!(ids_of(&sessions), vec![root_id, w1]);
 }
 
 /// T2: a session registered **after** the connection's snapshot is fanned and
@@ -664,6 +710,7 @@ async fn a_growth_push_reaches_an_established_client() {
     let root = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
         registry.subscribe(),
         (root_id.clone(), root),
         None,
@@ -681,17 +728,17 @@ async fn a_growth_push_reaches_an_established_client() {
     registry.register(w1.clone(), SessionActor::spawn(agent(vec![])));
 
     // The growth push carries the grown roster (awaited past any seed push).
-    let ids = loop {
-        let ids = roster.borrow_and_update().clone();
-        if ids.contains(&w1) {
-            break ids;
+    let sessions = loop {
+        let sessions = roster.borrow_and_update().clone();
+        if sessions.iter().any(|s| s.id == w1) {
+            break sessions;
         }
         tokio::time::timeout(Duration::from_secs(5), roster.changed())
             .await
             .expect("a roster change")
             .expect("open");
     };
-    assert_eq!(ids, vec![root_id.clone(), w1.clone()]);
+    assert_eq!(ids_of(&sessions), vec![root_id.clone(), w1.clone()]);
 
     // ...and the late session's events reach this connection's fan for it.
     let mut events = client.with_session(w1.clone()).subscribe();
@@ -734,6 +781,7 @@ async fn a_define_request_spawns_on_a_served_peer() {
     });
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        registry.clone(),
         registry.subscribe(),
         (root_id.clone(), root),
         Some(handler),
@@ -763,17 +811,17 @@ async fn a_define_request_spawns_on_a_served_peer() {
     assert_eq!(id, SessionId::agent("w1"));
 
     // The defined worker is served: it appears in the pushed roster.
-    let ids = loop {
-        let ids = roster.borrow_and_update().clone();
-        if ids.contains(&id) {
-            break ids;
+    let sessions = loop {
+        let sessions = roster.borrow_and_update().clone();
+        if sessions.iter().any(|s| s.id == id) {
+            break sessions;
         }
         tokio::time::timeout(Duration::from_secs(5), roster.changed())
             .await
             .expect("a roster change")
             .expect("open");
     };
-    assert_eq!(ids, vec![root_id.clone(), id.clone()]);
+    assert_eq!(ids_of(&sessions), vec![root_id.clone(), id.clone()]);
 }
 
 /// R1: `Define` with no handler installed is a correlated error, not a silent
@@ -786,6 +834,7 @@ async fn define_without_a_handler_is_a_correlated_error() {
     let root = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        wcode_protocol::Registry::new(),
         tokio::sync::watch::channel(Vec::new()).1,
         (SessionId::new("root"), root),
         None,
@@ -821,6 +870,7 @@ async fn a_flush_returns_promptly_when_connected() {
     let handle = SessionActor::spawn(agent(vec![]));
     let listener = wcode_protocol::bind(&sock).await.unwrap();
     tokio::spawn(wcode_protocol::serve(
+        wcode_protocol::Registry::new(),
         tokio::sync::watch::channel(Vec::new()).1,
         (SessionId::new("test"), handle),
         None,

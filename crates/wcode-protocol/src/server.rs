@@ -25,8 +25,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch};
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::event::AgentEvent;
-use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId};
+use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId, SessionInfo};
 
+use crate::Registry;
 use crate::frame::{read_frame, write_frame};
 
 /// The live roster of *extra* sessions served beside the root — a session is
@@ -72,7 +73,11 @@ pub type DefineHandler =
 /// one session also accepts any id, preserving the single-session flow (the
 /// `--socket` client's placeholder `"remote"` still reaches it). `define`, when
 /// installed, answers `Request::Define` — the composition root's worker factory.
+///
+/// `registry` is consulted (read-only) for each served session's model, so the
+/// roster this server pushes names models the server actually knows.
 pub async fn serve(
+    registry: Registry,
     roster: Roster,
     root: Root,
     define: Option<DefineHandler>,
@@ -81,6 +86,7 @@ pub async fn serve(
     loop {
         let (stream, _addr) = listener.accept().await?;
         tokio::spawn(connection(
+            registry.clone(),
             roster.clone(),
             root.clone(),
             define.clone(),
@@ -91,16 +97,18 @@ pub async fn serve(
 
 /// Bind `path`, then [`serve`].
 pub async fn serve_at(
+    registry: Registry,
     roster: Roster,
     root: Root,
     define: Option<DefineHandler>,
     path: &Path,
 ) -> io::Result<()> {
     let listener = crate::socket::bind(path).await?;
-    serve(roster, root, define, listener).await
+    serve(registry, roster, root, define, listener).await
 }
 
 async fn connection(
+    registry: Registry,
     mut roster: Roster,
     root: Root,
     define: Option<DefineHandler>,
@@ -137,7 +145,7 @@ async fn connection(
         session: root_id.clone(),
         sender: None,
         body: AgentEvent::Sessions {
-            ids: roster_ids(&root_id, &initial),
+            sessions: roster_infos(&registry, &root_id, &initial),
         },
     });
 
@@ -151,6 +159,7 @@ async fn connection(
     {
         let out = out.clone();
         let root_id = root_id.clone();
+        let registry = registry.clone();
         tokio::spawn(async move {
             loop {
                 if roster.changed().await.is_err() {
@@ -165,14 +174,14 @@ async fn connection(
                     }
                 }
                 if grew {
-                    let ids = roster_ids(&root_id, &current);
+                    let sessions = roster_infos(&registry, &root_id, &current);
                     let _ = out.send(Frame {
                         v: PROTOCOL_VERSION,
                         id: 0,
                         reply_to: None,
                         session: root_id.clone(),
                         sender: None,
-                        body: AgentEvent::Sessions { ids },
+                        body: AgentEvent::Sessions { sessions },
                     });
                 }
             }
@@ -197,14 +206,14 @@ async fn connection(
         // `ListSessions` names no session: the server answers it directly with
         // the roster (root first), before any demux.
         if matches!(body, Request::ListSessions) {
-            let ids = roster_ids(&root_id, &live);
+            let sessions = roster_infos(&registry, &root_id, &live);
             let _ = out.send(Frame {
                 v: PROTOCOL_VERSION,
                 id,
                 reply_to: Some(id),
                 session,
                 sender: None,
-                body: AgentEvent::Sessions { ids },
+                body: AgentEvent::Sessions { sessions },
             });
             continue;
         }
@@ -298,16 +307,26 @@ async fn connection(
     }
 }
 
-/// The served ids in order: the root first, then each roster session (minus the
-/// root, if a roster ever names it).
-fn roster_ids(root_id: &SessionId, roster: &[(SessionId, SessionHandle)]) -> Vec<SessionId> {
+/// The served sessions in order: the root first, then each roster session (minus
+/// the root, if a roster ever names it) — each joined with the model the registry
+/// knows for it (`None` when unset). The push payload of `AgentEvent::Sessions`.
+fn roster_infos(
+    registry: &Registry,
+    root_id: &SessionId,
+    roster: &[(SessionId, SessionHandle)],
+) -> Vec<SessionInfo> {
     let mut ids = vec![root_id.clone()];
     for (id, _) in roster {
         if id != root_id {
             ids.push(id.clone());
         }
     }
-    ids
+    ids.into_iter()
+        .map(|id| {
+            let model = registry.model_of(&id);
+            SessionInfo { id, model }
+        })
+        .collect()
 }
 
 /// Forward one session's events to a connection, each frame stamped with its

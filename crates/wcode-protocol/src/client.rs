@@ -29,7 +29,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use wcode_harness::actor::EVENT_BUFFER;
 use wcode_harness::event::AgentEvent;
-use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId};
+use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId, SessionInfo};
 
 use crate::Closed;
 use crate::frame::{read_frame, write_frame};
@@ -116,7 +116,7 @@ struct Inner {
     /// The connection-wide roster of served sessions, updated when the server
     /// pushes an unsolicited `AgentEvent::Sessions` frame (a session registered
     /// at runtime). Shared across every view — see [`Client::subscribe_roster`].
-    roster: watch::Sender<Vec<SessionId>>,
+    roster: watch::Sender<Vec<SessionInfo>>,
     /// Reply waiters, keyed by request id.
     pending: Mutex<HashMap<u64, oneshot::Sender<AgentEvent>>>,
     next_id: AtomicU64,
@@ -237,7 +237,7 @@ impl Client {
     /// registered at runtime); this receiver yields the new list. It is
     /// connection-wide, *not* per-session: every view over this connection
     /// shares it, so an unnarrowed and a `with_session` view see the same ids.
-    pub fn subscribe_roster(&self) -> watch::Receiver<Vec<SessionId>> {
+    pub fn subscribe_roster(&self) -> watch::Receiver<Vec<SessionInfo>> {
         self.inner.roster.subscribe()
     }
 
@@ -373,8 +373,8 @@ fn deliver(inner: &Inner, frame: Frame<AgentEvent>) {
             // An unsolicited `Sessions` frame is the server's roster push (a
             // session registered at runtime): record it connection-wide, so a
             // `subscribe_roster` view learns the new id without polling.
-            if let AgentEvent::Sessions { ids } = &frame.body {
-                let _ = inner.roster.send(ids.clone());
+            if let AgentEvent::Sessions { sessions } = &frame.body {
+                let _ = inner.roster.send(sessions.clone());
             }
             // Ids are unique per connection (a single `next_id` atomic), so a
             // reply and a streamed event never collide — no re-namespacing is

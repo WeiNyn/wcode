@@ -63,6 +63,9 @@ pub struct Registry {
 struct Inner {
     peers: Mutex<HashMap<SessionId, Backend>>,
     owners: Mutex<HashMap<SessionId, SessionId>>,
+    /// Each session's effective model id (see [`Registry::set_model`]), so a
+    /// socket server can name a member's model in the roster it pushes.
+    models: Mutex<HashMap<SessionId, String>>,
     /// The live **local** roster (see [`Registry::locals`]), refreshed on every
     /// `register`/`register_remote` so a socket server can fan a session that
     /// appears after it started. Read via [`Registry::subscribe`].
@@ -74,6 +77,7 @@ impl Default for Inner {
         Self {
             peers: Mutex::new(HashMap::new()),
             owners: Mutex::new(HashMap::new()),
+            models: Mutex::new(HashMap::new()),
             roster: watch::channel(Vec::new()).0,
         }
     }
@@ -152,6 +156,19 @@ impl Registry {
     /// orchestrator). This is the whole ownership tree — a star in v1.
     pub fn set_owner(&self, worker: SessionId, owner: SessionId) {
         self.inner.owners.lock().unwrap().insert(worker, owner);
+    }
+
+    /// Record a session's effective model id, so the roster this registry feeds
+    /// (a socket server's `Sessions` push) can name it. Mirrors [`Self::set_owner`]
+    /// — a plain metadata write, no effect on routing.
+    pub fn set_model(&self, id: SessionId, model: impl Into<String>) {
+        self.inner.models.lock().unwrap().insert(id, model.into());
+    }
+
+    /// The model recorded for `id`, if any ([`Self::set_model`]). `None` for a
+    /// peer registered without one (e.g. a remote reached across a socket).
+    pub fn model_of(&self, id: &SessionId) -> Option<String> {
+        self.inner.models.lock().unwrap().get(id).cloned()
     }
 
     /// Whether `from` may address `to` (§10.1): the pair must be joined by an
@@ -348,6 +365,17 @@ mod tests {
         );
         let ids: Vec<SessionId> = reg.locals().into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn set_model_is_read_back_per_id() {
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        let ghost = SessionId::agent("ghost");
+        assert_eq!(reg.model_of(&w1), None, "unset id has no model");
+        reg.set_model(w1.clone(), "m1");
+        assert_eq!(reg.model_of(&w1).as_deref(), Some("m1"));
+        assert_eq!(reg.model_of(&ghost), None);
     }
 
     #[tokio::test]

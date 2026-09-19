@@ -395,13 +395,13 @@ async fn main() {
         // The server's roster (root first). A failed ask keeps today's single
         // connection-wide view.
         let roster = match client.ask(Request::ListSessions).await {
-            Ok(AgentEvent::Sessions { ids }) => ids,
+            Ok(AgentEvent::Sessions { sessions }) => sessions,
             _ => Vec::new(),
         };
         match args.prompt.clone() {
             Some(prompt) => {
                 let backend = match roster.first() {
-                    Some(root) => Backend::from(client.with_session(root.clone())),
+                    Some(root) => Backend::from(client.with_session(root.id.clone())),
                     None => Backend::from(client),
                 };
                 let code = one_shot(backend, &prompt).await;
@@ -435,7 +435,7 @@ async fn main() {
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
                     // single connection-wide root surface.
-                    let root_id = roster.first().cloned();
+                    let root_id = roster.first().map(|info| info.id.clone());
                     let surfaces: Vec<wcode_tui::SurfaceSpec> = if roster.is_empty() {
                         vec![wcode_tui::SurfaceSpec {
                             id: SessionId::agent("root"),
@@ -445,15 +445,18 @@ async fn main() {
                             backend: Backend::from(client.clone()),
                         }]
                     } else {
-                        let root = &roster[0];
+                        let root = &roster[0].id;
                         roster
                             .iter()
-                            .map(|id| wcode_tui::SurfaceSpec {
-                                id: id.clone(),
-                                label: crate::agents::short_name(id),
-                                model: llm.model.clone(),
-                                is_root: id == root,
-                                backend: Backend::from(client.with_session(id.clone())),
+                            .map(|info| wcode_tui::SurfaceSpec {
+                                id: info.id.clone(),
+                                label: crate::agents::short_name(&info.id),
+                                model: info
+                                    .model
+                                    .clone()
+                                    .unwrap_or_else(|| llm.model.clone()),
+                                is_root: &info.id == root,
+                                backend: Backend::from(client.with_session(info.id.clone())),
                             })
                             .collect()
                     };
@@ -465,21 +468,24 @@ async fn main() {
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                         let mut roster_rx = client.subscribe_roster();
                         let mut seeded: std::collections::HashSet<SessionId> =
-                            roster.iter().cloned().collect();
+                            roster.iter().map(|info| info.id.clone()).collect();
                         let client = client.clone();
                         let model = llm.model.clone();
                         tokio::spawn(async move {
                             loop {
-                                for id in roster_rx.borrow_and_update().clone() {
-                                    if !seeded.insert(id.clone()) {
+                                for info in roster_rx.borrow_and_update().clone() {
+                                    if !seeded.insert(info.id.clone()) {
                                         continue;
                                     }
                                     let spec = wcode_tui::SurfaceSpec {
-                                        id: id.clone(),
-                                        label: crate::agents::short_name(&id),
-                                        model: model.clone(),
-                                        is_root: Some(&id) == root_id.as_ref(),
-                                        backend: Backend::from(client.with_session(id)),
+                                        id: info.id.clone(),
+                                        label: crate::agents::short_name(&info.id),
+                                        model: info
+                                            .model
+                                            .clone()
+                                            .unwrap_or_else(|| model.clone()),
+                                        is_root: Some(&info.id) == root_id.as_ref(),
+                                        backend: Backend::from(client.with_session(info.id.clone())),
                                     };
                                     // A closed receiver means the TUI has exited.
                                     if tx.send(spec).is_err() {
@@ -510,7 +516,7 @@ async fn main() {
                 repl::run(
                     match roster.first() {
                         Some(root) => {
-                            repl::SessionSource::Remote(client.with_session(root.clone()))
+                            repl::SessionSource::Remote(client.with_session(root.id.clone()))
                         }
                         None => repl::SessionSource::Remote(client),
                     },
@@ -757,6 +763,21 @@ async fn main() {
             // team: the registry's local sessions minus the root's own
             // `agent:orchestrator` alias. The roster stays live, so a worker
             // spawned at runtime is served without a restart.
+            // The registry the server reads each served session's model from, so
+            // its `Sessions` push names the models it knows (S2).
+            let registry = orchestrator
+                .as_ref()
+                .map(|o| o.registry().clone())
+                .unwrap_or_default();
+            // Record the **root**'s effective model too, keyed by the id the server
+            // pushes first — `session_id`, this agent's own session, *not* the
+            // registry's `agent:orchestrator` alias (a distinct id, never served).
+            // Only with `--agents`: without it there is no orchestrator and the
+            // registry stays a bare `Registry::default()`, so nothing is registered
+            // and a client falls back to its own model (acceptable).
+            if orchestrator.is_some() {
+                registry.set_model(session_id.clone(), llm.model.clone());
+            }
             let roster = match &orchestrator {
                 Some(o) => live_roster(o.registry(), o.id().clone()),
                 None => tokio::sync::watch::channel(Vec::new()).1,
@@ -786,7 +807,9 @@ async fn main() {
             println!("serving session on {}", path.display());
             println!("serving {} session(s): {}", ids.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
-            if let Err(e) = wcode_protocol::serve_at(roster, (session_id, handle), define, &path).await {
+            if let Err(e) =
+                wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path).await
+            {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
             }

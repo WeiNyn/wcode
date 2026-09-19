@@ -97,6 +97,19 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// A served session's address plus the little metadata a roster shows: today
+/// only its **effective model**. Carried by
+/// [`crate::event::AgentEvent::Sessions`], so a client can label each member by
+/// its own model instead of substituting the root's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: SessionId,
+    /// The session's effective model id, when the server knows one (a worker
+    /// registered with its model); `None` for a peer whose model is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// Inbound intent: the requests a session's mailbox accepts.
 ///
 /// Every variant maps one-to-one onto an existing [`crate::agent::Agent`]

@@ -218,14 +218,17 @@ impl SessionFactory {
         let backend = Backend::from(handle.clone());
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
+        // Record the worker's effective model, so a served roster names it (S2):
+        // the spec's override, else the inherited template model.
+        let model = spec
+            .model
+            .clone()
+            .unwrap_or_else(|| self.template.llm.model.clone());
+        self.registry.set_model(id.clone(), model.clone());
         // Announce the new surface so a running TUI can add it — D27 removed the
         // old `TeamUpdate` feed; this is its replacement. A closed receiver is
         // ignored (the TUI may have exited).
         if let Some(tx) = &*self.sink.lock().unwrap() {
-            let model = spec
-                .model
-                .clone()
-                .unwrap_or_else(|| self.template.llm.model.clone());
             let _ = tx.send(SurfaceSpec {
                 id: id.clone(),
                 label: short_name(&id),

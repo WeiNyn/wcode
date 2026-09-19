@@ -110,11 +110,12 @@ pub enum AgentEvent {
     History {
         messages: Vec<AgentMessage>,
     },
-    /// Reply: the sessions a server serves, in serve order (root first).
+    /// Reply: the sessions a server serves, in serve order (root first), each
+    /// with the model the server knows for it ([`crate::protocol::SessionInfo`]).
     /// Answers a [`crate::protocol::Request::ListSessions`]. Never streamed (see
     /// [`AgentEvent::Ack`]).
     Sessions {
-        ids: Vec<crate::protocol::SessionId>,
+        sessions: Vec<crate::protocol::SessionInfo>,
     },
     /// Reply: a peer defined a worker and returns its address, answering a
     /// [`crate::protocol::Request::Define`]. Never streamed (see
@@ -250,9 +251,15 @@ mod tests {
         roundtrip(AgentEvent::AgentEnd, "agent_end");
         roundtrip(
             AgentEvent::Sessions {
-                ids: vec![
-                    crate::protocol::SessionId::new("root"),
-                    crate::protocol::SessionId::agent("w1"),
+                sessions: vec![
+                    crate::protocol::SessionInfo {
+                        id: crate::protocol::SessionId::new("root"),
+                        model: Some("m1".into()),
+                    },
+                    crate::protocol::SessionInfo {
+                        id: crate::protocol::SessionId::agent("w1"),
+                        model: None,
+                    },
                 ],
             },
             "sessions",
