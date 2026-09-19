@@ -54,6 +54,15 @@ impl TeamState {
             TeamState::Done => "done",
         }
     }
+
+    /// The sidebar's status glyph: running · idle · done.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            TeamState::Idle => "○",
+            TeamState::Running => "●",
+            TeamState::Done => "✓",
+        }
+    }
 }
 
 /// One surface's display identity: the id its events route by, and the

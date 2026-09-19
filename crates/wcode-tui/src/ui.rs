@@ -995,8 +995,9 @@ fn clip(text: &str, width: usize) -> String {
     }
 }
 
-/// Draw the team status sidebar: a bordered pane, one `name · model · state` row
-/// per member, the row styled by state.
+/// Draw the team status sidebar: a bordered pane, one `{glyph} {name}` row per
+/// member plus its live dim action, the row styled by state. The model is not
+/// shown (§2).
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
@@ -1009,15 +1010,23 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let lines: Vec<Line> = app
         .member_rows()
         .into_iter()
-        .map(|(label, model, state, focused)| {
-            let text = format!("{label} · {model} · {}", state.label());
+        .map(|(label, state, focused, action)| {
             // The focused member is bolded — a style-only highlight, so rows stay
             // within the fixed sidebar width.
             let mut style = state_style(state);
             if focused {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            Line::from(Span::styled(clip(&text, width), style))
+            let head = clip(&format!("{} {label}", state.glyph()), width);
+            let used = head.chars().count();
+            let mut spans = vec![Span::styled(head, style)];
+            if let Some(action) = action {
+                let tail = clip(&format!(" {action}"), width.saturating_sub(used));
+                if !tail.is_empty() {
+                    spans.push(Span::styled(tail, dim()));
+                }
+            }
+            Line::from(spans)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1485,13 +1494,19 @@ mod tests {
             wcode_harness::event::AgentEvent::AgentStart,
         ));
 
-        // Wide enough: the sidebar shows the title, each member, and its state.
+        // Wide enough: the sidebar shows the title, each member with its status
+        // glyph — but never the model (§2).
         let wide = buffer_text(&render(&mut app, 80, 20));
         assert!(wide.contains("team"), "sidebar title missing:\n{wide}");
-        assert!(wide.contains("explorer"), "member missing:\n{wide}");
-        assert!(wide.contains("m1"), "model missing:\n{wide}");
-        assert!(wide.contains("running"), "state missing:\n{wide}");
-        assert!(wide.contains("reviewer"), "member missing:\n{wide}");
+        assert!(
+            wide.contains("● explorer"),
+            "running member missing:\n{wide}"
+        );
+        assert!(wide.contains("○ reviewer"), "idle member missing:\n{wide}");
+        assert!(
+            !wide.contains("m1") && !wide.contains("m2"),
+            "the model should be gone from the sidebar:\n{wide}"
+        );
 
         // Narrow (< 60 cols): the sidebar is hidden.
         let narrow = buffer_text(&render(&mut app, 50, 20));

@@ -387,15 +387,74 @@ fn command_named(token: &str) -> Option<&'static Command> {
         .find(|c| c.name == name || c.aliases.contains(&name))
 }
 
-/// The `/team` listing: one `label · model · state` line per member surface.
-fn team_text(rows: &[(&str, &str, TeamState, bool)]) -> String {
+/// The `/team` listing: one `{glyph} {label} · {state}` line per member surface,
+/// with its live action appended when there is one. The model is not shown (§2).
+fn team_text(rows: &[(&str, TeamState, bool, Option<&str>)]) -> String {
     if rows.is_empty() {
         return "(no team)".to_string();
     }
     rows.iter()
-        .map(|(label, model, state, _)| format!("{label} · {model} · {}", state.label()))
+        .map(|(label, state, _, action)| {
+            let head = format!("{} {label} · {}", state.glyph(), state.label());
+            match action {
+                Some(action) => format!("{head} · {action}"),
+                None => head,
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The argument keys a tool call may name in its label, most specific first.
+const ACTION_KEYS: [&str; 9] = [
+    "path",
+    "file_path",
+    "file",
+    "pattern",
+    "command",
+    "cmd",
+    "query",
+    "url",
+    "name",
+];
+
+/// The sidebar's action label for a tool call: `"{name} {target}"`, where the
+/// target is the first present string argument among [`ACTION_KEYS`] on the
+/// committed assistant block whose `ToolCall` id matches `call_id` (§3). No
+/// matching call, or no recognizable argument, falls back to just `"{name}"`.
+fn action_label(transcript: &[Block], call_id: &str, name: &str) -> String {
+    // The arguments ride the committed assistant block; scan from the end, as a
+    // call id is unique to the newest turn that carries it.
+    for block in transcript.iter().rev() {
+        let Block::Assistant(content) = block else {
+            continue;
+        };
+        let call = content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::ToolCall { id, .. } if id == call_id));
+        let Some(ContentBlock::ToolCall { arguments, .. }) = call else {
+            continue;
+        };
+        let target = ACTION_KEYS
+            .iter()
+            .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()));
+        return match target {
+            Some(target) => clip_label(&format!("{name} {target}")),
+            None => name.to_string(),
+        };
+    }
+    name.to_string()
+}
+
+/// Truncate a sidebar action to `~18` columns, ending with `…` when cut.
+fn clip_label(text: &str) -> String {
+    const MAX: usize = 18;
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(MAX - 1).collect();
+    out.push('…');
+    out
 }
 
 /// The keymap — the single source of truth for the `F1` help overlay and the
@@ -649,6 +708,9 @@ pub struct Surface {
     running: bool,
     /// A run finished (drives the sidebar's `done`).
     finished: bool,
+    /// The current run's live action (`"{tool} {target}"`) for the sidebar;
+    /// cleared at run start/end so it reflects the current run only (§3).
+    last_action: Option<String>,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -698,6 +760,7 @@ impl Surface {
             changes: Vec::new(),
             running: false,
             finished: false,
+            last_action: None,
             cancelled: false,
             context_used: None,
             scroll: 0,
@@ -747,8 +810,11 @@ impl Surface {
                 self.commit(message);
                 true
             }
-            AgentEvent::ToolExecutionStart { name, .. } => {
+            AgentEvent::ToolExecutionStart { call_id, name } => {
                 self.flush_live();
+                // The committed assistant block carries this call's arguments
+                // (§3), so resolve a short "name target" label for the sidebar.
+                self.last_action = Some(action_label(&self.transcript, &call_id, &name));
                 self.transcript.push(Block::Tool(Tool {
                     name,
                     output: String::new(),
@@ -801,12 +867,14 @@ impl Surface {
             AgentEvent::AgentStart => {
                 self.running = true;
                 self.finished = false;
+                self.last_action = None;
                 true
             }
             AgentEvent::AgentEnd => {
                 self.flush_live();
                 self.running = false;
                 self.finished = true;
+                self.last_action = None;
                 if self.cancelled {
                     self.cancelled = false;
                     self.transcript.push(Block::Notice("⏹ aborted".into()));
@@ -848,17 +916,14 @@ impl Surface {
         }
     }
 
-    /// Commit an assistant message, dropping tool-call blocks (the tool lines
-    /// carry those) and empty messages.
+    /// Commit an assistant message. Tool calls ride the block (the sidebar reads
+    /// their arguments, §3; the renderer ignores them); empty messages are not
+    /// committed.
     fn commit(&mut self, message: AgentMessage) {
-        if let AgentMessage::Assistant { content, .. } = message {
-            let visible: Vec<ContentBlock> = content
-                .into_iter()
-                .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
-                .collect();
-            if !visible.is_empty() {
-                self.transcript.push(Block::Assistant(visible));
-            }
+        if let AgentMessage::Assistant { content, .. } = message
+            && !content.is_empty()
+        {
+            self.transcript.push(Block::Assistant(content));
         }
     }
 
@@ -990,12 +1055,9 @@ impl Surface {
                     }
                 }
                 AgentMessage::Assistant { content, .. } => {
-                    // As when committing live: tool calls get their own line.
-                    let visible: Vec<ContentBlock> = content
-                        .iter()
-                        .filter(|b| !matches!(b, ContentBlock::ToolCall { .. }))
-                        .cloned()
-                        .collect();
+                    // The tool calls ride the block so a member's sidebar action
+                    // can name the call's target (§3); the renderer ignores them.
+                    let visible = content.to_vec();
                     if !visible.is_empty() {
                         self.transcript.push(Block::Assistant(visible));
                     }
@@ -1329,9 +1391,9 @@ impl App {
         self.dirty = true;
     }
 
-    /// The non-root surfaces as `(label, model, state, focused)` — the sidebar
-    /// and `/team`.
-    pub fn member_rows(&self) -> Vec<(&str, &str, TeamState, bool)> {
+    /// The non-root surfaces as `(label, state, focused, action)` — the sidebar
+    /// and `/team`. The action is the current run's live tool label, if any (§3).
+    pub fn member_rows(&self) -> Vec<(&str, TeamState, bool, Option<&str>)> {
         self.surfaces
             .iter()
             .enumerate()
@@ -1339,9 +1401,9 @@ impl App {
             .map(|(i, s)| {
                 (
                     s.label.as_str(),
-                    s.model.as_str(),
                     s.state(),
                     i == self.focus,
+                    s.last_action.as_deref(),
                 )
             })
             .collect()
@@ -2642,12 +2704,20 @@ mod tests {
         // A divider marks the replayed prefix, as the REPL's does.
         assert!(matches!(&app.transcript()[0], Block::Notice(t) if t.contains("3 earlier message")));
         assert_eq!(app.transcript()[1], Block::User("earlier question".into()));
-        // Dropped tool call, kept prose — same shape as a live commit.
+        // The tool call rides the assistant block — the renderer ignores it, the
+        // sidebar reads its target (§3).
         assert_eq!(
             app.transcript()[2],
-            Block::Assistant(vec![ContentBlock::Text {
-                text: "earlier answer".into()
-            }])
+            Block::Assistant(vec![
+                ContentBlock::Text {
+                    text: "earlier answer".into()
+                },
+                ContentBlock::ToolCall {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    arguments: Default::default(),
+                },
+            ])
         );
         // The tool result keeps the one-line summary form.
         assert!(
@@ -3095,11 +3165,11 @@ mod tests {
                 is_root: false,
             },
         ]);
-        assert_eq!(app.member_rows()[0].2, TeamState::Idle);
+        assert_eq!(app.member_rows()[0].1, TeamState::Idle);
         app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
-        assert_eq!(app.member_rows()[0].2, TeamState::Running);
+        assert_eq!(app.member_rows()[0].1, TeamState::Running);
         app.handle(AppEvent::Agent(id, AgentEvent::AgentEnd));
-        assert_eq!(app.member_rows()[0].2, TeamState::Done);
+        assert_eq!(app.member_rows()[0].1, TeamState::Done);
         assert!(app.dirty(), "an event requests a redraw");
     }
 
@@ -3142,8 +3212,54 @@ mod tests {
         let Some(Block::Notice(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
-        assert!(text.contains("explorer · m1 · idle"), "{text}");
-        assert!(text.contains("reviewer · m2 · done"), "{text}");
+        // One `{glyph} {label} · {state}` line each — no model (§2).
+        assert!(text.contains("○ explorer · idle"), "{text}");
+        assert!(text.contains("✓ reviewer · done"), "{text}");
+        assert!(
+            !text.contains("m1") && !text.contains("m2"),
+            "model shown: {text}"
+        );
+    }
+
+    #[test]
+    fn a_tool_start_sets_the_member_action_and_agent_end_clears_it() {
+        let (mut app, _root, id) = two_surfaces();
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
+
+        // The committed assistant block carries the call's arguments (§3).
+        app.handle(AppEvent::Agent(
+            id.clone(),
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: "{\"path\":\"a.rs\"}".parse().unwrap(),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            id.clone(),
+            AgentEvent::ToolExecutionStart {
+                call_id: "c1".into(),
+                name: "read".into(),
+            },
+        ));
+        assert_eq!(app.member_rows()[0].3, Some("read a.rs"));
+
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentEnd));
+        assert_eq!(app.member_rows()[0].3, None, "AgentEnd clears the action");
+    }
+
+    #[test]
+    fn the_status_glyphs_match_the_run_state() {
+        assert_eq!(TeamState::Idle.glyph(), "○");
+        assert_eq!(TeamState::Running.glyph(), "●");
+        assert_eq!(TeamState::Done.glyph(), "✓");
     }
 
     #[test]
@@ -3194,10 +3310,10 @@ mod tests {
         app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
         let row = app.member_rows();
         assert_eq!(row.len(), 1);
-        assert_eq!(row[0].2, TeamState::Running, "the added surface runs");
+        assert_eq!(row[0].1, TeamState::Running, "the added surface runs");
 
         app.handle(AppEvent::Agent(id, AgentEvent::AgentEnd));
-        assert_eq!(app.member_rows()[0].2, TeamState::Done);
+        assert_eq!(app.member_rows()[0].1, TeamState::Done);
     }
 
     /// A root + one member surface.
