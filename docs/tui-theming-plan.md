@@ -1,6 +1,6 @@
 # TUI palette & theming — plan
 
-Status: **T1 landed (palette B); T2/T3 open.** Parent: [`tui-plan.md`](tui-plan.md)
+Status: **T1 landed (palette B); T3 landed (T3a `010e7ab`, T3b `6f7053f`); T2 deferred (§4).** Parent: [`tui-plan.md`](tui-plan.md)
 (P2 truecolor detection, P4 configurable theme) and [`tui-design.md`](tui-design.md) §1.3.
 
 Presentation-only, inside `crates/wcode-tui`. No new deps.
@@ -88,12 +88,30 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
 - **T1 (landed — `847b569`) — palette B.** Rewrite `Theme::colored` per §2; add a test
   pinning `muted≠border`, `code≠warn`, `heading` colored, and `tool_name` bold.
   Commit `tui: adopt the semantic palette (B) for role distinctness`.
-- **T2 — capability detection (P2).** Introduce `ColorMode { Plain, Named, Indexed,
-  Rgb }`, resolve it once in `theme.rs`, and make `colored()` the `Named` tier.
-  Commit `tui: detect terminal color support (P2)`.
-- **T3 — `[theme]` overlay (P4).** A `[theme]` table in `config.toml` (roles as hex,
-  absent = inherit), opt-in truecolor, with the curated 16-color fallback from §3.
-  Commit `tui: configurable [theme] overlay (P4)`.
+- **T2 — capability detection (P2).** *Deferred.* Resolving a `ColorMode` in
+  isolation is near-void: the TUI only ever runs on a tty, so `Plain` is already
+  covered by `NO_COLOR`, and a tier produces no different output until there are
+  distinct tier palettes. Land it only alongside a tier that needs it (a `Basic`
+  8-color palette, or the 256/truecolor tiers below).
+- **T3 — `[theme]` overlay (P4).** A `[theme]` table in `config.toml` overrides
+  roles; absent keys inherit palette B. This is the user-facing theming feature, so
+  it lands in two commits:
+  - **T3a (TUI).** A public `ThemeSpec` (a role→color map, `Default` = palette B)
+    plus `parse_theme(&BTreeMap<String,String>) -> Result<ThemeSpec, String>` in
+    `wcode-tui`. Color values are **either** a named ANSI color (`cyan`,
+    `light-yellow`, `dark-gray`, …) **or** a hex `#rrggbb` (→ `Color::Rgb`, opt-in
+    truecolor). Unknown role/color is a hard error. `Options` gains `theme:
+    ThemeSpec`; `run` installs it into the `theme()` `OnceLock` before the first
+    draw. `NO_COLOR` still wins (forces `plain`, overrides ignored). No CLI change
+    yet. Test: parse named + hex; unknown role/color errors; an override changes
+    only its role; `NO_COLOR` wins.
+  - **T3b (CLI).** `[theme]` in `config.rs` (`FileConfig` → `Config`), validated at
+    load time into a `ThemeSpec` (a bad value is a `ConfigError`, matching the
+    "unparseable overlay is a hard error" style), passed through `main.rs` at both
+    `Options` literals. README + config example.
+
+  Commits (landed): `010e7ab` `tui: a configurable [theme] spec (P4)`, `6f7053f`
+  `cli: load the [theme] table into the TUI`.
 
 ## 5. Non-goals
 
