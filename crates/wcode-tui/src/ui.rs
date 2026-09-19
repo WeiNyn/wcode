@@ -1593,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_expands_the_last_tool_fully() {
+    fn enter_expands_the_selected_tool_fully() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
@@ -1808,13 +1808,13 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         app.handle(AppEvent::Key(Key::Enter));
         let text = buffer_text(&render(&mut app, 70, 45));
-        // The last tool is fully expanded…
-        assert!(text.contains("LAST-20"), "the last tool should expand:\n{text}");
+        // The selected block is fully expanded…
+        assert!(text.contains("LAST-20"), "the selected block should expand:\n{text}");
         // …while the first stays collapsed (its preview stops at line 5).
         assert!(text.contains("FIRST-5"), "{text}");
         assert!(
             !text.contains("FIRST-6"),
-            "only the last tool should toggle:\n{text}"
+            "only the selected block should toggle:\n{text}"
         );
     }
 
