@@ -1,7 +1,10 @@
 # wcode TUI — interface redesign plan
 
 Status: **P0–P3 done; P4 (stretch) open**. Companion to [`next-steps.md`](next-steps.md) (item 3,
-which this replaces). This is a project, not a task — the detail lives here so
+which this replaces). Follow-on work has its own docs:
+[`tui-polish-plan.md`](tui-polish-plan.md) (tool output, theme, keys) and
+[`tui-browse-plan.md`](tui-browse-plan.md) (transcript browse mode). This is a
+project, not a task — the detail lives here so
 it can be picked up as its own workstream.
 
 > **See also:** [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)

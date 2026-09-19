@@ -1,8 +1,9 @@
 # wcode
 
 A minimal, pi-like coding agent for the terminal. It streams an LLM conversation
-and gives it content-addressed tools — read (anchors per line), grep/find,
-bash, edit/replace, write — and stays out of the way. Built on a small kernel
+and gives it content-addressed tools — read (anchors per line), grep/find, bash,
+edit/edits/replace, write, and ast-grep search/rewrite — and stays out of the way.
+Built on a small kernel
 ([`wcode-harness`](crates/wcode-harness)) that speaks to any OpenAI-compatible
 chat-completions endpoint.
 
@@ -147,9 +148,15 @@ either; `-p`, `serve`, and piped input always take the non-TUI path. The TUI
 renders the same `AgentEvent` stream, over a local session or a `--socket` one.
 
 TUI keys: `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Up`/`Down` recall
-prompts · `PgUp`/`PgDn` scroll · `Esc`/`Ctrl-C` cancel a run or quit · `Ctrl-Y`
-copy the last reply (OSC-52). The input box wraps and grows (scrolling past ~8
-rows); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
+prompts · `PgUp`/`PgDn` (or the wheel) scroll · `Esc`/`Ctrl-C` cancel a run or
+quit · `Ctrl-Y` copy the last reply (OSC-52) · `Ctrl-T` expand/collapse every
+tool's output · `Ctrl-N`/`Shift-Tab` (or `Alt-1..9`) switch surface · `Ctrl-B`
+toggle the sidebar · `Ctrl-A`/`E`/`W`/`U`/`K` readline-style input editing.
+`Ctrl-G` enters **browse mode**, a `▌` cursor over the transcript (`j`/`k` next/
+prev, `g`/`G` first/last, `Enter` expand/collapse the selected block, `y` copy
+it, `Esc`/`q`/`Ctrl-G` leave). `F1` (or `/help`) opens the full keymap. The input
+box wraps and grows (capped at 8 rows, or half the screen, then scrolls to the
+cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/compact [text]`, `/usage`, `/copy`, `/team`, `/surface`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
@@ -157,9 +164,10 @@ the files this run changed, re-showing a diff) and `/resume` (pick a session; th
 CLI re-execs into it). The session-lifecycle commands below stay in the REPL. With
 `--agents` and a team, each member runs as its own **surface** (the root, plus one
 per member): input and `/`-commands go to the **focused** surface — switch with
-`/surface` (a picker) or `Ctrl-N` (cycle) — and a right-hand sidebar lists the
-members (`label · model · state`, idle/running/done, the focused one bolded; shown
-at ≥ 60 columns). `/team` prints the roster.
+`/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a
+right-hand sidebar lists the members (`label · model · state`, idle/running/done,
+the focused one bolded; shown at ≥ 60 columns, `Ctrl-B` toggles it). `/team`
+prints the roster.
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
 

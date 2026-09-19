@@ -26,8 +26,10 @@ Presentation code streams and styles `AgentEvent`s; the kernel owns the loop.
 `Request` → `AgentEvent` the same way locally or across a socket.
 
 `crates/wcode-tui` — the full-screen TUI (`ratatui`/`crossterm`), a
-`wcode-protocol` client: `run(backend, status, history)`, a pure reducer over
-`AgentEvent`, three bands (transcript · input · status), markdown + `/`-commands.
+`wcode-protocol` client: `run(surfaces, options, new_surfaces)`, a pure reducer
+over `AgentEvent`, three bands (transcript · input · status), markdown +
+`/`-commands, a team sidebar, overlays (pickers + `F1` help), a named-role
+palette (`theme.rs`), tool-output expand/collapse, and a transcript browse mode.
 
 `crates/wcode-cli` — the composition root:
 
@@ -101,4 +103,7 @@ Rust edition 2024, resolver 3.
 
 - `README.md` — config, commands, tools, and the content-addressed editing design.
 - `docs/next-steps.md` — current work tracker.
-- `docs/tui-plan.md` — planned full-screen TUI.
+- `docs/tui-design.md` — TUI visual spec (bands, glyphs, the palette).
+- `docs/tui-plan.md` — TUI phases/architecture (P0–P3 shipped).
+- `docs/tui-polish-plan.md` — TUI polish: tool output, theme, keys.
+- `docs/tui-browse-plan.md` — TUI transcript browse mode.
