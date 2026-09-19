@@ -230,6 +230,7 @@ async fn error_before_any_delta_persists_only_user_message() {
     let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
         Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
             message: "boom".into(),
+            fatal: true,
         }])) as LlmStream
     });
     let dir = tempfile::tempdir().unwrap();

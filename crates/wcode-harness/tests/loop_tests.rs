@@ -360,14 +360,89 @@ async fn assistant_message_carries_the_model() {
 }
 
 #[tokio::test]
-async fn tool_use_without_streamed_call_is_an_error() {
+async fn tool_use_without_streamed_call_feeds_back_and_continues() {
     // Finding #3: rig only emits the complete ToolCall on ToolInputEnd, so a
     // stream that finishes with tool_use but never streams a call has lost the
-    // model's requested action. The run must fail loudly, not silently end.
+    // model's requested action. That is a feedable failure now: it surfaces as
+    // an error notice, is written back into ctx, and the loop runs another
+    // turn so the model can re-issue the call.
     let rec = Recorder::default();
     rec.push(vec![LlmStreamEvent::Done {
         stop_reason: StopReason::ToolUse,
         usage: None,
+    }]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(rec.calls().len(), 2, "loop continues to a second stream call");
+    // User, fed-back failure notice, assistant answer.
+    assert_eq!(ctx.len(), 3);
+    assert_eq!(
+        ctx[1].as_text(),
+        "your previous response failed: model requested tool use but no tool call was streamed"
+    );
+    let notice_seen = rec.calls()[1]
+        .ctx
+        .iter()
+        .any(|m| m.as_text().contains("model requested tool use but no tool call was streamed"));
+    assert!(notice_seen, "second stream call receives the fed-back notice");
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
+#[tokio::test]
+async fn transient_stream_error_feeds_back_and_loop_continues() {
+    // A transient stream error no longer kills the run: turn 1 fails with a
+    // non-fatal Error, the failure notice lands in ctx, and a second stream
+    // call happens and completes normally.
+    let rec = Recorder::default();
+    rec.push(vec![LlmStreamEvent::Error {
+        message: "boom".into(),
+        fatal: false,
+    }]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("recovered".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(rec.calls().len(), 2, "a second stream call happens after the turn-1 error");
+    // User, fed-back failure notice, assistant answer.
+    assert_eq!(ctx.len(), 3);
+    assert_eq!(ctx[1].as_text(), "your previous response failed: boom");
+    let notice_seen = rec.calls()[1]
+        .ctx
+        .iter()
+        .any(|m| m.as_text() == "your previous response failed: boom");
+    assert!(notice_seen, "second stream call receives the fed-back notice");
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
+#[tokio::test]
+async fn hard_fatal_stream_error_ends_run() {
+    // Hard-fatal classes (bad request/auth/schema) cannot be fixed by retrying
+    // or re-feeding, so the run still ends with StopReason::Error — no second
+    // stream call is made.
+    let rec = Recorder::default();
+    rec.push(vec![LlmStreamEvent::Error {
+        message: "invalid_request_error: bad schema".into(),
+        fatal: true,
     }]);
     let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
 
@@ -375,18 +450,37 @@ async fn tool_use_without_streamed_call_is_an_error() {
     let (res, events) = run(cfg, &mut ctx).await;
 
     assert_eq!(res.unwrap(), StopReason::Error);
-    assert_eq!(ctx.len(), 1, "no tool call occurred, nothing to persist");
+    assert_eq!(rec.calls().len(), 1, "no second turn after a fatal error");
+    assert_eq!(ctx.len(), 1, "no empty assistant may be recorded");
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
+#[tokio::test]
+async fn consecutive_stream_error_turns_are_capped() {
+    // A provider that keeps failing on every turn must not loop forever: after
+    // DEFAULT_MAX_STREAM_ERROR_TURNS consecutive fed-back errors, the run ends
+    // with StopReason::Error exactly as it did before.
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
+            message: "boom".into(),
+            fatal: false,
+        }])) as LlmStream
+    });
+    let TestSetup { cfg, .. } = setup(stream_fn, vec![], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    // One fed-back notice per capped turn; the turn past the cap ends the run
+    // without pushing another.
     assert_eq!(
-        tags(&events),
-        vec![
-            "agent_start",
-            "turn_start",
-            "message_start",
-            "error",
-            "message_end",
-            "turn_end",
-            "agent_end",
-        ]
+        ctx.len(),
+        1 + wcode_harness::loop_::DEFAULT_MAX_STREAM_ERROR_TURNS
+    );
+    assert!(
+        ctx.iter().all(|m| matches!(m, AgentMessage::User { .. })),
+        "no assistant content was produced: {ctx:?}"
     );
 }
 
@@ -900,12 +994,13 @@ async fn cancel_before_turn_skips_llm_call() {
 
 #[tokio::test]
 async fn stream_error_before_any_delta_leaves_no_assistant() {
-    // A stream that errors on its first item produces no content; the run must
-    // end Error without persisting an empty assistant message, yet still close
-    // the turn framing (Error surfaces after MessageStart).
+    // A hard-fatal stream error on its first item produces no content; the run
+    // must end Error without persisting an empty assistant message, yet still
+    // close the turn framing (Error surfaces after MessageStart).
     let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
         Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
             message: "boom".into(),
+            fatal: true,
         }])) as LlmStream
     });
     let TestSetup { cfg, .. } = setup(stream_fn, vec![], HooksSet::default());

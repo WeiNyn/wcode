@@ -648,7 +648,7 @@ pub async fn summarize(
                 usage = u;
                 break;
             }
-            LlmStreamEvent::Error { message } => return Err(message),
+            LlmStreamEvent::Error { message, .. } => return Err(message),
             _ => {}
         }
     }
@@ -832,6 +832,7 @@ mod summarize_tests {
         let stream_fn = scripted(
             vec![LlmStreamEvent::Error {
                 message: "boom".into(),
+                fatal: true,
             }],
             Arc::new(Mutex::new(Vec::new())),
         );

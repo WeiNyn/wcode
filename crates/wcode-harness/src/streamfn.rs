@@ -218,17 +218,24 @@ fn adapt(
     let model = opts.model.clone();
     runtime.spawn(async move {
         let open = || open_stream(client.clone(), endpoint, &model, request.clone());
-        let (mut stream, first) = match connect_with_retry(&policy, open, &tx).await {
-            Ok(pair) => pair,
-            Err(e) => {
+        // Retry budget for the whole pre-content window, shared across the
+        // connect, the first-item peek (rig defers the request into the stream,
+        // so a transport failure surfaces there), and any transient error that
+        // slips past the peek before the first content event is forwarded.
+        let mut state = RetryState::new(policy.max);
+        let (mut stream, mut pending) = match connect_with_retry(&policy, &mut state, &open, &tx).await {
+            PreContent::Ready { stream, first } => (stream, first),
+            PreContent::Cancelled => return,
+            PreContent::Failed(error) => {
                 let _ = tx.send(LlmStreamEvent::Error {
-                    message: e.to_string(),
+                    message: error.to_string(),
+                    fatal: fatal_class(&error),
                 });
                 return;
             }
         };
         let mut errored = false;
-        let mut pending = first;
+        let mut content_forwarded = false;
         loop {
             let item = match pending.take() {
                 Some(item) => item,
@@ -246,13 +253,48 @@ fn adapt(
                     if errored && matches!(content, StreamedAssistantContent::Final(_)) {
                         continue;
                     }
-                    map_item(content)
+                    let events = map_item(content);
+                    // Replay is only safe before the first forwarded event;
+                    // once anything reached the consumer a later error cannot
+                    // be retried (it would duplicate output).
+                    content_forwarded |= !events.is_empty();
+                    events
                 }
-                Err(e) => {
-                    errored = true;
-                    vec![LlmStreamEvent::Error {
-                        message: e.to_string(),
-                    }]
+                Err(error) => {
+                    if !content_forwarded && state.budget > 0 && retryable(&error) {
+                        // Nothing forwarded yet: back off and replay the request
+                        // from scratch. The re-open shares the same retry budget
+                        // and keeps backoff growing monotonically.
+                        state.attempts += 1;
+                        state.budget -= 1;
+                        if !retry_wait(&tx, &policy, state.attempts, &error).await {
+                            return;
+                        }
+                        match connect_with_retry(&policy, &mut state, &open, &tx).await {
+                            PreContent::Ready { stream: s, first } => {
+                                stream = s;
+                                pending = first;
+                                continue;
+                            }
+                            PreContent::Cancelled => return,
+                            PreContent::Failed(e) => {
+                                errored = true;
+                                vec![LlmStreamEvent::Error {
+                                    message: e.to_string(),
+                                    fatal: fatal_class(&e),
+                                }]
+                            }
+                        }
+                    } else {
+                        // Final: a hard-fatal class, retries exhausted, or a
+                        // mid-stream error after content. The loop decides (via
+                        // `fatal`) whether to feed it back or end the run.
+                        errored = true;
+                        vec![LlmStreamEvent::Error {
+                            message: error.to_string(),
+                            fatal: fatal_class(&error),
+                        }]
+                    }
                 }
             };
             for ev in events {
@@ -268,8 +310,11 @@ fn adapt(
 }
 
 fn error_stream(message: String) -> LlmStream {
+    // Pre-request failures (invalid effort, client build, missing runtime) are
+    // hard-fatal: the request itself can never succeed, so the run must stop.
     Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
         message,
+        fatal: true,
     }]))
 }
 
@@ -378,36 +423,99 @@ fn open_stream(
     }
 }
 
-/// Open a stream, retrying transient failures on both the connect and the
-/// **first** item. rig's OpenAI path defers the HTTP request into the stream, so
-/// a connection failure surfaces on the first poll; retrying only the connect
-/// would miss it. `open` is re-invoked per attempt (a fresh future). Once any
-/// content has been forwarded a mid-stream error is surfaced as-is — retrying
-/// would duplicate output. Each backoff is abandoned if the consumer drops `tx`.
+/// Outcome of the pre-content phase of a stream turn: a stream with its first
+/// (buffered) item — which may itself be an error, in which case the caller
+/// classifies it — or a final failure.
+enum PreContent<S> {
+    Ready {
+        stream: S,
+        first: Option<Result<StreamedAssistantContent, CompletionError>>,
+    },
+    /// Final failure: not in the transient class, or retries exhausted.
+    Failed(CompletionError),
+    /// The consumer dropped `tx` during a backoff wait (cancellation).
+    Cancelled,
+}
+
+/// Shared retry bookkeeping for one turn's pre-content window: how many retries
+/// remain across the connect/peek and any later pre-content errors, plus how
+/// many failed attempts have accumulated so backoff keeps growing monotonically.
+#[derive(Clone, Copy)]
+struct RetryState {
+    budget: u32,
+    attempts: u32,
+}
+
+impl RetryState {
+    fn new(max: u32) -> Self {
+        RetryState {
+            budget: max,
+            attempts: 0,
+        }
+    }
+}
+
+/// Whether a failed stream call is of a hard-fatal class that retrying or
+/// re-feeding cannot fix: hard client statuses (400/401/403/404/422) and
+/// build/parse failures (Json/Request/Response/Url). Transient-class errors
+/// (see [`retryable`]) may exhaust their retries — those surface with
+/// `fatal: false` so the loop can feed the failure back to the model instead
+/// of ending the run.
+fn fatal_class(error: &CompletionError) -> bool {
+    !retryable(error)
+}
+
+/// Open a stream, retrying transient failures on the connect and on anything
+/// the peek surfaces. rig's OpenAI path defers the HTTP request into the stream,
+/// so a connection failure surfaces on the first poll; retrying only the
+/// connect would miss it. `open` is re-invoked per attempt (a fresh future).
+/// The [`RetryState`] budget is shared with the forwarding loop, so a transient
+/// error that slips past the peek (still before any content was forwarded) is
+/// likewise retried at most `policy.max` times total per turn. Once any content
+/// has been forwarded a mid-stream error is surfaced as-is — retrying would
+/// duplicate output. Each backoff is abandoned if the consumer drops `tx`.
 async fn connect_with_retry<S, F>(
     policy: &RetryPolicy,
+    state: &mut RetryState,
     mut open: F,
     tx: &tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>,
-) -> Result<(S, Option<Result<StreamedAssistantContent, CompletionError>>), CompletionError>
+) -> PreContent<S>
 where
     F: FnMut() -> Pin<Box<dyn std::future::Future<Output = Result<S, CompletionError>> + Send>>,
     S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin + Send,
 {
-    let mut attempt = 0u32;
     loop {
-        let error = match open().await {
+        state.attempts += 1;
+        match open().await {
             Ok(mut stream) => match stream.next().await {
-                Some(Err(error)) => error,
-                first => return Ok((stream, first)),
+                Some(Err(error)) => {
+                    if state.budget > 0 && retryable(&error) {
+                        state.budget -= 1;
+                        if !retry_wait(tx, policy, state.attempts, &error).await {
+                            return PreContent::Cancelled;
+                        }
+                        continue;
+                    }
+                    // A first-item error that cannot be retried is still an
+                    // error item: hand it to the forwarding loop, which
+                    // classifies it (fatal vs feed-back) like any other.
+                    return PreContent::Ready {
+                        stream,
+                        first: Some(Err(error)),
+                    };
+                }
+                first => return PreContent::Ready { stream, first },
             },
-            Err(error) => error,
-        };
-        attempt += 1;
-        if attempt > policy.max || !retryable(&error) {
-            return Err(error);
-        }
-        if !retry_wait(tx, policy, attempt, &error).await {
-            return Err(error);
+            Err(error) => {
+                if state.budget > 0 && retryable(&error) {
+                    state.budget -= 1;
+                    if !retry_wait(tx, policy, state.attempts, &error).await {
+                        return PreContent::Cancelled;
+                    }
+                    continue;
+                }
+                return PreContent::Failed(error);
+            }
         }
     }
 }
@@ -1328,8 +1436,10 @@ mod retry_tests {
             cap: Duration::from_millis(50),
         };
         let c = calls.clone();
+        let mut state = RetryState::new(policy.max);
         let out = connect_with_retry(
             &policy,
+            &mut state,
             move || {
                 let n = c.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
@@ -1343,7 +1453,7 @@ mod retry_tests {
             &tx,
         )
         .await;
-        assert!(out.is_ok());
+        assert!(matches!(out, PreContent::Ready { .. }));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(matches!(
             rx.try_recv(),
@@ -1365,8 +1475,10 @@ mod retry_tests {
             cap: Duration::from_millis(5),
         };
         let c = calls.clone();
+        let mut state = RetryState::new(policy.max);
         let out = connect_with_retry(
             &policy,
+            &mut state,
             move || {
                 let n = c.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
@@ -1380,7 +1492,7 @@ mod retry_tests {
             &tx,
         )
         .await;
-        assert!(out.is_ok());
+        assert!(matches!(out, PreContent::Ready { .. }));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "first-item error retried");
     }
 
@@ -1395,8 +1507,10 @@ mod retry_tests {
 
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
+        let mut state = RetryState::new(policy.max);
         let out = connect_with_retry(
             &policy,
+            &mut state,
             move || {
                 c.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Err::<Chunks, CompletionError>(transient()) })
@@ -1404,13 +1518,15 @@ mod retry_tests {
             &tx,
         )
         .await;
-        assert!(out.is_err());
+        assert!(matches!(out, PreContent::Failed(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 2, "one attempt + one retry");
 
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
+        let mut state = RetryState::new(policy.max);
         let out = connect_with_retry(
             &policy,
+            &mut state,
             move || {
                 c.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Err::<Chunks, CompletionError>(fatal()) })
@@ -1418,7 +1534,57 @@ mod retry_tests {
             &tx,
         )
         .await;
-        assert!(out.is_err());
+        assert!(matches!(out, PreContent::Failed(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "non-retryable returns at once");
+    }
+
+    #[test]
+    fn fatal_class_flags_hard_errors_but_not_transient_transport() {
+        // Transient-class failures stay feedable after their retries are
+        // exhausted (the loop feeds the message back to the model); hard
+        // client/build failures are fatal (the run stops).
+        assert!(!fatal_class(&transient()));
+        assert!(!fatal_class(&CompletionError::HttpError(
+            rig::http_client::Error::StreamEnded
+        )));
+        assert!(fatal_class(&fatal()));
+        assert!(fatal_class(&CompletionError::ResponseError("bad".into())));
+        assert!(fatal_class(&CompletionError::RequestError("bad".into())));
+        let json_err = serde_json::from_str::<u8>("not a number").unwrap_err();
+        assert!(fatal_class(&CompletionError::JsonError(json_err)));
+    }
+
+    /// Live-ish check against a refused port: a transport failure exhausts the
+    /// retry budget (Retrying notices) and surfaces as a *non-fatal* stream
+    /// error — which is exactly what lets the loop feed it back next turn
+    /// instead of dying.
+    #[tokio::test]
+    async fn refused_port_exhausts_retries_to_non_fatal_error() {
+        let opts = LlmOpts {
+            model: "m1".to_string(),
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: Some("test-key".to_string()),
+            retry: RetryPolicy {
+                max: 2,
+                base: Duration::from_millis(10),
+                cap: Duration::from_millis(50),
+            },
+            ..LlmOpts::default()
+        };
+        let stream_fn = rig_stream_fn();
+        let stream = stream_fn(&[], "sys", &[], &opts);
+        let events: Vec<LlmStreamEvent> =
+            tokio::time::timeout(std::time::Duration::from_secs(10), stream.collect())
+                .await
+                .expect("stream terminates");
+        let retries = events
+            .iter()
+            .filter(|e| matches!(e, LlmStreamEvent::Retrying { .. }))
+            .count();
+        assert_eq!(retries, 2, "two backoff notices before giving up: {events:?}");
+        assert!(
+            matches!(events.last(), Some(LlmStreamEvent::Error { fatal: false, .. })),
+            "refused port is transient-class, not fatal: {events:?}"
+        );
     }
 }

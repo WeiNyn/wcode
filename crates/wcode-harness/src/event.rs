@@ -29,6 +29,12 @@ pub enum LlmStreamEvent {
     },
     Error {
         message: String,
+        /// True when the failure is of a hard-fatal class (bad request, auth,
+        /// schema, build/parse) that retrying or re-feeding cannot fix. The
+        /// loop ends the run on a fatal error; a transient-class error that
+        /// exhausted its retries (or landed mid-stream after content) is fed
+        /// back to the model for a corrective turn instead.
+        fatal: bool,
     },
 }
 
@@ -91,7 +97,10 @@ pub enum AgentEvent {
         from: crate::protocol::SessionId,
         content: String,
     },
-    /// Stream-level failure; the run ends with `StopReason::Error`.
+    /// Stream-level failure. A fatal-class failure (bad request, auth, schema)
+    /// ends the run with `StopReason::Error`; a transient-class failure that
+    /// exhausted its retries (or landed mid-stream) is fed back to the model
+    /// and the loop continues, still bounded by a consecutive-error cap.
     Error {
         message: String,
     },

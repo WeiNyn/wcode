@@ -14,6 +14,14 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// unbounded. Unlike cancellation, hitting it is a clean, resumable stop.
 pub const DEFAULT_MAX_TURNS: usize = 100;
 
+/// Cap on *consecutive* turns that ended in a fed-back stream error. A
+/// transient-class stream failure no longer kills the run — the loop feeds the
+/// error back to the model and retries the turn — but a persistently broken
+/// request (or a model that cannot recover) must still terminate. After this
+/// many consecutive fed-back error turns the run ends with `StopReason::Error`
+/// exactly as it did before. Any turn that completes cleanly resets the count.
+pub const DEFAULT_MAX_STREAM_ERROR_TURNS: usize = 3;
+
 /// Cap on tools executing concurrently inside one group. The model chooses the
 /// batch size, but a runaway batch should not open unbounded file handles.
 const MAX_PARALLEL_TOOLS: usize = 8;
@@ -98,6 +106,9 @@ pub async fn run_loop(
 
     // Turns used so far, checked against `cfg.max_turns` at each turn start.
     let mut turns: usize = 0;
+    // Consecutive fed-back stream-error turns; see
+    // [`DEFAULT_MAX_STREAM_ERROR_TURNS`]. Reset by any cleanly-completed turn.
+    let mut consecutive_stream_errors: usize = 0;
     'outer: loop {
         loop {
             // Turn budget: caps a runaway tool loop (the model re-issuing tool
@@ -161,6 +172,11 @@ pub async fn run_loop(
             let mut content: Vec<ContentBlock> = Vec::new();
             let mut captured: Option<StopReason> = None;
             let mut usage: Option<Usage> = None;
+            // A final stream failure that is *feedable* (transient class that
+            // exhausted its retries, a mid-stream error, or the tool-use-with-
+            // no-call finish). When set, the turn's error is written back into
+            // ctx so the model can fix it, and the loop continues below.
+            let mut stream_error: Option<String> = None;
 
             if sink
                 .send(AgentEvent::MessageStart {
@@ -245,14 +261,23 @@ pub async fn run_loop(
                                                     // hang the run or overwrite the captured reason.
                                                     break;
                                                 }
-                                                // A stream Error behaves like Done{Error}: capture, end run.
-                                                // The message is surfaced first so consumers can show it.
+                                                // A stream Error is surfaced first so consumers can show it. A
+                                                // fatal-class failure ends the run; a transient-class one that
+                                                // exhausted its retries (or landed mid-stream) is fed back below.
                                                 Some(LlmStreamEvent::Retrying { attempt, max, reason }) => {
                                                     let _ = sink.send(AgentEvent::Retrying { attempt, max, reason });
                                                 }
-                                                Some(LlmStreamEvent::Error { message }) => {
-                                                    let _ = sink.send(AgentEvent::Error { message });
-                                                    captured = Some(StopReason::Error);
+                                                Some(LlmStreamEvent::Error { message, fatal }) => {
+                                                    let _ = sink.send(AgentEvent::Error { message: message.clone() });
+                                                    // Hard-fatal (bad request/auth/schema): retrying or re-feeding
+                                                    // cannot help — end the run. Transient-class (retries exhausted
+                                                    // or mid-stream after content): feed back and continue below.
+                                                    if fatal {
+                                                        captured = Some(StopReason::Error);
+                                                    } else {
+                                                        stream_error = Some(message);
+                                                        captured = Some(StopReason::Error);
+                                                    }
                                                     break;
                                                 }
                                             }
@@ -264,16 +289,18 @@ pub async fn run_loop(
             // means the model's requested action was lost. rig only delivers
             // the reassembled call on ToolInputEnd (deltas are dropped); a
             // provider that ends input without closing it has no call to emit,
-            // so the call would vanish silently. Fail loudly instead.
+            // so the call would vanish silently. Feed it back loudly instead of
+            // silently ending: the model sees the failure and can re-issue the
+            // call on the next turn.
             if !aborted
                 && captured == Some(StopReason::ToolUse)
                 && !content
                     .iter()
                     .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
             {
-                let _ = sink.send(AgentEvent::Error {
-                    message: "model requested tool use but no tool call was streamed".to_string(),
-                });
+                let message = "model requested tool use but no tool call was streamed".to_string();
+                let _ = sink.send(AgentEvent::Error { message: message.clone() });
+                stream_error = Some(message);
                 captured = Some(StopReason::Error);
             }
 
@@ -326,26 +353,52 @@ pub async fn run_loop(
                 })
                 .collect();
 
-            // Errors/aborts are values: end the run even if tool calls exist.
-            // Every unexecuted call first gets a synthesized error ToolResult
-            // so ctx never keeps a ToolCall without its ToolResult (invalid
-            // history → wire 400s on the next turn, persisted via session).
-            if aborted || matches!(captured, Some(StopReason::Error | StopReason::Aborted)) {
+            // Aborts and hard-fatal errors are values: end the run even if
+            // tool calls exist. Every unexecuted call first gets a synthesized
+            // error ToolResult so ctx never keeps a ToolCall without its
+            // ToolResult (invalid history → wire 400s on the next turn,
+            // persisted via session).
+            if aborted || matches!(captured, Some(StopReason::Aborted)) {
                 if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, calls.into_iter()) {
                     let _ = sink.send(AgentEvent::AgentEnd);
                     return Err(e);
                 }
                 let _ = sink.send(AgentEvent::AgentEnd);
-                return finish(
-                    if aborted {
-                        StopReason::Aborted
-                    } else {
-                        captured.unwrap()
-                    },
-                    cfg.steering,
-                    cfg.follow_ups,
-                );
+                return finish(StopReason::Aborted, cfg.steering, cfg.follow_ups);
             }
+            // Hard-fatal stream error (captured Error with no feed-back note):
+            // the request itself cannot succeed, so retrying or re-feeding is
+            // pointless — end the run as before.
+            if matches!(captured, Some(StopReason::Error)) && stream_error.is_none() {
+                if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, calls.into_iter()) {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return Err(e);
+                }
+                let _ = sink.send(AgentEvent::AgentEnd);
+                return finish(StopReason::Error, cfg.steering, cfg.follow_ups);
+            }
+            // A feedable stream failure is written back into ctx — the model
+            // sees "your previous response failed: <msg>" and can fix its
+            // output, exactly like a malformed tool result. Consecutive such
+            // turns are capped ([`DEFAULT_MAX_STREAM_ERROR_TURNS`]) so a broken
+            // request or a model that cannot recover still terminates with
+            // StopReason::Error as it always did.
+            if let Some(err_msg) = stream_error {
+                consecutive_stream_errors += 1;
+                if let Err(e) = synthesize_unexecuted(&mut cfg, &sink, ctx, calls.into_iter()) {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return Err(e);
+                }
+                if consecutive_stream_errors > DEFAULT_MAX_STREAM_ERROR_TURNS {
+                    let _ = sink.send(AgentEvent::AgentEnd);
+                    return finish(StopReason::Error, cfg.steering, cfg.follow_ups);
+                }
+                let notice = AgentMessage::user_text(format!("your previous response failed: {err_msg}"));
+                record_session(&mut cfg, &notice)?;
+                ctx.push(notice);
+                continue;
+            }
+            consecutive_stream_errors = 0;
             if calls.is_empty() {
                 // Turn with no tool calls: the turn's tool work (none) is
                 // done, so the stop hook — documented to run after a turn's

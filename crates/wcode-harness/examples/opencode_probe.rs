@@ -109,7 +109,7 @@ async fn main() {
             LlmStreamEvent::Done { stop_reason, usage } => {
                 println!("Done: stop_reason={stop_reason:?} usage={usage:?}");
             }
-            LlmStreamEvent::Error { message } => println!("Error event: {message}"),
+            LlmStreamEvent::Error { message, .. } => println!("Error event: {message}"),
             _ => {}
         }
     }
@@ -134,7 +134,7 @@ async fn main() {
         let mut seen = false;
         for ev in &events {
             match ev {
-                LlmStreamEvent::Error { message } => {
+                LlmStreamEvent::Error { message, .. } => {
                     seen = true;
                     println!("Error: {}", &message[..message.len().min(1200)]);
                 }
