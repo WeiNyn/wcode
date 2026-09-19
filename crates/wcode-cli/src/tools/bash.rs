@@ -28,6 +28,10 @@ const PREVIEW_TAIL_CHARS: usize = 6_000;
 /// Live `ToolExecutionUpdate` lines per stream before we stop streaming (a
 /// flooding command shouldn't spam the UI; the file still holds everything).
 const LIVE_LINE_CAP: usize = 200;
+/// Bytes per pseudo-line when a no-newline stream overflows the line buffer —
+/// a legit JSON blob fits; a megabyte of log noise is chunked. See
+/// [`drain_lines`].
+const MAX_LINE_BYTES: usize = 64_000;
 
 /// Per-process counter so repeated/concurrent bash calls get distinct spill
 /// files even within the same millisecond.
@@ -226,16 +230,34 @@ async fn drain_lines(
         match reader.read_until(b'\n', &mut line).await {
             Ok(0) => break, // EOF: pipe closed
             Ok(_) => {
-                let text = String::from_utf8_lossy(&line);
-                if live < LIVE_LINE_CAP {
-                    let _ = events.send(AgentEvent::ToolExecutionUpdate {
-                        call_id: label.call_id.to_string(),
-                        name: label.name.to_string(),
-                        partial: format!("{}{text}", label.live_prefix),
-                    });
-                    live += 1;
+                // Chunk a pathological no-newline stream: `read_until` would
+                // otherwise grow `line` unboundedly and bypass both the spill
+                // threshold and the live cap (they fire only per full line).
+                // A `from_utf8_lossy` split mid-codepoint renders a
+                // replacement char — the whole path is already lossy, and no
+                // data is dropped (the file still holds every byte).
+                let mut emit = |text: &str, raw_len: usize| {
+                    if live < LIVE_LINE_CAP {
+                        let _ = events.send(AgentEvent::ToolExecutionUpdate {
+                            call_id: label.call_id.to_string(),
+                            name: label.name.to_string(),
+                            partial: format!("{}{text}", label.live_prefix),
+                        });
+                        live += 1;
+                    }
+                    capture.push(text, raw_len);
+                };
+                let mut start = 0;
+                while line.len().saturating_sub(start) > MAX_LINE_BYTES {
+                    let end = start + MAX_LINE_BYTES;
+                    let text = String::from_utf8_lossy(&line[start..end]);
+                    emit(&text, end - start);
+                    start = end;
                 }
-                capture.push(&text, line.len());
+                if start < line.len() {
+                    let text = String::from_utf8_lossy(&line[start..]);
+                    emit(&text, line.len() - start);
+                }
             }
             Err(_) => break,
         }
@@ -757,5 +779,60 @@ mod tests {
             }
         }
         assert_eq!(updates, LIVE_LINE_CAP, "live stream is capped");
+    }
+
+    #[tokio::test]
+    async fn a_no_newline_stream_is_chunked_and_never_grows_unboundedly() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut rx) = super::super::test_ctx(dir.path());
+        // 200 KiB of 'a' with no newline: `read_until` would otherwise grow one
+        // line to the full 200 KiB; the chunker turns it into MAX_LINE_BYTES
+        // pseudo-lines so the live updates and the memory stay bounded.
+        let out = Bash
+            .execute(
+                BashArgs {
+                    command: "dd if=/dev/zero bs=200000 count=1 2>/dev/null | tr '\\0' 'a'"
+                        .into(),
+                    timeout_secs: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+
+        let mut updates = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AgentEvent::ToolExecutionUpdate { partial, .. } = ev {
+                updates.push(partial);
+            }
+        }
+        let full_chunks = 200_000 / MAX_LINE_BYTES;
+        let tail = 200_000 % MAX_LINE_BYTES;
+        assert!(tail > 0, "200_000 bytes must span more than whole chunks");
+        assert_eq!(updates.len(), full_chunks + 1, "one pseudo-line per chunk");
+        for update in &updates[..full_chunks] {
+            assert_eq!(update.chars().count(), MAX_LINE_BYTES, "a chunk is capped");
+        }
+        assert_eq!(updates.last().unwrap().chars().count(), tail);
+
+        // Content is preserved across the chunk boundaries (lossy, but here
+        // pure ASCII, so byte-identical).
+        let joined: String = updates.concat();
+        assert!(joined.chars().all(|c| c == 'a'));
+        assert_eq!(joined.chars().count(), 200_000);
+
+        // The spill file still holds the whole stream, byte for byte.
+        let path = out
+            .output
+            .split("full output at ")
+            .nth(1)
+            .expect("spill notice")
+            .split(']')
+            .next()
+            .unwrap()
+            .to_string();
+        let full = std::fs::read(&path).expect("spill file readable");
+        assert_eq!(full.len(), 200_000, "no byte is dropped from the file");
+        let _ = std::fs::remove_file(&path);
     }
 }
