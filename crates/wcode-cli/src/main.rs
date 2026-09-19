@@ -429,7 +429,7 @@ async fn main() {
                         // The server owns the session; a socket client cannot see
                         // the session dir, so `/resume` has nothing to offer.
                         sessions: Vec::new(),
-                        theme: Default::default(),
+                        theme: cfg.theme.clone(),
                         history: Some(repl::history_path()),
                     };
                     // One surface per served session (root first), all over the
@@ -829,7 +829,7 @@ async fn main() {
                     status,
                     models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
                     sessions: session_items(),
-                    theme: Default::default(),
+                    theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
                 };
                 let handle = SessionActor::spawn(agent);

@@ -69,6 +69,15 @@ max = 3                    # optional; retries after the first attempt (0 disabl
 base_ms = 500              # optional; base backoff for the first retry
 cap_ms = 8000              # optional; cap on a single backoff wait
 
+[theme]
+# TUI role colors, presentation-only. A value is a named ANSI color (`cyan`,
+# `light-yellow`, `dark-gray`, ...) or hex `#rrggbb`; absent roles inherit the
+# default palette (accent, dim, muted, border, user, body, error, success, warn,
+# code, heading, link, tool_name, thinking, diff_add, diff_del). Honored only
+# when NO_COLOR is unset.
+link = "light-cyan"        # optional; role = color
+muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
+
 # A preset team the orchestrator starts with (requires --agents). One [[team]]
 # entry per member; names are unique (a duplicate fails the load loudly).
 [[team]]

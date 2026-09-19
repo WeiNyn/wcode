@@ -127,7 +127,7 @@ pub(crate) fn no_color() -> bool {
 /// A role→color overlay on the default palette (palette B). `Default` (empty) is
 /// palette B; overrides are built only through [`parse_theme`], which validates
 /// every role and color.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSpec {
     roles: BTreeMap<String, String>,
 }

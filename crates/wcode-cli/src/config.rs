@@ -229,6 +229,10 @@ pub struct FileConfig {
     /// `[orchestrator]`: root-only workflow guidance (F3b), passed through.
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
+    /// `[theme]`: a role → color overlay, passed to the TUI and validated there
+    /// (`wcode_tui::parse_theme`); absent roles keep the default palette.
+    #[serde(default)]
+    pub theme: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +254,8 @@ pub struct Config {
     pub team: Vec<TeamMember>,
     /// Resolved `[orchestrator]` (F3b): the root's workflow guidance.
     pub orchestrator: OrchestratorConfig,
+    /// Resolved `[theme]`: a validated overlay on the default TUI palette.
+    pub theme: wcode_tui::ThemeSpec,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -309,6 +315,8 @@ pub enum ConfigError {
     Io(String),
     /// Two `[team]` members share a `name` (names are unique phonebook keys).
     DuplicateTeamMember(String),
+    /// An invalid `[theme]` overlay: an unknown role or an unparseable color.
+    Theme(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -323,6 +331,7 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "duplicate [team] member `{name}`: names must be unique"
             ),
+            ConfigError::Theme(msg) => write!(f, "invalid [theme]: {msg}"),
         }
     }
 }
@@ -450,6 +459,9 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             }
         }
     }
+    // `[theme]` is presentation-only, but a bad role or color is a hard error —
+    // the "unparseable overlay fails loudly" style (§4 T3b).
+    let theme = wcode_tui::parse_theme(&file.theme).map_err(ConfigError::Theme)?;
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -465,6 +477,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         peers: file.peers,
         team: file.team,
         orchestrator: file.orchestrator,
+        theme,
     })
 }
 
@@ -1078,6 +1091,37 @@ mod compaction_cfg_tests {
             panic!("wrong error: {err:?}")
         };
         assert!(msg.contains("compaction.budget"), "got: {msg}");
+    }
+
+    #[test]
+    fn theme_table_with_named_and_hex_colors_parses() {
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[theme]\nlink = \"light-cyan\"\nmuted = \"#123456\"\n")
+                .unwrap();
+        assert!(merge(EnvLike::default(), file).is_ok());
+    }
+
+    #[test]
+    fn an_absent_theme_table_is_the_default_overlay() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.theme, wcode_tui::ThemeSpec::default());
+    }
+
+    #[test]
+    fn an_unknown_theme_role_is_a_config_error() {
+        let file =
+            toml::from_str::<FileConfig>("model = \"m\"\n[theme]\nnope = \"red\"\n").unwrap();
+        let err = merge(EnvLike::default(), file).unwrap_err();
+        assert!(matches!(err, ConfigError::Theme(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn an_unknown_theme_color_is_a_config_error() {
+        let file = toml::from_str::<FileConfig>("model = \"m\"\n[theme]\nlink = \"chartreuse\"\n")
+            .unwrap();
+        let err = merge(EnvLike::default(), file).unwrap_err();
+        assert!(matches!(err, ConfigError::Theme(_)), "got: {err:?}");
     }
 }
 
