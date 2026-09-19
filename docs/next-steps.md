@@ -20,7 +20,7 @@ the boxes as each task completes and keep the status table current.
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
 | 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ◐ phases 1–2 |
 | 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T3 (`[theme]` overlay) landed; T2 deferred |
-| 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ◐ S1 in progress; S2 (socket member model) open |
+| 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -485,7 +485,8 @@ across members, and *wrong* over `--socket`) and shows nothing about what a team
 is doing. Replace it with a status glyph (`● ○ ✓`) + name + a dim **live action**,
 dropping the model from the sidebar (revising D28); the action comes from
 `ToolExecutionStart`, its target resolved UI-side from the assistant tool-call
-arguments. A separate fix (S2) plumbs the member model through the socket roster.
+arguments. A separate fix (S2) plumbs the member model through the socket roster
+(landed).
 
 > ➡️ **[`tui-sidebar-plan.md`](tui-sidebar-plan.md)** — problem, the row design, the
 action data path, S1/S2, non-goals.

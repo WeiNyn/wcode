@@ -1,6 +1,6 @@
 # TUI team sidebar — plan
 
-Status: **S1 (glyph + live action, model dropped) in progress.** Revises decision
+Status: **S1 (glyph + live action, model dropped) and S2 (socket roster model) landed.** Revises decision
 **D28** in [`team-and-tui-plan.md`](team-and-tui-plan.md). Presentation-only, inside
 `crates/wcode-tui`.
 
@@ -64,18 +64,34 @@ One line per member: a **status glyph**, the **name**, and a dim **live action**
   `ToolExecutionStart` (target resolved from the assistant block) and cleared on
   `AgentEnd`; `/team` lists without the model. Commit
   `tui: sidebar shows member status + live action`.
-- **S2 (separate) — the socket member-model fix.** See §6.
+- **S2 — the socket member-model fix (landed).** See §6.
 
 ## 6. S2 — the `--socket` member-model bug (separate effort)
 
-Root cause: `AgentEvent::Sessions { ids }` (`event.rs:116`) carries ids only, and
-`SessionHandle` (`actor.rs:135`) holds no metadata, so the client cannot learn a
-member's model — `main.rs:452/478` substitutes the root's. The clean fix **widens
-`Sessions`** to carry records (`SessionInfo { id, model, label }`) and plumbs the
-metadata into the `Registry`/`SessionHandle` (the real change), rippling through
-`server.rs` (`roster_ids`, the three push sites), `client.rs` (`roster` watch,
-`subscribe_roster`), `registry.rs`, `main.rs`, and the roundtrip tests. Tracked
-separately; not part of S1.
+Root cause: `AgentEvent::Sessions { ids }` (`event.rs:116`) carries ids only, so the
+client cannot learn a member's model — `main.rs:452/478` substitutes the root's.
+
+**Design (chosen).**
+- New `SessionInfo { id: SessionId, model: Option<String> }` in
+  `wcode_harness::protocol` (next to `SessionId`; `event.rs` already reaches into
+  `crate::protocol`). Label is **not** carried — the client derives it from the id
+  (`short_name`), which already works.
+- `AgentEvent::Sessions { sessions: Vec<SessionInfo> }` (was `{ ids }`).
+- `Registry` gains a `models: HashMap<SessionId, String>` beside `owners`, with
+  `set_model(id, model)` — **mirroring `set_owner`**, so `register`/`register_remote`
+  keep their signatures and no call site churns. Add `model_of(&id)`.
+- `server.rs`: `roster_ids()` → `roster_infos(&registry, &roster)`, joining the
+  roster with `model_of`; the three push sites carry `SessionInfo`s.
+- `client.rs`: the `roster` watch and `subscribe_roster()` become
+  `Vec<SessionInfo>`; `handle_frame` stores `sessions`.
+- `cli`: `SessionFactory::spawn` records each worker's model (`agents.rs`); the
+  serve branch records the **root**'s under the served id (`main.rs`, on the same
+  registry `serve_at` reads — `register_root` cannot know that id). `main.rs`'s
+  socket branch reads `sessions` for model + label instead of substituting
+  `llm.model`.
+
+Landed separately from S1; touched `event.rs`, `registry.rs`, `server.rs`,
+`client.rs`, `agents.rs`, `main.rs`, and the roundtrip tests.
 
 ## 7. Non-goals
 
