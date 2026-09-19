@@ -140,6 +140,7 @@ async fn main() -> std::io::Result<()> {
         status,
         models: vec!["demo".to_string(), "demo-mini".to_string()],
         sessions: Vec::new(),
+        theme: Default::default(),
         history: None,
     };
     // A static roster so the example shows the team sidebar (root + two members).

@@ -5,10 +5,12 @@
 //! `Theme::plain()` is the `NO_COLOR` fallback: no `fg` at all, only
 //! bold/italic/dim — byte-identical to the per-function branches it replaced.
 //!
-//! Named ANSI colors only (no truecolor), so it works on any terminal. Theme
-//! *detection* (`COLORTERM` / 256-color) and a *configurable* theme remain open
-//! (`tui-plan.md` P2/P4) — this is a structural refactor onto roles, nothing more.
+//! Palette B is the default (named ANSI colors). A [`ThemeSpec`] — built by
+//! [`parse_theme`] from a `[theme]` table — overlays any role, including a hex
+//! `#rrggbb` truecolor value (opt-in). Theme *detection* (`COLORTERM` /
+//! 256-color) remains open (`tui-plan.md` P2).
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -101,22 +103,156 @@ impl Theme {
     }
 }
 
-/// The active theme, chosen once from `NO_COLOR`.
+/// The active theme — an installed [`ThemeSpec`] overlay on palette B, or
+/// `plain()` under `NO_COLOR`. Resolved once, before the first draw.
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+/// The active theme, resolved once from [`THEME`].
 pub(crate) fn theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| {
-        if no_color() {
-            Theme::plain()
-        } else {
-            Theme::colored()
-        }
-    })
+    THEME.get_or_init(|| if no_color() { Theme::plain() } else { Theme::colored() })
+}
+
+/// Install `spec` as the process theme (called once, before the first draw); a
+/// later call, or one after the theme was first read, is a no-op.
+pub(crate) fn install(spec: ThemeSpec) {
+    let _ = THEME.set(resolve(spec, no_color()));
 }
 
 /// Honor `NO_COLOR` (<https://no-color.org>) — resolved once.
 pub(crate) fn no_color() -> bool {
     static NO_COLOR: OnceLock<bool> = OnceLock::new();
     *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some())
+}
+
+/// A role→color overlay on the default palette (palette B). `Default` (empty) is
+/// palette B; overrides are built only through [`parse_theme`], which validates
+/// every role and color.
+#[derive(Clone, Debug, Default)]
+pub struct ThemeSpec {
+    roles: BTreeMap<String, String>,
+}
+
+impl ThemeSpec {
+    /// The default palette with this spec's overrides applied. For each named
+    /// role only the `fg` changes — its modifiers stay (`link` underlined,
+    /// `tool_name` and `accent` bold, `thinking` dim+italic).
+    fn into_theme(self) -> Theme {
+        let mut theme = Theme::colored();
+        for (role, value) in &self.roles {
+            // `parse_theme` validated both; a stray value cannot reach here.
+            let Ok(color) = parse_color(value) else {
+                continue;
+            };
+            let slot = match role.as_str() {
+                "accent" => &mut theme.accent,
+                "dim" => &mut theme.dim,
+                "muted" => &mut theme.muted,
+                "border" => &mut theme.border,
+                "user" => &mut theme.user,
+                "body" => &mut theme.body,
+                "error" => &mut theme.error,
+                "success" => &mut theme.success,
+                "warn" => &mut theme.warn,
+                "code" => &mut theme.code,
+                "heading" => &mut theme.heading,
+                "link" => &mut theme.link,
+                "tool_name" => &mut theme.tool_name,
+                "thinking" => &mut theme.thinking,
+                "diff_add" => &mut theme.diff_add,
+                "diff_del" => &mut theme.diff_del,
+                _ => continue,
+            };
+            slot.fg = Some(color);
+        }
+        theme
+    }
+}
+
+/// The 16 role names a `[theme]` table may override.
+const ROLE_NAMES: [&str; 16] = [
+    "accent",
+    "dim",
+    "muted",
+    "border",
+    "user",
+    "body",
+    "error",
+    "success",
+    "warn",
+    "code",
+    "heading",
+    "link",
+    "tool_name",
+    "thinking",
+    "diff_add",
+    "diff_del",
+];
+
+/// Validate a `[theme]` table (role → color) into a [`ThemeSpec`]. An unknown
+/// role or an unparseable color is a hard error — the caller surfaces it.
+pub fn parse_theme(roles: &BTreeMap<String, String>) -> Result<ThemeSpec, String> {
+    let mut spec = ThemeSpec::default();
+    for (role, value) in roles {
+        if !ROLE_NAMES.contains(&role.as_str()) {
+            return Err(format!("unknown theme role `{role}`"));
+        }
+        if parse_color(value).is_err() {
+            return Err(format!("invalid color `{value}` for role `{role}`"));
+        }
+        spec.roles.insert(role.clone(), value.clone());
+    }
+    Ok(spec)
+}
+
+/// A color value: a `#rrggbb` hex (truecolor, opt-in) or a named ANSI color.
+/// Kebab-case names only; the input is trimmed and lower-cased.
+fn parse_color(s: &str) -> Result<Color, String> {
+    let s = s.trim().to_ascii_lowercase();
+    if let Some(hex) = s.strip_prefix('#') {
+        return hex_to_rgb(hex).ok_or_else(|| format!("invalid hex color `{s}`"));
+    }
+    let color = match s.as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "dark-gray" | "dark-grey" => Color::DarkGray,
+        "light-red" => Color::LightRed,
+        "light-green" => Color::LightGreen,
+        "light-yellow" => Color::LightYellow,
+        "light-blue" => Color::LightBlue,
+        "light-magenta" => Color::LightMagenta,
+        "light-cyan" => Color::LightCyan,
+        "white" => Color::White,
+        "reset" | "default" => Color::Reset,
+        other => return Err(format!("unknown color `{other}`")),
+    };
+    Ok(color)
+}
+
+/// Exactly six hex digits → a truecolor [`Color::Rgb`].
+fn hex_to_rgb(hex: &str) -> Option<Color> {
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
+}
+
+/// The palette for `spec`: `NO_COLOR` wins (plain, overrides ignored), else the
+/// overlay on palette B.
+fn resolve(spec: ThemeSpec, no_color: bool) -> Theme {
+    if no_color {
+        Theme::plain()
+    } else {
+        spec.into_theme()
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +316,51 @@ mod tests {
         assert!(t.heading.fg.is_some(), "headings carry a color now");
         // Intentional aliases — not asserted distinct:
         // accent == user (prompt/running), success == diff_add, error == diff_del.
+    }
+
+    #[test]
+    fn parse_theme_accepts_a_named_color_and_a_hex() {
+        let roles = BTreeMap::from([
+            ("accent".to_string(), "light-magenta".to_string()),
+            ("muted".to_string(), "#123456".to_string()),
+        ]);
+        let theme = parse_theme(&roles).expect("a valid spec").into_theme();
+        assert_eq!(theme.accent.fg, Some(Color::LightMagenta));
+        assert_eq!(theme.muted.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn parse_theme_rejects_an_unknown_role_or_color() {
+        let role = BTreeMap::from([("nope".to_string(), "red".to_string())]);
+        assert!(parse_theme(&role).is_err(), "an unknown role is an error");
+        let color = BTreeMap::from([("accent".to_string(), "chartreuse".to_string())]);
+        assert!(parse_theme(&color).is_err(), "an unknown color is an error");
+    }
+
+    #[test]
+    fn an_override_sets_only_its_role_and_keeps_modifiers() {
+        let roles = BTreeMap::from([
+            ("link".to_string(), "light-cyan".to_string()),
+            ("tool_name".to_string(), "light-green".to_string()),
+        ]);
+        let theme = parse_theme(&roles).unwrap().into_theme();
+        assert_eq!(theme.link.fg, Some(Color::LightCyan));
+        assert_eq!(theme.tool_name.fg, Some(Color::LightGreen));
+        assert!(theme.link.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(theme.tool_name.add_modifier.contains(Modifier::BOLD));
+        // Untouched roles keep palette B.
+        let base = Theme::colored();
+        assert_eq!(theme.error.fg, base.error.fg);
+        assert_eq!(theme.heading, base.heading);
+    }
+
+    #[test]
+    fn no_color_wins_over_a_spec() {
+        let roles = BTreeMap::from([("accent".to_string(), "red".to_string())]);
+        let spec = parse_theme(&roles).expect("a valid spec");
+        let plain = resolve(spec, true);
+        for style in fields(&plain) {
+            assert_eq!(style.fg, None, "NO_COLOR must not set an fg: {style:?}");
+        }
     }
 }

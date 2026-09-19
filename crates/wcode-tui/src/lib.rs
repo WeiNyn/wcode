@@ -32,6 +32,7 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::Backend;
 
 pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, Tool};
+pub use crate::theme::{ThemeSpec, parse_theme};
 
 /// A surface's live state, shown in the sidebar and by `/team`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,9 @@ pub struct Options {
     /// Resumable sessions for the `/resume` picker (local sessions only; empty
     /// when the client is remote and cannot see the session dir).
     pub sessions: Vec<SessionItem>,
+    /// A `[theme]` overlay on palette B (empty = palette B); installed before
+    /// the first draw.
+    pub theme: ThemeSpec,
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
     pub history: Option<PathBuf>,
 }
@@ -134,7 +138,10 @@ pub async fn run(
         models,
         sessions,
         history,
+        theme,
     } = options;
+    // Install the theme before the terminal is entered and anything draws.
+    theme::install(theme);
     let (guard, mut terminal) = terminal::enter()?;
 
     let mut app = App::new();
@@ -418,6 +425,7 @@ mod tests {
             models: Vec::new(),
             sessions: Vec::new(),
             history: None,
+            theme: ThemeSpec::default(),
         };
         assert_eq!(run(Vec::new(), options, None).await.unwrap(), Outcome::Quit);
     }
