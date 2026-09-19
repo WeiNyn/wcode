@@ -252,7 +252,7 @@ runtime-spawned worker is thus visible to a `--socket` client.
 | D25 | F4b history | **per-surface** prompt history (a change from the shared-composer sketch in §F4) |
 | D26 | F4b focus | a `/surface` picker (F1 machinery, `PickerKind::Surface`) **plus** a cycle key; the sidebar highlights the focused surface |
 | D27 | F4b feed | F4b-2 **subsumes** F4a's `TeamUpdate` feed — a surface's own `AgentStart`/`AgentEnd` is the sidebar state, so the forwarder channel goes away |
-| D28 | F4b rows | teammates show **model + state only**; the root keeps the full status line |
+| D28 | F4b rows | teammates show **model + state only**; the root keeps the full status line. **Revised** by [`tui-sidebar-plan.md`](tui-sidebar-plan.md): the row is now status glyph + name + live action, and the model is dropped from the sidebar |
 
 ## Phased tasks
 
