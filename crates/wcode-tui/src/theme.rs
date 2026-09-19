@@ -124,6 +124,53 @@ pub(crate) fn no_color() -> bool {
     *NO_COLOR.get_or_init(|| std::env::var_os("NO_COLOR").is_some())
 }
 
+/// The terminal's color capability, from the environment ladder (plan §3).
+/// Resolved once, like [`no_color()`]; used to gate what a [`ThemeSpec`] may
+/// emit — see [`ThemeSpec::into_theme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Modifiers only — the `Theme::plain` palette.
+    Plain,
+    /// The terminal's own 16-color palette (`Theme::colored`).
+    Named,
+    /// A 256-color palette.
+    Indexed,
+    /// 24-bit truecolor — hex overrides are honored here.
+    Rgb,
+}
+
+/// The capability ladder exactly as planned: `NO_COLOR` or a dumb terminal is
+/// intentionally colorless (nothing later rescues it), `COLORTERM=24bit|truecolor`
+/// claims truecolor, a `TERM` containing `256color` claims the 256-tier, and
+/// everything else stays on the symbolic 16 palette.
+fn resolve_color_mode_from(
+    no_color: impl Fn() -> bool,
+    colorterm: Option<&str>,
+    term: Option<&str>,
+) -> ColorMode {
+    if no_color() || term == Some("dumb") {
+        return ColorMode::Plain;
+    }
+    let colorterm = colorterm.map(str::to_ascii_lowercase);
+    if colorterm.as_deref() == Some("truecolor") || colorterm.as_deref() == Some("24bit") {
+        return ColorMode::Rgb;
+    }
+    if term.is_some_and(|t| t.contains("256color")) {
+        return ColorMode::Indexed;
+    }
+    ColorMode::Named
+}
+
+/// The resolved color mode for this process, memoized like [`no_color()`].
+pub fn color_mode() -> ColorMode {
+    static MODE: OnceLock<ColorMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let colorterm = std::env::var_os("COLORTERM").and_then(|v| v.into_string().ok());
+        let term = std::env::var_os("TERM").and_then(|v| v.into_string().ok());
+        resolve_color_mode_from(no_color, colorterm.as_deref(), term.as_deref())
+    })
+}
+
 /// A role→color overlay on the default palette (palette B). `Default` (empty) is
 /// palette B; overrides are built only through [`parse_theme`], which validates
 /// every role and color.
@@ -135,14 +182,22 @@ pub struct ThemeSpec {
 impl ThemeSpec {
     /// The default palette with this spec's overrides applied. For each named
     /// role only the `fg` changes — its modifiers stay (`link` underlined,
-    /// `tool_name` and `accent` bold, `thinking` dim+italic).
-    fn into_theme(self) -> Theme {
+    /// `tool_name` and `accent` bold, `thinking` dim+italic). A hex
+    /// (`#rrggbb` → [`Color::Rgb`]) override is honored only when the terminal
+    /// is truecolor ([`ColorMode::Rgb`]): under Plain / Named / Indexed it
+    /// degrades to that role's palette-B default rather than emit an `Rgb` a
+    /// non-truecolor terminal renders wrong. Named colors are honored in every
+    /// color mode. [`parse_theme`] validated the values; a stray one cannot
+    /// reach here.
+    fn into_theme(self, mode: ColorMode) -> Theme {
         let mut theme = Theme::colored();
         for (role, value) in &self.roles {
-            // `parse_theme` validated both; a stray value cannot reach here.
             let Ok(color) = parse_color(value) else {
                 continue;
             };
+            if matches!(color, Color::Rgb(..)) && mode != ColorMode::Rgb {
+                continue;
+            }
             let slot = match role.as_str() {
                 "accent" => &mut theme.accent,
                 "dim" => &mut theme.dim,
@@ -251,7 +306,7 @@ fn resolve(spec: ThemeSpec, no_color: bool) -> Theme {
     if no_color {
         Theme::plain()
     } else {
-        spec.into_theme()
+        spec.into_theme(color_mode())
     }
 }
 
@@ -324,7 +379,7 @@ mod tests {
             ("accent".to_string(), "light-magenta".to_string()),
             ("muted".to_string(), "#123456".to_string()),
         ]);
-        let theme = parse_theme(&roles).expect("a valid spec").into_theme();
+        let theme = parse_theme(&roles).expect("a valid spec").into_theme(ColorMode::Rgb);
         assert_eq!(theme.accent.fg, Some(Color::LightMagenta));
         assert_eq!(theme.muted.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
     }
@@ -343,7 +398,7 @@ mod tests {
             ("link".to_string(), "light-cyan".to_string()),
             ("tool_name".to_string(), "light-green".to_string()),
         ]);
-        let theme = parse_theme(&roles).unwrap().into_theme();
+        let theme = parse_theme(&roles).unwrap().into_theme(ColorMode::Rgb);
         assert_eq!(theme.link.fg, Some(Color::LightCyan));
         assert_eq!(theme.tool_name.fg, Some(Color::LightGreen));
         assert!(theme.link.add_modifier.contains(Modifier::UNDERLINED));
@@ -352,6 +407,90 @@ mod tests {
         let base = Theme::colored();
         assert_eq!(theme.error.fg, base.error.fg);
         assert_eq!(theme.heading, base.heading);
+    }
+
+    #[test]
+    fn resolve_color_mode_follows_the_ladder() {
+        let none = || false;
+        // NO_COLOR beats everything, even a truecolor claim.
+        assert_eq!(
+            resolve_color_mode_from(|| true, Some("truecolor"), Some("xterm-256color")),
+            ColorMode::Plain,
+            "NO_COLOR wins"
+        );
+        // A dumb TERM is colorless regardless of COLORTERM.
+        assert_eq!(
+            resolve_color_mode_from(none, Some("truecolor"), Some("dumb")),
+            ColorMode::Plain,
+            "TERM=dumb is plain"
+        );
+        // Both truecolor spellings.
+        assert_eq!(
+            resolve_color_mode_from(none, Some("truecolor"), None),
+            ColorMode::Rgb
+        );
+        assert_eq!(
+            resolve_color_mode_from(none, Some("24bit"), None),
+            ColorMode::Rgb
+        );
+        assert_eq!(
+            resolve_color_mode_from(none, Some("TrueColor"), Some("xterm-256color")),
+            ColorMode::Rgb,
+            "truecolor claims beat a 256color TERM; COLORTERM is case-insensitive"
+        );
+        // A 256-color TERM.
+        assert_eq!(
+            resolve_color_mode_from(none, None, Some("xterm-256color")),
+            ColorMode::Indexed
+        );
+        // Nothing claimed: the symbolic 16 palette.
+        assert_eq!(resolve_color_mode_from(none, None, None), ColorMode::Named);
+        assert_eq!(
+            resolve_color_mode_from(none, None, Some("xterm")),
+            ColorMode::Named
+        );
+    }
+
+    #[test]
+    fn hex_overrides_are_honored_only_under_truecolor() {
+        let roles = BTreeMap::from([("accent".to_string(), "#ff00cc".to_string())]);
+        let spec = parse_theme(&roles).unwrap();
+        let base = Theme::colored(); // accent == Cyan + Bold
+
+        assert_eq!(
+            spec.clone().into_theme(ColorMode::Rgb).accent.fg,
+            Some(Color::Rgb(0xff, 0x00, 0xcc)),
+            "Rgb mode honors the hex"
+        );
+        for degraded in [ColorMode::Plain, ColorMode::Named, ColorMode::Indexed] {
+            let theme = spec.clone().into_theme(degraded);
+            assert_eq!(
+                theme.accent.fg, base.accent.fg,
+                "hex degrades to the role's palette default under {degraded:?}"
+            );
+            assert!(
+                theme.accent.add_modifier.contains(Modifier::BOLD),
+                "modifiers survive the degradation"
+            );
+        }
+    }
+
+    #[test]
+    fn named_colors_are_honored_in_every_color_mode() {
+        let roles = BTreeMap::from([("warn".to_string(), "light-cyan".to_string())]);
+        let spec = parse_theme(&roles).unwrap();
+        for mode in [
+            ColorMode::Plain,
+            ColorMode::Named,
+            ColorMode::Indexed,
+            ColorMode::Rgb,
+        ] {
+            assert_eq!(
+                spec.clone().into_theme(mode).warn.fg,
+                Some(Color::LightCyan),
+                "a named color is honored under {mode:?}"
+            );
+        }
     }
 
     #[test]
