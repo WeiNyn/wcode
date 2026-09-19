@@ -19,7 +19,7 @@ the boxes as each task completes and keep the status table current.
 | 11 | One-shot `-p` drops fire-and-forget remote deliveries (A2A residual) | ☑ done |
 | 12 | TUI polish: tool output, theme, keys (see [`tui-polish-plan.md`](tui-polish-plan.md)) | ☑ done |
 | 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ☑ phases 1–3 |
-| 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T3 (`[theme]` overlay) landed; T2 deferred |
+| 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T2 (color-mode ladder, hex-gated truecolor) + T3 (`[theme]` overlay) landed; tier palettes open |
 | 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

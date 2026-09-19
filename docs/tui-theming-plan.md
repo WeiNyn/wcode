@@ -1,6 +1,6 @@
 # TUI palette & theming — plan
 
-Status: **T1 landed (palette B); T3 landed (T3a `010e7ab`, T3b `6f7053f`); T2 deferred (§4).** Parent: [`tui-plan.md`](tui-plan.md)
+Status: **T1 landed (palette B); T2 landed (capability detection, hex-gated truecolor); T3 landed (T3a `010e7ab`, T3b `6f7053f`).** Parent: [`tui-plan.md`](tui-plan.md)
 (P2 truecolor detection, P4 configurable theme) and [`tui-design.md`](tui-design.md) §1.3.
 
 Presentation-only, inside `crates/wcode-tui`. No new deps.
@@ -88,11 +88,19 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
 - **T1 (landed — `847b569`) — palette B.** Rewrite `Theme::colored` per §2; add a test
   pinning `muted≠border`, `code≠warn`, `heading` colored, and `tool_name` bold.
   Commit `tui: adopt the semantic palette (B) for role distinctness`.
-- **T2 — capability detection (P2).** *Deferred.* Resolving a `ColorMode` in
-  isolation is near-void: the TUI only ever runs on a tty, so `Plain` is already
-  covered by `NO_COLOR`, and a tier produces no different output until there are
-  distinct tier palettes. Land it only alongside a tier that needs it (a `Basic`
-  8-color palette, or the 256/truecolor tiers below).
+- **T2 — capability detection (P2).** *Landed.* `ColorMode { Plain, Named,
+  Indexed, Rgb }` resolved once from the §3 ladder (`NO_COLOR`/`TERM=dumb` →
+  Plain; `COLORTERM` in {truecolor,24bit} → Rgb; `TERM` containing `256color` →
+  Indexed; else Named) via a pure `resolve_color_mode_from(no_color, colorterm,
+  term)` under test. It has a real, observable effect today: a hex `#rrggbb`
+  override in a `[theme]` spec is honored only when `color_mode() == Rgb`; under
+  Plain/Named/Indexed it degrades to the role's palette-B default (a truecolor
+  value on a non-truecolor terminal renders wrong), while named colors are
+  honored in every mode. Config stays terminal-agnostic — `parse_theme` still
+  accepts and validates hex; the degradation happens at apply time in
+  `ThemeSpec::into_theme(mode)`, and `resolve()`'s NO_COLOR-wins behavior is
+  unchanged. Still open: the actual tier palettes (Basic 8 / 256 / truecolor),
+  which land only alongside a tier that needs them.
 - **T3 — `[theme]` overlay (P4).** A `[theme]` table in `config.toml` overrides
   roles; absent keys inherit palette B. This is the user-facing theming feature, so
   it lands in two commits:
