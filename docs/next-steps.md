@@ -31,6 +31,7 @@ the boxes as each task completes and keep the status table current.
 | 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
 | 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ◐ review snapshot |
 | 25 | Tier-1 gap sweep: Retry-After + socket hardening (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ done — b3b3240, 9705f06 |
+| 26 | Session search: cross-session + in-session (see [session-search-plan.md](session-search-plan.md)) | ◐ design — D1–D5 settled |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
