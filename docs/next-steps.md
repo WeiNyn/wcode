@@ -29,6 +29,7 @@ the boxes as each task completes and keep the status table current.
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
 | 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
 | 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
+| 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ◐ review snapshot |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -667,6 +668,43 @@ timeout, until the user gives up and cancels.
 **Open questions.**
 - One deadline on the raw stream item, or also a keepalive/heartbeat probe?
 - Default values (e.g. ttft 60 s, idle 120 s) — provider-dependent; make it a knob.
+
+---
+
+## 24. jcode feature-gap analysis
+
+**Summary.** A feature diff of wcode against `../jcode` (~670k LOC, 80+ crates) —
+what is worth *adopting*, filtered by wcode's doctrine (no MCP, no permission
+prompts, no behavior config; policy lives in `Hooks`). Full analysis:
+[`gap-analysis-jcode.md`](gap-analysis-jcode.md) (companion to
+[`swarm-comparison-plan.md`](swarm-comparison-plan.md), the already-tracked
+multi-agent slice). Status: **review snapshot** — read-only, no build/run.
+
+**Tier 1 (small, on-doctrine) — the recommended first sweep.**
+- Honor `Retry-After` on 429/503 (the retry path is blind backoff today).
+- Socket `0600` + an NDJSON frame cap (`socket::bind` sets no mode;
+  `read_frame` is unbounded).
+- Cross-session `session_search` (sessions are already JSONL; only listing
+  exists).
+- Within-session `conversation_search` (compaction drops the summarized prefix
+  with no retrieval path).
+- A `todo` tool (no model-facing checklist; `task` is root/team-scoped).
+- Widen the context catalog — `limits::model_limit` keys off one provider only.
+- Soft-interrupt point B — a steer during a tool-free turn is lost.
+- Dedicated reasoning/usage `AgentEvent`s — *cosmetic only* (both are already
+  surfaced).
+
+**Second wave (Tier 2).** The most defensible is a **`bash` command-risk gate**
+built as a `Hooks` policy (code, not config) — the catastrophic-only subset, the
+one jcode feature that fits wcode's doctrine. Also: native Anthropic/Gemini
+provider, markdown maturity, `webfetch`, skill authoring, plan card, live theme
+reload, a narrow side panel, tool backgrounding.
+
+**Non-goals (do NOT build).** Permission prompts/approval/HITL,
+OAuth/credential store/provider picker, MCP/browser/computer-use/sandbox, the
+embedding memory graph + sideagents, config-driven/spawn/scheduled hooks,
+semantic compaction — all excluded by doctrine or by the missing-daemon
+constraint.
 
 ---
 
