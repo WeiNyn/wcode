@@ -1021,7 +1021,20 @@ async fn main() {
                     None
                 };
                 match wcode_tui::run(surfaces, options, new_surfaces).await {
-                    Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                    Ok(wcode_tui::Outcome::Quit) => {
+                        // The terminal is already restored: print the exact
+                        // command to bring this session back (nothing when there
+                        // is no local session path).
+                        repl::print_relaunch(
+                            &llm,
+                            session_path.as_deref(),
+                            args.agents,
+                            args.config.as_deref(),
+                            args.owner.as_deref(),
+                            args.name.as_deref(),
+                        );
+                        std::process::exit(0)
+                    }
                     Ok(wcode_tui::Outcome::Reload { no_session }) => {
                         // Rebuild + re-exec into the same session (the REPL's
                         // `/reload`); the terminal is already restored.

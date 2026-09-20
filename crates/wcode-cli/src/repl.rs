@@ -590,6 +590,56 @@ pub fn exec_self(args: &[String]) {
     }
 }
 
+/// Print the exact relaunch command for the current session on a clean
+/// interactive exit. A remote client (or `--no-session`) owns no local path, so
+/// nothing is printed — a bogus local command would be worse than silence.
+/// Mirrors the startup banner's `session: <path>` style.
+pub fn print_relaunch(
+    llm: &LlmOpts,
+    session: Option<&Path>,
+    agents: bool,
+    overlay: Option<&str>,
+    owner: Option<&str>,
+    name: Option<&str>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let args = reload_args(llm, Some(session), false, agents, overlay, owner, name);
+    println!("resume: {}", relaunch_line(&args));
+}
+
+/// The relaunch command as a copy-pasteable shell line: the invoked program
+/// (`argv[0]`, else `wcode`) plus the shell-quoted [`reload_args`].
+pub fn relaunch_line(args: &[String]) -> String {
+    let program = std::env::args_os()
+        .next()
+        .map(|a| a.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "wcode".to_string());
+    let mut line = shell_quote(&program);
+    for arg in args {
+        line.push(' ');
+        line.push_str(&shell_quote(arg));
+    }
+    line
+}
+
+/// POSIX-shell-safe `arg`: as-is when it is already safe, else single-quoted
+/// (escaping any embedded `'`).
+fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'-' | b'_' | b'.' | b'/' | b'=' | b':' | b'@' | b',' | b'+')
+        });
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// `/models [filter]`: list `GET {base_url}/models` ids, `*` marks the
 /// current model. Filter is a case-insensitive substring on the id.
 async fn print_models(llm: &LlmOpts, filter: Option<&str>) {
@@ -1051,6 +1101,17 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
         }
     }
 
+    // Interactive close: the exact command to bring this session back (the same
+    // argv `/reload` would exec). A remote client owns no local session, so
+    // `print_relaunch` prints nothing for it.
+    print_relaunch(
+        &llm,
+        session_path.as_deref(),
+        orchestrator.is_some(),
+        overlay,
+        owner,
+        name,
+    );
 }
 
 /// `/skills`: what was discovered, one block per skill, with the file the
@@ -1626,6 +1687,33 @@ mod tests {
             reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None);
         assert!(!without.iter().any(|a| a == "--owner"), "{without:?}");
         assert!(!without.iter().any(|a| a == "--name"), "{without:?}");
+    }
+
+    #[test]
+    fn relaunch_line_prefixes_the_program_and_quotes_unsafe_args() {
+        let line = relaunch_line(&[
+            "--resume".into(),
+            "/s/a b.jsonl".into(),
+            "--model".into(),
+            "gpt-x".into(),
+        ]);
+        // The program token comes first, unquoted here (argv[0] in tests).
+        assert!(!line.starts_with(' '), "{line}");
+        // Safe args pass through; the path with a space is single-quoted.
+        assert!(
+            line.ends_with("--resume '/s/a b.jsonl' --model gpt-x"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_only_when_needed() {
+        assert_eq!(shell_quote("plain-1.2/3"), "plain-1.2/3");
+        assert_eq!(shell_quote("http://x/v1"), "http://x/v1");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote(""), "''");
+        // An embedded single quote is escaped portably.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]
