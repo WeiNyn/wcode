@@ -674,6 +674,25 @@ where
     }
 }
 
+/// The server's `Retry-After` header (integer delta-seconds), when the failed
+/// response preserved one. `None` when there is no preserved response, no
+/// header, a non-UTF-8 value, or a value that is not a non-negative integer.
+///
+/// SCOPE: integer delta-seconds ONLY. The HTTP-date form of `Retry-After`
+/// (RFC 9110 `Retry-After = HTTP-date / delay-seconds`) is deliberately out of
+/// scope: a date would need wall-clock parsing against the loop's monotonic
+/// `tokio::time` deadline, and a subtly wrong date is worse than ignoring it —
+/// a provider that sends one simply gets the normal backoff.
+fn retry_after(error: &CompletionError) -> Option<Duration> {
+    // `provider_response_headers()` already unwraps both the
+    // `HttpError(InvalidStatusCodeWithDetails)` and the `ProviderResponse`
+    // variants, so this reads either.
+    let raw = error.provider_response_headers()?.get("retry-after")?;
+    // A non-UTF-8 header value is ignored, not an error.
+    let seconds: u64 = raw.to_str().ok()?.trim().parse().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
 /// Emit a retry notice and sleep the backoff. Returns false if the consumer
 /// dropped `tx` (cancellation) during the wait.
 async fn retry_wait(
@@ -682,7 +701,12 @@ async fn retry_wait(
     attempt: u32,
     error: &CompletionError,
 ) -> bool {
-    let delay = backoff(attempt, policy.base, policy.cap);
+    // A server-supplied `Retry-After` is authoritative and wins over the local
+    // backoff, but it is clamped by the existing `policy.cap` so a hostile or
+    // buggy `Retry-After: 86400` cannot park the turn for a day.
+    let delay = retry_after(error)
+        .map(|d| d.min(policy.cap))
+        .unwrap_or_else(|| backoff(attempt, policy.base, policy.cap));
     let _ = tx.send(LlmStreamEvent::Retrying {
         attempt,
         max: policy.max,
@@ -1754,6 +1778,70 @@ mod retry_tests {
         );
     }
 
+    /// A `CompletionError` carrying a preserved response with a `Retry-After`
+    /// header (no HTTP status needed: the header path reads
+    /// `provider_response_headers()` regardless of status).
+    fn err_with_retry_after(value: &str) -> CompletionError {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_str(value).unwrap());
+        CompletionError::ProviderResponse(
+            rig::ProviderResponseError::without_status("429")
+                .with_headers(Some(Box::new(headers))),
+        )
+    }
+
+    #[test]
+    fn retry_after_parses_integer_seconds() {
+        assert_eq!(
+            retry_after(&err_with_retry_after("7")),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn retry_after_is_none_when_absent() {
+        // A transport failure with no preserved response/headers.
+        assert_eq!(retry_after(&transient()), None);
+    }
+
+    #[test]
+    fn retry_after_is_none_on_non_numeric() {
+        // The HTTP-date form and garbage both parse to `None` (dates are out of
+        // scope — see `retry_after`).
+        assert_eq!(
+            retry_after(&err_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(retry_after(&err_with_retry_after("soon")), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_wait_honors_retry_after_over_backoff() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // base 10ms gives a ~10ms backoff for attempt 1; `Retry-After: 3` must
+        // win, so the paused clock advances ~3s instead.
+        let policy = RetryPolicy {
+            base: Duration::from_millis(10),
+            ..RetryPolicy::default()
+        };
+        let start = tokio::time::Instant::now();
+        assert!(retry_wait(&tx, &policy, 1, &err_with_retry_after("3")).await);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_wait_clamps_retry_after_to_the_cap() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // A hostile/buggy `Retry-After: 100` must not park the turn for 100s:
+        // it is clamped to `policy.cap` (8s), not honored verbatim.
+        let policy = RetryPolicy {
+            cap: Duration::from_secs(8),
+            ..RetryPolicy::default()
+        };
+        let start = tokio::time::Instant::now();
+        assert!(retry_wait(&tx, &policy, 1, &err_with_retry_after("100")).await);
+        assert_eq!(start.elapsed(), Duration::from_secs(8));
+    }
     // ---- #23: stream-stall timeouts ----
 
     type BoxStream =
