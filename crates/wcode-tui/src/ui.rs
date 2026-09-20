@@ -1136,25 +1136,29 @@ fn draw_team_strip(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     // The right-aligned "+N": a leading separator space, the plus, and the
-    // digits (mirrors `slot_geometry`'s budget).
+    // digits (mirrors `slot_geometry`'s budget) — but only when members
+    // overflow, so a no-overflow band reserves nothing on the right.
     let seg = if overflow > 0 {
         format!("+{overflow}")
     } else {
         String::new()
     };
-    // Columns left over after the equal shares, folded into the last share so
-    // the slot regions always run out to the `+N` / right edge.
+    // The band minus the `+N` segment and the inter-share separators, shared
+    // evenly (`slot_geometry`'s `inner`). The columns left over after the
+    // equal shares fold into the last share, so shares + separators + `+N`
+    // always sum to exactly the width.
     let inner = width
-        .saturating_sub(seg.chars().count() + 1)
+        .saturating_sub(seg.chars().count() + usize::from(overflow > 0))
         .saturating_sub(shown - 1);
     let slack = inner.saturating_sub(share.saturating_mul(shown));
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, (label, state, _, action)) in rows.into_iter().take(shown).enumerate() {
         let last = i == shown - 1;
-        // Every share is `share` wide; the non-last shares end in a dim `│`
-        // taken from the share, the last one stretches over the `slack` too.
-        let content_w = if last { share + slack } else { share - 1 };
+        // Each share is `share` columns of content (the last stretches over
+        // the `slack`); the dim `│` sits as a column BETWEEN shares, so shares
+        // + separators sum to exactly `inner` and the band ends flush.
+        let content_w = if last { share + slack } else { share };
         let slot = slot_span(label, state, action, content_w);
         let used: usize = slot.iter().map(|s| s.content.chars().count()).sum();
         spans.extend(slot);
@@ -1752,6 +1756,35 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_band_sums_exactly_to_the_width() {
+        // The band's shares + separators (+ `+N`) must total the width exactly
+        // for every width and team size the strip can show — never a shortfall
+        // at the right edge, never an overflow onto the next band.
+        for width in [60usize, 80, 97, 120] {
+            for n in 1..=10usize {
+                let (shown, share, overflow) = slot_geometry(width, n);
+                if shown == 0 || share == 0 {
+                    continue; // guarded: the renderer draws nothing
+                }
+                // The `+N` segment, leading space included (as budgeted).
+                let seg_w = if overflow > 0 {
+                    overflow.to_string().chars().count() + 1
+                } else {
+                    0
+                };
+                let inner = width.saturating_sub(seg_w).saturating_sub(shown - 1);
+                let slack = inner.saturating_sub(share.saturating_mul(shown));
+                let total = share
+                    .saturating_mul(shown)
+                    .saturating_add(slack)
+                    .saturating_add(shown - 1)
+                    .saturating_add(seg_w);
+                assert_eq!(total, width, "width {width}, n {n}");
+            }
+        }
+    }
+
+    #[test]
     fn the_strip_folds_members_beyond_three_into_a_plus_count() {
         let mut app = App::new();
         app.set_surfaces(vec![
@@ -1864,23 +1897,44 @@ mod tests {
     }
 
     #[test]
-    fn a_single_member_fills_the_strip_edge_to_edge() {
-        let mut app = App::new();
-        with_member(&mut app, "explorer", "m");
-        let terminal = render(&mut app, 80, 12);
-        let y = strip_row(&terminal, "explorer");
-        let buf = terminal.backend().buffer();
-        // Content starts at the left edge and the dim fill runs to the right
-        // edge: even a one-member team spans the whole band, like the rule.
-        assert_ne!(buf[(0, y)].symbol(), " ", "content starts at the left edge");
-        assert_eq!(buf[(79, y)].symbol(), " ", "the tail is filled, not blank");
-        assert_ne!(
-            buf[(79, y)].style(),
-            Style::default(),
-            "the fill is a dim band, not empty chrome"
-        );
-        // One share ⇒ no separators, not even at the edges.
-        assert!((0..80).all(|x| buf[(x, y)].symbol() != "│"));
+    fn the_strip_fills_the_band_edge_to_edge_for_any_team_size() {
+        // 1, 2, or 3 members (no `+N`): the dim band reaches the right edge
+        // exactly, so a lone or part-filled strip still spans the screen.
+        for n in 1..=3 {
+            let mut app = App::new();
+            let mut surfaces = vec![crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            }];
+            for i in 1..=n {
+                surfaces.push(crate::SurfaceInfo {
+                    id: SessionId::agent(format!("w{i}")),
+                    label: format!("w{i}"),
+                    model: "m".into(),
+                    is_root: false,
+                });
+            }
+            app.set_surfaces(surfaces);
+            let terminal = render(&mut app, 80, 12);
+            let y = strip_row(&terminal, "w1");
+            let buf = terminal.backend().buffer();
+            // Content starts at the left edge; the band's last column is
+            // dim-filled, never empty chrome.
+            assert_ne!(buf[(0, y)].symbol(), " ", "n={n}: content at the left edge");
+            assert_eq!(buf[(79, y)].symbol(), " ", "n={n}: fill reaches the last col");
+            assert_ne!(
+                buf[(79, y)].style(),
+                Style::default(),
+                "n={n}: the fill is a dim band"
+            );
+            // `│` separators only between the n-1 shares, never at the edges.
+            let bars: Vec<u16> = (0..80).filter(|&x| buf[(x, y)].symbol() == "│").collect();
+            assert_eq!(bars.len(), n - 1, "n={n}: one separator per gap");
+            assert_ne!(buf[(0, y)].symbol(), "│");
+            assert_ne!(buf[(79, y)].symbol(), "│");
+        }
     }
 
     #[test]
@@ -1916,7 +1970,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         let row = text.lines().nth(y as usize).expect("the strip row");
         // The running head is a green signal — not faint/white like accent.
-let run_x = row[..row.find("runner").expect("running label")].chars().count() as u16;
+        let run_x = row[..row.find("runner").expect("running label")].chars().count() as u16;
         assert_eq!(buf[(run_x - 2, y)].symbol(), "●", "running glyph");
         assert_eq!(
             buf[(run_x - 2, y)].style().fg,
@@ -1924,7 +1978,7 @@ let run_x = row[..row.find("runner").expect("running label")].chars().count() as
             "running must read green, like the ✓ marks"
         );
         // …and stays distinct from an idle member's dim head.
-let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16;
+        let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16;
         assert_ne!(buf[(idle_x - 2, y)].style().fg, success().fg);
     }
 
@@ -1960,13 +2014,15 @@ let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16
         let terminal = render(&mut app, 80, 12);
         let y = strip_row(&terminal, "w1");
         let buf = terminal.backend().buffer();
-        // 80 cols, 3 shares: (80 − 2) / 3 = 26 each; the dim `│` sits on the
-        // last column of every share but the last (cols 25 and 51) — equal
-        // columns spanning the screen, never at the outer edges.
+        // 80 cols, 3 shares: (80 − 2) / 3 = 26 each; the dim `│` is a
+        // column BETWEEN shares (cols 26 and 53) — equal columns spanning the
+        // screen, never at the outer edges, and the band ends flush at the edge.
         let bars: Vec<u16> = (0..80).filter(|&x| buf[(x, y)].symbol() == "│").collect();
-        assert_eq!(bars, vec![25, 51], "bars between shares, not at the edges");
-        assert!(buf[(25, y)].style().add_modifier.contains(Modifier::DIM), "the bar is dim chrome");
-        assert!(buf[(51, y)].style().add_modifier.contains(Modifier::DIM));
+        assert_eq!(bars, vec![26, 53], "bars between shares, not at the edges");
+        assert!(buf[(26, y)].style().add_modifier.contains(Modifier::DIM), "the bar is dim chrome");
+        assert!(buf[(53, y)].style().add_modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(79, y)].symbol(), " ", "3-member fill reaches the right edge");
+        assert_ne!(buf[(79, y)].style(), Style::default());
     }
 
     #[test]
@@ -2005,12 +2061,12 @@ let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16
                 is_root: false,
             },
         ]);
-// 80 cols, 4 members: three shares (24/24/25) + a right-aligned "+1".
+        // 80 cols, 4 members: three shares (25/25/25) + a right-aligned "+1".
         let terminal = render(&mut app, 80, 12);
         let text = buffer_text(&terminal);
         let y = strip_row(&terminal, "very-long-member");
         let buf = terminal.backend().buffer();
-// The "+1" survives at the far right…
+        // The "+1" survives at the far right…
         assert_eq!(buf[(78, y)].symbol(), "+");
         assert_eq!(buf[(79, y)].symbol(), "1", "+N hidden:\n{text}");
         // …while the long label clips inside its own share; its neighbors and
