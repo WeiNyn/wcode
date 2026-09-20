@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
@@ -108,7 +107,7 @@ pub struct WorkerTemplate {
 /// that the per-agent provider has landed — the `base_url`/`api_key`, so a worker
 /// may run on its own provider. `stream_fn` stays shared: the rig keystore rekeys
 /// per `ClientKey(base_url, api_key, session_id)`, so one closure serves them all.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default)]
 pub struct WorkerSpec {
     /// The worker's address. Auto-assigned (`w1`, `w2`, …) when absent.
     pub name: Option<String>,
