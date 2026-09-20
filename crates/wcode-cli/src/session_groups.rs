@@ -514,7 +514,6 @@ pub fn load_root(group: &SessionGroup) -> io::Result<(Session, Vec<AgentMessage>
 #[derive(Debug)]
 pub enum MemberResume {
     /// The member is live again: opened, seeded (D1), rebuilt, registered,
-    /// The member is live again: opened, seeded (D1), rebuilt, registered,
     /// owned, named.
     ///
     /// A `messages: 0` result is the **phantom-member window**: the member file
