@@ -8,8 +8,8 @@ This is a *feature* diff, not a line diff: `../jcode` is ~670k LOC over 80+ crat
 ## 2. Worth implementing — Tier 1 (small, on-doctrine)
 | # | gap | why | size |
 |---|-----|-----|------|
-| 1 | **Honor `Retry-After`** on 429/503 | wcode's retry path retries on blind backoff and ignores the header (`streamfn.rs::backoff`, `is_transient_status` — no `Retry-After` anywhere in the tree). Isolated change. | S |
-| 2 | **Socket `0600` + frame cap** | `socket::bind` sets no mode (follows umask) and the NDJSON reader (`frame::read_frame`, `read_line` into an unbounded `String`) is unbounded: any local user may connect, and a large frame grows memory. | S |
+| 1 | **Honor `Retry-After`** on 429/503 | wcode's retry path retried on blind backoff and ignored the header (`streamfn.rs::backoff`, `is_transient_status`). **Done** (`b3b3240`): `retry_after` reads the header and clamps it to `policy.cap`. | S |
+| 2 | **Socket `0600` + frame cap** | `socket::bind` set no mode (followed umask) and the NDJSON reader (`frame::read_frame`, `read_line` into an unbounded `String`) was unbounded. **Done** (`9705f06`): `bind` chmods `0600` (fails on error); `read_frame` caps at `MAX_FRAME_BYTES` (16 MiB). | S |
 | 3 | **Cross-session `session_search`** | sessions are already full JSONL under `~/.local/share/wcode/sessions` (`repl::session_dir`, `Session::append`); only listing exists (`repl::list_sessions`). jcode's is keyword + Bloom index, no embeddings. | S |
 | 4 | **Within-session `conversation_search`** | after compaction `compaction::compact_ctx` summarizes and drops the summarized prefix from the model's view with no retrieval path; same shape as #3 over `Agent::session_path`. | S |
 | 5 | **`todo` tool** | no model-facing checklist; `task` is root/team-scoped (`tools/task.rs` "Root-only"). jcode's is a plain `{content,status}` list (skip its goal/gate machinery). | S |

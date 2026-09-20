@@ -30,6 +30,7 @@ the boxes as each task completes and keep the status table current.
 | 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
 | 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
 | 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ◐ review snapshot |
+| 25 | Tier-1 gap sweep: Retry-After + socket hardening (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ done — b3b3240, 9705f06 |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
