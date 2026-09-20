@@ -1117,40 +1117,60 @@ fn slot_span(
 }
 
 /// Draw the active-team strip: one row between the rule and the input, up to
-/// [`MAX_TEAM_SLOTS`] member slots (`glyph label` + a dim action) with the rest
-/// folded into a right-aligned `+N`. Consumes [`App::member_rows`] — already
-/// ordered active-first then by action recency. The model is not shown (§2).
+/// [`MAX_TEAM_SLOTS`] equal-share member slots (`glyph label` + a dim action)
+/// with the rest folded into a right-aligned `+N`. Each share is filled out
+/// with dim background and separated from the next by a dim `│`, so the band
+/// reads edge-to-edge like the rule/status lines — a single member still spans
+/// the whole width. Consumes [`App::member_rows`] — already ordered active-first
+/// then by action recency. The model is not shown (§2).
 fn draw_team_strip(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
     let rows = app.member_rows();
     let n = rows.len();
-    let (shown, slot_width, overflow) = slot_geometry(area.width as usize, n);
-    if shown == 0 || slot_width == 0 {
+    let width = area.width as usize;
+    let (shown, share, overflow) = slot_geometry(width, n);
+    if shown == 0 || share == 0 {
         return;
     }
+    // The right-aligned "+N": a leading separator space, the plus, and the
+    // digits (mirrors `slot_geometry`'s budget).
+    let seg = if overflow > 0 {
+        format!("+{overflow}")
+    } else {
+        String::new()
+    };
+    // Columns left over after the equal shares, folded into the last share so
+    // the slot regions always run out to the `+N` / right edge.
+    let inner = width
+        .saturating_sub(seg.chars().count() + 1)
+        .saturating_sub(shown - 1);
+    let slack = inner.saturating_sub(share.saturating_mul(shown));
+
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut used = 0usize;
     for (i, (label, state, _, action)) in rows.into_iter().take(shown).enumerate() {
-        if i > 0 {
-            spans.push(Span::raw(" "));
-            used += 1;
-        }
-        let slot = slot_span(label, state, action, slot_width);
-        used += slot.iter().map(|s| s.content.chars().count()).sum::<usize>();
+        let last = i == shown - 1;
+        // Every share is `share` wide; the non-last shares end in a dim `│`
+        // taken from the share, the last one stretches over the `slack` too.
+        let content_w = if last { share + slack } else { share - 1 };
+        let slot = slot_span(label, state, action, content_w);
+        let used: usize = slot.iter().map(|s| s.content.chars().count()).sum();
         spans.extend(slot);
+        // Dim spaces fill the share's remainder: one continuous subtle band.
+        if let Some(fill) = content_w.checked_sub(used).filter(|&f| f > 0) {
+            spans.push(Span::styled(" ".repeat(fill), dim()));
+        }
+        if !last {
+            spans.push(Span::styled("│", dim()));
+        }
     }
     if overflow > 0 {
-        let seg = format!("+{overflow}");
-        // Right-align: pad the gap between the last slot and the `+N`.
-        let pad = (area.width as usize)
-            .saturating_sub(used)
-            .saturating_sub(1 + seg.chars().count());
-        for _ in 0..pad {
-            spans.push(Span::raw(" "));
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let pad = width.saturating_sub(used).saturating_sub(seg.chars().count());
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), dim()));
         }
-        spans.push(Span::raw(" "));
         spans.push(Span::styled(seg, dim()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1185,6 +1205,7 @@ mod tests {
     use crate::app::{App, AppEvent, Key};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
     use wcode_harness::protocol::SessionId;
 
     /// The default root surface's id (`App::new`'s single surface).
@@ -1233,6 +1254,14 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// The team strip's row: the first buffer row that names `label`.
+    fn strip_row(terminal: &Terminal<TestBackend>, label: &str) -> u16 {
+        buffer_text(terminal)
+            .lines()
+            .position(|line| line.contains(label))
+            .expect("the strip row") as u16
     }
 
     #[test]
@@ -1764,7 +1793,8 @@ mod tests {
         ]);
         // Three equal slots share the band; the two remaining members fold into
         // a right-aligned "+2" instead of a fourth slot.
-        let text = buffer_text(&render(&mut app, 100, 12));
+        let terminal = render(&mut app, 100, 12);
+        let text = buffer_text(&terminal);
         assert!(text.contains("w1"), "slot w1 missing:\n{text}");
         assert!(text.contains("w2"), "slot w2 missing:\n{text}");
         assert!(text.contains("w3"), "slot w3 missing:\n{text}");
@@ -1773,6 +1803,14 @@ mod tests {
             !text.contains("w4") && !text.contains("w5"),
             "members beyond the top three should fold into +N:\n{text}"
         );
+        // "+2" is flush against the right edge, on the same dim band.
+        let y = strip_row(&terminal, "w1");
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(99, y)].symbol(), "2", "+N not right-aligned:\n{text}");
+        assert_eq!(buf[(98, y)].symbol(), "+");
+        // The seam before it is dim fill, never slot content.
+        assert_eq!(buf[(97, y)].symbol(), " ");
+        assert_ne!(buf[(97, y)].style(), Style::default());
     }
 
     #[test]
@@ -1822,6 +1860,124 @@ mod tests {
             text.contains("○ very-long-member"),
             "the clip must cut the label tail, not the head:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_single_member_fills_the_strip_edge_to_edge() {
+        let mut app = App::new();
+        with_member(&mut app, "explorer", "m");
+        let terminal = render(&mut app, 80, 12);
+        let y = strip_row(&terminal, "explorer");
+        let buf = terminal.backend().buffer();
+        // Content starts at the left edge and the dim fill runs to the right
+        // edge: even a one-member team spans the whole band, like the rule.
+        assert_ne!(buf[(0, y)].symbol(), " ", "content starts at the left edge");
+        assert_eq!(buf[(79, y)].symbol(), " ", "the tail is filled, not blank");
+        assert_ne!(
+            buf[(79, y)].style(),
+            Style::default(),
+            "the fill is a dim band, not empty chrome"
+        );
+        // One share ⇒ no separators, not even at the edges.
+        assert!((0..80).all(|x| buf[(x, y)].symbol() != "│"));
+    }
+
+    #[test]
+    fn dim_bars_separate_the_shares() {
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w1"),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w2"),
+                label: "w2".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w3"),
+                label: "w3".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        let terminal = render(&mut app, 80, 12);
+        let y = strip_row(&terminal, "w1");
+        let buf = terminal.backend().buffer();
+        // 80 cols, 3 shares: (80 − 2) / 3 = 26 each; the dim `│` sits on the
+        // last column of every share but the last (cols 25 and 51) — equal
+        // columns spanning the screen, never at the outer edges.
+        let bars: Vec<u16> = (0..80).filter(|&x| buf[(x, y)].symbol() == "│").collect();
+        assert_eq!(bars, vec![25, 51], "bars between shares, not at the edges");
+        assert!(buf[(25, y)].style().add_modifier.contains(Modifier::DIM), "the bar is dim chrome");
+        assert!(buf[(51, y)].style().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn a_long_label_never_eats_the_plus_count() {
+        let mut app = App::new();
+        let long = "very-long-member-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent(long),
+                label: long.into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("alpha"),
+                label: "alpha".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("beta"),
+                label: "beta".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("gamma"),
+                label: "gamma".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+// 80 cols, 4 members: three shares (24/24/25) + a right-aligned "+1".
+        let terminal = render(&mut app, 80, 12);
+        let text = buffer_text(&terminal);
+        let y = strip_row(&terminal, "very-long-member");
+        let buf = terminal.backend().buffer();
+// The "+1" survives at the far right…
+        assert_eq!(buf[(78, y)].symbol(), "+");
+        assert_eq!(buf[(79, y)].symbol(), "1", "+N hidden:\n{text}");
+        // …while the long label clips inside its own share; its neighbors and
+        // the seam before "+1" stay intact.
+        assert!(text.contains("…"), "the long label should clip:\n{text}");
+        assert!(
+            text.contains("alpha") && text.contains("beta"),
+            "a long label hides its neighbors:\n{text}"
+        );
+        for x in 75..78 {
+            assert_eq!(buf[(x, y)].symbol(), " ", "dim seam before +N:\n{text}");
+            assert_ne!(buf[(x, y)].style(), Style::default());
+        }
     }
 
     /// Push one tool invocation (start → end) into the focused surface.
