@@ -19,6 +19,7 @@ mod rtk;
 mod session_groups;
 mod skills;
 mod tools;
+mod workspace;
 
 use crate::config::{
     Config, ConfigError, EnvLike, FileConfig, TeamMember, config_dir, merge, parse_endpoint,
@@ -537,6 +538,7 @@ async fn main() {
                     args.owner.as_deref(),
                     args.name.as_deref(),
                     None,
+                    cfg.workspace.digest_cas,
                 )
                 .await;
                 std::process::exit(0);
@@ -675,6 +677,7 @@ async fn main() {
             compaction: cfg.compaction,
             working_dir: cwd.clone(),
             members_dir: active_group.as_ref().map(|g| g.members_dir.clone()),
+            digest_cas: cfg.workspace.digest_cas,
         };
         crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
     });
@@ -824,6 +827,7 @@ async fn main() {
         session,
         context,
         extra_tools,
+        cfg.workspace.digest_cas,
     );
 
     if args.serve {
@@ -1045,6 +1049,7 @@ async fn main() {
                 args.owner.as_deref(),
                 args.name.as_deref(),
                 orchestrator,
+                cfg.workspace.digest_cas,
             )
             .await
         }
@@ -1569,3 +1574,4 @@ mod instructions_flag_tests {
         assert!(!Args::default().no_instructions);
     }
 }
+

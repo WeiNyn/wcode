@@ -379,10 +379,19 @@ pub fn build_agent(
     session: Option<Session>,
     context: Vec<AgentMessage>,
     extra_tools: Vec<Tool>,
+    digest_cas: bool,
 ) -> Agent {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut tools = default_tools(spec.tools);
     tools.extend(extra_tools);
+    // A FRESH WorkspaceHooks per agent (per-session digest cache). It must NOT
+    // live in the shared `spec.hooks` set: `/new` and `/resume` rebuild the
+    // agent in-process from that shared set, so a shared instance would either
+    // vanish or leak one session's cache into another (reviewer #1).
+    let mut hooks = spec.hooks;
+    hooks.push(std::sync::Arc::new(crate::workspace::WorkspaceHooks::new(
+        digest_cas,
+    )));
     Agent::new(AgentConfig {
         system: system_prompt(
             spec.tools,
@@ -395,7 +404,7 @@ pub fn build_agent(
         tools,
         llm: spec.llm,
         stream_fn: rig_stream_fn(),
-        hooks: spec.hooks,
+        hooks,
         session,
         context,
         working_dir: cwd,
@@ -636,6 +645,7 @@ pub async fn run(
     owner: Option<&str>,
     name: Option<&str>,
     orchestrator: Option<crate::agents::Orchestrator>,
+    digest_cas: bool,
 ) {
     #[cfg(unix)]
     let remote = matches!(source, SessionSource::Remote(_));
@@ -749,6 +759,7 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
+                            digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
                         if let Some(o) = &orchestrator {
@@ -897,6 +908,7 @@ pub async fn run(
                                         .as_ref()
                                         .map(|o| o.tools())
                                         .unwrap_or_default(),
+                                    digest_cas,
                                 );
                                 let handle = SessionActor::spawn(new_agent);
                                 if let Some(o) = &orchestrator {
@@ -942,6 +954,7 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
+                            digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
                         if let Some(o) = &orchestrator {
@@ -1244,6 +1257,35 @@ fn out(s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn build_agent_leaves_the_shared_hook_set_untouched() {
+        // Reviewer #1's correction: WorkspaceHooks is built INSIDE build_agent,
+        // so the shared set that `/new` and `/resume` clone never carries a
+        // per-session digest cache — the policy is rebuilt with every agent.
+        let shared = HooksSet::default();
+        assert!(shared.is_empty());
+        let _agent = build_agent(
+            AgentSpec {
+                llm: LlmOpts::default(),
+                hooks: shared.clone(),
+                tools: &ToolsConfig::default(),
+                compaction: CompactionPolicy::default(),
+                instructions: &InstructionSet::default(),
+                skills: &SkillSet::default(),
+                team: &[],
+                guidelines: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        assert!(
+            shared.is_empty(),
+            "the shared set must not gain the per-session WorkspaceHooks"
+        );
+    }
     use serde_json::json;
     use wcode_harness::message::{StopReason, Usage};
 
@@ -1923,3 +1965,4 @@ mod system_prompt_tests {
         assert!(!base.contains("Project instructions"), "{base}");
     }
 }
+

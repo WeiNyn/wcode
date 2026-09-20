@@ -151,11 +151,21 @@ impl TypedTool for Read {
             }
         }
 
+        let plain = args.plain.unwrap_or(false);
         let mut out = String::new();
+        if !plain {
+            // A7: the digest header is the FIRST line of ANCHORED output only —
+            // `--plain` stays raw (no header). It is the plumbing channel the
+            // workspace hook reads the whole-file digest from: `after_tool_call`
+            // receives no `working_dir`, so the digest must ride the output text.
+            out.push_str(&crate::workspace::digest_header(
+                &args.path,
+                &anchor::file_digest(content.as_bytes()),
+            ));
+        }
         if let Some(note) = ambiguity_note {
             out.push_str(&note);
         }
-        let plain = args.plain.unwrap_or(false);
         if anchor::is_degenerate_empty(&content) {
             // Byte-empty and "\n"-only files are one anonymous insertion point;
             // a "\n"-only file is not a real blank line.
@@ -230,9 +240,10 @@ mod tests {
             .await;
         assert!(!out.is_error);
         let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 2);
-        // Every line is ANCHOR│content with a parseable 5-char anchor.
-        for line in rendered {
+        assert_eq!(rendered.len(), 3); // digest header + 2 paged lines
+        assert!(rendered[0].contains("digest"), "{}", rendered[0]);
+        // Every content line is ANCHOR│content with a parseable 5-char anchor.
+        for &line in &rendered[1..] {
             let (hash, content) = line.split_once(anchor::ANCHOR_SEP).unwrap();
             assert!(anchor::is_anchor(hash), "bad anchor: {line}");
             assert!(content.contains("line "));
@@ -287,9 +298,18 @@ mod tests {
             assert!(out.output.contains("empty file"), "for {content:?}");
             outputs.push(out.output);
         }
+        // Both degenerate states now carry a digest header, but the digest
+        // differs ("" and "\n" are different bytes), so compare the body
+        // beneath the header — the insertion point itself is unchanged.
+        assert!(
+            outputs[0].contains("digest") && outputs[1].contains("digest"),
+            "both carry a header: {outputs:?}"
+        );
+        let body = |s: &str| s.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap();
         assert_eq!(
-            outputs[0], outputs[1],
-            "empty & newline-only must render identically"
+            body(&outputs[0]),
+            body(&outputs[1]),
+            "empty & newline-only must render identically below the digest header"
         );
     }
 
@@ -316,10 +336,10 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 3); // c, d, e
-        let first = rendered[0].split_once(anchor::ANCHOR_SEP).unwrap();
+        assert_eq!(rendered.len(), 4); // digest header + c, d, e
+        let first = rendered[1].split_once(anchor::ANCHOR_SEP).unwrap();
         assert_eq!(first.0, anchor::anchor("c"));
-        assert!(rendered[2].contains("e"));
+        assert!(rendered[3].contains("e"));
     }
 
     #[tokio::test]
@@ -343,11 +363,11 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 3); // b, c, d
-        assert!(rendered[0].contains("b"));
-        assert!(rendered[1].contains("c"));
+        assert_eq!(rendered.len(), 4); // digest header + b, c, d
+        assert!(rendered[1].contains("b"));
+        assert!(rendered[2].contains("c"));
         assert_eq!(
-            rendered[2].split_once(anchor::ANCHOR_SEP).unwrap().0,
+            rendered[3].split_once(anchor::ANCHOR_SEP).unwrap().0,
             anchor::anchor("d")
         );
     }
@@ -373,7 +393,7 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         assert!(
-            out.output.lines().next().unwrap().contains("a"),
+            out.output.lines().nth(1).unwrap().contains("a"),
             "{}",
             out.output
         );
@@ -511,10 +531,11 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         let lines: Vec<&str> = out.output.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].ends_with("short"), "{}", lines[0]);
+        assert_eq!(lines.len(), 3); // digest header + 2 content lines
+        assert!(lines[0].contains("digest"), "{}", lines[0]);
+        assert!(lines[1].ends_with("short"), "{}", lines[1]);
         // Display is truncated, but the leading anchor hashes the FULL line.
-        let (hash, display) = lines[1].split_once(anchor::ANCHOR_SEP).unwrap();
+        let (hash, display) = lines[2].split_once(anchor::ANCHOR_SEP).unwrap();
         assert_eq!(hash, anchor::anchor(&long));
         assert!(display.contains("…(+"), "{}", display);
     }
@@ -546,8 +567,8 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         let lines: Vec<&str> = out.output.lines().collect();
-        assert_eq!(lines.len(), MAX_READ_LINES + 1); // page + note
-        assert!(lines[MAX_READ_LINES].contains("10 more lines"));
+        assert_eq!(lines.len(), MAX_READ_LINES + 2); // digest header + page + note
+        assert!(lines[MAX_READ_LINES + 1].contains("10 more lines"));
 
         // An explicit limit above the cap is honored (no note).
         let out2 = Read
@@ -564,7 +585,7 @@ mod tests {
             )
             .await;
         assert!(!out2.is_error, "{}", out2.output);
-        assert_eq!(out2.output.lines().count(), MAX_READ_LINES + 10);
+        assert_eq!(out2.output.lines().count(), MAX_READ_LINES + 11); // + header
 
         // Plain mode is capped too.
         let out3 = Read
@@ -615,3 +636,4 @@ mod indentation_regression {
         );
     }
 }
+

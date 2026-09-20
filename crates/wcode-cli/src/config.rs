@@ -17,6 +17,30 @@ pub struct HooksConfig {
     pub rtk: RtkPreference,
 }
 
+/// Workspace concurrency, from the `[workspace]` config table. One honored
+/// toggle: whole-file digest CAS (design §3).
+///
+/// Default ON: every agent gets a fresh `WorkspaceHooks` (built in
+/// `build_agent`/`worker_config_with`) that auto-attaches the last-read digest
+/// to a mutation and refuses a stale write. Set `digest_cas = false` to turn
+/// the policy off (the hook short-circuits both of its seams).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Auto-attach last-read digests + refuse stale writes (design §3).
+    #[serde(default = "default_true")]
+    pub digest_cas: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self { digest_cas: true }
+    }
+}
+
 /// Per-tool registration flags, loaded from the `[tools]` config table.
 ///
 /// `grep` and `find` are redundant with `bash` (which can run `grep`/`find`
@@ -217,6 +241,9 @@ pub struct FileConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub retry: RetryConfig,
+    /// `[workspace]`: whole-file digest CAS (default ON).
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
     /// `[peers]`: a name → peer map. A value is a socket path (a served peer,
     /// reachable over `--peer`/`register_remote`) or an address alias
     /// (`agent:<id>`/`user`). The phonebook (§13.15) resolves `message`'s `to`.
@@ -248,6 +275,8 @@ pub struct Config {
     pub instructions: InstructionsConfig,
     pub skills: SkillsConfig,
     pub retry: RetryPolicy,
+    /// Resolved `[workspace]`: whole-file digest CAS (default ON).
+    pub workspace: WorkspaceConfig,
     /// Resolved `[peers]` (name → socket path or address): the phonebook (§13.15).
     pub peers: std::collections::HashMap<String, String>,
     /// Resolved `[team]` (F3): the workers the orchestrator starts with.
@@ -474,6 +503,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         instructions,
         skills,
         retry,
+        workspace: file.workspace,
         peers: file.peers,
         team: file.team,
         orchestrator: file.orchestrator,
@@ -1173,5 +1203,36 @@ mod instructions_cfg_tests {
         )
         .unwrap();
         assert_eq!(cfg.instructions.file.as_deref(), Some("off"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_cfg_tests {
+    use super::*;
+
+    #[test]
+    fn digest_cas_defaults_on() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.workspace.digest_cas, "absent [workspace] means ON");
+        assert_eq!(cfg.workspace, WorkspaceConfig::default());
+    }
+
+    #[test]
+    fn toml_turns_digest_cas_off_and_on() {
+        let off: FileConfig =
+            toml::from_str("model = \"m\"\n[workspace]\ndigest_cas = false\n").unwrap();
+        assert!(!off.workspace.digest_cas);
+        assert!(!merge(EnvLike::default(), off).unwrap().workspace.digest_cas);
+
+        let on: FileConfig =
+            toml::from_str("model = \"m\"\n[workspace]\ndigest_cas = true\n").unwrap();
+        assert!(merge(EnvLike::default(), on).unwrap().workspace.digest_cas);
     }
 }

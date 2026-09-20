@@ -3,6 +3,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
+use super::anchor;
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReplaceArgs {
     /// File path (relative to the working directory unless absolute).
@@ -13,6 +15,11 @@ pub struct ReplaceArgs {
     pub new_string: String,
     /// Replace every occurrence instead of requiring a unique match.
     pub replace_all: Option<bool>,
+    /// Whole-file digest from your last read of this file (the `# <path>
+    /// digest <hex>` line `read` prints). Auto-filled by the harness; normally
+    /// leave unset. A mismatch refuses the call (E_STALE_DIGEST) — re-read.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
 }
 
 pub struct Replace {
@@ -50,6 +57,18 @@ impl TypedTool for Replace {
                 };
             }
         };
+        // Whole-file CAS (D1): refuse when the file moved since the digest was
+        // captured, before touching the match count. Nothing is written.
+        if let Some(expected) = &args.expected_digest {
+            let actual = anchor::file_digest(content.as_bytes());
+            if &actual != expected {
+                return ToolOutput {
+                    output: crate::workspace::stale_digest(&args.path, expected, &actual),
+                    is_error: true,
+                    ..ToolOutput::default()
+                };
+            }
+        }
         let matches = content.matches(&args.old_string).count();
         if matches == 0 {
             return ToolOutput {
@@ -99,6 +118,39 @@ impl TypedTool for Replace {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stale_digest_refuses_the_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha beta").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let mut a = args("f.txt", "beta", "BETA", None);
+        a.expected_digest = Some("000000000000".into());
+        let out = tool().execute(a, &ctx).await;
+        assert!(out.is_error, "{}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        assert!(out.output.contains("re-read"), "{}", out.output);
+        // Nothing written.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "alpha beta"
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_digest_allows_the_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha beta").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let mut a = args("f.txt", "beta", "BETA", None);
+        a.expected_digest = Some(anchor::file_digest(b"alpha beta"));
+        let out = tool().execute(a, &ctx).await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "alpha BETA"
+        );
+    }
+
     fn tool() -> Replace {
         Replace::new(Arc::new(tokio::sync::Mutex::new(())))
     }
@@ -109,6 +161,7 @@ mod tests {
             old_string: old.into(),
             new_string: new.into(),
             replace_all,
+            expected_digest: None,
         }
     }
 
@@ -168,3 +221,4 @@ mod tests {
         );
     }
 }
+

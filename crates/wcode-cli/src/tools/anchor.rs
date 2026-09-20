@@ -389,3 +389,52 @@ mod tests {
         assert_eq!(out, "a\n");
     }
 }
+
+/// Length of a whole-file digest in hex chars (48 bits of [`hash64`]).
+///
+/// Design D4 asks for a short prefix — enough to *compare*, not to audit.
+/// §5.4 settles the hash: reuse the in-tree [`hash64`] rather than add a crypto
+/// dependency; a crypto hash buys no forgery resistance beyond the prefix, and
+/// the CAS is an optimistic-concurrency check, not a security boundary. An
+/// accidental collision is ≈2^-48 per comparison.
+pub const DIGEST_HEX_LEN: usize = 12;
+
+/// Whole-file content digest — the digest-CAS identity of a file's exact
+/// bytes. A pure function of the bytes: the first [`DIGEST_HEX_LEN`] hex chars
+/// of [`hash64`], lowercase, zero-padded. Not the per-line [`anchor`] (which
+/// hashes one line, `\r`-stripped).
+///
+/// Contract: identical bytes ⇒ identical digest, deterministically, across
+/// processes and hosts (two peers on one filesystem compare equal). Unlike
+/// [`hash_input`], the bytes are hashed VERBATIM — no trailing-`\r` strip and
+/// no line split — so a CRLF checkout differs from an LF one.
+pub fn file_digest(bytes: &[u8]) -> String {
+    let full = format!("{:016x}", hash64(bytes));
+    full[..DIGEST_HEX_LEN].to_string()
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn digest_is_deterministic_and_len_bounded() {
+        assert_eq!(file_digest(b"hello world"), file_digest(b"hello world"));
+        assert_eq!(file_digest(b"hello world").len(), DIGEST_HEX_LEN);
+        assert_eq!(file_digest(b"").len(), DIGEST_HEX_LEN);
+    }
+
+    #[test]
+    fn digest_differs_on_a_single_byte_change() {
+        assert_ne!(file_digest(b"a"), file_digest(b"b"));
+    }
+
+    #[test]
+    fn digest_hashes_exact_bytes_no_cr_strip() {
+        // Contrast the per-line hash: `hash_input` strips one trailing `\r`,
+        // so CRLF and LF address identically there. The whole-file digest is
+        // the *file* identity, so it must not.
+        assert_eq!(hash_input("line\r"), hash_input("line"));
+        assert_ne!(file_digest(b"line\r\n"), file_digest(b"line\n"));
+    }
+}

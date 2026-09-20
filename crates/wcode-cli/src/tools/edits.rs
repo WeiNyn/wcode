@@ -31,6 +31,11 @@ pub struct EditsArgs {
     /// batch is atomic — any stale/ambiguous/overlapping op aborts the whole
     /// call and nothing is written.
     pub edits: Vec<EditOp>,
+    /// Whole-file digest from your last read of this file (the `# <path>
+    /// digest <hex>` line `read` prints). Auto-filled by the harness; normally
+    /// leave unset. A mismatch refuses the call (E_STALE_DIGEST) — re-read.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
 }
 
 /// Cap on the anchored `Region now:` echo: a batch that spans more than this
@@ -98,6 +103,20 @@ impl TypedTool for Edits {
                 };
             }
         };
+
+        // Whole-file CAS (D1): the batch touches one file, so a single
+        // top-level digest covers every op. Verified before any anchor
+        // resolution; a mismatch refuses the whole batch, nothing written.
+        if let Some(expected) = &args.expected_digest {
+            let actual = anchor::file_digest(content.as_bytes());
+            if &actual != expected {
+                return ToolOutput {
+                    output: crate::workspace::stale_digest(&args.edits[0].path, expected, &actual),
+                    is_error: true,
+                    ..ToolOutput::default()
+                };
+            }
+        }
 
         let empty = anchor::is_degenerate_empty(&content);
         let original = content.clone();
@@ -324,6 +343,54 @@ impl TypedTool for Edits {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stale_digest_refuses_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    expected_digest: Some("000000000000".into()),
+                    edits: vec![op("f.txt", &ha, None, "A")],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "{}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        assert!(out.output.contains("re-read"), "{}", out.output);
+        // All-or-nothing: the batch was not written.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a\nb\nc\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_digest_applies_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let digest = anchor::file_digest(b"a\nb\n");
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    expected_digest: Some(digest),
+                    edits: vec![op("f.txt", &ha, None, "A")],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "A\nb\n"
+        );
+    }
+
     fn tool() -> Edits {
         Edits::new(Arc::new(tokio::sync::Mutex::new(())))
     }
@@ -349,6 +416,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![
                         op("f.txt", &ha, None, "A\nA"),
                         op("f.txt", &hd, None, "D\nD"),
@@ -375,6 +443,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![
                         op("f.txt", &ha, None, "A"),
                         op("f.txt", "zzz99", None, "B"), // valid anchor, never in file
@@ -404,6 +473,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![
                         op("f.txt", &hx, Some(&hz), "W"),
                         op("f.txt", &hy, None, "V"), // inside op1's range
@@ -436,6 +506,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![op1, op("f.txt", &hx, None, "y")],
                 },
                 &ctx,
@@ -459,6 +530,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![op("a.txt", &ha, None, "A"), op("b.txt", &hb, None, "B")],
                 },
                 &ctx,
@@ -488,6 +560,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![op("f.txt", &ha, None, "A"), op("./f.txt", &hb, None, "B")],
                 },
                 &ctx,
@@ -512,6 +585,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![
                         op("f.txt", &ha, None, "A"), // changes
                         op("f.txt", &hb, None, "b"), // already "b" -> no-op
@@ -542,7 +616,15 @@ mod tests {
     async fn empty_batch_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = tool().execute(EditsArgs { edits: vec![] }, &ctx).await;
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    edits: vec![],
+                    expected_digest: None,
+                },
+                &ctx,
+            )
+            .await;
         assert!(out.is_error);
         assert!(out.output.contains("E_EMPTY_BATCH"));
     }
@@ -557,6 +639,7 @@ mod tests {
         let out = tool()
             .execute(
                 EditsArgs {
+                    expected_digest: None,
                     edits: vec![
                         op("f.txt", &hx, None, "A"),
                         op("f.txt", &h, None, "z"), // ambiguous: two `}` lines
@@ -574,3 +657,4 @@ mod tests {
         );
     }
 }
+

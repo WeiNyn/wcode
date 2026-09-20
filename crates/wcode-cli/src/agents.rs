@@ -97,6 +97,9 @@ pub struct WorkerTemplate {
     /// v1 in-memory contract (no session file); set by the composition root
     /// when a group exists.
     pub members_dir: Option<PathBuf>,
+    /// `[workspace] digest_cas` — each worker builds its OWN `WorkspaceHooks`
+    /// with this (per-session cache; never shared).
+    pub digest_cas: bool,
 }
 
 /// How to build one worker. `Default` reproduces v1 behavior: inherit the
@@ -379,6 +382,9 @@ impl SessionFactory {
                     me: id.clone(),
                     owner: owner.clone(),
                 }));
+                hooks.push(Arc::new(crate::workspace::WorkspaceHooks::new(
+                    t.digest_cas,
+                )));
                 hooks
             },
             session,
@@ -610,6 +616,7 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
+            digest_cas: true,
         };
         (SessionFactory::new(registry.clone(), template), registry)
     }
@@ -924,6 +931,7 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
+            digest_cas: true,
         };
         let o = Orchestrator::new(registry.clone(), template);
 
@@ -974,6 +982,7 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
+            digest_cas: true,
         };
         Orchestrator::new(Registry::new(), template)
     }
@@ -1195,3 +1204,4 @@ mod tests {
         assert!(err.contains("bogus"), "{err}");
     }
 }
+

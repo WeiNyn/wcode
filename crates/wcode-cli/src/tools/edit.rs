@@ -22,6 +22,11 @@ pub struct EditArgs {
     pub old_string: Option<String>,
     /// Replace every matching range instead of requiring exactly one.
     pub replace_all: Option<bool>,
+    /// Whole-file digest from your last read of this file (the `# <path>
+    /// digest <hex>` line `read` prints). Auto-filled by the harness; normally
+    /// leave unset. A mismatch refuses the call (E_STALE_DIGEST) — re-read.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
 }
 
 pub struct Edit {
@@ -78,6 +83,19 @@ impl TypedTool for Edit {
                 };
             }
         };
+
+        // Whole-file CAS (D1): refuse when the file moved since the digest was
+        // captured. Runs before anchor resolution; nothing is written on refuse.
+        if let Some(expected) = &args.expected_digest {
+            let actual = anchor::file_digest(content.as_bytes());
+            if &actual != expected {
+                return ToolOutput {
+                    output: crate::workspace::stale_digest(&args.path, expected, &actual),
+                    is_error: true,
+                    ..ToolOutput::default()
+                };
+            }
+        }
 
         // A byte-empty or "\n"-only file is one anonymous empty insertion point, so
         // the agent can populate it with `edit { from: <emptyAnchor> }`.
@@ -285,6 +303,41 @@ fn stale_message(args: &EditArgs, lines: &[String], anchors: &[String]) -> Strin
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn stale_digest_refuses_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a = 1");
+        let mut a = args("f.txt", &ha, None, "a = 10", None, None);
+        a.expected_digest = Some("000000000000".into());
+        let out = tool().execute(a, &ctx).await;
+        assert!(out.is_error, "{}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        assert!(out.output.contains("re-read"), "{}", out.output);
+        // Nothing written.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a = 1\nb = 2\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_digest_allows_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a = 1");
+        let mut a = args("f.txt", &ha, None, "a = 10", None, None);
+        a.expected_digest = Some(anchor::file_digest(b"a = 1\nb = 2\n"));
+        let out = tool().execute(a, &ctx).await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a = 10\nb = 2\n"
+        );
+    }
+
     fn tool() -> Edit {
         Edit::new(Arc::new(tokio::sync::Mutex::new(())))
     }
@@ -304,6 +357,7 @@ mod tests {
             replacement: replacement.into(),
             old_string: old_string.map(String::from),
             replace_all,
+            expected_digest: None,
         }
     }
 
@@ -624,3 +678,4 @@ mod tests {
         );
     }
 }
+
