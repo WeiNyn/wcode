@@ -1034,12 +1034,13 @@ fn success() -> Style {
     theme::theme().success
 }
 
-/// The style for a member's row, keyed by state (idle = dim, running = accent,
-/// done = muted).
+/// The style for a member's row, keyed by state: idle = dim, running = green
+/// [`success`] (a clear "active" signal, distinct from the dim status line and
+/// from idle/done), done = muted.
 fn state_style(state: TeamState) -> Style {
     match state {
         TeamState::Idle => dim(),
-        TeamState::Running => accent(),
+        TeamState::Running => success(),
         TeamState::Done => muted(),
     }
 }
@@ -1880,6 +1881,51 @@ mod tests {
         );
         // One share ⇒ no separators, not even at the edges.
         assert!((0..80).all(|x| buf[(x, y)].symbol() != "│"));
+    }
+
+    #[test]
+    fn the_running_member_reads_green() {
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("runner"),
+                label: "runner".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("idle"),
+                label: "idle".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        app.handle(AppEvent::Agent(
+            SessionId::agent("runner"),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        let terminal = render(&mut app, 80, 12);
+        let text = buffer_text(&terminal);
+        let y = strip_row(&terminal, "runner");
+        let buf = terminal.backend().buffer();
+        let row = text.lines().nth(y as usize).expect("the strip row");
+        // The running head is a green signal — not faint/white like accent.
+let run_x = row[..row.find("runner").expect("running label")].chars().count() as u16;
+        assert_eq!(buf[(run_x - 2, y)].symbol(), "●", "running glyph");
+        assert_eq!(
+            buf[(run_x - 2, y)].style().fg,
+            success().fg,
+            "running must read green, like the ✓ marks"
+        );
+        // …and stays distinct from an idle member's dim head.
+let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16;
+        assert_ne!(buf[(idle_x - 2, y)].style().fg, success().fg);
     }
 
     #[test]
