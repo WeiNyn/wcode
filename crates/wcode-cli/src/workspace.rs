@@ -374,12 +374,18 @@ mod chain {
 
     use wcode_harness::hooks::HooksSet;
 
+    /// A shared, ordered log of hook invocations (per test). Both `Recorder` and
+    /// `LoggedWorkspace` append to it, so the `HooksSet`'s insertion order is
+    /// observable.
+    type OrderLog = Arc<Mutex<Vec<&'static str>>>;
+
     /// A minimal local hook (the harness's `RecordingHooks` is crate-local):
-    /// records that it ran and leaves an observable marker, so a composed pass
-    /// is checkable. `after_tool_call` appends to the END so it never disturbs
-    /// the digest header at `output`'s first line.
-    #[derive(Default)]
+    /// counts its hook points and appends `label` to the shared order log, so a
+    /// composed pass's *ordering* is observable. Its `after_tool_call` marker
+    /// goes at the END so it never disturbs the digest header on line 1.
     struct Recorder {
+        label: &'static str,
+        order: OrderLog,
         transforms: AtomicUsize,
         outputs: AtomicUsize,
     }
@@ -388,6 +394,7 @@ mod chain {
     impl Hooks for Recorder {
         async fn transform_tool_input(&self, call: &mut ToolCall) {
             self.transforms.fetch_add(1, Ordering::SeqCst);
+            self.order.lock().unwrap().push(self.label);
             if let Some(obj) = call.arguments.as_object_mut() {
                 obj.insert("recorder".into(), serde_json::json!(true));
             }
@@ -395,7 +402,28 @@ mod chain {
 
         async fn after_tool_call(&self, _call: &ToolCall, out: &mut ToolOutput) {
             self.outputs.fetch_add(1, Ordering::SeqCst);
+            self.order.lock().unwrap().push(self.label);
             out.output.push('!');
+        }
+    }
+
+    /// The real digest hook, wrapped only to tick the shared order log at each
+    /// seam (it forwards straight through to the real `WorkspaceHooks`).
+    struct LoggedWorkspace {
+        inner: WorkspaceHooks,
+        order: OrderLog,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for LoggedWorkspace {
+        async fn transform_tool_input(&self, call: &mut ToolCall) {
+            self.order.lock().unwrap().push("workspace");
+            self.inner.transform_tool_input(call).await;
+        }
+
+        async fn after_tool_call(&self, call: &ToolCall, out: &mut ToolOutput) {
+            self.order.lock().unwrap().push("workspace");
+            self.inner.after_tool_call(call, out).await;
         }
     }
 
@@ -575,15 +603,25 @@ mod chain {
     /// in insertion order). Covers the ordering seam, not just the hook alone.
     #[tokio::test]
     async fn the_real_hook_set_composes_in_order() {
-        let rec = Arc::new(Recorder::default());
-        let set = HooksSet::from_iter([
-            rec.clone() as Arc<dyn Hooks>,
-            Arc::new(WorkspaceHooks::new(true)) as Arc<dyn Hooks>,
-        ]);
+        let order: OrderLog = Arc::new(Mutex::new(Vec::new()));
+        let rec = Arc::new(Recorder {
+            label: "recorder",
+            order: order.clone(),
+            transforms: AtomicUsize::new(0),
+            outputs: AtomicUsize::new(0),
+        });
+        let wsp = Arc::new(LoggedWorkspace {
+            inner: WorkspaceHooks::new(true),
+            order: order.clone(),
+        });
+        // Insertion order: recorder first, the (wrapped) digest hook second.
+        let set = HooksSet::from_iter([rec.clone() as Arc<dyn Hooks>, wsp as Arc<dyn Hooks>]);
 
-        // transform: the recorder runs first (marker), then the digest hook.
+        // transform_tool_input: both hooks run, in INSERTION order.
         let mut w = write_call("f.txt", "NEW");
         set.transform_tool_input(&mut w).await;
+        assert_eq!(*order.lock().unwrap(), ["recorder", "workspace"]);
+        order.lock().unwrap().clear();
         assert_eq!(rec.transforms.load(Ordering::SeqCst), 1);
         assert_eq!(w.arguments["recorder"], true);
         assert!(
@@ -591,16 +629,18 @@ mod chain {
             "an empty cache attaches nothing"
         );
 
-        // Both hooks run on after_tool_call; the recorder leaves its marker...
+        // after_tool_call: both hooks run, in INSERTION order; the recorder
+        // leaves its marker, the digest hook harvests the header digest.
         let mut read_out = ToolOutput {
             output: "# f.txt digest cafebabe0000\nAB1CD│line\n".into(),
             ..ToolOutput::default()
         };
         set.after_tool_call(&read_call("f.txt"), &mut read_out).await;
+        assert_eq!(*order.lock().unwrap(), ["recorder", "workspace"]);
         assert_eq!(rec.outputs.load(Ordering::SeqCst), 1);
         assert!(read_out.output.ends_with('!'), "{}", read_out.output);
 
-        // ...and the composed transform now attaches the digest it cached.
+        // The composed pass armed the cache → the next transform attaches it.
         let mut w2 = write_call("f.txt", "NEW");
         set.transform_tool_input(&mut w2).await;
         assert_eq!(w2.arguments[EXPECTED_DIGEST_KEY], "cafebabe0000");
