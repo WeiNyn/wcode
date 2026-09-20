@@ -821,6 +821,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn group_dir_of_maps_a_group_dir_and_root_jsonl_only() {
+        let base = tempfile::tempdir().unwrap();
+        let group = make_group(base.path(), "1768570000000_a1b2c3d4");
+
+        // (1) The group directory itself maps to itself.
+        assert_eq!(group_dir_of(&group.dir).as_deref(), Some(group.dir.as_path()));
+
+        // (2) `<groupdir>/root.jsonl` (the resume / `/reload` target) maps back up.
+        let root = group.dir.join("root.jsonl");
+        fs::write(&root, "").unwrap();
+        assert_eq!(group_dir_of(&root).as_deref(), Some(group.dir.as_path()));
+
+        // (3) A bare flat file (a legacy session) is not a group.
+        let flat = base.path().join("1768570000000_a1b2c3d4.jsonl");
+        fs::write(&flat, "").unwrap();
+        assert_eq!(group_dir_of(&flat), None);
+
+        // (3b) An unrelated directory is not a group (`is_group_dir_name` fails)…
+        let plain = base.path().join("stuff");
+        fs::create_dir(&plain).unwrap();
+        assert_eq!(group_dir_of(&plain), None);
+        // …and a `root.jsonl` inside it maps nowhere either.
+        let other = plain.join("root.jsonl");
+        fs::write(&other, "").unwrap();
+        assert_eq!(group_dir_of(&other), None);
+    }
+
     // ---- member records & the manifest fast path ----
 
     #[test]
