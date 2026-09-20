@@ -673,6 +673,20 @@ fn lock_slot<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Await `f` unless the idle-Ctrl-C signal fires first (`None`). The REPL's
+/// prompt read races this: a signal leaves the loop so its after-loop relaunch
+/// line prints, exactly like `/exit`/EOF. An in-flight run is unaffected (its
+/// Ctrl-C routes to the actor as a `Cancel`, not this signal).
+async fn unless_idle_ctrl_c<F: std::future::Future>(
+    signal: &tokio::sync::Notify,
+    f: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        _ = signal.notified() => None,
+        out = f => Some(out),
+    }
+}
+
 /// Where a REPL session comes from: a local agent to hand to the actor, or a
 /// client already connected to a session served elsewhere.
 pub enum SessionSource {
@@ -726,10 +740,15 @@ pub async fn run(
     }
     // Ctrl-C lives on a separate task. The slot holds the *current* backend
     // (swapped by `/new`/`/resume`) so Ctrl-C always reaches the live run; when
-    // idle it exits.
+    // idle it ends the loop (so the relaunch line still prints).
+    // Idle Ctrl-C ends the loop (rather than exiting in the task) so the
+    // after-loop relaunch line prints there too; the task signals via this
+    // `Notify`.
+    let ctrl_c_exit = Arc::new(tokio::sync::Notify::new());
     let backend_slot: Arc<Mutex<Backend>> = Arc::new(Mutex::new(backend.clone()));
     {
         let in_flight = in_flight.clone();
+        let ctrl_c_exit = ctrl_c_exit.clone();
         let backend_slot = backend_slot.clone();
         tokio::spawn(async move {
             while tokio::signal::ctrl_c().await.is_ok() {
@@ -737,7 +756,8 @@ pub async fn run(
                     let _ = lock_slot(&backend_slot).send(Request::Cancel);
                 } else {
                     println!();
-                    std::process::exit(0);
+                    // Break the main loop (it prints the relaunch line once).
+                    ctrl_c_exit.notify_one();
                 }
             }
         });
@@ -772,7 +792,10 @@ pub async fn run(
     loop {
         print!("❯ ");
         let _ = io::stdout().flush();
-        let Ok(Some(line)) = lines.next_line().await else {
+        let Some(line) = unless_idle_ctrl_c(&ctrl_c_exit, lines.next_line()).await else {
+            break; // idle Ctrl-C: leave the loop normally (the relaunch line prints)
+        };
+        let Ok(Some(line)) = line else {
             break; // EOF or stdin error: exit
         };
         let line = line.trim();
@@ -1714,6 +1737,25 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
         // An embedded single quote is escaped portably.
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[tokio::test]
+    async fn an_idle_ctrl_c_signal_ends_the_prompt_wait() {
+        // The fix: idle Ctrl-C notifies instead of exiting, so the prompt read
+        // is abandoned and the loop breaks — then the after-loop relaunch line
+        // prints, exactly like `/exit`/EOF.
+        let signal = tokio::sync::Notify::new();
+        let pending = std::future::pending::<Option<String>>();
+        let fut = unless_idle_ctrl_c(&signal, pending);
+        signal.notify_one();
+        assert!(fut.await.is_none(), "the signal must end the prompt wait");
+    }
+
+    #[tokio::test]
+    async fn a_ready_read_is_returned_without_a_signal() {
+        let signal = tokio::sync::Notify::new();
+        let out = unless_idle_ctrl_c(&signal, async { Some("hi".to_string()) }).await;
+        assert_eq!(out, Some(Some("hi".to_string())));
     }
 
     #[test]
