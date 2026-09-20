@@ -13,7 +13,9 @@ pub mod peers;
 pub mod read;
 pub mod replace;
 pub mod spawn;
+pub mod task;
 pub mod write;
+
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -31,6 +31,7 @@ use wcode_tui::SurfaceSpec;
 
 use crate::config::ToolsConfig;
 use crate::session_groups::{self, SessionGroup};
+use crate::tasks::TaskList;
 use crate::tools::default_tools;
 use crate::tools::message::Message;
 use crate::tools::spawn::Spawn;
@@ -455,6 +456,7 @@ pub struct Orchestrator {
     factory: Arc<SessionFactory>,
     id: SessionId,
     phonebook: Phonebook,
+    tasks: TaskList,
 }
 
 impl Orchestrator {
@@ -464,6 +466,7 @@ impl Orchestrator {
             registry,
             id: SessionId::agent("orchestrator"),
             phonebook: Phonebook::default(),
+            tasks: TaskList::new(),
         }
     }
 
@@ -482,6 +485,11 @@ impl Orchestrator {
                 self.phonebook.clone(),
             )),
             erased(crate::tools::peers::Peers::new(self.phonebook.clone())),
+            // The plan — root-only: only the root holds this tool set.
+            erased(crate::tools::task::Task::new(
+                self.tasks.clone(),
+                self.phonebook.clone(),
+            )),
         ]
     }
 
@@ -536,6 +544,12 @@ impl Orchestrator {
     /// surface's id.
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    /// The root's shared plan — so the composition root can seed the TUI and
+    /// forward live updates (`main.rs`).
+    pub fn tasks(&self) -> &TaskList {
+        &self.tasks
     }
 
     /// The shared address book — so the composition root can enumerate the

@@ -18,6 +18,7 @@ mod repl;
 mod rtk;
 mod session_groups;
 mod skills;
+mod tasks;
 mod tools;
 mod workspace;
 

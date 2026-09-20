@@ -27,6 +27,7 @@ the boxes as each task completes and keep the status table current.
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
+| 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ◐ revived — comparison refreshed; C1 typed report proposed; C3 (DAG) is the north star |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -591,6 +592,30 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 
 ---
 
+## 22. Team vs jcode swarm — comparison & candidates
+
+**Revived.** The parked comparison of wcode's agent-team against jcode's swarm
+(brainstorm §10/§10.1, roadmap S5, decision #11) is re-opened against **as-built**
+code on both sides: wcode's shipped star (F1–F4) vs jcode's DAG-first model. The
+capability table, gap analysis, and candidate features live in
+[`swarm-comparison-plan.md`](swarm-comparison-plan.md).
+
+**Recommendation.** Take the minimal subset: **C1 — typed report** now (improves
+the shipped star with no new subsystem); **C2 — shared task list** if the team
+needs explicit task tracking. Treat **C3 — the task DAG + scheduler (S5)** as the
+documented north star, built only if coverage-first exploration becomes a goal
+(then with C4's gates). Do **not** import jcode's channels / shared-context KV /
+worktree managers / coordinator entity / ACLs.
+
+**Tasks**
+- [ ] C1 — typed report: document the report shape in the worker blurb; thread it
+      through the auto-forward; test the report reaches the owner intact.
+- [ ] C2 — shared task list (if approved): a task tool + a root-owned list +
+      a TUI `/tasks`.
+- [ ] C3 — task DAG + scheduler (decision gate; needs its own plan doc).
+- [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
+- [ ] C5 — lifecycle footer (small, presentation).
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -628,3 +653,4 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 19. **19** digest-CAS follow-ups. Done (`3886148`).
 20. **20** digest-CAS chain-test residuals. Done (`1b2ca6b`, `28fde3e`).
 21. **21** session relaunch UX — TUI `/reload` + relaunch line on exit. Done (`85911d5`…`0765661`).
+22. **22** team vs jcode swarm — comparison revived; see [`swarm-comparison-plan.md`](swarm-comparison-plan.md).
