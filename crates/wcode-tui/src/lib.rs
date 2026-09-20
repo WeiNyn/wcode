@@ -34,7 +34,7 @@ use wcode_protocol::Backend;
 pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, Tool};
 pub use crate::theme::{ThemeSpec, parse_theme};
 
-/// A surface's live state, shown in the sidebar and by `/team`.
+/// A surface's live state, shown in the team strip and by `/team`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamState {
     /// Not running (the default until an event says otherwise).
@@ -46,7 +46,7 @@ pub enum TeamState {
 }
 
 impl TeamState {
-    /// The lowercase label used in the sidebar and `/team`.
+    /// The lowercase label used in the team strip and `/team`.
     pub fn label(self) -> &'static str {
         match self {
             TeamState::Idle => "idle",
@@ -55,7 +55,7 @@ impl TeamState {
         }
     }
 
-    /// The sidebar's status glyph: running · idle · done.
+    /// The team strip's status glyph: running · idle · done.
     pub fn glyph(self) -> &'static str {
         match self {
             TeamState::Idle => "○",
@@ -66,7 +66,7 @@ impl TeamState {
 }
 
 /// One surface's display identity: the id its events route by, and the
-/// `label`/`model` the sidebar shows.
+/// `label`/`model` the team strip shows.
 #[derive(Clone, Debug)]
 pub struct SurfaceInfo {
     pub id: SessionId,
@@ -86,7 +86,7 @@ pub struct SurfaceSpec {
 }
 
 impl SurfaceSpec {
-    /// The sidebar/`/team` identity for this spec — the fields the reducer
+    /// The team strip/`/team` identity for this spec — the fields the reducer
     /// tracks (the `backend` belongs to the loop, not the app).
     fn info(&self) -> SurfaceInfo {
         SurfaceInfo {

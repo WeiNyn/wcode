@@ -1,13 +1,14 @@
 //! Immediate-mode rendering: compose the whole frame from [`App`] each draw.
 //!
-//! Bands (top → bottom): transcript · rule · input · status. See
-//! `docs/tui-design.md` for the visual spec.
+//! Bands (top → bottom): transcript · rule · [team strip] · input · status.
+//! The team strip is a one-row band that appears only when there is a team.
+//! See `docs/tui-design.md` for the visual spec.
 
 use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
@@ -31,10 +32,13 @@ const TOOL_EXPANDED_LINES: usize = 200;
 /// Diff lines a collapsed tool shows before the hint.
 const TOOL_DIFF_PREVIEW_LINES: usize = 8;
 
-/// The team sidebar appears only when the terminal is at least this wide.
-const SIDEBAR_MIN_WIDTH: u16 = 60;
-/// The sidebar's fixed width (`Constraint::Length(26)`).
-const SIDEBAR_WIDTH: u16 = 26;
+/// The team strip appears only when the terminal is at least this wide.
+const TEAM_STRIP_MIN_WIDTH: u16 = 50;
+/// … and at least this tall, so body + rule + strip + input + status leave
+/// the transcript something to show.
+const TEAM_STRIP_MIN_HEIGHT: u16 = 6;
+/// Slots shown before overflow folds the rest into a right-aligned `+N`.
+const MAX_TEAM_SLOTS: usize = 3;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -46,31 +50,37 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let view = app.input_view();
     let (_, _, _, total_rows) = input_rows(&view.display, view.cursor_col, width);
     let input_height = total_rows.clamp(1, max_rows) as u16;
-    let [body, rule, input, status] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(input_height),
-        Constraint::Length(1),
-    ])
-    .areas(area);
 
-    // The team sidebar splits the `body` band when there is a team and the
-    // terminal is wide enough; otherwise the layout is byte-identical to before.
-    let sidebar = !app.hide_sidebar() && !app.member_rows().is_empty() && area.width >= SIDEBAR_MIN_WIDTH;
-    if sidebar {
-        let [left, right] =
-            Layout::horizontal([Constraint::Min(20), Constraint::Length(SIDEBAR_WIDTH)])
-                .areas(body);
-        draw_transcript(frame, left, app);
-        draw_sidebar(frame, right, app);
-    } else {
-        draw_transcript(frame, body, app);
+    // The team strip is a one-row band between `rule` and `input`, present only
+    // when there is a team and the terminal is big enough. With no team the
+    // layout is byte-identical to the original four-band stack.
+    let team = !app.member_rows().is_empty()
+        && area.width >= TEAM_STRIP_MIN_WIDTH
+        && area.height >= TEAM_STRIP_MIN_HEIGHT;
+    let mut constraints = vec![Constraint::Min(1), Constraint::Length(1)];
+    if team {
+        constraints.push(Constraint::Length(1));
     }
+    constraints.push(Constraint::Length(input_height));
+    constraints.push(Constraint::Length(1));
+    let areas = Layout::vertical(constraints).split(area);
+    let body = areas[0];
+    let rule = areas[1];
+    let (input, status) = if team {
+        (areas[3], areas[4])
+    } else {
+        (areas[2], areas[3])
+    };
+
+    draw_transcript(frame, body, app);
     draw_rule(frame, rule);
+    if team {
+        draw_team_strip(frame, areas[2], app);
+    }
     draw_input(frame, input, &view);
     draw_status(frame, status, app);
-    draw_completion(frame, area, rule, app, sidebar);
-    draw_search_prompt(frame, area, rule, app, sidebar);
+    draw_completion(frame, area, rule, app);
+    draw_search_prompt(frame, area, rule, app);
     // The modal, if any, is drawn last — over the bands.
     draw_overlay(frame, area, app);
 }
@@ -79,24 +89,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// band like the command completion. Browse-owned and non-reflowing: it is
 /// `Clear`ed over the transcript only while the prompt is open, so an
 /// input-mode frame stays byte-identical.
-fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App, sidebar: bool) {
+fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let Some(query) = app.search_query() else {
         return;
     };
     if app.mode() != Mode::Browse {
         return; // defensive: the prompt never survives exit_browse
     }
-    // Two content rows + the borders; keep clear of the team sidebar.
+    // Two content rows + the borders; floats above the rule, so the team strip
+    // (below the rule) can never collide.
     let height = 4;
     if above.y < height {
         return; // no room above the input band
     }
-    let avail = if sidebar {
-        area.width.saturating_sub(SIDEBAR_WIDTH)
-    } else {
-        area.width
-    };
-    let width = avail.saturating_sub(2).clamp(1, 64);
+    let width = area.width.saturating_sub(2).clamp(1, 64);
     let rect = Rect {
         x: area.x + 1,
         y: above.y - height,
@@ -229,7 +235,7 @@ const MAX_COMPLETION_ROWS: usize = 8;
 /// Draw the inline `/`-command completion popup, floating just above the input
 /// band (its bottom edge rests on the `rule`). Non-modal and non-reflowing: it
 /// is `Clear`ed over the transcript and styled like the picker (design D7).
-fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App, sidebar: bool) {
+fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let rows = app.completion_rows();
     if rows.is_empty() {
         return;
@@ -247,14 +253,9 @@ fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App, sideba
         selected.saturating_sub(visible - 1).min(rows.len() - visible)
     };
     let height = visible as u16 + 2;
-    // Keep clear of the team sidebar: when it is shown the popup stops at its
-    // left edge (the same split predicate `draw` uses).
-    let avail = if sidebar {
-        area.width.saturating_sub(SIDEBAR_WIDTH)
-    } else {
-        area.width
-    };
-    let width = avail.saturating_sub(2).clamp(1, 64);
+    // The popup floats above the rule and is drawn over the transcript only; the
+    // team strip sits below the rule, so the two can never overlap.
+    let width = area.width.saturating_sub(2).clamp(1, 64);
     let rect = Rect {
         x: area.x + 1,
         y: above.y - height,
@@ -1008,7 +1009,7 @@ fn muted() -> Style {
     theme::theme().muted
 }
 
-/// The overlay / sidebar border and its title.
+/// The overlay / popup border and its title.
 fn border() -> Style {
     theme::theme().border
 }
@@ -1043,51 +1044,116 @@ fn state_style(state: TeamState) -> Style {
     }
 }
 
-/// Clip a row to `width` display columns (char count; the sidebar is ASCII-ish,
-/// and ratatui clips precisely anyway).
-fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        text.to_string()
-    } else {
-        text.chars().take(width).collect()
+/// The strip's slot layout for `n` members across `area_width` columns:
+/// `(shown, slot_width, overflow)` — up to [`MAX_TEAM_SLOTS`] equal-width
+/// slots, the members beyond them folded into a right-aligned `+N`. The width
+/// budget is the band minus the `+N` segment and the inter-slot gaps, shared
+/// evenly. `slot_width` is 0 when the band cannot seat even one slot; the
+/// renderer draws nothing then (never a divide-by-zero).
+fn slot_geometry(area_width: usize, n: usize) -> (usize, usize, usize) {
+    let shown = n.min(MAX_TEAM_SLOTS);
+    if area_width == 0 || shown == 0 {
+        return (shown, 0, 0);
     }
+    let overflow = n.saturating_sub(shown);
+    // The right-aligned "+N": a separator space, the plus, and the digits.
+    let overflow_w = if overflow > 0 {
+        2 + overflow.to_string().chars().count()
+    } else {
+        0
+    };
+    let gaps = shown.saturating_sub(1);
+    let inner = area_width
+        .saturating_sub(overflow_w)
+        .saturating_sub(gaps);
+    (shown, inner / shown, overflow)
 }
 
-/// Draw the team status sidebar: a bordered pane, one `{glyph} {name}` row per
-/// member plus its live dim action, the row styled by state. The model is not
-/// shown (§2).
-fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
-    let block = WidgetBlock::default()
-        .borders(Borders::ALL)
-        .border_style(border())
-        .title(Span::styled(" team ", border()));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+/// One slot's spans: a state-colored `glyph label` head plus a dim tail — the
+/// live action, or ` —` for idle/done members with nothing running — clipped
+/// to `width` with a single trailing `…` when cut. The clip takes from the
+/// whole slot text up front (reserving the ellipsis), so a long label can
+/// never push past the slot into a neighbor's share.
+fn slot_span(
+    label: &str,
+    state: TeamState,
+    action: Option<&str>,
+    width: usize,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let head = format!("{} {label}", state.glyph());
+    let tail = match (state, action) {
+        (_, Some(action)) => format!(" {action}"),
+        (TeamState::Idle | TeamState::Done, None) => " —".to_string(),
+        (TeamState::Running, None) => String::new(),
+    };
+    let head_len = head.chars().count();
+    let total = head_len + tail.chars().count();
+    // Reserve the ellipsis slot *before* taking, so a cut slot never exceeds
+    // `width` columns.
+    let take = if total <= width { total } else { width - 1 };
+    let head_take = take.min(head_len);
+    let tail_take = take.saturating_sub(head_take);
+    let cut = total > width;
+    let mut spans = Vec::new();
+    let mut head_text: String = head.chars().take(head_take).collect();
+    if cut && tail_take == 0 {
+        // The tail did not survive the clip; the ellipsis rides the head.
+        head_text.push('…');
+    }
+    if !head_text.is_empty() {
+        spans.push(Span::styled(head_text, state_style(state)));
+    }
+    if tail_take > 0 {
+        let mut tail_text: String = tail.chars().take(tail_take).collect();
+        if cut {
+            tail_text.push('…');
+        }
+        spans.push(Span::styled(tail_text, dim()));
+    }
+    spans
+}
 
-    let width = inner.width as usize;
-    let lines: Vec<Line> = app
-        .member_rows()
-        .into_iter()
-        .map(|(label, state, focused, action)| {
-            // The focused member is bolded — a style-only highlight, so rows stay
-            // within the fixed sidebar width.
-            let mut style = state_style(state);
-            if focused {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            let head = clip(&format!("{} {label}", state.glyph()), width);
-            let used = head.chars().count();
-            let mut spans = vec![Span::styled(head, style)];
-            if let Some(action) = action {
-                let tail = clip(&format!(" {action}"), width.saturating_sub(used));
-                if !tail.is_empty() {
-                    spans.push(Span::styled(tail, dim()));
-                }
-            }
-            Line::from(spans)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+/// Draw the active-team strip: one row between the rule and the input, up to
+/// [`MAX_TEAM_SLOTS`] member slots (`glyph label` + a dim action) with the rest
+/// folded into a right-aligned `+N`. Consumes [`App::member_rows`] — already
+/// ordered active-first then by action recency. The model is not shown (§2).
+fn draw_team_strip(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let rows = app.member_rows();
+    let n = rows.len();
+    let (shown, slot_width, overflow) = slot_geometry(area.width as usize, n);
+    if shown == 0 || slot_width == 0 {
+        return;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for (i, (label, state, _, action)) in rows.into_iter().take(shown).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+            used += 1;
+        }
+        let slot = slot_span(label, state, action, slot_width);
+        used += slot.iter().map(|s| s.content.chars().count()).sum::<usize>();
+        spans.extend(slot);
+    }
+    if overflow > 0 {
+        let seg = format!("+{overflow}");
+        // Right-align: pad the gap between the last slot and the `+N`.
+        let pad = (area.width as usize)
+            .saturating_sub(used)
+            .saturating_sub(1 + seg.chars().count());
+        for _ in 0..pad {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(seg, dim()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub(crate) fn accent() -> Style {
@@ -1518,21 +1584,21 @@ mod tests {
                         width: area.width,
                         height: 1,
                     };
-                    draw_completion(frame, area, above, &app, false);
+                    draw_completion(frame, area, above, &app);
                 }
             })
             .unwrap();
     }
 
     #[test]
-    fn an_empty_roster_draws_no_sidebar() {
+    fn an_empty_roster_draws_no_strip() {
         let mut app = App::new();
         let text = buffer_text(&render(&mut app, 80, 20));
-        assert!(!text.contains("team"), "no sidebar without a team:\n{text}");
+        assert!(!text.contains("team"), "no strip without a team:\n{text}");
     }
 
     #[test]
-    fn the_team_sidebar_lists_members_and_hides_when_narrow() {
+    fn the_team_strip_lists_members_and_hides_when_narrow() {
         let mut app = App::new();
         app.set_surfaces(vec![
             crate::SurfaceInfo {
@@ -1559,10 +1625,9 @@ mod tests {
             wcode_harness::event::AgentEvent::AgentStart,
         ));
 
-        // Wide enough: the sidebar shows the title, each member with its status
-        // glyph — but never the model (§2).
+        // Wide enough: the strip shows each member with its status glyph — but
+        // never the model (§2).
         let wide = buffer_text(&render(&mut app, 80, 20));
-        assert!(wide.contains("team"), "sidebar title missing:\n{wide}");
         assert!(
             wide.contains("● explorer"),
             "running member missing:\n{wide}"
@@ -1570,38 +1635,52 @@ mod tests {
         assert!(wide.contains("○ reviewer"), "idle member missing:\n{wide}");
         assert!(
             !wide.contains("m1") && !wide.contains("m2"),
-            "the model should be gone from the sidebar:\n{wide}"
+            "the model should be gone from the strip:\n{wide}"
         );
 
-        // Narrow (< 60 cols): the sidebar is hidden.
-        let narrow = buffer_text(&render(&mut app, 50, 20));
+        // Narrow (< 50 cols): the strip is hidden.
+        let narrow = buffer_text(&render(&mut app, 49, 20));
         assert!(
             !narrow.contains("explorer"),
-            "the sidebar should hide when narrow:\n{narrow}"
+            "the strip should hide when narrow:\n{narrow}"
         );
     }
 
     #[test]
-    fn the_sidebar_shows_only_at_the_width_threshold() {
+    fn the_strip_shows_only_at_the_width_threshold() {
         let mut app = App::new();
         with_member(&mut app, "explorer", "m");
-        // 59 cols: hidden. 60 (the threshold): shown.
-        assert!(!buffer_text(&render(&mut app, 59, 12)).contains("explorer"));
-        assert!(buffer_text(&render(&mut app, 60, 12)).contains("explorer"));
+        // 49 cols: hidden. 50 (the threshold): shown.
+        assert!(!buffer_text(&render(&mut app, 49, 12)).contains("explorer"));
+        assert!(buffer_text(&render(&mut app, 50, 12)).contains("explorer"));
     }
 
     #[test]
-    fn a_short_body_draws_the_sidebar_without_panicking() {
+    fn a_short_terminal_draws_the_strip_without_panicking() {
         let mut app = App::new();
         with_member(&mut app, "explorer", "m");
-        // Tiny heights leave a degenerate `body` (even 0–1 rows): no panic.
+        // Tiny heights leave a degenerate `body` (even 0–1 rows): no panic. The
+        // strip itself is hidden below its minimum height (6 rows).
         for height in [3u16, 4, 5] {
-            let _ = buffer_text(&render(&mut app, 80, height));
+            let text = buffer_text(&render(&mut app, 80, height));
+            assert!(
+                !text.contains("explorer"),
+                "the strip must hide below 6 rows ({height}):\n{text}"
+            );
+        }
+        // From the minimum height up, body + rule + strip + input + status all
+        // fit and the strip still renders on a short screen.
+        for height in [6u16, 7, 8] {
+            let text = buffer_text(&render(&mut app, 80, height));
+            assert!(
+                text.contains("explorer"),
+                "the strip should render at {height} rows:\n{text}"
+            );
         }
     }
 
     #[test]
-    fn the_completion_popup_does_not_overdraw_the_sidebar() {
+    fn the_completion_popup_does_not_overdraw_the_strip() {
         let mut app = App::new();
         with_member(&mut app, "explorer", "m");
         for c in "/mo".chars() {
@@ -1609,25 +1688,140 @@ mod tests {
         }
         assert!(!app.completion_rows().is_empty(), "the popup should be open");
 
-        let width = 80u16;
-        let terminal = render(&mut app, width, 16);
-        let buf = terminal.backend().buffer();
-        // The sidebar owns the rightmost `SIDEBAR_WIDTH` columns; the popup
-        // (title "commands") must never paint there.
-        let sidebar_left = width - SIDEBAR_WIDTH;
-        let mut sidebar = String::new();
-        for y in 0..buf.area.height {
-            for x in sidebar_left..buf.area.width {
-                sidebar.push_str(buf[(x, y)].symbol());
-            }
-            sidebar.push('\n');
-        }
+        let terminal = render(&mut app, 80, 16);
+        let rows: Vec<String> = buffer_text(&terminal).lines().map(str::to_string).collect();
+        // The popup floats above the rule; the strip sits below it, so the two
+        // must never share a row.
+        let strip_row = rows
+            .iter()
+            .position(|row| row.contains("explorer"))
+            .expect("the strip row");
         assert!(
-            !sidebar.contains("commands"),
-            "the popup overdraws the sidebar:\n{sidebar}"
+            !rows[strip_row].contains("commands"),
+            "the popup overdraws the strip:\n{}",
+            rows[strip_row]
         );
-        // Sanity: the popup is still drawn (to the left of the sidebar).
+        // Sanity: the popup is still drawn elsewhere.
         assert!(buffer_text(&terminal).contains("commands"));
+    }
+
+    #[test]
+    fn strip_slots_are_equal_shares_after_overflow_and_gaps() {
+        // 3 members, no overflow: three equal slots, two 1-char gaps.
+        // 100 cols → (100 − 2) / 3 = 32 each.
+        assert_eq!(slot_geometry(100, 3), (3, 32, 0));
+        // 5 members: three slots + a right-aligned "+2" (2 chars + a space).
+        // 100 → (100 − 3 − 2) / 3 = 31.
+        assert_eq!(slot_geometry(100, 5), (3, 31, 2));
+        // A band too narrow to seat a slot is guarded, never div-by-zero
+        // (slot_width 0 means the renderer draws nothing).
+        assert_eq!(slot_geometry(4, 5), (3, 0, 2));
+        assert_eq!(slot_geometry(0, 4), (3, 0, 0));
+        // No members: nothing to draw.
+        assert_eq!(slot_geometry(80, 0), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_strip_folds_members_beyond_three_into_a_plus_count() {
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w1"),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w2"),
+                label: "w2".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w3"),
+                label: "w3".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w4"),
+                label: "w4".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("w5"),
+                label: "w5".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        // Three equal slots share the band; the two remaining members fold into
+        // a right-aligned "+2" instead of a fourth slot.
+        let text = buffer_text(&render(&mut app, 100, 12));
+        assert!(text.contains("w1"), "slot w1 missing:\n{text}");
+        assert!(text.contains("w2"), "slot w2 missing:\n{text}");
+        assert!(text.contains("w3"), "slot w3 missing:\n{text}");
+        assert!(text.contains("+2"), "overflow count missing:\n{text}");
+        assert!(
+            !text.contains("w4") && !text.contains("w5"),
+            "members beyond the top three should fold into +N:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_long_label_is_clipped_within_its_slot_without_hiding_neighbors() {
+        let mut app = App::new();
+        let long = "very-long-member-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("alpha"),
+                label: "alpha".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent(long),
+                label: long.into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("beta"),
+                label: "beta".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        // Three slots at 80 cols → (80 − 2) / 3 = 26 each. The long label clips
+        // inside its own slot (a single …) and must not hide "alpha" or "beta".
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(
+            text.contains("alpha") && text.contains("beta"),
+            "a long label hides its neighbors:\n{text}"
+        );
+        assert!(text.contains("…"), "the long label should clip:\n{text}");
+        assert!(
+            !text.contains(long),
+            "the long label must be cut to its slot:\n{text}"
+        );
+        // The clip keeps the glyph + label prefix, only the tail is cut.
+        assert!(
+            text.contains("○ very-long-member"),
+            "the clip must cut the label tail, not the head:\n{text}"
+        );
     }
 
     /// Push one tool invocation (start → end) into the focused surface.
@@ -1979,18 +2173,6 @@ mod tests {
             assert!(text.contains(chord), "chord {chord:?} missing:\n{text}");
         }
         assert!(text.contains("toggle this help"), "F1's description missing:\n{text}");
-    }
-
-    #[test]
-    fn ctrl_b_hides_the_team_sidebar() {
-        let mut app = App::new();
-        with_member(&mut app, "explorer", "m");
-        assert!(buffer_text(&render(&mut app, 80, 16)).contains("explorer"));
-        app.handle(AppEvent::Key(Key::Ctrl('b')));
-        assert!(
-            !buffer_text(&render(&mut app, 80, 16)).contains("explorer"),
-            "the sidebar should be hidden after Ctrl-B"
-        );
     }
 
     #[test]

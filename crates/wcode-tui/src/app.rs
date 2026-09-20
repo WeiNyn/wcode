@@ -418,7 +418,7 @@ const ACTION_KEYS: [&str; 9] = [
     "name",
 ];
 
-/// The sidebar's action label for a tool call: `"{name} {target}"`, where the
+/// The team strip's action label for a tool call: `"{name} {target}"`, where the
 /// target is the first present string argument among [`ACTION_KEYS`] on the
 /// committed assistant block whose `ToolCall` id matches `call_id` (§3). No
 /// matching call, or no recognizable argument, falls back to just `"{name}"`.
@@ -446,7 +446,7 @@ fn action_label(transcript: &[Block], call_id: &str, name: &str) -> String {
     name.to_string()
 }
 
-/// Truncate a sidebar action to `~18` columns, ending with `…` when cut.
+/// Truncate a team-strip action to `~18` columns, ending with `…` when cut.
 fn clip_label(text: &str) -> String {
     const MAX: usize = 18;
     if text.chars().count() <= MAX {
@@ -472,7 +472,6 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-T", "expand / collapse all tool output"),
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
     ("Alt-1..9", "focus the Nth surface"),
-    ("Ctrl-B", "toggle the team sidebar"),
     ("Ctrl-G", "browse the transcript"),
     ("j / k · g / G", "browse: next / previous · first / last"),
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
@@ -688,15 +687,15 @@ pub(crate) struct InputView {
 }
 
 /// One conversation's state: its identity (the id events route by), the
-/// `label`/`model` the sidebar shows, the transcript, run state, changeset,
+/// `label`/`model` the team strip shows, the transcript, run state, changeset,
 /// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
 /// root, the rest are team members.
 pub struct Surface {
     /// The id this surface's events route by.
     id: SessionId,
-    /// A short display name (the sidebar + status line).
+    /// A short display name (the team strip + status line).
     label: String,
-    /// The effective model id (the sidebar).
+    /// The effective model id (the status line).
     model: String,
     /// The root surface (full status line); members are the team.
     is_root: bool,
@@ -709,11 +708,15 @@ pub struct Surface {
     /// prompt starts a run, kept afterwards so the run stays reviewable.
     changes: Vec<Change>,
     running: bool,
-    /// A run finished (drives the sidebar's `done`).
+    /// A run finished (drives the team strip's `done`).
     finished: bool,
-    /// The current run's live action (`"{tool} {target}"`) for the sidebar;
-    /// cleared at run start/end so it reflects the current run only (§3).
+    /// The current run's live action (`"{tool} {target}"`) for the team strip
+    /// and `/team`; cleared at run start/end so it reflects the current run
+    /// only (§3).
     last_action: Option<String>,
+    /// Monotonic stamp of the last action, for ordering members by recency
+    /// (active first, then most recent action first) in the team strip.
+    last_action_at: Option<u64>,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -764,6 +767,7 @@ impl Surface {
             running: false,
             finished: false,
             last_action: None,
+            last_action_at: None,
             cancelled: false,
             context_used: None,
             scroll: 0,
@@ -779,7 +783,7 @@ impl Surface {
         }
     }
 
-    /// The sidebar/`/team` state, derived from the run flags.
+    /// The team strip/`/team` state, derived from the run flags.
     fn state(&self) -> TeamState {
         if self.running {
             TeamState::Running
@@ -791,8 +795,9 @@ impl Surface {
     }
 
     /// Apply one agent event. Returns `true` when the surface changed, so `App`
-    /// can mark itself dirty (the surface owns no `dirty` flag).
-    fn apply(&mut self, event: AgentEvent) -> bool {
+    /// can mark itself dirty (the surface owns no `dirty` flag). `action_seq`
+    /// is the app-wide monotonic clock for stamping action recency.
+    fn apply(&mut self, event: AgentEvent, action_seq: &mut u64) -> bool {
         match event {
             AgentEvent::MessageStart { message } => {
                 if matches!(message, AgentMessage::Assistant { .. }) {
@@ -816,8 +821,10 @@ impl Surface {
             AgentEvent::ToolExecutionStart { call_id, name } => {
                 self.flush_live();
                 // The committed assistant block carries this call's arguments
-                // (§3), so resolve a short "name target" label for the sidebar.
+                // (§3), so resolve a short "name target" label for the team strip.
                 self.last_action = Some(action_label(&self.transcript, &call_id, &name));
+                self.last_action_at = Some(*action_seq);
+                *action_seq += 1;
                 self.transcript.push(Block::Tool(Tool {
                     name,
                     output: String::new(),
@@ -919,7 +926,7 @@ impl Surface {
         }
     }
 
-    /// Commit an assistant message. Tool calls ride the block (the sidebar reads
+    /// Commit an assistant message. Tool calls ride the block (the team strip reads
     /// their arguments, §3; the renderer ignores them); empty messages are not
     /// committed.
     fn commit(&mut self, message: AgentMessage) {
@@ -1058,7 +1065,7 @@ impl Surface {
                     }
                 }
                 AgentMessage::Assistant { content, .. } => {
-                    // The tool calls ride the block so a member's sidebar action
+                    // The tool calls ride the block so a member's team strip action
                     // can name the call's target (§3); the renderer ignores them.
                     let visible = content.to_vec();
                     if !visible.is_empty() {
@@ -1190,9 +1197,9 @@ pub struct App {
     dirty: bool,
     should_quit: bool,
     actions: Vec<Action>,
-    /// Hide the team sidebar even when there is a team and the terminal is wide
-    /// enough (`Ctrl-B`).
-    hide_sidebar: bool,
+    /// Monotonic clock stamping the last action of each member, so the team
+    /// strip can order members active-first then by action recency.
+    action_seq: u64,
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
     /// The open browse search prompt, if any — see [`BrowseSearch`].
@@ -1226,7 +1233,7 @@ impl App {
             dirty: true,
             should_quit: false,
             actions: Vec::new(),
-            hide_sidebar: false,
+            action_seq: 0,
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -1337,17 +1344,6 @@ impl App {
         }
     }
 
-    /// Show or hide the team sidebar (`Ctrl-B`).
-    fn toggle_sidebar(&mut self) {
-        self.hide_sidebar = !self.hide_sidebar;
-        self.dirty = true;
-    }
-
-    /// Whether the team sidebar is hidden (`Ctrl-B`) — read by the renderer.
-    pub(crate) fn hide_sidebar(&self) -> bool {
-        self.hide_sidebar
-    }
-
     /// Open the keymap overlay (`F1`).
     fn open_help(&mut self) {
         self.overlay = Some(Overlay::Help);
@@ -1416,10 +1412,13 @@ impl App {
         self.dirty = true;
     }
 
-    /// The non-root surfaces as `(label, state, focused, action)` — the sidebar
-    /// and `/team`. The action is the current run's live tool label, if any (§3).
+    /// The non-root surfaces as `(label, state, focused, action)` — the team
+    /// strip and `/team`. Ordered active-first, then by most recent action
+    /// (stable: surface order breaks ties). The action is the current run's
+    /// live tool label, if any (§3).
     pub fn member_rows(&self) -> Vec<(&str, TeamState, bool, Option<&str>)> {
-        self.surfaces
+        let mut rows: Vec<_> = self
+            .surfaces
             .iter()
             .enumerate()
             .filter(|(_, s)| !s.is_root)
@@ -1429,8 +1428,13 @@ impl App {
                     s.state(),
                     i == self.focus,
                     s.last_action.as_deref(),
+                    s.last_action_at,
                 )
             })
+            .collect();
+        rows.sort_by_key(|(_, state, _, _, at)| (*state != TeamState::Running, std::cmp::Reverse(at.unwrap_or(0))));
+        rows.into_iter()
+            .map(|(label, state, focused, action, _)| (label, state, focused, action))
             .collect()
     }
 
@@ -1835,7 +1839,7 @@ impl App {
                 // Route to the surface that owns this session; an unknown id is
                 // ignored (a stray/duplicate event must not panic).
                 if let Some(idx) = self.surface_index(&id)
-                    && self.surfaces[idx].apply(event)
+                    && self.surfaces[idx].apply(event, &mut self.action_seq)
                 {
                     self.dirty = true;
                 }
@@ -1916,7 +1920,6 @@ impl App {
             // Tool detail: Ctrl-T toggles every tool at once; the per-block
             // toggle lives in browse mode, where the target is drawn.
             Key::Ctrl('t') => self.toggle_all_tools(),
-            Key::Ctrl('b') => self.toggle_sidebar(),
             // Readline word/line editing on the atom buffer.
             Key::Ctrl('a') => self.move_cursor_start(),
             Key::Ctrl('e') => self.move_cursor_end(),
@@ -2932,7 +2935,7 @@ mod tests {
         assert!(matches!(&app.transcript()[0], Block::Notice(t) if t.contains("3 earlier message")));
         assert_eq!(app.transcript()[1], Block::User("earlier question".into()));
         // The tool call rides the assistant block — the renderer ignores it, the
-        // sidebar reads its target (§3).
+        // team strip reads its target (§3).
         assert_eq!(
             app.transcript()[2],
             Block::Assistant(vec![
@@ -3543,6 +3546,53 @@ mod tests {
         assert_eq!(app.member_rows()[0].1, TeamState::Done);
     }
 
+    /// Push one `ToolExecutionStart` into `id`, stamping the action (and its
+    /// recency) the team strip orders by.
+    fn member_tool_start(app: &mut App, id: &SessionId, name: &str) {
+        app.handle(AppEvent::Agent(
+            id.clone(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: name.into(),
+            },
+        ));
+    }
+
+    #[test]
+    fn member_rows_order_active_first_then_by_action_recency() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "zebra", "alpha", "mike"]);
+        let zebra = SessionId::agent("zebra");
+        let alpha = SessionId::agent("alpha");
+        let mike = SessionId::agent("mike");
+        let labels = |app: &App| -> Vec<String> {
+            app.member_rows()
+                .iter()
+                .map(|row| row.0.to_string())
+                .collect()
+        };
+
+        // All idle with no actions: surface order (stable sort) is preserved.
+        assert_eq!(labels(&app), vec!["zebra", "alpha", "mike"]);
+        // alpha's action is the more recent: idle members sort by recency.
+        member_tool_start(&mut app, &zebra, "read");
+        member_tool_start(&mut app, &alpha, "bash");
+        assert_eq!(labels(&app), vec!["alpha", "zebra", "mike"]);
+        // A running member jumps the queue even before any live action.
+        app.handle(AppEvent::Agent(mike.clone(), AgentEvent::AgentStart));
+        assert_eq!(labels(&app), vec!["mike", "alpha", "zebra"]);
+        // Among running members, the newest action comes first.
+        app.handle(AppEvent::Agent(zebra.clone(), AgentEvent::AgentStart));
+        member_tool_start(&mut app, &zebra, "edit");
+        let rows = app.member_rows();
+        assert_eq!(rows[0].0, "zebra", "newer action wins among running members");
+        assert_eq!(rows[0].3, Some("edit"), "the live action rides the row");
+        assert_eq!(rows[1].0, "mike", "a runner with no action trails");
+        assert_eq!(rows[1].3, None);
+        assert_eq!(rows[2].0, "alpha", "idle members come last, by recency");
+        assert_eq!(rows[2].3, Some("bash"));
+    }
+
     /// A root + one member surface.
     fn two_surfaces() -> (App, SessionId, SessionId) {
         let mut app = App::new();
@@ -4023,16 +4073,6 @@ mod tests {
         app.handle(AppEvent::Key(Key::F(1)));
         app.handle(AppEvent::Key(Key::F(1)));
         assert!(app.overlay().is_none());
-    }
-
-    #[test]
-    fn ctrl_b_toggles_the_sidebar_flag() {
-        let mut app = App::new();
-        assert!(!app.hide_sidebar());
-        app.handle(AppEvent::Key(Key::Ctrl('b')));
-        assert!(app.hide_sidebar());
-        app.handle(AppEvent::Key(Key::Ctrl('b')));
-        assert!(!app.hide_sidebar());
     }
 
     #[test]

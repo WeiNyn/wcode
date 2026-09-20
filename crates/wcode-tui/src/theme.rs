@@ -21,10 +21,10 @@ pub(crate) struct Theme {
     pub accent: Style,
     /// The workhorse: secondary chrome and quiet prose.
     pub dim: Style,
-    /// A low-emphasis grey, distinct from [`Theme::border`]: e.g. the sidebar's
+    /// A low-emphasis grey, distinct from [`Theme::border`]: e.g. the team strip's
     /// `done` state.
     pub muted: Style,
-    /// The overlay and sidebar borders and their titles.
+    /// The overlay and popup borders and their titles.
     pub border: Style,
     /// The user's own prompt block.
     pub user: Style,
