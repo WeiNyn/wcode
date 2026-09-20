@@ -366,7 +366,38 @@ mod chain {
     use crate::tools::anchor;
     use crate::tools::read::{Read, ReadArgs};
     use crate::tools::test_ctx;
+    use crate::tools::edit::{Edit, EditArgs};
     use crate::tools::write::{Write, WriteArgs};
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use wcode_harness::hooks::HooksSet;
+
+    /// A minimal local hook (the harness's `RecordingHooks` is crate-local):
+    /// records that it ran and leaves an observable marker, so a composed pass
+    /// is checkable. `after_tool_call` appends to the END so it never disturbs
+    /// the digest header at `output`'s first line.
+    #[derive(Default)]
+    struct Recorder {
+        transforms: AtomicUsize,
+        outputs: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Hooks for Recorder {
+        async fn transform_tool_input(&self, call: &mut ToolCall) {
+            self.transforms.fetch_add(1, Ordering::SeqCst);
+            if let Some(obj) = call.arguments.as_object_mut() {
+                obj.insert("recorder".into(), serde_json::json!(true));
+            }
+        }
+
+        async fn after_tool_call(&self, _call: &ToolCall, out: &mut ToolOutput) {
+            self.outputs.fetch_add(1, Ordering::SeqCst);
+            out.output.push('!');
+        }
+    }
 
     fn read_call(path: &str) -> ToolCall {
         ToolCall {
@@ -462,5 +493,145 @@ mod chain {
         let mut w = write_call("f.txt", "NEW");
         h.transform_tool_input(&mut w).await;
         assert!(w.arguments.get(EXPECTED_DIGEST_KEY).is_none());
+    }
+
+    /// Item 20.1 — the same chain through the real `edit` tool: proves anchor
+    /// resolution still runs *after* a passing CAS check, and that a stale base
+    /// is refused before anything is written.
+    #[tokio::test]
+    async fn read_arms_the_hook_and_the_real_edit_is_cas_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+
+        // The real `read` (anchored) emits the header; the hook caches its digest.
+        let mut out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(false),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let h = WorkspaceHooks::new(true);
+        h.after_tool_call(&read_call("f.txt"), &mut out).await;
+
+        // An `edit` call (no `expected_digest`) gets it attached top-level.
+        let mut e = ToolCall {
+            id: "e1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("a = 1"),
+                "replacement": "a = 10",
+            }),
+        };
+        h.transform_tool_input(&mut e).await;
+        assert_eq!(
+            e.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"a = 1\nb = 2\n")
+        );
+
+        // The real `edit` passes the CAS check and still resolves the anchor.
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let eargs: EditArgs = serde_json::from_value(e.arguments.clone()).unwrap();
+        let out = Edit::new(lock.clone()).execute(eargs, &ctx).await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 10\nb = 2\n");
+
+        // A peer rewrites the file: the armed digest is stale → refuse, no write.
+        std::fs::write(&path, "peer\n").unwrap();
+        let mut e2 = ToolCall {
+            id: "e2".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("peer"),
+                "replacement": "x",
+            }),
+        };
+        h.transform_tool_input(&mut e2).await;
+        assert_eq!(
+            e2.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"a = 1\nb = 2\n"),
+            "the stale digest is still attached"
+        );
+        let eargs2: EditArgs = serde_json::from_value(e2.arguments.clone()).unwrap();
+        let out = Edit::new(lock).execute(eargs2, &ctx).await;
+        assert!(out.is_error, "a stale edit must refuse: {}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "peer\n");
+    }
+
+    /// Item 20.2 — the digest policy composed with another hook in a real
+    /// `HooksSet`, driven the way the loop drives it (both seams run every hook
+    /// in insertion order). Covers the ordering seam, not just the hook alone.
+    #[tokio::test]
+    async fn the_real_hook_set_composes_in_order() {
+        let rec = Arc::new(Recorder::default());
+        let set = HooksSet::from_iter([
+            rec.clone() as Arc<dyn Hooks>,
+            Arc::new(WorkspaceHooks::new(true)) as Arc<dyn Hooks>,
+        ]);
+
+        // transform: the recorder runs first (marker), then the digest hook.
+        let mut w = write_call("f.txt", "NEW");
+        set.transform_tool_input(&mut w).await;
+        assert_eq!(rec.transforms.load(Ordering::SeqCst), 1);
+        assert_eq!(w.arguments["recorder"], true);
+        assert!(
+            w.arguments.get(EXPECTED_DIGEST_KEY).is_none(),
+            "an empty cache attaches nothing"
+        );
+
+        // Both hooks run on after_tool_call; the recorder leaves its marker...
+        let mut read_out = ToolOutput {
+            output: "# f.txt digest cafebabe0000\nAB1CD│line\n".into(),
+            ..ToolOutput::default()
+        };
+        set.after_tool_call(&read_call("f.txt"), &mut read_out).await;
+        assert_eq!(rec.outputs.load(Ordering::SeqCst), 1);
+        assert!(read_out.output.ends_with('!'), "{}", read_out.output);
+
+        // ...and the composed transform now attaches the digest it cached.
+        let mut w2 = write_call("f.txt", "NEW");
+        set.transform_tool_input(&mut w2).await;
+        assert_eq!(w2.arguments[EXPECTED_DIGEST_KEY], "cafebabe0000");
+    }
+
+    /// Item 20.3 — a `plain: true` read has no header, so it arms nothing.
+    #[tokio::test]
+    async fn a_plain_read_arms_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "hello\nworld\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+
+        let mut out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(true),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        // The first line is raw `cat -n`, not a digest header...
+        assert_eq!(parse_digest_header(out.output.lines().next().unwrap()), None);
+        // ...so after_tool_call arms nothing for that path.
+        let h = WorkspaceHooks::new(true);
+        h.after_tool_call(&read_call("f.txt"), &mut out).await;
+        assert!(h.last_read.lock().unwrap().get(&cache_key("f.txt")).is_none());
     }
 }
