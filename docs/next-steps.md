@@ -27,7 +27,7 @@ the boxes as each task completes and keep the status table current.
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
-| 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ◐ revived — comparison refreshed; C1 typed report proposed; C3 (DAG) is the north star |
+| 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
 | 23 | LLM stream stall hangs the run — no idle timeout | ☐ todo — grounded: `loop_.rs:206`, `streamfn.rs:239`/`241` |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
@@ -609,10 +609,10 @@ documented north star, built only if coverage-first exploration becomes a goal
 worktree managers / coordinator entity / ACLs.
 
 **Tasks**
-- [ ] C1 — typed report: document the report shape in the worker blurb; thread it
-      through the auto-forward; test the report reaches the owner intact.
-- [ ] C2 — shared task list (if approved): a task tool + a root-owned list +
-      a TUI `/tasks`.
+- [x] C1 — typed report: the report shape is in the worker blurb; the
+auto-forward is tested. `cli:` `d99ab65`.
+- [x] C2 — shared task list: root-owned list + `task` tool + TUI `/tasks`.
+      `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [ ] C3 — task DAG + scheduler (decision gate; needs its own plan doc).
 - [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
 - [ ] C5 — lifecycle footer (small, presentation).

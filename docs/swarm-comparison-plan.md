@@ -1,6 +1,8 @@
 # wcode — team vs jcode swarm (comparison & candidate plan)
 
-Status: **revived — active.** Revives the parked comparison in
+Status: **active — C1 (typed report) + C2 (shared task list) landed** (`d99ab65`,
+`7bd24bb`, `f1338c2`, `ca12f16`); second-layer APPROVED; C3 (the DAG) is the north
+star. Revives the parked comparison in
 [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md) §10
 ("Multi-agent semantics worth taking"), §10.1 (orchestrator → group), roadmap
 **S5** ("Task-DAG / deep swarm, only if wanted") and decision **#11**
@@ -169,11 +171,10 @@ report shape and (maybe) the task list; leave the framework and the DAG.*
 
 ## 8. Phased tasks
 
-- [ ] **C1 — typed report**: document the report shape in the worker blurb;
-      thread it through the auto-forward; test that a report reaches the owner
-      intact. `cli:` commit.
-- [ ] **C2 — shared task list** (if approved): a task tool + a root-owned
-      list + TUI `/tasks`. `cli:` + `tui:` commits.
+- [x] **C1 — typed report**: the report shape is documented in the worker blurb;
+      the auto-forward is tested. `cli:` `d99ab65`.
+- [x] **C2 — shared task list**: a root-owned list + the `task` tool + TUI
+      `/tasks`. `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [ ] **C3 — task DAG + scheduler** (decision gate): own plan doc first.
 - [ ] **C4 — verify gate as a `Hooks` policy** (rides on C2/C3).
 - [ ] **C5 — lifecycle footer** (small, presentation).
