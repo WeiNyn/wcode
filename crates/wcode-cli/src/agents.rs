@@ -336,7 +336,12 @@ impl SessionFactory {
             "{}\n\n# You are a worker\nYou are the session `{id}`, spawned by \
              `{owner}`. Complete the task you are given. When you finish, your \
              final message is reported back to `{owner}` automatically — you do \
-             not need to send it yourself.",
+            not need to send it yourself. Report what you did, not just that \
+            you are done. Structure your final message as: (1) outcome — \
+            done / blocked / partial; (2) what changed or you found, with \
+            `file:anchor` or commit evidence; (3) the validation you ran \
+            (command + result); (4) open questions and what you did NOT \
+            check. Omit a part only if it truly does not apply.",
             t.system
         );
         if let Some(role) = &spec.system {
@@ -1068,6 +1073,21 @@ mod tests {
             cfg.system
         );
         assert!(cfg.system.contains("# Role\nrole text"), "{}", cfg.system);
+    }
+
+    /// C1: the worker blurb tells the model *how* to report. The text is
+    /// forwarded verbatim by `ReportBack::after_run`, so it is prompt-only.
+    #[test]
+    fn worker_system_documents_the_report_shape() {
+        let cfg = config_for(&WorkerSpec::default());
+        assert!(
+            cfg.system.contains("Report what you did"),
+            "the report shape is asked for: {}",
+            cfg.system
+        );
+        for part in ["outcome", "file:anchor", "validation", "did NOT check"] {
+            assert!(cfg.system.contains(part), "missing `{part}`: {}", cfg.system);
+        }
     }
 
     #[test]
