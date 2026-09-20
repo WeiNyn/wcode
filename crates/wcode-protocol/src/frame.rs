@@ -120,9 +120,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_of_exactly_the_cap_is_accepted() {
-        // Valid JSON of EXACTLY the cap (newline excluded) still parses: a
-        // merely-too-big non-JSON line would fail serde regardless, so this
-        // pins the `+ 1` take budget rather than serde.
+        // Positive control: a legal max-size frame (valid JSON, EXACTLY the cap
+        // with its newline) is ACCEPTED. Serde is not the gate here — the point
+        // is that the cap does not reject a frame at the boundary.
         let (json, pad_len) = padded_frame_json(MAX_FRAME_BYTES);
         assert_eq!(json.len(), MAX_FRAME_BYTES);
         let mut bytes = json.into_bytes();
