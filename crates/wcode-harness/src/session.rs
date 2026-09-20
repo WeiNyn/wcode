@@ -65,14 +65,34 @@ impl Session {
     /// actually ran — otherwise the header's `cwd` describes a directory the
     /// tools never touched.
     pub fn create_with_cwd(dir: &Path, cwd: &Path) -> io::Result<Session> {
-        fs::create_dir_all(dir)?;
         let id = uuid::Uuid::new_v4();
         let name = format!(
             "{}_{}.jsonl",
             Utc::now().timestamp_millis(),
             &id.simple().to_string()[..8]
         );
-        let path = dir.join(name);
+        Self::open_new(dir, name, id, cwd)
+    }
+
+    /// Like [`create`], but the file is exactly `<dir>/<name>.jsonl` — the
+    /// deterministic tree session groups need (`root.jsonl`, `members/<name>.jsonl`),
+    /// where a `{millis}_{uuid8}` name would not map back to an address. Header
+    /// content identical to [`create_with_cwd`]; only the file name is caller-
+    /// supplied.
+    pub fn create_named(dir: &Path, name: &str) -> io::Result<Session> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Session::create_named_with_cwd(dir, name, &cwd)
+    }
+
+    /// [`create_named`] with an explicit `cwd` (see [`create_with_cwd`]).
+    pub fn create_named_with_cwd(dir: &Path, name: &str, cwd: &Path) -> io::Result<Session> {
+        Self::open_new(dir, format!("{name}.jsonl"), uuid::Uuid::new_v4(), cwd)
+    }
+
+    /// The shared constructor: fresh dirs, a header stamped first, one file.
+    fn open_new(dir: &Path, filename: String, id: uuid::Uuid, cwd: &Path) -> io::Result<Session> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join(filename);
         let mut session = Session {
             path: Some(path.clone()),
             entries: Vec::new(),
@@ -265,6 +285,44 @@ mod tests {
             SessionEntry::Header { cwd, .. } => assert_eq!(cwd, "/custom/workdir"),
             _ => panic!("first entry not header"),
         }
+    }
+
+    #[test]
+    fn create_named_writes_to_the_named_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Session::create_named_with_cwd(dir.path(), "root", std::path::Path::new("/wd"))
+            .unwrap();
+        assert_eq!(root.path().unwrap().file_name().unwrap(), "root.jsonl");
+        match &root.entries()[0] {
+            SessionEntry::Header { version, cwd, .. } => {
+                assert_eq!(*version, 1);
+                assert_eq!(cwd, "/wd");
+            }
+            _ => panic!("first entry not header"),
+        }
+
+        // The bare `create_named` stamps the process cwd, and the file name is
+        // exactly `<name>.jsonl` — the deterministic tree session groups need.
+        let member = Session::create_named(dir.path(), "w1").unwrap();
+        assert_eq!(member.path().unwrap().file_name().unwrap(), "w1.jsonl");
+
+        // Reopen round-trips: an append comes back, so group transcripts are
+        // ordinary kernel sessions with caller-supplied names.
+        let mut reopened = Session::open(&dir.path().join("root.jsonl")).unwrap();
+        reopened
+            .append(SessionEntry::ModelChange {
+                id: "m1".into(),
+                model: "m".into(),
+            })
+            .unwrap();
+        assert_eq!(reopened.entries().len(), 2);
+        assert_eq!(
+            Session::open(&dir.path().join("root.jsonl"))
+                .unwrap()
+                .model()
+                .as_deref(),
+            Some("m")
+        );
     }
 
     #[test]
