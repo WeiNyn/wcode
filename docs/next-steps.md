@@ -28,7 +28,7 @@ the boxes as each task completes and keep the status table current.
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
 | 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
-| 23 | LLM stream stall hangs the run — no idle timeout | ☐ todo — grounded: `loop_.rs:206`, `streamfn.rs:239`/`241` |
+| 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -657,11 +657,11 @@ timeout, until the user gives up and cancels.
   `LlmStreamEvent::Retrying` / `AgentEvent::Retrying` → a dim line.
 
 **Tasks**
-- [ ] Idle / time-to-first-token timeout around `stream.next()` in `loop_.rs`.
-- [ ] The same in the adapter (`streamfn.rs`: the peek and the forward loop).
-- [ ] Config + env; default on; `0` disables.
-- [ ] Stall notice → dim line (reuse the retry notice).
-- [ ] Tests: a stream that hangs after N events trips a time-out (short injected
+- [x] Idle / time-to-first-token timeout around `stream.next()` in `loop_.rs`.
+- [x] The same in the adapter (`streamfn.rs`: the peek and the forward loop).
+- [x] Config + env; default on; `0` disables.
+- [x] Stall notice → dim line (reuse the retry notice).
+- [x] Tests: a stream that hangs after N events trips a time-out (short injected
       duration); a clean stream is unaffected.
 
 **Open questions.**

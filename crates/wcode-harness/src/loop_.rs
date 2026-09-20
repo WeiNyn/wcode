@@ -197,6 +197,8 @@ pub async fn run_loop(
 
             if !aborted {
                 let mut stream = (cfg.stream_fn)(ctx.as_slice(), &cfg.system, &tool_defs, &cfg.llm);
+                // The stall backstop's deadline, captured once (ZERO disables).
+                let idle = cfg.llm.retry.idle;
                 loop {
                     tokio::select! {
                                             biased;
@@ -280,6 +282,17 @@ pub async fn run_loop(
                                                     }
                                                     break;
                                                 }
+                                            },
+                                            // Kernel backstop: a `StreamFn` that never yields must
+                                            // not wedge the run. Feed the failure back — the same
+                                            // corrective-turn path as a stream error, bounded by
+                                            // DEFAULT_MAX_STREAM_ERROR_TURNS. `idle == ZERO` disables.
+                                            _ = tokio::time::sleep(idle), if !idle.is_zero() => {
+                                                let message = format!("stream stalled {idle:?}");
+                                                let _ = sink.send(AgentEvent::Error { message: message.clone() });
+                                                stream_error = Some(message);
+                                                captured = Some(StopReason::Error);
+                                                break;
                                             }
                                         }
                 }

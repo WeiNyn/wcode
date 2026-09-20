@@ -484,6 +484,38 @@ async fn consecutive_stream_error_turns_are_capped() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_streamfn_that_never_yields_trips_the_backstop() {
+    // #23: a `StreamFn` that never yields (a pathological custom impl, or a
+    // stalled adapter) must not wedge the run. The kernel's idle arm surfaces
+    // an `AgentEvent::Error`, feeds it back as a corrective turn, and ends the
+    // run after the cap — never hangs.
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::pending::<LlmStreamEvent>()) as LlmStream
+    });
+    let TestSetup { mut cfg, .. } = setup(stream_fn, vec![], HooksSet::default());
+    cfg.llm.retry.idle = std::time::Duration::from_millis(100);
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert!(
+        tags(&events).contains(&"error"),
+        "the stall surfaced an error: {:?}",
+        tags(&events)
+    );
+    assert_eq!(
+        ctx.len(),
+        1 + wcode_harness::loop_::DEFAULT_MAX_STREAM_ERROR_TURNS,
+        "the stall is fed back, capped like any stream error"
+    );
+    assert!(
+        ctx.iter().all(|m| matches!(m, AgentMessage::User { .. })),
+        "no assistant content was produced: {ctx:?}"
+    );
+}
+
 #[tokio::test]
 async fn complete_thinking_block_replaces_accumulated_deltas() {
     // A provider that streams reasoning deltas and then restates the full

@@ -223,7 +223,7 @@ fn adapt(
         // so a transport failure surfaces there), and any transient error that
         // slips past the peek before the first content event is forwarded.
         let mut state = RetryState::new(policy.max);
-        let (mut stream, mut pending) = match connect_with_retry(&policy, &mut state, &open, &tx).await {
+        let (stream, pending) = match connect_with_retry(&policy, &mut state, &open, &tx).await {
             PreContent::Ready { stream, first } => (stream, first),
             PreContent::Cancelled => return,
             PreContent::Failed(error) => {
@@ -234,79 +234,151 @@ fn adapt(
                 return;
             }
         };
-        let mut errored = false;
-        let mut content_forwarded = false;
-        loop {
-            let item = match pending.take() {
-                Some(item) => item,
-                None => tokio::select! {
-                    biased;
-                    _ = tx.closed() => break,
-                    item = stream.next() => match item {
-                        Some(item) => item,
-                        None => break,
-                    },
-                },
-            };
-            let events = match item {
-                Ok(content) => {
-                    if errored && matches!(content, StreamedAssistantContent::Final(_)) {
-                        continue;
-                    }
-                    let events = map_item(content);
-                    // Replay is only safe before the first forwarded event;
-                    // once anything reached the consumer a later error cannot
-                    // be retried (it would duplicate output).
-                    content_forwarded |= !events.is_empty();
-                    events
-                }
-                Err(error) => {
-                    if !content_forwarded && state.budget > 0 && retryable(&error) {
-                        // Nothing forwarded yet: back off and replay the request
-                        // from scratch. The re-open shares the same retry budget
-                        // and keeps backoff growing monotonically.
-                        state.attempts += 1;
-                        state.budget -= 1;
-                        if !retry_wait(&tx, &policy, state.attempts, &error).await {
-                            return;
-                        }
-                        match connect_with_retry(&policy, &mut state, &open, &tx).await {
-                            PreContent::Ready { stream: s, first } => {
-                                stream = s;
-                                pending = first;
-                                continue;
-                            }
-                            PreContent::Cancelled => return,
-                            PreContent::Failed(e) => {
-                                errored = true;
-                                vec![LlmStreamEvent::Error {
-                                    message: e.to_string(),
-                                    fatal: fatal_class(&e),
-                                }]
-                            }
-                        }
-                    } else {
-                        // Final: a hard-fatal class, retries exhausted, or a
-                        // mid-stream error after content. The loop decides (via
-                        // `fatal`) whether to feed it back or end the run.
-                        errored = true;
-                        vec![LlmStreamEvent::Error {
-                            message: error.to_string(),
-                            fatal: fatal_class(&error),
-                        }]
-                    }
-                }
-            };
-            for ev in events {
-                if tx.send(ev).is_err() {
-                    return;
-                }
-            }
-        }
+        forward_stream(stream, pending, policy, &open, tx, state).await;
     });
     Box::pin(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|ev| (ev, rx))
     }))
+}
+
+/// The forwarding phase of a stream turn: pull items (the buffered `pending`
+/// first, then from `stream` under the idle deadline), map them to events, and
+/// send them on `tx`. A pre-content stall re-opens via `open` on the shared
+/// retry budget (mirroring a transient connect error); a post-content stall (or
+/// an exhausted budget) surfaces a non-fatal error and ends the loop.
+async fn forward_stream<S, F>(
+    mut stream: S,
+    mut pending: Option<Result<StreamedAssistantContent, CompletionError>>,
+    policy: RetryPolicy,
+    open: F,
+    tx: tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>,
+    mut state: RetryState,
+) where
+    F: Fn() -> Pin<Box<dyn std::future::Future<Output = Result<S, CompletionError>> + Send>>,
+    S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin + Send,
+{
+    let mut errored = false;
+    let mut content_forwarded = false;
+    loop {
+        // The next item: a buffered first item, or one from the stream under the
+        // idle deadline. Cancel-safe: a dropped `next_or_stall` drops an
+        // in-flight `stream.next()` poll, which is safe to re-enter (the
+        // pre-content path re-opens a fresh stream); `biased` with the item arm
+        // first so a ready item is never lost.
+        let item = match pending.take() {
+            Some(item) => item,
+            None => tokio::select! {
+                biased;
+                result = next_or_stall(&mut stream, policy.idle) => match result {
+                    // The stream ended.
+                    None => break,
+                    // One item — the stream's own `Result`.
+                    Some(Stall::Item(item)) => item,
+                    // The idle deadline fired. Pre-content → a transient retry
+                    // on the shared budget (re-open, mirroring a connect error);
+                    // post-content (or an exhausted budget) → a NON-fatal error
+                    // that ends the turn (a stalled stream will not resume).
+                    Some(Stall::Idle) => {
+                        let error = stall_error(policy.idle);
+                        if !content_forwarded && state.budget > 0 {
+                            state.attempts += 1;
+                            state.budget -= 1;
+                            if !retry_wait(&tx, &policy, state.attempts, &error).await {
+                                return;
+                            }
+                            match connect_with_retry(&policy, &mut state, &open, &tx).await {
+                                PreContent::Ready { stream: s, first } => {
+                                    stream = s;
+                                    pending = first;
+                                    continue;
+                                }
+                                PreContent::Cancelled => return,
+                                PreContent::Failed(e) => {
+                                    let fatal = fatal_class(&e);
+                                    if tx
+                                        .send(LlmStreamEvent::Error {
+                                            message: e.to_string(),
+                                            fatal,
+                                        })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    break;
+                                }
+                            }
+                        } else {
+                            if tx
+                                .send(LlmStreamEvent::Error {
+                                    message: error.to_string(),
+                                    fatal: false,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                    }
+                },
+                _ = tx.closed() => break,
+            },
+        };
+        let events = match item {
+            Ok(content) => {
+                if errored && matches!(content, StreamedAssistantContent::Final(_)) {
+                    continue;
+                }
+                let events = map_item(content);
+                // Replay is only safe before the first forwarded event;
+                // once anything reached the consumer a later error cannot
+                // be retried (it would duplicate output).
+                content_forwarded |= !events.is_empty();
+                events
+            }
+            Err(error) => {
+                if !content_forwarded && state.budget > 0 && retryable(&error) {
+                    // Nothing forwarded yet: back off and replay the request
+                    // from scratch. The re-open shares the same retry budget
+                    // and keeps backoff growing monotonically.
+                    state.attempts += 1;
+                    state.budget -= 1;
+                    if !retry_wait(&tx, &policy, state.attempts, &error).await {
+                        return;
+                    }
+                    match connect_with_retry(&policy, &mut state, &open, &tx).await {
+                        PreContent::Ready { stream: s, first } => {
+                            stream = s;
+                            pending = first;
+                            continue;
+                        }
+                        PreContent::Cancelled => return,
+                        PreContent::Failed(e) => {
+                            errored = true;
+                            vec![LlmStreamEvent::Error {
+                                message: e.to_string(),
+                                fatal: fatal_class(&e),
+                            }]
+                        }
+                    }
+                } else {
+                    // Final: a hard-fatal class, retries exhausted, or a
+                    // mid-stream error after content. The loop decides (via
+                    // `fatal`) whether to feed it back or end the run.
+                    errored = true;
+                    vec![LlmStreamEvent::Error {
+                        message: error.to_string(),
+                        fatal: fatal_class(&error),
+                    }]
+                }
+            }
+        };
+        for ev in events {
+            if tx.send(ev).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 fn error_stream(message: String) -> LlmStream {
@@ -318,7 +390,8 @@ fn error_stream(message: String) -> LlmStream {
     }]))
 }
 
-/// Retry policy for the connect phase of a stream call.
+/// Retry policy for a stream call: the transient-connect retries plus the stall
+/// (idle / time-to-first-token) timeouts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Retries after the first attempt (0 disables retrying).
@@ -327,6 +400,10 @@ pub struct RetryPolicy {
     pub base: Duration,
     /// Upper bound on a single backoff wait.
     pub cap: Duration,
+    /// Time-to-first-token: covers connect + the first stream item. `ZERO` = off.
+    pub ttft: Duration,
+    /// Inter-item idle: resets on every received item. `ZERO` = off.
+    pub idle: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -335,10 +412,37 @@ impl Default for RetryPolicy {
             max: 3,
             base: Duration::from_millis(500),
             cap: Duration::from_secs(8),
+            ttft: Duration::from_secs(60),
+            idle: Duration::from_secs(120),
         }
     }
 }
 
+/// One poll of a stream under a stall deadline (see [`next_or_stall`]).
+enum Stall<T> {
+    /// One item — the stream's OWN item type (for a rig stream, a
+    /// `Result<StreamedAssistantContent, CompletionError>`), not an `Option`.
+    Item(T),
+    /// The deadline fired before an item arrived.
+    Idle,
+}
+
+/// `stream.next()` under a `deadline`; `ZERO` means "no timeout" and collapses
+/// to a plain `stream.next().await`. `biased` toward the item so a ready item
+/// wins a tie with an expired deadline. Outer `None` = the stream ended.
+async fn next_or_stall<S: Stream + Unpin>(
+    stream: &mut S,
+    deadline: Duration,
+) -> Option<Stall<S::Item>> {
+    if deadline.is_zero() {
+        return stream.next().await.map(Stall::Item);
+    }
+    tokio::select! {
+        biased;
+        item = stream.next() => item.map(Stall::Item),
+        _ = tokio::time::sleep(deadline) => Some(Stall::Idle),
+    }
+}
 /// Transient HTTP statuses worth retrying: request timeout/conflict, rate
 /// limiting, and the 5xx family. Client errors (400/401/403/404/422) are not.
 fn is_transient_status(code: u16) -> bool {
@@ -474,6 +578,13 @@ fn fatal_class(error: &CompletionError) -> bool {
 /// likewise retried at most `policy.max` times total per turn. Once any content
 /// has been forwarded a mid-stream error is surfaced as-is — retrying would
 /// duplicate output. Each backoff is abandoned if the consumer drops `tx`.
+/// A synthesized provider error for a stream stall. The message carries a
+/// needle `is_transient_message` already matches ("timed out"), so `retryable()`
+/// is `true` and `fatal_class()` is `false` (B1) — a stall rides the existing
+/// transient-retry / feed-back paths unchanged.
+fn stall_error(d: Duration) -> CompletionError {
+    CompletionError::ProviderError(format!("stream stalled: no item within {d:?} (timed out)"))
+}
 async fn connect_with_retry<S, F>(
     policy: &RetryPolicy,
     state: &mut RetryState,
@@ -486,28 +597,71 @@ where
 {
     loop {
         state.attempts += 1;
-        match open().await {
-            Ok(mut stream) => match stream.next().await {
-                Some(Err(error)) => {
-                    if state.budget > 0 && retryable(&error) {
-                        state.budget -= 1;
-                        if !retry_wait(tx, policy, state.attempts, &error).await {
-                            return PreContent::Cancelled;
-                        }
-                        continue;
-                    }
-                    // A first-item error that cannot be retried is still an
-                    // error item: hand it to the forwarding loop, which
-                    // classifies it (fatal vs feed-back) like any other.
-                    return PreContent::Ready {
-                        stream,
-                        first: Some(Err(error)),
-                    };
-                }
-                first => return PreContent::Ready { stream, first },
-            },
-            Err(error) => {
+        // Race the connect against `ttft` — zero-aware: `ZERO` disables the
+        // deadline and awaits the connect directly (never `sleep(ZERO)`, which
+        // would fire at once). A connect stall yields a transient `stall_error`.
+        let opened = if policy.ttft.is_zero() {
+            Ok(open().await)
+        } else {
+            tokio::select! {
+                biased;
+                r = open() => Ok(r),
+                _ = tokio::time::sleep(policy.ttft) => Err(()),
+            }
+        };
+        let mut stream = match opened {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
                 if state.budget > 0 && retryable(&error) {
+                    state.budget -= 1;
+                    if !retry_wait(tx, policy, state.attempts, &error).await {
+                        return PreContent::Cancelled;
+                    }
+                    continue;
+                }
+                return PreContent::Failed(error);
+            }
+            Err(()) => {
+                let error = stall_error(policy.ttft);
+                if state.budget > 0 {
+                    state.budget -= 1;
+                    if !retry_wait(tx, policy, state.attempts, &error).await {
+                        return PreContent::Cancelled;
+                    }
+                    continue;
+                }
+                return PreContent::Failed(error);
+            }
+        };
+        // Peek the first item under the SAME `ttft`: rig defers the request into
+        // the stream, so a transport failure (or a stall) surfaces here.
+        match next_or_stall(&mut stream, policy.ttft).await {
+            None => return PreContent::Ready { stream, first: None },
+            Some(Stall::Item(Err(error))) => {
+                if state.budget > 0 && retryable(&error) {
+                    state.budget -= 1;
+                    if !retry_wait(tx, policy, state.attempts, &error).await {
+                        return PreContent::Cancelled;
+                    }
+                    continue;
+                }
+                // A first-item error that cannot be retried is still an error
+                // item: hand it to the forwarding loop, which classifies it
+                // (fatal vs feed-back) like any other.
+                return PreContent::Ready {
+                    stream,
+                    first: Some(Err(error)),
+                };
+            }
+            Some(Stall::Item(Ok(content))) => {
+                return PreContent::Ready {
+                    stream,
+                    first: Some(Ok(content)),
+                };
+            }
+            Some(Stall::Idle) => {
+                let error = stall_error(policy.ttft);
+                if state.budget > 0 {
                     state.budget -= 1;
                     if !retry_wait(tx, policy, state.attempts, &error).await {
                         return PreContent::Cancelled;
@@ -1391,6 +1545,14 @@ mod retry_tests {
         futures::stream::iter(Vec::new())
     }
 
+    /// A terminal `Final` item (the stream's `Done`).
+    fn done() -> StreamedAssistantContent {
+        StreamedAssistantContent::Final(rig::streaming::StreamFinal::new(
+            "test",
+            rig::completion::Usage::default(),
+        ))
+    }
+
     fn first_item_err(e: CompletionError) -> Chunks {
         futures::stream::iter(vec![Err(e)])
     }
@@ -1434,6 +1596,7 @@ mod retry_tests {
             max: 3,
             base: Duration::from_millis(10),
             cap: Duration::from_millis(50),
+            ..RetryPolicy::default()
         };
         let c = calls.clone();
         let mut state = RetryState::new(policy.max);
@@ -1473,6 +1636,7 @@ mod retry_tests {
             max: 2,
             base: Duration::from_millis(5),
             cap: Duration::from_millis(5),
+            ..RetryPolicy::default()
         };
         let c = calls.clone();
         let mut state = RetryState::new(policy.max);
@@ -1503,6 +1667,7 @@ mod retry_tests {
             max: 1,
             base: Duration::from_millis(1),
             cap: Duration::from_millis(1),
+            ..RetryPolicy::default()
         };
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1568,6 +1733,7 @@ mod retry_tests {
                 max: 2,
                 base: Duration::from_millis(10),
                 cap: Duration::from_millis(50),
+                ..RetryPolicy::default()
             },
             ..LlmOpts::default()
         };
@@ -1585,6 +1751,198 @@ mod retry_tests {
         assert!(
             matches!(events.last(), Some(LlmStreamEvent::Error { fatal: false, .. })),
             "refused port is transient-class, not fatal: {events:?}"
+        );
+    }
+
+    // ---- #23: stream-stall timeouts ----
+
+    type BoxStream =
+        Pin<Box<dyn futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Send>>;
+
+    fn boxed<S>(s: S) -> BoxStream
+    where
+        S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>>
+            + Send
+            + 'static,
+    {
+        Box::pin(s)
+    }
+
+    fn silent_boxed() -> BoxStream {
+        boxed(futures::stream::pending::<Result<StreamedAssistantContent, CompletionError>>())
+    }
+
+    /// A fresh silent stream per call — `forward_stream`/`connect_with_retry`'s
+    /// re-open seam, never exercised where content already flowed.
+    fn open_silent()
+    -> Pin<Box<dyn std::future::Future<Output = Result<BoxStream, CompletionError>> + Send>> {
+        Box::pin(async { Ok::<_, CompletionError>(silent_boxed()) })
+    }
+
+    /// A slow (but successful) connect — used to prove `ttft = ZERO` awaits it
+    /// directly instead of racing an immediate `sleep(ZERO)`.
+    fn open_slow_ok()
+    -> Pin<Box<dyn std::future::Future<Output = Result<BoxStream, CompletionError>> + Send>> {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok::<_, CompletionError>(boxed(futures::stream::iter(vec![Ok::<_, CompletionError>(
+                StreamedAssistantContent::Text(rig::message::Text::new("ok")),
+            )])))
+        })
+    }
+
+    /// A stall is transient-class, so it rides the retry / feed-back paths (B1).
+    #[test]
+    fn a_stall_error_is_transient_and_not_hard_fatal() {
+        let d = Duration::from_secs(1);
+        assert!(retryable(&stall_error(d)), "a stall must be transient (B1)");
+        assert!(!fatal_class(&stall_error(d)), "a stall must not be hard-fatal");
+        assert!(
+            stall_error(d).to_string().contains("timed out"),
+            "the (timed out) needle drives retryable()"
+        );
+    }
+
+    /// A silent stream stalls on the `ttft` peek every attempt: each retry emits
+    /// a `Retrying` notice, and once the budget is spent the failure is a
+    /// transient (non-fatal) `stall_error`.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_stream_trips_the_ttft_retries_then_fails() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy {
+            max: 2,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            ttft: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        let c = calls.clone();
+        let open = move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            open_silent()
+        };
+        let mut state = RetryState::new(policy.max);
+        let out = connect_with_retry(&policy, &mut state, open, &tx).await;
+
+        let PreContent::Failed(error) = out else {
+            panic!("expected Failed from an exhausted stall")
+        };
+        assert!(retryable(&error), "a stall is transient");
+        assert!(!fatal_class(&error), "a stall is not hard-fatal");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "one attempt + two retries");
+        let retries = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, LlmStreamEvent::Retrying { .. }))
+            .count();
+        assert_eq!(retries, 2, "a Retrying notice per retry");
+    }
+
+    /// A stream that emits a delta and then goes silent trips the idle deadline:
+    /// because content already flowed, the failure is a NON-fatal error (the
+    /// loop feeds it back) and is not retried (that would duplicate output).
+    #[tokio::test(start_paused = true)]
+    async fn deltas_then_a_stall_is_a_nonfatal_error() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max: 3,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            idle: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        let stream = boxed(
+            futures::stream::iter(vec![Ok::<_, CompletionError>(
+                StreamedAssistantContent::Text(rig::message::Text::new("hi")),
+            )])
+            .chain(futures::stream::pending::<Result<StreamedAssistantContent, CompletionError>>()),
+        );
+        let state = RetryState::new(policy.max);
+        forward_stream(stream, None, policy, open_silent, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::TextDelta(t) if t == "hi")),
+            "{events:?}"
+        );
+        let error = events
+            .iter()
+            .find_map(|e| match e {
+                LlmStreamEvent::Error { message, fatal } => Some((message.clone(), *fatal)),
+                _ => None,
+            })
+            .expect("the idle deadline surfaced an error");
+        assert!(!error.1, "a post-content stall is non-fatal: {error:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmStreamEvent::Retrying { .. })),
+            "no retry once content flowed: {events:?}"
+        );
+    }
+
+    /// A clean stream (deltas then `Done`) is forwarded untouched: no error, no
+    /// retry, the idle deadline never fires.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_stream_is_unaffected() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            idle: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        let stream = boxed(futures::stream::iter(vec![
+            Ok::<_, CompletionError>(StreamedAssistantContent::Text(rig::message::Text::new("hi"))),
+            Ok::<_, CompletionError>(done()),
+        ]));
+        let state = RetryState::new(policy.max);
+        forward_stream(stream, None, policy, open_silent, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::TextDelta(t) if t == "hi")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmStreamEvent::Error { .. })),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmStreamEvent::Retrying { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// `ZERO` disables the deadline at BOTH seams: the peek collapses to a plain
+    /// `stream.next()` (a silent stream stays pending), and the connect race is
+    /// skipped so a slow connect is not spuriously timed out.
+    #[tokio::test(start_paused = true)]
+    async fn zero_deadlines_disable_the_timeout() {
+        // Peek seam: no `sleep(ZERO)`, so a silent stream never yields `Idle`.
+        let mut silent =
+            futures::stream::pending::<Result<StreamedAssistantContent, CompletionError>>();
+        let stalled = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_or_stall(&mut silent, Duration::ZERO),
+        )
+        .await;
+        assert!(stalled.is_err(), "ZERO must not trip the deadline");
+
+        // Connect seam: `ZERO` awaits the connect directly.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            ttft: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let mut state = RetryState::new(policy.max);
+        let out = connect_with_retry(&policy, &mut state, open_slow_ok, &tx).await;
+        assert!(
+            matches!(out, PreContent::Ready { .. }),
+            "a slow connect must not be timed out under ZERO"
         );
     }
 }

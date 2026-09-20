@@ -134,7 +134,8 @@ impl SkillsConfig {
 }
 
 /// Retry policy, loaded from the `[retry]` table. Absent = defaults (3 retries,
-/// 500 ms base, 8 s cap); `max = 0` disables retrying.
+/// 500 ms base, 8 s cap, 60 s ttft, 120 s idle); `max = 0` disables retrying and
+/// a `0` timeout disables that stall deadline.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct RetryConfig {
     /// Retries after the first attempt (`0` disables).
@@ -143,6 +144,10 @@ pub struct RetryConfig {
     pub base_ms: Option<u64>,
     /// Cap on a single backoff wait, in milliseconds.
     pub cap_ms: Option<u64>,
+    /// Time-to-first-token timeout, in ms (`0` disables).
+    pub ttft_ms: Option<u64>,
+    /// Inter-item idle timeout, in ms (`0` disables).
+    pub idle_ms: Option<u64>,
 }
 
 impl RetryConfig {
@@ -159,6 +164,14 @@ impl RetryConfig {
                 .cap_ms
                 .map(std::time::Duration::from_millis)
                 .unwrap_or(d.cap),
+            ttft: self
+                .ttft_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(d.ttft),
+            idle: self
+                .idle_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(d.idle),
         }
     }
 }
@@ -308,6 +321,8 @@ pub struct EnvLike {
     pub wcode_retry_max: Option<String>,
     pub wcode_retry_base_ms: Option<String>,
     pub wcode_retry_cap_ms: Option<String>,
+    pub wcode_retry_ttft_ms: Option<String>,
+    pub wcode_retry_idle_ms: Option<String>,
 }
 
 impl EnvLike {
@@ -331,6 +346,8 @@ impl EnvLike {
             wcode_retry_max: std::env::var("WCODE_RETRY_MAX").ok(),
             wcode_retry_base_ms: std::env::var("WCODE_RETRY_BASE_MS").ok(),
             wcode_retry_cap_ms: std::env::var("WCODE_RETRY_CAP_MS").ok(),
+            wcode_retry_ttft_ms: std::env::var("WCODE_RETRY_TTFT_MS").ok(),
+            wcode_retry_idle_ms: std::env::var("WCODE_RETRY_IDLE_MS").ok(),
         }
     }
 }
@@ -458,6 +475,16 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     if let Some(v) = env.wcode_retry_cap_ms.as_deref() {
         retry.cap = std::time::Duration::from_millis(
             parse_count("retry.cap_ms", v).map_err(ConfigError::Io)?,
+        );
+    }
+    if let Some(v) = env.wcode_retry_ttft_ms.as_deref() {
+        retry.ttft = std::time::Duration::from_millis(
+            parse_count("retry.ttft_ms", v).map_err(ConfigError::Io)?,
+        );
+    }
+    if let Some(v) = env.wcode_retry_idle_ms.as_deref() {
+        retry.idle = std::time::Duration::from_millis(
+            parse_count("retry.idle_ms", v).map_err(ConfigError::Io)?,
         );
     }
     // Env beats toml: an explicit `WCODE_INSTRUCTIONS` (or `off`) wins for the
@@ -1121,6 +1148,56 @@ mod compaction_cfg_tests {
             panic!("wrong error: {err:?}")
         };
         assert!(msg.contains("compaction.budget"), "got: {msg}");
+    }
+
+    #[test]
+    fn toml_retry_stall_timeouts_parse_into_the_policy() {
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[retry]\nttft_ms = 5000\nidle_ms = 9000").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.retry.ttft, std::time::Duration::from_millis(5000));
+        assert_eq!(cfg.retry.idle, std::time::Duration::from_millis(9000));
+        // Unset fields keep the harness defaults.
+        assert_eq!(cfg.retry.max, RetryPolicy::default().max);
+        assert_eq!(
+            cfg.to_llm_opts().retry.idle,
+            std::time::Duration::from_millis(9000)
+        );
+    }
+
+    #[test]
+    fn retry_stall_env_beats_toml_and_zero_disables() {
+        let cfg = merge(
+            EnvLike {
+                wcode_retry_ttft_ms: Some("0".into()),
+                wcode_retry_idle_ms: Some("250".into()),
+                ..EnvLike::default()
+            },
+            toml::from_str("model = \"m\"\n[retry]\nttft_ms = 5000\nidle_ms = 9000").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cfg.retry.ttft, std::time::Duration::ZERO, "0 disables");
+        assert_eq!(cfg.retry.idle, std::time::Duration::from_millis(250));
+        assert_eq!(cfg.to_llm_opts().retry.ttft, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn invalid_retry_stall_env_is_config_error_naming_the_field() {
+        let err = merge(
+            EnvLike {
+                wcode_retry_idle_ms: Some("soon".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("retry.idle_ms"), "got: {msg}");
     }
 
     #[test]

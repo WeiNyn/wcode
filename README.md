@@ -68,6 +68,8 @@ disabled = ["noisy-skill"] # optional; names to skip
 max = 3                    # optional; retries after the first attempt (0 disables)
 base_ms = 500              # optional; base backoff for the first retry
 cap_ms = 8000              # optional; cap on a single backoff wait
+ttft_ms = 60000            # optional; time-to-first-token timeout (0 disables)
+idle_ms = 120000           # optional; inter-item idle timeout (0 disables)
 
 [theme]
 # TUI role colors, presentation-only. A value is a named ANSI color (`cyan`,
@@ -110,7 +112,8 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
 `off`), `WCODE_SKILLS` (extra skill roots, or `off`), and `WCODE_RETRY_MAX`,
-`WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS` (the
+`WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS`, `WCODE_RETRY_TTFT_MS`,
+`WCODE_RETRY_IDLE_MS` (the
 `[retry]` table).
 
 `--config <path>` (or `WCODE_CONFIG`; flag beats env, relative to the cwd)
