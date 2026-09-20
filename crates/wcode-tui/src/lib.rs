@@ -31,7 +31,7 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::Backend;
 
-pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, Tool};
+pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, TaskItem, Tool};
 pub use crate::theme::{ThemeSpec, parse_theme};
 
 /// A surface's live state, shown in the team strip and by `/team`.
@@ -112,6 +112,9 @@ pub struct Options {
     /// Resumable sessions for the `/resume` picker (local sessions only; empty
     /// when the client is remote and cannot see the session dir).
     pub sessions: Vec<SessionItem>,
+    /// The orchestrator's plan — seeded at startup and refreshed live by the
+    /// `new_tasks` feed to `run` (empty for a socket client).
+    pub tasks: Vec<TaskItem>,
     /// A `[theme]` overlay on palette B (empty = palette B); installed before
     /// the first draw.
     pub theme: ThemeSpec,
@@ -144,6 +147,7 @@ pub async fn run(
     surfaces: Vec<SurfaceSpec>,
     options: Options,
     new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+    new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
 ) -> io::Result<Outcome> {
     // Index 0 (the root) is mandatory — its backend drives the loop. Guard the
     // `pub` API against an empty list rather than panicking on `backends[0]`.
@@ -154,6 +158,7 @@ pub async fn run(
         status,
         models,
         sessions,
+        tasks,
         history,
         theme,
         remote,
@@ -165,6 +170,7 @@ pub async fn run(
     let mut app = App::new();
     app.set_models(models);
     app.set_sessions(sessions);
+    app.set_tasks(tasks);
     app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
     // The root's full status line (members derive a reduced one).
     app.set_status(status);
@@ -186,7 +192,7 @@ pub async fn run(
         app.load_history(read_history(path));
     }
 
-    let result = event_loop(&mut terminal, backends, &mut app, new_surfaces).await;
+    let result = event_loop(&mut terminal, backends, &mut app, new_surfaces, new_tasks).await;
 
     if let Some(path) = &history {
         write_history(path, app.history());
@@ -213,6 +219,7 @@ async fn event_loop(
     mut backends: Vec<(SessionId, Backend)>,
     app: &mut App,
     mut new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+    mut new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
 
@@ -252,6 +259,8 @@ async fn event_loop(
                 app.add_surface(spec.info());
                 backends.push((spec.id.clone(), spec.backend));
             }
+            // The orchestrator's plan changed: replace the whole list.
+            Some(items) = recv_tasks(&mut new_tasks) => app.set_tasks(items),
             Some(event) = replies.recv() => app.handle(event),
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
@@ -316,6 +325,17 @@ fn spawn_forwarder(
 
 /// The next runtime-added surface, or a future that never resolves when the
 /// feed is absent (a socket client, or a served worker which has no team).
+/// The next task-list update, or a future that never resolves when the feed is
+/// absent (a socket client). A full-replacement list per update.
+async fn recv_tasks(
+    rx: &mut Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
+) -> Option<Vec<TaskItem>> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn recv_opt(
     rx: &mut Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
 ) -> Option<SurfaceSpec> {
@@ -441,6 +461,26 @@ mod tests {
         assert_eq!(got.id.as_str(), "agent:explorer");
     }
 
+    /// A task-list update handed over the feed is delivered to the loop's arm —
+    /// the headless seam the event loop's `new_tasks` branch reads.
+    #[tokio::test]
+    async fn recv_tasks_yields_an_update() {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<TaskItem>>();
+        let mut feed = Some(rx);
+        tx.send(vec![TaskItem {
+            id: 1,
+            title: "do it".into(),
+            owner: Some("w1".into()),
+            state: "doing".into(),
+        }])
+        .unwrap();
+
+        let got = recv_tasks(&mut feed).await.expect("a list");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].title, "do it");
+        assert_eq!(got[0].owner.as_deref(), Some("w1"));
+    }
+
     /// An empty surface list quits cleanly — no `backends[0]` panic.
     #[tokio::test]
     async fn run_with_no_surfaces_quits_without_panicking() {
@@ -448,10 +488,14 @@ mod tests {
             status: Status::default(),
             models: Vec::new(),
             sessions: Vec::new(),
+            tasks: Vec::new(),
             history: None,
             theme: ThemeSpec::default(),
             remote: false,
         };
-        assert_eq!(run(Vec::new(), options, None).await.unwrap(), Outcome::Quit);
+        assert_eq!(
+            run(Vec::new(), options, None, None).await.unwrap(),
+            Outcome::Quit
+        );
     }
 }

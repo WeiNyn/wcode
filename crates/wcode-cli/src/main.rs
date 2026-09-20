@@ -440,6 +440,7 @@ async fn main() {
                         // The server owns the session; a socket client cannot see
                         // the session dir, so `/resume` has nothing to offer.
                         sessions: Vec::new(),
+                        tasks: Vec::new(),
                         theme: cfg.theme.clone(),
                         history: Some(repl::history_path()),
                         remote: true,
@@ -507,7 +508,10 @@ async fn main() {
                         });
                         Some(rx)
                     };
-                    match wcode_tui::run(surfaces, options, new_surfaces).await {
+                    // Tasks are unavailable across a socket: the server owns the
+                    // plan, and the client holds no `TaskList`.
+                    let new_tasks = None;
+                    match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
                         Ok(wcode_tui::Outcome::Reload { .. }) => {
                             eprintln!("tui: cannot reload over a socket");
@@ -946,6 +950,7 @@ async fn main() {
                         .await
                         .unwrap_or_default(),
                     sessions: session_items(),
+                    tasks: task_items(&orchestrator),
                     theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
                     remote: false,
@@ -1021,7 +1026,32 @@ async fn main() {
                 } else {
                     None
                 };
-                match wcode_tui::run(surfaces, options, new_surfaces).await {
+                // Seed the plan and forward live updates: the TUI holds no
+                // `TaskList`, so the composition root maps each snapshot to the
+                // `TaskItem` view type over a feed shaped like `new_surfaces`.
+                let new_tasks = orchestrator.as_ref().map(|o| {
+                    let (tx, rx) =
+                        tokio::sync::mpsc::unbounded_channel::<Vec<wcode_tui::TaskItem>>();
+                    let mut updates = o.tasks().subscribe();
+                    tokio::spawn(async move {
+                        loop {
+                            let items: Vec<wcode_tui::TaskItem> = updates
+                                .borrow_and_update()
+                                .iter()
+                                .map(task_item)
+                                .collect();
+                            // A closed receiver means the TUI has exited.
+                            if tx.send(items).is_err() {
+                                return;
+                            }
+                            if updates.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                    rx
+                });
+                match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
                     Ok(wcode_tui::Outcome::Quit) => {
                         // The terminal is already restored: print the exact
                         // command to bring this session back (nothing when there
@@ -1309,6 +1339,25 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
             1
         }
     }
+}
+
+/// Map a task-list entry to the TUI's view type (owner shortened to `w1`).
+fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
+    wcode_tui::TaskItem {
+        id: task.id,
+        title: task.title.clone(),
+        owner: task.owner.as_ref().map(crate::agents::short_name),
+        state: task.state.label().to_string(),
+    }
+}
+
+/// The initial plan for the TUI: empty when there is no orchestrator (a served
+/// `--owner` worker holds no `TaskList`).
+fn task_items(orchestrator: &Option<crate::agents::Orchestrator>) -> Vec<wcode_tui::TaskItem> {
+    orchestrator
+        .as_ref()
+        .map(|o| o.tasks().snapshot().iter().map(task_item).collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

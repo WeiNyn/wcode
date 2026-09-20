@@ -358,6 +358,12 @@ const COMMANDS: &[Command] = &[
         summary: "list the team",
     },
     Command {
+        name: "tasks",
+        aliases: &[],
+        args: None,
+        summary: "list the tasks",
+    },
+    Command {
         name: "help",
         aliases: &[],
         args: None,
@@ -406,6 +412,22 @@ fn team_text(rows: &[(&str, TeamState, bool, Option<&str>)]) -> String {
                 Some(action) => format!("{head} · {action}"),
                 None => head,
             }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `/tasks` listing: one `#<id> [<state>] <title> (<owner>)` line per task,
+/// with `(unassigned)` when no owner. The plan is reflected here, not edited.
+fn tasks_text(tasks: &[TaskItem]) -> String {
+    if tasks.is_empty() {
+        return "(no tasks yet)".to_string();
+    }
+    tasks
+        .iter()
+        .map(|t| match &t.owner {
+            Some(owner) => format!("#{} [{}] {} ({owner})", t.id, t.state, t.title),
+            None => format!("#{} [{}] {} (unassigned)", t.id, t.state, t.title),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -590,6 +612,19 @@ fn match_range(item: &str, query: &str) -> Option<Range<usize>> {
 pub struct SessionItem {
     pub label: String,
     pub path: PathBuf,
+}
+
+/// One planned task for the `/tasks` listing — a *view* type injected by the
+/// composition root (the TUI owns no `TaskList` and cannot see one). Mirrors
+/// [`SessionItem`]: a plain, cloneable value the CLI builds from a snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskItem {
+    pub id: u32,
+    pub title: String,
+    /// The assigned worker's short name (`w1`) or address, if any.
+    pub owner: Option<String>,
+    /// The display state (`todo`/`doing`/`done`).
+    pub state: String,
 }
 
 /// Status-line fields.
@@ -1192,6 +1227,9 @@ pub struct App {
     /// Resumable sessions for the `/resume` picker — injected by the composition
     /// root, which owns the session dir the TUI cannot see.
     sessions: Vec<SessionItem>,
+    /// The orchestrator's plan — injected by the composition root and refreshed
+    /// live by the `new_tasks` feed to `run`.
+    tasks: Vec<TaskItem>,
     /// Set when the user picks a session to resume; the run returns it so the CLI
     /// can re-exec with `--resume <path>`.
     pending_resume: Option<PathBuf>,
@@ -1239,6 +1277,7 @@ impl App {
             paste_id: 0,
             models: Vec::new(),
             sessions: Vec::new(),
+            tasks: Vec::new(),
             pending_resume: None,
             pending_reload: None,
             remote: false,
@@ -2042,6 +2081,7 @@ impl App {
             },
             "copy" => self.copy_last(),
             "team" => self.notice(team_text(&self.member_rows())),
+            "tasks" => self.notice(tasks_text(&self.tasks)),
             "surface" => self.open_surface_picker(),
             "help" => self.notice(help_text()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
@@ -2559,6 +2599,14 @@ impl App {
     /// Seed the session list the `/resume` picker offers.
     pub fn set_sessions(&mut self, sessions: Vec<SessionItem>) {
         self.sessions = sessions;
+    }
+
+    /// Replace the plan when the composition root (or the `new_tasks` feed)
+    /// pushes one. Mirrors [`Self::set_sessions`]; marks dirty so the next frame
+    /// redraws.
+    pub fn set_tasks(&mut self, tasks: Vec<TaskItem>) {
+        self.tasks = tasks;
+        self.dirty = true;
     }
 
     /// The session the user chose to resume, if any — read by the event loop
@@ -3493,6 +3541,69 @@ mod tests {
         );
     }
 
+    /// `/tasks` reflects the injected plan: `(no tasks yet)`, then one line each.
+    #[test]
+    fn the_tasks_command_lists_the_plan() {
+        let mut app = App::new();
+        submit(&mut app, "/tasks");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t == "(no tasks yet)"
+        ));
+
+        let mut app = App::new();
+        app.set_tasks(vec![
+            TaskItem {
+                id: 1,
+                title: "explore".into(),
+                owner: None,
+                state: "todo".into(),
+            },
+            TaskItem {
+                id: 2,
+                title: "fix it".into(),
+                owner: Some("w1".into()),
+                state: "doing".into(),
+            },
+        ]);
+        submit(&mut app, "/tasks");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a tasks notice");
+        };
+        assert!(text.contains("#1 [todo] explore (unassigned)"), "{text}");
+        assert!(text.contains("#2 [doing] fix it (w1)"), "{text}");
+    }
+
+    /// `tasks_text` renders `(no tasks yet)` when empty, one line per task else.
+    #[test]
+    fn tasks_text_renders_each_task() {
+        assert_eq!(tasks_text(&[]), "(no tasks yet)");
+        let items = vec![TaskItem {
+            id: 3,
+            title: "verify".into(),
+            owner: Some("reviewer".into()),
+            state: "done".into(),
+        }];
+        assert_eq!(tasks_text(&items), "#3 [done] verify (reviewer)");
+    }
+
+    /// `set_tasks` replaces the plan and requests a redraw.
+    #[test]
+    fn set_tasks_replaces_the_plan_and_marks_dirty() {
+        let mut app = App::new();
+        assert!(app.tasks.is_empty());
+        app.dirty = false;
+        app.set_tasks(vec![TaskItem {
+            id: 7,
+            title: "t".into(),
+            owner: None,
+            state: "todo".into(),
+        }]);
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].id, 7);
+        assert!(app.dirty(), "a new plan requests a redraw");
+    }
+
     #[test]
     fn a_tool_start_sets_the_member_action_and_agent_end_clears_it() {
         let (mut app, _root, id) = two_surfaces();
@@ -3840,13 +3951,13 @@ mod tests {
         assert!(
             text.starts_with(
                 "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /reload [--no-session] /usage /copy /surface /team /help"
+                 /resume /reload [--no-session] /usage /copy /surface /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
             "exit", "model", "effort", "compact", "changes", "resume", "reload", "usage", "copy",
-            "surface", "team", "help",
+            "surface", "team", "tasks", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),

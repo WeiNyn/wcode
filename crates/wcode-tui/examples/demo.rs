@@ -140,6 +140,7 @@ async fn main() -> std::io::Result<()> {
         status,
         models: vec!["demo".to_string(), "demo-mini".to_string()],
         sessions: Vec::new(),
+        tasks: Vec::new(),
         theme: Default::default(),
         history: None,
         remote: false,
@@ -168,5 +169,5 @@ async fn main() -> std::io::Result<()> {
             backend: Backend::from(handle),
         },
     ];
-    wcode_tui::run(surfaces, options, None).await.map(|_| ())
+    wcode_tui::run(surfaces, options, None, None).await.map(|_| ())
 }
