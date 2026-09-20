@@ -346,7 +346,9 @@ pub fn group_dir_of(p: &Path) -> Option<PathBuf> {
 /// one source of truth; amendment 6c.)
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Manifest {
-    /// The group id (`<millis>_<id8>`), checked against the dir name on open.
+    /// The group id (`<millis>_<id8>`), **informational only** — written on the
+    /// first record and never validated on open. The `members/` scan and the
+    /// directory name are the source of truth; `.group` is not read back.
     pub group: String,
     /// Per-member launch specs. `members/` scanning decides membership; a
     /// member with no record here resumes with a default (template) spec.
@@ -512,7 +514,15 @@ pub fn load_root(group: &SessionGroup) -> io::Result<(Session, Vec<AgentMessage>
 #[derive(Debug)]
 pub enum MemberResume {
     /// The member is live again: opened, seeded (D1), rebuilt, registered,
+    /// The member is live again: opened, seeded (D1), rebuilt, registered,
     /// owned, named.
+    ///
+    /// A `messages: 0` result is the **phantom-member window**: the member file
+    /// is created (`create_group_member_session`, which writes only the header)
+    /// *before* the manifest is written (`record_member`), so a crash in
+    /// between leaves a header-only file with no manifest entry. On resume that
+    /// opens with an empty context and comes back as a benign "hello" member —
+    /// distinct from a *corrupt* file, which is `Skipped { reason }`.
     Restored {
         /// The live address (`agent:<name>`), as registered.
         id: SessionId,
@@ -546,6 +556,11 @@ pub enum MemberResume {
 /// A member whose file parses joins `Restored`; a corrupt/missing one is
 /// `Skipped` (with the reason) and the loop continues. There is no hard
 /// failure here — the group's root was already opened by [`load_root`].
+///
+/// A header-only member file (empty transcript) still parses, so it comes back
+/// as `Restored { messages: 0 }` — the crash window between member-file
+/// creation and the manifest write (see [`MemberResume::Restored`]), *not* a
+/// corrupt file.
 ///
 /// `root` is the report-back target (the root's address, i.e. `orchestrator.id()`).
 pub fn rebuild_team(
