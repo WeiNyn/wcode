@@ -21,8 +21,10 @@ the boxes as each task completes and keep the status table current.
 | 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ☑ phases 1–3 |
 | 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T2 (color-mode ladder, hex-gated truecolor) + T3 (`[theme]` overlay) landed; tier palettes open |
 | 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
-| 16 | Session groups: team session persistence & resume (see [`session-groups.md`](session-groups.md)) | ☑ done |
-| 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ◐ design locked — digest-CAS only; **claims dropped** (orchestrator owns targeting/scope by prompt); re-sketch in first-layer review |
+| 16 | Session groups: team session persistence & resume (see [`session-groups.md`](session-groups.md)) | ☑ done — 2 commits (`fe95cf8`, `1408550`); second-layer review APPROVED |
+| 17 | Session-groups follow-ups (reviewer's non-blocking list) | ☐ todo — see §17 |
+| 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ☑ done — `94069f0`; **claims dropped** (orchestrator owns targeting/scope by prompt); second-layer review APPROVED |
+| 19 | Digest-CAS follow-ups (item 18 review debt) | ☐ todo — see §19 |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -495,6 +497,37 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, 10, 
 
 ---
 
+## 17. Session-groups follow-ups (item 16 review debt)
+
+**New.** Tracker item 16 (session groups) shipped and passed second-layer review
+with a reviewer's non-blocking list. Small, independent:
+
+- [ ] `group_dir_of` unit test (dir + `<dir>/root.jsonl` + bare-file `None`) — the
+      6b linchpin, currently verified only live and by call-site reading.
+- [ ] Document the phantom-member window: a crash between member-file creation
+      and the manifest write resumes a header-only member as "Restored, 0
+      messages" (by design, differs from the corrupt→Skipped story).
+- [ ] Validate `Manifest.group` on open — or fix the doc comment that claims it
+      is "checked against the dir name" (scan is truth; purely informational).
+- [ ] One real `/reload` in a group session (full exec re-invocation) at final
+      sign-off.
+- [ ] Drop the unused `WorkerSpec` serde derive, or actually serialize it.
+
+## 19. Digest-CAS follow-ups (item 18 review debt)
+
+**New.** Tracker item 18 (whole-file digest CAS) shipped (`94069f0`) and passed
+second-layer review with a reviewer's non-blocking list:
+
+- [ ] Automated integration test wiring the *real* `read` output →
+      `WorkspaceHooks::after_tool_call` → `transform_tool_input` → a *real*
+      mutator `execute` — the one link covered only by unit seams + the live
+      check.
+- [ ] Strengthen `build_agent_leaves_the_shared_hook_set_untouched` with
+      `assert!(!agent.hooks().is_empty())` — asserts the push actually happened,
+      not just that the shared input set was left unmutated.
+- [ ] Mention in the `read` tool description that `--plain` does not arm the
+      digest cache (a model that reads plain before writing gets no protection).
+
 ## 15. TUI team sidebar: status + live action
 
 **New.** The sidebar's `name · model · state` row wastes the model column (uniform
@@ -541,5 +574,9 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 14. **14** TUI palette & theming — presentation-only; see
     [`tui-theming-plan.md`](tui-theming-plan.md).
 15. **15** TUI team sidebar: status + live action — presentation-only (+ a socket fix);
+15. **15** TUI team sidebar: status + live action — presentation-only (+ a socket fix);
     see [`tui-sidebar-plan.md`](tui-sidebar-plan.md).
-18. **18** workspace concurrency — whole-file digest CAS; design first.
+16. **16** session groups — team persistence/resume; see [`session-groups.md`](session-groups.md). Done.
+17. **17** session-groups follow-ups — small review debts; see §17.
+18. **18** workspace concurrency — whole-file digest CAS. Done (`94069f0`).
+19. **19** digest-CAS follow-ups — small review debts; see §19.
