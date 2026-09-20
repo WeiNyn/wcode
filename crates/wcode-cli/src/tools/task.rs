@@ -47,12 +47,13 @@ impl Task {
         Self { list, phonebook }
     }
 
-    /// Resolve an assignee name to an address: the phonebook first, then a bare
-    /// `agent:<name>` (mirrors `message::address`).
+    /// Resolve an assignee name to an address: the phonebook first, then the
+    /// same rule as `message::address` — a `:`-prefixed name is taken verbatim
+    /// (`agent:w1`), otherwise a bare name becomes `agent:<name>`.
     fn resolve(&self, name: &str) -> SessionId {
         self.phonebook
             .get(name)
-            .unwrap_or_else(|| SessionId::agent(name))
+            .unwrap_or_else(|| crate::tools::message::address(name))
     }
 }
 
@@ -229,6 +230,28 @@ mod tests {
             .await;
         assert!(out.is_error, "{out:?}");
         assert!(out.output.contains("9"), "{}", out.output);
+    }
+
+    /// A prefixed `assignee` is taken verbatim (mirrors `message::address`) —
+    /// the bare-name path must not double-prefix `agent:w1`.
+    #[tokio::test]
+    async fn assign_accepts_a_prefixed_assignee() {
+        let (tool, list) = tool();
+        tool.execute(serde_json::json!({ "op": "create", "title": "t" }), ctx())
+            .await;
+        let out = tool
+            .execute(
+                serde_json::json!({ "op": "assign", "id": 1, "assignee": "agent:w1" }),
+                ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(list.snapshot()[0].owner, Some(SessionId::agent("w1")));
+        assert!(
+            out.output.contains("agent:w1") && !out.output.contains("agent:agent:w1"),
+            "the echo shows the address verbatim: {}",
+            out.output
+        );
     }
 
     /// An unknown `op` (and a missing required field) is an `is_error`, not a panic.

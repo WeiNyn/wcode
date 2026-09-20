@@ -1236,5 +1236,23 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("bogus"), "{err}");
     }
+
+    /// The `task` tool is root-only: the orchestrator's set offers it, the
+    /// default (worker) set does not — locks the boundary against drift.
+    #[test]
+    fn the_task_tool_is_root_only() {
+        let o = orchestrator();
+        let root: Vec<String> = o.tools().iter().map(|t| t.name().to_string()).collect();
+        assert!(root.contains(&"task".to_string()), "root tools: {root:?}");
+
+        let defaults: Vec<String> = default_tools(&ToolsConfig::default())
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert!(
+            !defaults.contains(&"task".to_string()),
+            "the default set must not offer `task`: {defaults:?}"
+        );
+    }
 }
 

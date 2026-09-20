@@ -54,7 +54,7 @@ impl Message {
 
 /// A bare name is a worker address (`w1` → `agent:w1`); anything with a
 /// `:`-prefix (`agent:…`, `client:…`) is taken verbatim.
-fn address(to: &str) -> SessionId {
+pub(crate) fn address(to: &str) -> SessionId {
     if to.contains(':') {
         SessionId::new(to)
     } else {
