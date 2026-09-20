@@ -16,6 +16,7 @@ mod config;
 mod instructions;
 mod repl;
 mod rtk;
+mod session_groups;
 mod skills;
 mod tools;
 
@@ -23,11 +24,11 @@ use crate::config::{
     Config, ConfigError, EnvLike, FileConfig, TeamMember, config_dir, merge, parse_endpoint,
 };
 use crate::instructions::{InstructionSet, Mode, load as load_instructions};
-use crate::skills::{SkillSet, discover as discover_skills};
 use crate::repl::{
     AgentSpec, build_agent, default_hooks, list_sessions, resolve_session_path, session_dir,
     system_prompt,
 };
+use crate::skills::{SkillSet, discover as discover_skills};
 
 const USAGE: &str = "\
 wcode — minimal coding agent
@@ -194,8 +195,11 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--sequential" => a.sequential = true,
             "--agents" => a.agents = true,
             "--peer" => {
-                a.peers
-                    .push(args.get(i).ok_or("--peer requires <name>=<socket>")?.clone());
+                a.peers.push(
+                    args.get(i)
+                        .ok_or("--peer requires <name>=<socket>")?
+                        .clone(),
+                );
                 i += 1;
             }
             "--name" => {
@@ -428,7 +432,9 @@ async fn main() {
                     };
                     let options = wcode_tui::Options {
                         status,
-                        models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
+                        models: wcode_harness::streamfn::list_models(&llm)
+                            .await
+                            .unwrap_or_default(),
                         // The server owns the session; a socket client cannot see
                         // the session dir, so `/resume` has nothing to offer.
                         sessions: Vec::new(),
@@ -454,10 +460,7 @@ async fn main() {
                             .map(|info| wcode_tui::SurfaceSpec {
                                 id: info.id.clone(),
                                 label: crate::agents::short_name(&info.id),
-                                model: info
-                                    .model
-                                    .clone()
-                                    .unwrap_or_else(|| llm.model.clone()),
+                                model: info.model.clone().unwrap_or_else(|| llm.model.clone()),
                                 is_root: &info.id == root,
                                 backend: Backend::from(client.with_session(info.id.clone())),
                             })
@@ -483,12 +486,11 @@ async fn main() {
                                     let spec = wcode_tui::SurfaceSpec {
                                         id: info.id.clone(),
                                         label: crate::agents::short_name(&info.id),
-                                        model: info
-                                            .model
-                                            .clone()
-                                            .unwrap_or_else(|| model.clone()),
+                                        model: info.model.clone().unwrap_or_else(|| model.clone()),
                                         is_root: Some(&info.id) == root_id.as_ref(),
-                                        backend: Backend::from(client.with_session(info.id.clone())),
+                                        backend: Backend::from(
+                                            client.with_session(info.id.clone()),
+                                        ),
                                     };
                                     // A closed receiver means the TUI has exited.
                                     if tx.send(spec).is_err() {
@@ -547,6 +549,14 @@ async fn main() {
         std::process::exit(2);
     }
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // The active session group, when this run owns one (a fresh root always
+    // creates one; a resumed group sets it below). Threaded into the worker
+    // template so spawned/rebuilt members persist into its `members/`.
+    let mut active_group: Option<session_groups::SessionGroup> = None;
+    // True when the root came back from a group dir: the team is rebuilt from
+    // the files (not `[team]`), after the orchestrator exists.
+    let mut resuming_group = false;
     let (session, context): (Option<Session>, Vec<AgentMessage>) = match args.resume.clone() {
         Some(path) => {
             let p = match path {
@@ -565,31 +575,73 @@ async fn main() {
                     }
                 },
             };
-            match Session::open(&p) {
-                Ok(s) => {
-                    let ctx = s.messages();
-                    // `--model`/`--effort` flags win over the session's last
-                    // change; otherwise the session restores both.
-                    if args.model.is_none()
-                        && let Some(m) = s.model()
-                    {
-                        llm.model = m;
+            // A group dir (or a `<dir>/root.jsonl` from a `/reload`, 6b) resumes
+            // the whole team; a bare flat file resumes as today.
+            match session_groups::group_dir_of(&p) {
+                Some(dir) => match session_groups::open_group(&dir) {
+                    Ok(group) => match session_groups::load_root(&group) {
+                        Ok((s, ctx)) => {
+                            if args.model.is_none()
+                                && let Some(m) = s.model()
+                            {
+                                llm.model = m;
+                            }
+                            if args.effort.is_none()
+                                && let Some(e) = s.effort()
+                            {
+                                llm.effort = e;
+                            }
+                            resuming_group = true;
+                            active_group = Some(group);
+                            (Some(s), ctx)
+                        }
+                        Err(e) => {
+                            eprintln!("error: open {}: {e}", group.root().display());
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("error: open group {}: {e}", dir.display());
+                        std::process::exit(1);
                     }
-                    if args.effort.is_none()
-                        && let Some(e) = s.effort()
-                    {
-                        llm.effort = e;
+                },
+                None => match Session::open(&p) {
+                    Ok(s) => {
+                        let ctx = s.messages();
+                        // `--model`/`--effort` flags win over the session's last
+                        // change; otherwise the session restores both.
+                        if args.model.is_none()
+                            && let Some(m) = s.model()
+                        {
+                            llm.model = m;
+                        }
+                        if args.effort.is_none()
+                            && let Some(e) = s.effort()
+                        {
+                            llm.effort = e;
+                        }
+                        (Some(s), ctx)
                     }
-                    (Some(s), ctx)
-                }
-                Err(e) => {
-                    eprintln!("error: open {}: {e}", p.display());
-                    std::process::exit(1);
-                }
+                    Err(e) => {
+                        eprintln!("error: open {}: {e}", p.display());
+                        std::process::exit(1);
+                    }
+                },
             }
         }
-        None => match (!args.no_session).then(|| Session::create(&session_dir())) {
-            Some(Ok(s)) => (Some(s), Vec::new()),
+        None => match (!args.no_session).then(|| {
+            // Every fresh root is a session group (Q(G)): a `<millis>_<id8>/`
+            // dir holding `root.jsonl` (and a `members/` for any team). A group
+            // with no members resumes exactly as a bare root.
+            session_groups::create_group(&session_dir()).and_then(|group| {
+                let session = session_groups::create_root_session(&group.dir, &cwd)?;
+                Ok((group, session))
+            })
+        }) {
+            Some(Ok((group, s))) => {
+                active_group = Some(group);
+                (Some(s), Vec::new())
+            }
             Some(Err(e)) => {
                 eprintln!("error: create session: {e}");
                 std::process::exit(1);
@@ -601,7 +653,6 @@ async fn main() {
     // Instruction ("reference") files: discover the configured candidates
     // from the working dir up to the repo root (plus the config-dir global
     // file), unless --no-instructions disables it.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mode = if args.no_instructions {
         Mode::Off
     } else {
@@ -623,6 +674,7 @@ async fn main() {
             tools: cfg.tools,
             compaction: cfg.compaction,
             working_dir: cwd.clone(),
+            members_dir: active_group.as_ref().map(|g| g.members_dir.clone()),
         };
         crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
     });
@@ -681,10 +733,36 @@ async fn main() {
             }
         }
     }
+    // A resumed group's members come from its files, not `[team]`: rebuild the
+    // team through the orchestrator's own factory/phonebook (amendment 6a),
+    // seeding each member with its full persisted transcript (D1). Deferred to
+    // here because `rebuild_team` needs the orchestrator (friction #3).
+    if resuming_group && let (Some(group), Some(o)) = (&active_group, &orchestrator) {
+        let mut names = Vec::new();
+        let mut seeded = 0usize;
+        for outcome in session_groups::rebuild_team(group, o, o.id()) {
+            match outcome {
+                session_groups::MemberResume::Restored { id, messages } => {
+                    seeded += messages;
+                    names.push(crate::agents::short_name(&id));
+                }
+                session_groups::MemberResume::Skipped { name, reason } => {
+                    eprintln!("warning: member `{name}` not resumed: {reason}");
+                }
+            }
+        }
+        if !names.is_empty() {
+            println!(
+                "team: {} (restored, {seeded} prior messages)",
+                names.join(", ")
+            );
+        }
+    }
     // `[team]` (F3): spawn each member through the orchestrator, which validates
     // the tool allow-list (D14) and registers the name in the phonebook. Only the
     // root orchestrator spawns — a served `--owner` worker does not.
     if args.owner.is_none()
+        && !resuming_group
         && let Some(o) = &orchestrator
     {
         for member in &cfg.team {
@@ -702,7 +780,7 @@ async fn main() {
             }
         }
     }
-    if args.owner.is_none() && !cfg.team.is_empty() {
+    if args.owner.is_none() && !cfg.team.is_empty() && !resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
         println!("team: {}", names.join(", "));
     }
@@ -811,7 +889,8 @@ async fn main() {
             println!("serving {} session(s): {}", ids.len(), ids.join(", "));
             let _ = std::io::stdout().flush();
             if let Err(e) =
-                wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path).await
+                wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path)
+                    .await
             {
                 eprintln!("serve: {e}");
                 std::process::exit(1);
@@ -853,7 +932,9 @@ async fn main() {
                 };
                 let options = wcode_tui::Options {
                     status,
-                    models: wcode_harness::streamfn::list_models(&llm).await.unwrap_or_default(),
+                    models: wcode_harness::streamfn::list_models(&llm)
+                        .await
+                        .unwrap_or_default(),
                     sessions: session_items(),
                     theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
@@ -877,12 +958,34 @@ async fn main() {
                 if args.owner.is_none()
                     && let Some(o) = &orchestrator
                 {
-                    for member in &cfg.team {
-                        if let Some(backend) = o.worker_backend(&member.name) {
+                    // A resumed group's members come from its files; otherwise
+                    // from `[team]`. Either way the phonebook resolves each name.
+                    let member_names: Vec<String> = match (resuming_group, &active_group) {
+                        (true, Some(group)) => session_groups::scan_members(group)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|p| {
+                                p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                            })
+                            .collect(),
+                        _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
+                    };
+                    for name in member_names {
+                        if let Some(backend) = o.worker_backend(&name) {
+                            let model = match (resuming_group, &active_group) {
+                                (true, Some(group)) => {
+                                    session_groups::member_spec(group, &name).model
+                                }
+                                _ => cfg
+                                    .team
+                                    .iter()
+                                    .find(|m| m.name == name)
+                                    .and_then(|m| m.model.clone()),
+                            };
                             surfaces.push(wcode_tui::SurfaceSpec {
-                                id: SessionId::agent(&member.name),
-                                label: member.name.clone(),
-                                model: member.model.clone().unwrap_or_else(|| llm.model.clone()),
+                                id: SessionId::agent(&name),
+                                label: name.clone(),
+                                model: model.unwrap_or_else(|| llm.model.clone()),
                                 is_root: false,
                                 backend,
                             });
@@ -911,7 +1014,15 @@ async fn main() {
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
                         // with `--resume <path>` (the terminal is already restored).
-                        repl::exec_self(&repl::reload_args(&llm, Some(&path), false, args.agents, args.config.as_deref(), args.owner.as_deref(), args.name.as_deref()));
+                        repl::exec_self(&repl::reload_args(
+                            &llm,
+                            Some(&path),
+                            false,
+                            args.agents,
+                            args.config.as_deref(),
+                            args.owner.as_deref(),
+                            args.name.as_deref(),
+                        ));
                         std::process::exit(1); // only reached if the exec failed
                     }
                     Err(e) => {
@@ -946,8 +1057,6 @@ fn resolve_overlay(flag: Option<&str>, env: Option<&str>) -> Option<String> {
     flag.map(str::to_string)
         .or_else(|| env.filter(|s| !s.trim().is_empty()).map(str::to_string))
 }
-
-
 
 /// Pick the interactive front-end: the TUI when forced with `--tui`, or by
 /// default on a TTY; `--no-tui` (or a pipe/CI) keeps the line REPL. One-shot
@@ -1008,12 +1117,22 @@ fn live_roster(
 /// with a `id · age · first user line` label and the path to hand back for
 /// `--resume`. Failures degrade to a bare file name rather than break the picker.
 fn session_items() -> Vec<wcode_tui::SessionItem> {
-    list_sessions(&session_dir())
+    session_groups::list_groups(&session_dir())
         .unwrap_or_default()
         .into_iter()
-        .map(|path| wcode_tui::SessionItem {
-            label: session_label(&path),
-            path,
+        .map(|entry| {
+            let path = entry.path().to_path_buf();
+            let mut label = session_label(&path);
+            // Mark a group that actually carries a team, so the picker
+            // distinguishes it from a bare legacy file.
+            if let session_groups::GroupEntry::Group(group) = &entry
+                && !session_groups::scan_members(group)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                label.push_str(" · team");
+            }
+            wcode_tui::SessionItem { label, path }
         })
         .collect()
 }
@@ -1062,7 +1181,13 @@ fn humanize_age(ms: u64) -> String {
 /// The first line of the session's first user message, truncated — the quickest
 /// way to recognize a session in the picker.
 fn first_user_line(path: &Path) -> Option<String> {
-    Session::open(path)
+    // A group entry resolves to its `root.jsonl` (friction #4); a legacy file
+    // is already the transcript.
+    let root = match session_groups::group_dir_of(path) {
+        Some(dir) => dir.join("root.jsonl"),
+        None => path.to_path_buf(),
+    };
+    Session::open(&root)
         .ok()?
         .messages()
         .into_iter()
@@ -1168,8 +1293,14 @@ mod tests {
 
         let label = session_label(&path);
         assert!(label.contains("fix the flaky test"), "{label}");
-        assert!(!label.contains("second line"), "only the first line: {label}");
-        assert!(label.contains(" · 0s · "), "a fresh session reads as 0s: {label}");
+        assert!(
+            !label.contains("second line"),
+            "only the first line: {label}"
+        );
+        assert!(
+            label.contains(" · 0s · "),
+            "a fresh session reads as 0s: {label}"
+        );
     }
 
     #[test]
@@ -1366,8 +1497,20 @@ mod tests {
     fn choose_tui_prefers_flags_then_terminal() {
         assert!(choose_tui(&Args::default(), true));
         assert!(!choose_tui(&Args::default(), false));
-        assert!(choose_tui(&Args { tui: true, ..Args::default() }, false));
-        assert!(!choose_tui(&Args { no_tui: true, ..Args::default() }, true));
+        assert!(choose_tui(
+            &Args {
+                tui: true,
+                ..Args::default()
+            },
+            false
+        ));
+        assert!(!choose_tui(
+            &Args {
+                no_tui: true,
+                ..Args::default()
+            },
+            true
+        ));
         assert!(!choose_tui(
             &Args {
                 prompt: Some("x".into()),
@@ -1407,8 +1550,7 @@ mod tests {
         assert_eq!(resolve_overlay(None, Some("   ")), None);
         assert_eq!(resolve_overlay(None, None), None);
     }
-
-    }
+}
 
 #[cfg(test)]
 mod instructions_flag_tests {
@@ -1416,7 +1558,10 @@ mod instructions_flag_tests {
 
     #[test]
     fn parse_no_instructions_flag() {
-        let argv: Vec<String> = ["--no-instructions"].iter().map(|s| s.to_string()).collect();
+        let argv: Vec<String> = ["--no-instructions"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let Parsed::Args(a) = parse_args(&argv).unwrap() else {
             panic!("not args");
         };

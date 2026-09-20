@@ -330,20 +330,17 @@ pub fn history_path() -> PathBuf {
 
 /// Session files, newest first. Names are `{millis}_{hex}.jsonl`, so
 /// lexicographic order is chronological.
+/// Resumable session paths, newest first: one path per **session group** (its
+/// dir) or **legacy** flat file — the flat view the `/resume` default, `/sessions`
+/// and `main`'s latest-session lookup consume. Names are `{millis}_{hex}`, so
+/// lexicographic order is chronological. Thin wrapper over
+/// [`crate::session_groups::list_groups`], which owns the listing rule (member
+/// files are never listed).
 pub fn list_sessions(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        // No dir yet = no sessions; callers report it as empty.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut files: Vec<PathBuf> = read
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
-    files.sort_unstable();
-    files.reverse();
-    Ok(files)
+    Ok(crate::session_groups::list_groups(dir)?
+        .into_iter()
+        .map(|entry| entry.path().to_path_buf())
+        .collect())
 }
 
 /// A `/resume` arg: use it verbatim when it exists, else relative to the
@@ -839,6 +836,85 @@ pub async fn run(
                         }
                     },
                 };
+                if let Some(dir) = crate::session_groups::group_dir_of(&path) {
+                    // A session group: resume the root and rebuild the whole team
+                    // through the orchestrator's own factory/phonebook (6a).
+                    match crate::session_groups::open_group(&dir) {
+                        Ok(group) => match crate::session_groups::load_root(&group) {
+                            Ok((s, messages)) => {
+                                if let Some(m) = s.model() {
+                                    llm.model = m;
+                                }
+                                if let Some(e) = s.effort() {
+                                    llm.effort = e;
+                                }
+                                if let Some(o) = &orchestrator {
+                                    let mut names = Vec::new();
+                                    let mut seeded = 0usize;
+                                    for outcome in
+                                        crate::session_groups::rebuild_team(&group, o, o.id())
+                                    {
+                                        match outcome {
+                                            crate::session_groups::MemberResume::Restored {
+                                                id,
+                                                messages,
+                                            } => {
+                                                seeded += messages;
+                                                names.push(crate::agents::short_name(&id));
+                                            }
+                                            crate::session_groups::MemberResume::Skipped {
+                                                name,
+                                                reason,
+                                            } => {
+                                                eprintln!(
+                                                    "warning: member `{name}` not resumed: {reason}"
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if !names.is_empty() {
+                                        println!(
+                                            "team: {} (restored, {seeded} prior messages)",
+                                            names.join(", ")
+                                        );
+                                    }
+                                }
+                                let n = messages.len();
+                                let new_agent = build_agent(
+                                    AgentSpec {
+                                        llm: llm.clone(),
+                                        hooks: hooks.clone(),
+                                        tools: &tools,
+                                        compaction,
+                                        instructions: &instructions,
+                                        skills: &skills,
+                                        team,
+                                        guidelines,
+                                    },
+                                    Some(s),
+                                    messages,
+                                    orchestrator
+                                        .as_ref()
+                                        .map(|o| o.tools())
+                                        .unwrap_or_default(),
+                                );
+                                let handle = SessionActor::spawn(new_agent);
+                                if let Some(o) = &orchestrator {
+                                    o.register_root(handle.clone());
+                                }
+                                backend = Backend::from(handle);
+                                *lock_slot(&backend_slot) = backend.clone();
+                                // `root.jsonl` is the live session path: `/reload`
+                                // re-execs `--resume <dir>/root.jsonl`, mapped back
+                                // up to the group on the way in (amendment 6b).
+                                session_path = Some(group.root().to_path_buf());
+                                println!("resumed {} ({n} messages)", group.root().display());
+                            }
+                            Err(e) => eprintln!("open {}: {e}", group.root().display()),
+                        },
+                        Err(e) => eprintln!("open group {}: {e}", dir.display()),
+                    }
+                } else {
                 match Session::open(&path) {
                     Ok(s) => {
                         let messages = s.messages();
@@ -878,6 +954,7 @@ pub async fn run(
                     }
                     Err(e) => eprintln!("open {}: {e}", path.display()),
                 }
+                }
             }
             Some(Command::Sessions) => match list_sessions(&session_dir()) {
                 Ok(list) if list.is_empty() => {
@@ -885,8 +962,13 @@ pub async fn run(
                 }
                 Ok(list) => {
                     let current = session_path.as_deref();
+                    // A group-resumed session's path is `<dir>/root.jsonl`; map
+                    // it back up so the group dir row is still marked.
+                    let current_group = current.and_then(crate::session_groups::group_dir_of);
                     for p in list {
-                        let mark = if current == Some(p.as_path()) {
+                        let mark = if current == Some(p.as_path())
+                            || current_group.as_deref() == Some(p.as_path())
+                        {
                             "*"
                         } else {
                             " "

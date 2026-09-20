@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
@@ -23,12 +24,14 @@ use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
+use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
 use wcode_harness::tool::{Tool, erased};
 use wcode_protocol::{Backend, Registry};
 use wcode_tui::SurfaceSpec;
 
 use crate::config::ToolsConfig;
+use crate::session_groups::{self, SessionGroup};
 use crate::tools::default_tools;
 use crate::tools::message::Message;
 use crate::tools::spawn::Spawn;
@@ -88,6 +91,12 @@ pub struct WorkerTemplate {
     pub tools: ToolsConfig,
     pub compaction: CompactionPolicy,
     pub working_dir: PathBuf,
+    /// When `Some`, a spawned worker persists its own transcript at
+    /// `<members_dir>/<name>.jsonl` (a session group's `members/`), so the team
+    /// survives a crash and `--resume` rebuilds it (Item 16). `None` keeps the
+    /// v1 in-memory contract (no session file); set by the composition root
+    /// when a group exists.
+    pub members_dir: Option<PathBuf>,
 }
 
 /// How to build one worker. `Default` reproduces v1 behavior: inherit the
@@ -96,7 +105,7 @@ pub struct WorkerTemplate {
 /// that the per-agent provider has landed — the `base_url`/`api_key`, so a worker
 /// may run on its own provider. `stream_fn` stays shared: the rig keystore rekeys
 /// per `ClientKey(base_url, api_key, session_id)`, so one closure serves them all.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct WorkerSpec {
     /// The worker's address. Auto-assigned (`w1`, `w2`, …) when absent.
     pub name: Option<String>,
@@ -191,63 +200,132 @@ impl SessionFactory {
 
     /// Build a worker, spawn its actor, and register it under `owner` — the
     /// `report_back_to` edge the permitted set reads (§10.1).
+    /// Build a worker, spawn its actor, and register it under `owner` — the
+    /// `report_back_to` edge the permitted set reads (§10.1). When the template
+    /// names a members dir, the worker persists its transcript there and its
+    /// launch spec is recorded in the group manifest (Item 16 write path).
     pub fn spawn(&self, owner: &SessionId, spec: WorkerSpec) -> Result<SpawnedWorker, String> {
-        let name = match &spec.name {
-            // An explicit name is the caller's claim: a collision is a mistake to
-            // report loudly (D18 rejects the same for `[team]` at config load),
-            // not to paper over. Every spawn still consumes a `seq` number.
+        let name = self.assign_name(&spec.name)?;
+        let id = SessionId::agent(name);
+        let session = self.persist_member(&id, &spec)?;
+        let handle = self.build_with(&id, owner, &spec, session, Vec::new());
+        self.register_and_announce(&id, owner, handle, spec.model.clone());
+        Ok(SpawnedWorker { id })
+    }
+
+    /// Resume a worker from a persisted transcript (group resume, Item 16): the
+    /// same name allocation + registration as [`Self::spawn`], but the worker is
+    /// seeded with `session`/`context` — its full prior history (D1) — instead of
+    /// a blank slate. Never writes the group (D5: resume does not rewrite state).
+    pub fn resume_worker(
+        &self,
+        owner: &SessionId,
+        spec: WorkerSpec,
+        session: Option<Session>,
+        context: Vec<AgentMessage>,
+    ) -> Result<SpawnedWorker, String> {
+        let name = self.assign_name(&spec.name)?;
+        let id = SessionId::agent(name);
+        let handle = self.build_with(&id, owner, &spec, session, context);
+        self.register_and_announce(&id, owner, handle, spec.model.clone());
+        Ok(SpawnedWorker { id })
+    }
+
+    /// The worker's address name. An explicit name is the caller's claim — a
+    /// collision is a mistake to report loudly (D18 rejects the same for `[team]`
+    /// at config load), not to paper over; a generated name skips any taken id.
+    /// Every call still consumes a `seq` number.
+    fn assign_name(&self, explicit: &Option<String>) -> Result<String, String> {
+        match explicit {
             Some(n) => {
                 if self.registry.contains(&SessionId::agent(n)) {
                     return Err(format!("a worker named `{n}` already exists"));
                 }
                 let _ = self.seq.fetch_add(1, Ordering::Relaxed);
-                n.clone()
+                Ok(n.clone())
             }
-            // A generated name must never collide — even with an explicit `w1`
-            // already registered — so bump `seq` past any that are taken.
-            None => loop {
+            None => Ok(loop {
                 let n = self.seq.fetch_add(1, Ordering::Relaxed);
                 let candidate = format!("w{n}");
                 if !self.registry.contains(&SessionId::agent(&candidate)) {
                     break candidate;
                 }
-            },
+            }),
+        }
+    }
+
+    /// Persist the worker's transcript into the template's members dir and its
+    /// launch spec into the group manifest (`record_member`, the D5 fast path).
+    /// `None` (no members dir) keeps the v1 in-memory contract.
+    fn persist_member(&self, id: &SessionId, spec: &WorkerSpec) -> Result<Option<Session>, String> {
+        let Some(dir) = &self.template.members_dir else {
+            return Ok(None);
         };
-        let id = SessionId::agent(name);
-        let handle = self.build(&id, owner, &spec);
+        let name = short_name(id);
+        let group = SessionGroup::from_members_dir(dir);
+        let session = session_groups::create_group_member_session(&group, &name)
+            .map_err(|e| format!("create member session `{name}`: {e}"))?;
+        session_groups::record_member(&group, spec)
+            .map_err(|e| format!("record member `{name}`: {e}"))?;
+        Ok(Some(session))
+    }
+
+    /// Register the worker, record its effective model (so a served roster names
+    /// it, S2), and announce its surface so a running TUI can add it — D27
+    /// replaced the old `TeamUpdate` feed with this. A closed receiver is ignored.
+    fn register_and_announce(
+        &self,
+        id: &SessionId,
+        owner: &SessionId,
+        handle: SessionHandle,
+        spec_model: Option<String>,
+    ) {
         let backend = Backend::from(handle.clone());
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
-        // Record the worker's effective model, so a served roster names it (S2):
-        // the spec's override, else the inherited template model.
-        let model = spec
-            .model
-            .clone()
-            .unwrap_or_else(|| self.template.llm.model.clone());
+        let model = spec_model.unwrap_or_else(|| self.template.llm.model.clone());
         self.registry.set_model(id.clone(), model.clone());
-        // Announce the new surface so a running TUI can add it — D27 removed the
-        // old `TeamUpdate` feed; this is its replacement. A closed receiver is
-        // ignored (the TUI may have exited).
         if let Some(tx) = &*self.sink.lock().unwrap() {
             let _ = tx.send(SurfaceSpec {
                 id: id.clone(),
-                label: short_name(&id),
+                label: short_name(id),
                 model,
                 is_root: false,
                 backend,
             });
         }
-        Ok(SpawnedWorker { id })
     }
 
-    fn build(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> SessionHandle {
-        SessionActor::spawn(Agent::new(self.worker_config(id, owner, spec)))
+    fn build_with(
+        &self,
+        id: &SessionId,
+        owner: &SessionId,
+        spec: &WorkerSpec,
+        session: Option<Session>,
+        context: Vec<AgentMessage>,
+    ) -> SessionHandle {
+        SessionActor::spawn(Agent::new(
+            self.worker_config_with(id, owner, spec, session, context),
+        ))
     }
 
-    /// The pure worker config: no actor, no registration — the piece worth
-    /// testing. Applies a spec's model / provider / role / tool-subset over the
-    /// inherited template, so a worker may run on its own model and provider.
+    /// The pure worker config — no actor, no persisted session; a test-only
+    /// convenience over [`Self::worker_config_with`].
+    #[cfg(test)]
     fn worker_config(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> AgentConfig {
+        self.worker_config_with(id, owner, spec, None, Vec::new())
+    }
+
+    /// The full worker config: like [`Self::worker_config`], but the worker is
+    /// seeded with a persisted `session` and prior `context` (group resume, D1).
+    fn worker_config_with(
+        &self,
+        id: &SessionId,
+        owner: &SessionId,
+        spec: &WorkerSpec,
+        session: Option<Session>,
+        context: Vec<AgentMessage>,
+    ) -> AgentConfig {
         let t = &self.template;
         // A worker is told who it is; its result is forwarded to the orchestrator
         // automatically when its run ends (the `ReportBack` hook), so it is not
@@ -303,8 +381,8 @@ impl SessionFactory {
                 }));
                 hooks
             },
-            session: None,
-            context: Vec::new(),
+            session,
+            context,
             working_dir: t.working_dir.clone(),
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: true,
@@ -416,6 +494,26 @@ impl Orchestrator {
         Ok(worker)
     }
 
+    /// Resume a worker from a persisted transcript (group resume, Item 16):
+    /// mirrors [`Self::spawn_worker`] — validate the tool allow-list, build via
+    /// the orchestrator's own factory, close the phonebook name — but the worker
+    /// is seeded with `session`/`context` (its full prior history, D1). `owner`
+    /// is the report-back target (the root). Uses the live factory/phonebook, so
+    /// a resumed member is indistinguishable from a spawned one (amendment 6a).
+    pub fn resume_worker(
+        &self,
+        owner: &SessionId,
+        spec: WorkerSpec,
+        session: Option<Session>,
+        context: Vec<AgentMessage>,
+    ) -> Result<SpawnedWorker, String> {
+        self.factory.validate_tools(&spec)?;
+        let worker = self.factory.resume_worker(owner, spec, session, context)?;
+        self.phonebook
+            .insert(short_name(&worker.id), worker.id.clone());
+        Ok(worker)
+    }
+
     /// A worker's backend, by phonebook name — so the composition root can build
     /// a surface for it. `None` when the name is unknown or the worker cannot be
     /// resolved from this orchestrator (the registry is otherwise private).
@@ -511,6 +609,7 @@ mod tests {
             tools: ToolsConfig::default(),
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
+            members_dir: None,
         };
         (SessionFactory::new(registry.clone(), template), registry)
     }
@@ -824,6 +923,7 @@ mod tests {
             tools: ToolsConfig::default(),
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
+            members_dir: None,
         };
         let o = Orchestrator::new(registry.clone(), template);
 
@@ -873,6 +973,7 @@ mod tests {
             tools: ToolsConfig::default(),
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
+            members_dir: None,
         };
         Orchestrator::new(Registry::new(), template)
     }

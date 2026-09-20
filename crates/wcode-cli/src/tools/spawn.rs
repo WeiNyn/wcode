@@ -295,6 +295,7 @@ mod tests {
                 tools: ToolsConfig::default(),
                 compaction: CompactionPolicy::default(),
                 working_dir: std::env::temp_dir(),
+                members_dir: None,
             },
         )
     }
