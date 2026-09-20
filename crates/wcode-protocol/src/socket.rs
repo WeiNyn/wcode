@@ -5,6 +5,7 @@
 //! removed before binding, so a restart is not blocked by its predecessor.
 
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use tokio::net::{UnixListener, UnixStream};
@@ -23,7 +24,13 @@ pub async fn bind(path: &Path) -> io::Result<UnixListener> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    UnixListener::bind(path)
+    let listener = UnixListener::bind(path)?;
+    // The socket file follows umask by default (commonly 0755/0775); it is the
+    // session's only credential, so narrow it to owner-only. A bind that cannot
+    // chmod its own just-created socket fails loudly rather than shipping an
+    // over-permissive socket.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 /// Connect to a server listening at `path`.

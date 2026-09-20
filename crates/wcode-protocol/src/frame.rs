@@ -7,7 +7,7 @@
 use std::io;
 
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use wcode_harness::protocol::Frame;
 
 /// Write one frame as a single line and flush.
@@ -22,6 +22,12 @@ where
     writer.flush().await
 }
 
+/// Maximum size (bytes, trailing newline excluded) of a single frame's JSON
+/// body. A peer that sends a longer line is rejected with `InvalidData` rather
+/// than buffered unboundedly. 16 MiB, matching jcode — far above any legitimate
+/// frame.
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 /// Read one frame. Returns `Ok(None)` on a clean EOF. Blank lines are skipped,
 /// so a frame boundary never depends on a caller flushing an empty line.
 pub async fn read_frame<R, P>(reader: &mut R) -> io::Result<Option<Frame<P>>>
@@ -32,7 +38,17 @@ where
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
+        // Cap the read: `+ 1` lets a payload of exactly `MAX_FRAME_BYTES` still
+        // consume its trailing '\n'.
+        let mut limited = (&mut *reader).take(MAX_FRAME_BYTES as u64 + 1);
+        let n = limited.read_line(&mut line).await?;
+        // No newline within the budget => the frame exceeds the cap.
+        if n > MAX_FRAME_BYTES && !line.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("frame exceeds {MAX_FRAME_BYTES} bytes"),
+            ));
+        }
         if n == 0 {
             return Ok(None);
         }
@@ -85,6 +101,56 @@ mod tests {
     #[serde(tag = "type", rename_all = "snake_case")]
     enum Only {
         Marker,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Padded {
+        Marker { pad: String },
+    }
+
+    /// A valid `Frame<Padded>` JSON body of exactly `total` bytes (newline
+    /// excluded), and the `pad` length it was built with.
+    fn padded_frame_json(total: usize) -> (String, usize) {
+        const PREFIX: &str = r#"{"v":1,"id":0,"session":"s1","type":"marker","pad":""#;
+        const SUFFIX: &str = r#""}"#;
+        let pad = total - PREFIX.len() - SUFFIX.len();
+        (format!("{PREFIX}{}{SUFFIX}", "a".repeat(pad)), pad)
+    }
+
+    #[tokio::test]
+    async fn a_frame_of_exactly_the_cap_is_accepted() {
+        // Valid JSON of EXACTLY the cap (newline excluded) still parses: a
+        // merely-too-big non-JSON line would fail serde regardless, so this
+        // pins the `+ 1` take budget rather than serde.
+        let (json, pad_len) = padded_frame_json(MAX_FRAME_BYTES);
+        assert_eq!(json.len(), MAX_FRAME_BYTES);
+        let mut bytes = json.into_bytes();
+        bytes.push(b'\n');
+        let mut src = BufReader::new(bytes.as_slice());
+        let frame: Frame<Padded> = read_frame(&mut src).await.unwrap().unwrap();
+        match frame.body {
+            Padded::Marker { pad } => assert_eq!(pad.len(), pad_len),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_frame_one_byte_over_the_cap_is_rejected() {
+        let (json, _) = padded_frame_json(MAX_FRAME_BYTES + 1);
+        let mut bytes = json.into_bytes();
+        bytes.push(b'\n');
+        let mut src = BufReader::new(bytes.as_slice());
+        let err = read_frame::<_, Padded>(&mut src).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn an_unterminated_frame_is_refused_rather_than_buffered_forever() {
+        // A reader that never yields a newline: the ONLY way for `read_frame` to
+        // return is the cap. Without it this would buffer forever.
+        let mut src = BufReader::new(tokio::io::repeat(b'A'));
+        let err = read_frame::<_, Only>(&mut src).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

@@ -91,6 +91,19 @@ async fn next_message(
 }
 
 #[tokio::test]
+async fn bind_sets_owner_only_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("wcode.sock");
+    let _listener = wcode_protocol::bind(&sock).await.unwrap();
+    // The socket file is the session's only credential; a default umask would
+    // leave it group/world-reachable.
+    let mode = std::fs::metadata(&sock).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "socket must be owner-only");
+}
+
+#[tokio::test]
 async fn a_remote_client_drives_the_session() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("wcode.sock");
