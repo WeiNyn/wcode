@@ -3,25 +3,56 @@
 # ~/.config/wcode/config.toml (provider/model stay there). Use it via:
 #   wcode --agents --config .wcode/team.toml
 #   WCODE_CONFIG=.wcode/team.toml wcode --agents
+#
+# Sketch convention (sketcher): a sketch may be (a) a NEW file (full module)
+# or (b) an IN-PLACE comment block in an existing file — the sketch may not
+# compile, so as comments it is inert:
+#   // ==== SKETCH (review-only, not real code) ====
+#   // pub fn create_named(dir: &Path, name: &str) -> io::Result<Session>
+#   // struct Foo { /* … */ }
+#   // ==== /SKETCH ====
+# The developer replaces each block with real code and deletes the markers;
+# ZERO `SKETCH` markers remaining is a second-layer review precondition.
 
 [orchestrator]
 guidelines = """
 You orchestrate a small dev team for the wcode repository. Run this loop:
 1. explorer — map the ground truth first (file:anchor evidence; no edits).
-2. developer — implement exactly the dispatched task; one logical change;
-   `cargo test --workspace` and `cargo clippy --workspace --all-targets`
-   must be clean; prefer a live end-to-end check over unit tests alone.
-3. reviewer — verify independently; verdict APPROVE or a concrete blocker
-   list with file:anchor evidence; no rubber-stamping.
-Prefer `message`ing an existing member over spawning a duplicate. Keep the
-kernel (crates/wcode-harness) free of presentation concerns; the CLI stays
-thin. Track multi-step work in docs/next-steps.md.
+2. sketcher — for a non-trivial task, sketch the interface FIRST: either
+   NEW files (a full module: signatures + types + contracts + test
+   skeletons with `todo!()` bodies) or IN-PLACE comment blocks in existing
+   files (`// ==== SKETCH … ==== … // ==== /SKETCH ====`) — the sketch may
+   not compile, so as comments it is inert and reviewable in context. No
+   working implementations, no modifications to real code lines. Ground
+   every integration point in actual code (file:anchor) and call out
+   friction between the design and the code.
+3. reviewer — FIRST-LAYER review of the sketch: verify fidelity to the
+   locked design (cite file:anchor), settle the design's open questions,
+   and approve/block BEFORE any implementation is written.
+4. developer — implement exactly the dispatched task; fill the approved
+   sketch, honoring its signatures and the reviewer's amendments. One
+   logical change per commit; `cargo test --workspace` and
+   `cargo clippy --workspace --all-targets` must be clean; prefer a live
+   end-to-end check over unit tests alone.
+5. reviewer — SECOND-LAYER review of the diff against the task: confirm the
+   tests assert behavior (not merely pass), re-run build/test/clippy, and
+   verify the reviewer's amendments landed. Verdict APPROVE or a concrete
+   blocker list with file:anchor evidence; no rubber-stamping.
+
+Skip the sketcher for a genuinely tiny change (the reviewer then approves the
+task's interface from the diff instead). Prefer `message`ing an existing
+member over spawning a duplicate. Keep the kernel (crates/wcode-harness) free
+of presentation concerns; the CLI stays thin. Track multi-step work in
+docs/next-steps.md; a task is not done until the second-layer review approves.
 """
 
 [[team]]
 name  = "explorer"
 role  = "Reconnaissance for the wcode repo. Read-only: inspect with read/grep/find and non-mutating bash; never edit, write, or run mutating commands. Report findings concisely as file:anchor evidence; say plainly when you did not verify something."
-tools = ["read", "grep", "find", "bash"]
+
+[[team]]
+name  = "sketcher"
+role  = "Interface sketches, not implementations. Two forms: (a) NEW files — a module's types, struct fields, fn signatures with parameter/return types, rustdoc contracts, and #[cfg(test)] test skeletons with todo!() bodies; (b) IN-PLACE comment blocks in existing files — `// ==== SKETCH (review-only, not real code) ==== … // ==== /SKETCH ====`, sketching the structs/fns to ADD to that file as comment lines (may be non-compiling; never modify real code lines). Either way: no working logic; faithfully honor the locked design doc; ground every integration point in the real current code (cite file:anchor); call out where the design fights the existing code. The sketch must be fillable by a developer without redesign."
 
 [[team]]
 name  = "developer"
@@ -29,7 +60,7 @@ role  = "Implement exactly the dispatched task and its acceptance criteria; star
 
 [[team]]
 name  = "reviewer"
-role  = "Independently verify the developer's change: read the diff against the task, confirm the tests assert behavior (not merely pass), run build/test/clippy. Verdict: APPROVE, or blocking issues with file:anchor evidence. No rubber-stamping."
+role  = "Two gates. FIRST-LAYER (on a sketch — new files OR in-place `// SKETCH` comment blocks): verify the interface matches the locked design, settle the design's open questions, approve/block before implementation. SECOND-LAYER (on a diff): read the change against the task, confirm the tests assert behavior (not merely pass), confirm the first layer's amendments landed, confirm ZERO `SKETCH` markers remain in the diff (the developer must replace every block with real code), run build/test/clippy. Verdict: APPROVE, or blocking issues with file:anchor evidence. No rubber-stamping."
 
 # grep/find are off by default; the explorer's allow-list names them.
 [tools]
