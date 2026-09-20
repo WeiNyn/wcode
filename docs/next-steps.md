@@ -28,6 +28,7 @@ the boxes as each task completes and keep the status table current.
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
 | 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ◐ revived — comparison refreshed; C1 typed report proposed; C3 (DAG) is the north star |
+| 23 | LLM stream stall hangs the run — no idle timeout | ☐ todo — grounded: `loop_.rs:206`, `streamfn.rs:239`/`241` |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -616,6 +617,59 @@ worktree managers / coordinator entity / ACLs.
 - [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
 - [ ] C5 — lifecycle footer (small, presentation).
 
+---
+
+## 23. LLM stream stall hangs the run (no idle timeout)
+
+**Problem.** The stream is consumed with **no stall/idle timeout** at any layer.
+The kernel turn loop selects only on `cancel` and `stream.next()` — the
+`tokio::select!` at `crates/wcode-harness/src/loop_.rs:206` has exactly two arms,
+`cfg.cancel.cancelled()` and `item = stream.next()`. The rig adapter is the same:
+`crates/wcode-harness/src/streamfn.rs:239` (the `connect_with_retry` first-item
+peek) and `streamfn.rs:241` (the main forward loop) select only on `tx.closed()`
+and `stream.next()`. So if a provider accepts the connection but then goes
+silent — no deltas, no error, no EOF (a half-open TCP / idle upstream / a proxy
+that keeps the socket open) — `stream.next()` never resolves and the whole turn
+awaits forever. This is a common provider failure mode.
+
+**Impact.** The agent hangs indefinitely mid-turn: the UI shows a spinner and
+never finishes, and one-shot `-p` never returns. Only a manual cancel (Ctrl-C →
+`cfg.cancel`) unwedges it.
+
+**Example.** A provider (or an overloaded local endpoint) stalls after a `200`
+with headers: the run spins on `stream.next()` with no event, no error, no
+timeout, until the user gives up and cancels.
+
+**Proposed fix.**
+- Add an **idle deadline** around `stream.next()` at both layers: a shorter
+  **time-to-first-token** deadline before the first event, and a longer
+  **inter-token** deadline after (each received event resets it). On expiry,
+  surface a *transient* stream error so the existing recovery path handles it —
+  the retry/backoff in `streamfn.rs` for the pre-content case, or the fed-back
+  stream error in `loop_.rs` once content has flowed.
+- Keep it **cancellable**: the deadline is just another `select!` arm beside
+  `cancel`/`tx.closed()` — no new cancellation path.
+- Cover the `connect_with_retry` peek (`streamfn.rs:239`) too, so a stall
+  *before* the first token also retries rather than hanging.
+- **Config**: `[retry]` (or a new `[timeout]` table) gains `ttft_ms` / `idle_ms`
+  (+ `WCODE_*`); sane defaults on, `0` disables.
+- **Observability**: emit a stall notice on expiry, reusing the existing
+  `LlmStreamEvent::Retrying` / `AgentEvent::Retrying` → a dim line.
+
+**Tasks**
+- [ ] Idle / time-to-first-token timeout around `stream.next()` in `loop_.rs`.
+- [ ] The same in the adapter (`streamfn.rs`: the peek and the forward loop).
+- [ ] Config + env; default on; `0` disables.
+- [ ] Stall notice → dim line (reuse the retry notice).
+- [ ] Tests: a stream that hangs after N events trips a time-out (short injected
+      duration); a clean stream is unaffected.
+
+**Open questions.**
+- One deadline on the raw stream item, or also a keepalive/heartbeat probe?
+- Default values (e.g. ttft 60 s, idle 120 s) — provider-dependent; make it a knob.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
@@ -654,3 +708,4 @@ worktree managers / coordinator entity / ACLs.
 20. **20** digest-CAS chain-test residuals. Done (`1b2ca6b`, `28fde3e`).
 21. **21** session relaunch UX — TUI `/reload` + relaunch line on exit. Done (`85911d5`…`0765661`).
 22. **22** team vs jcode swarm — comparison revived; see [`swarm-comparison-plan.md`](swarm-comparison-plan.md).
+23. **23** LLM stream stall hangs the run — no idle timeout (see §23).
