@@ -1265,7 +1265,7 @@ mod tests {
         // per-session digest cache — the policy is rebuilt with every agent.
         let shared = HooksSet::default();
         assert!(shared.is_empty());
-        let _agent = build_agent(
+        let agent = build_agent(
             AgentSpec {
                 llm: LlmOpts::default(),
                 hooks: shared.clone(),
@@ -1284,6 +1284,10 @@ mod tests {
         assert!(
             shared.is_empty(),
             "the shared set must not gain the per-session WorkspaceHooks"
+        );
+        assert!(
+            !agent.hooks().is_empty(),
+            "build_agent must push its fresh WorkspaceHooks"
         );
     }
     use serde_json::json;

@@ -352,3 +352,115 @@ mod tests {
         assert!(msg.contains("re-read"), "{msg}");
     }
 }
+
+/// Item 19.1 — the end-to-end chain with **no fake seams**: the real `Read`
+/// tool emits the digest header, the real hook caches it and attaches it to a
+/// mutator call, and the real `Write` tool verifies it. This covers the wiring
+/// *between* the pieces (header text ⇄ parser, `arguments` JSON ⇄ tool args),
+/// not just each piece in isolation.
+#[cfg(test)]
+mod chain {
+    use super::*;
+    use wcode_harness::tool::TypedTool;
+
+    use crate::tools::anchor;
+    use crate::tools::read::{Read, ReadArgs};
+    use crate::tools::test_ctx;
+    use crate::tools::write::{Write, WriteArgs};
+
+    fn read_call(path: &str) -> ToolCall {
+        ToolCall {
+            id: "r1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({ "path": path }),
+        }
+    }
+
+    fn write_call(path: &str, content: &str) -> ToolCall {
+        ToolCall {
+            id: "w1".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({ "path": path, "content": content }),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_arms_the_hook_and_the_real_write_is_cas_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "original\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+
+        // 1. The real `read` emits the digest header as its FIRST line.
+        let mut out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(false),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(
+            parse_digest_header(out.output.lines().next().unwrap()),
+            Some(anchor::file_digest(b"original\n")),
+            "the read header carries the file's digest"
+        );
+
+        // 2. `after_tool_call` caches that digest under the read's path.
+        let h = WorkspaceHooks::new(true);
+        h.after_tool_call(&read_call("f.txt"), &mut out).await;
+        assert!(
+            h.last_read.lock().unwrap().contains_key(&cache_key("f.txt")),
+            "the read armed the cache"
+        );
+
+        // 3. A mutator call with NO `expected_digest` gets it injected top-level.
+        let mut w = write_call("f.txt", "NEW");
+        h.transform_tool_input(&mut w).await;
+        assert_eq!(
+            w.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"original\n")
+        );
+
+        // 4. The real `write` verifies against the live file and succeeds.
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let wargs: WriteArgs = serde_json::from_value(w.arguments.clone()).unwrap();
+        let out = Write::new(lock.clone()).execute(wargs, &ctx).await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NEW");
+
+        // 5. A peer rewrites the file out-of-band: the armed digest is now stale.
+        std::fs::write(&path, "PEER").unwrap();
+        let mut w2 = write_call("f.txt", "AGAIN");
+        h.transform_tool_input(&mut w2).await;
+        assert_eq!(
+            w2.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"original\n"),
+            "the stale digest is still attached"
+        );
+        let wargs2: WriteArgs = serde_json::from_value(w2.arguments.clone()).unwrap();
+        let out = Write::new(lock).execute(wargs2, &ctx).await;
+        assert!(out.is_error, "a stale write must refuse: {}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        // Non-destructive: the peer's content is byte-for-byte untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "PEER");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_hook_injects_nothing_into_the_real_call() {
+        let h = WorkspaceHooks::new(false);
+        h.last_read
+            .lock()
+            .unwrap()
+            .insert(cache_key("f.txt"), "abc123".into());
+        let mut w = write_call("f.txt", "NEW");
+        h.transform_tool_input(&mut w).await;
+        assert!(w.arguments.get(EXPECTED_DIGEST_KEY).is_none());
+    }
+}
