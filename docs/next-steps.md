@@ -22,7 +22,7 @@ the boxes as each task completes and keep the status table current.
 | 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T2 (color-mode ladder, hex-gated truecolor) + T3 (`[theme]` overlay) landed; tier palettes open |
 | 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
 | 16 | Session groups: team session persistence & resume (see [`session-groups.md`](session-groups.md)) | ☑ done — 2 commits (`fe95cf8`, `1408550`); second-layer review APPROVED |
-| 17 | Session-groups follow-ups (reviewer's non-blocking list) | ☐ todo — see §17 |
+| 17 | Session-groups follow-ups (reviewer's non-blocking list) | ☑ done — `3342073`/`b58a6f4`/`ef5e65b`/`5d272c9`; second-layer APPROVED; manual `/reload` sign-off pending |
 | 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ☑ done — `94069f0`; **claims dropped** (orchestrator owns targeting/scope by prompt); second-layer review APPROVED |
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
@@ -500,19 +500,21 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, 9, 10, 
 
 ## 17. Session-groups follow-ups (item 16 review debt)
 
-**New.** Tracker item 16 (session groups) shipped and passed second-layer review
-with a reviewer's non-blocking list. Small, independent:
+**Done** (except the manual sign-off). Tracker item 16 (session groups) shipped
+and passed second-layer review with a reviewer's non-blocking list; four of five
+landed (`3342073`, `b58a6f4`, `ef5e65b`, `5d272c9`) and passed second-layer review:
 
-- [ ] `group_dir_of` unit test (dir + `<dir>/root.jsonl` + bare-file `None`) — the
-      6b linchpin, currently verified only live and by call-site reading.
-- [ ] Document the phantom-member window: a crash between member-file creation
+- [x] `group_dir_of` unit test (dir + `<dir>/root.jsonl` + bare-file `None`) — the
+      6b linchpin, previously verified only live and by call-site reading.
+- [x] Document the phantom-member window: a crash between member-file creation
       and the manifest write resumes a header-only member as "Restored, 0
       messages" (by design, differs from the corrupt→Skipped story).
-- [ ] Validate `Manifest.group` on open — or fix the doc comment that claims it
-      is "checked against the dir name" (scan is truth; purely informational).
-- [ ] One real `/reload` in a group session (full exec re-invocation) at final
-      sign-off.
-- [ ] Drop the unused `WorkerSpec` serde derive, or actually serialize it.
+- [x] Fix the `Manifest.group` doc comment that claimed it is "checked against
+      the dir name" — it is informational only (scan is truth); validation on
+      open was **not** added.
+- [ ] One real `/reload` in a group session (full exec re-invocation) — **manual
+      final sign-off**, not automatable.
+- [x] Drop the unused `WorkerSpec` serde derive (kept `Clone, Default`).
 
 ## 19. Digest-CAS follow-ups (item 18 review debt)
 
@@ -596,7 +598,7 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 15. **15** TUI team sidebar: status + live action — presentation-only (+ a socket fix);
     see [`tui-sidebar-plan.md`](tui-sidebar-plan.md).
 16. **16** session groups — team persistence/resume; see [`session-groups.md`](session-groups.md). Done.
-17. **17** session-groups follow-ups — small review debts; see §17.
+17. **17** session-groups follow-ups. Done (`3342073`…`5d272c9`); manual `/reload` sign-off pending.
 18. **18** workspace concurrency — whole-file digest CAS. Done (`94069f0`).
 19. **19** digest-CAS follow-ups. Done (`3886148`).
 20. **20** digest-CAS chain-test residuals. Done (`1b2ca6b`, `28fde3e`).
