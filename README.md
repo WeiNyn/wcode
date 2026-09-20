@@ -175,8 +175,10 @@ cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted 
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/compact [text]`, `/usage`, `/copy`, `/team`, `/surface`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
-the files this run changed, re-showing a diff) and `/resume` (pick a session; the
-CLI re-execs into it). The session-lifecycle commands below stay in the REPL. With
+the files this run changed, re-showing a diff), `/resume` (pick a session; the
+CLI re-execs into it), and `/reload [--no-session]` (rebuild + re-exec into the
+current session, mirroring the REPL; refused over a socket). The remaining
+session-lifecycle commands below stay in the REPL.
 `--agents` and a team, each member runs as its own **surface** (the root, plus one
 per member): input and `/`-commands go to the **focused** surface — switch with
 `/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a
@@ -301,6 +303,11 @@ One entry per message plus `model_change` / `effort_change` markers; torn
 final lines are tolerated. `/resume` replays the history as the conversation
 context and restores the last model + effort (`--model` / `--effort` flags
 win when passed alongside `--resume`).
+
+On a clean interactive exit (`/exit`, or EOF; the TUI's `/exit`) wcode prints the
+exact command to bring the session back, e.g.
+`resume: wcode --resume <sessions>/<id>/root.jsonl --model <id> --agents` for a
+team — copy-paste it to relaunch. A remote (`--socket`) session prints nothing.
 
 ## Philosophy
 

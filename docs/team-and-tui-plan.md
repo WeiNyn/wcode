@@ -232,7 +232,7 @@ runtime-spawned worker is thus visible to a `--socket` client.
 | D5 | F3 startup | spawn the team after `Orchestrator::new`, mirroring the `[peers]` loop; `/new` keeps it |
 | D6 | F4 order | **tier 1 first** — sidebar (1a) then in-process multi-surface (1b); socket multiplexing (tier 2) landed (`6f3ef23`, `c3eb261`) |
 | D7 | F1 popup | **non-modal inline**, reusing the picker's render/style — its own prefix matcher (D11) — **not** the modal `Overlay` |
-| D8 | F1 table | TUI-local `Command` table; `/help` generated from it; REPL unification deferred |
+| D8 | F1 table | TUI-local `Command` table; `/help` generated from it; REPL unification deferred. Item 21 adds the TUI `/reload [--no-session]` (mirrors the REPL: rebuild + re-exec into the current session, surfaced as `Outcome::Reload`; refused over a socket) |
 | D9 | F1 keys | popup owns `Up`/`Down`/`Tab`/`Esc`; `Char`/`Backspace`/`Enter` fall through. While the popup is open `Up`/`Down` select rows **even for an exact token** (e.g. `/model`), so history recall is suppressed in that state — a deliberate change from before |
 | D10 | sequence | F1 → F2 → F3 → F4 |
 | D11 | F1 matching | completion matches case-insensitive **prefix** (canonical names + aliases); the **picker keeps substring** filtering — a separate matcher, not the shared one |
