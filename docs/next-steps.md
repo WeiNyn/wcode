@@ -26,6 +26,7 @@ the boxes as each task completes and keep the status table current.
 | 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ☑ done — `94069f0`; **claims dropped** (orchestrator owns targeting/scope by prompt); second-layer review APPROVED |
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
+| 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -549,6 +550,30 @@ Optional follow-ons (not tracked as an item): the `edit` chain derives its
 `from` anchor via `anchor::anchor(..)` rather than parsing it out of the read
 output; `edits`/`replace` have unit tests but no full chain.
 
+## 21. Session relaunch UX
+
+**Done.** Two gaps found while signing off §17.4:
+
+- **`/reload` was REPL-only.** The TUI's `COMMANDS` table (`app.rs`) now carries
+  `/reload [--no-session]`; it mirrors the REPL (rebuild + re-exec into the
+  current session) via a new `Outcome::Reload`, refused over a socket.
+- **No relaunch command on exit.** Closing (REPL `/exit`, EOF, idle Ctrl-C; TUI
+  `/exit`) now prints the exact relaunch command built from `reload_args` — flat
+  `wcode --resume <file.jsonl> …`, team
+  `wcode --resume <groupdir>/root.jsonl --agents …`.
+
+**Tasks**
+- [x] TUI: `/reload [--no-session]` in the command table, mirroring the REPL
+      (rebuild + re-exec into the current session); refused over a socket.
+- [x] Print the exact relaunch command on exit (REPL + TUI): flat and team/group.
+- [x] README + `team-and-tui-plan.md` note.
+
+Commits `85911d5` (TUI `/reload`), `2f920f8` (relaunch line), `7c55844` (Ctrl-C
+parity), `0765661` (docs); second-layer APPROVED.
+
+**Out of scope (stated, not papered over):** a terminal **window-close
+(`SIGTERM`/`SIGHUP`)** has no handler, so it exits without printing the line.
+
 ## 15. TUI team sidebar: status + live action
 
 **New.** The sidebar's `name · model · state` row wastes the model column (uniform
@@ -602,3 +627,4 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 18. **18** workspace concurrency — whole-file digest CAS. Done (`94069f0`).
 19. **19** digest-CAS follow-ups. Done (`3886148`).
 20. **20** digest-CAS chain-test residuals. Done (`1b2ca6b`, `28fde3e`).
+21. **21** session relaunch UX — TUI `/reload` + relaunch line on exit. Done (`85911d5`…`0765661`).
