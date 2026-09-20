@@ -1945,4 +1945,89 @@ mod retry_tests {
             "a slow connect must not be timed out under ZERO"
         );
     }
+
+    /// The genuinely-stalled *connect* branch: `open()` never resolves, so the
+    /// nonzero `ttft` race times out on every attempt. Each retry emits a
+    /// `Retrying` notice; once the budget is spent the failure is a transient
+    /// (non-fatal) `stall_error` — the same shape as a peek stall, but through
+    /// the connect race's `Err(())` arm.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_connect_trips_the_ttft_retries_then_fails() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let policy = RetryPolicy {
+            max: 2,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            ttft: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        let c = calls.clone();
+        let open = move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending::<Result<BoxStream, CompletionError>>())
+                as Pin<
+                    Box<
+                        dyn std::future::Future<Output = Result<BoxStream, CompletionError>> + Send,
+                    >,
+                >
+        };
+        let mut state = RetryState::new(policy.max);
+        let out = connect_with_retry(&policy, &mut state, open, &tx).await;
+
+        let PreContent::Failed(error) = out else {
+            panic!("expected Failed from an exhausted connect stall")
+        };
+        assert!(retryable(&error), "a connect stall is transient");
+        assert!(!fatal_class(&error), "a connect stall is not hard-fatal");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "one attempt + two retries");
+        let retries = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, LlmStreamEvent::Retrying { .. }))
+            .count();
+        assert_eq!(retries, 2, "a Retrying notice per retry");
+    }
+
+    /// The forward loop's *pre-content* idle branch: a stream that emits nothing
+    /// and then stalls, with budget remaining, backs off (a `Retrying` notice)
+    /// and re-opens — here the re-opened stream succeeds and the turn completes.
+    #[tokio::test(start_paused = true)]
+    async fn a_pre_content_idle_stall_retries_and_reopens() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max: 2,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            idle: Duration::from_secs(1),
+            ..RetryPolicy::default()
+        };
+        // The initial stream never yields → the idle deadline trips pre-content.
+        let stream = silent_boxed();
+        // The re-open yields a `Final`, so the retried turn completes.
+        fn open_done()
+        -> Pin<Box<dyn std::future::Future<Output = Result<BoxStream, CompletionError>> + Send>> {
+            Box::pin(async {
+                Ok::<_, CompletionError>(boxed(futures::stream::iter(vec![Ok::<_, CompletionError>(
+                    done(),
+                )])))
+            })
+        }
+        let state = RetryState::new(policy.max);
+        forward_stream(stream, None, policy, open_done, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Retrying { .. })),
+            "a pre-content stall backs off: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "the re-opened stream completed: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, LlmStreamEvent::Error { .. })),
+            "no error once the retry succeeded: {events:?}"
+        );
+    }
 }
