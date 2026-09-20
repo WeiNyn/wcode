@@ -24,7 +24,8 @@ the boxes as each task completes and keep the status table current.
 | 16 | Session groups: team session persistence & resume (see [`session-groups.md`](session-groups.md)) | ☑ done — 2 commits (`fe95cf8`, `1408550`); second-layer review APPROVED |
 | 17 | Session-groups follow-ups (reviewer's non-blocking list) | ☐ todo — see §17 |
 | 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ☑ done — `94069f0`; **claims dropped** (orchestrator owns targeting/scope by prompt); second-layer review APPROVED |
-| 19 | Digest-CAS follow-ups (item 18 review debt) | ☐ todo — see §19 |
+| 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
+| 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☐ todo — see §20 |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -515,18 +516,32 @@ with a reviewer's non-blocking list. Small, independent:
 
 ## 19. Digest-CAS follow-ups (item 18 review debt)
 
-**New.** Tracker item 18 (whole-file digest CAS) shipped (`94069f0`) and passed
-second-layer review with a reviewer's non-blocking list:
+**Done.** Tracker item 18 (whole-file digest CAS) shipped (`94069f0`) and passed
+second-layer review with a reviewer's non-blocking list; all three landed in
+`3886148` and passed second-layer review:
 
-- [ ] Automated integration test wiring the *real* `read` output →
+- [x] Automated integration test wiring the *real* `read` output →
       `WorkspaceHooks::after_tool_call` → `transform_tool_input` → a *real*
       mutator `execute` — the one link covered only by unit seams + the live
       check.
-- [ ] Strengthen `build_agent_leaves_the_shared_hook_set_untouched` with
+- [x] Strengthen `build_agent_leaves_the_shared_hook_set_untouched` with
       `assert!(!agent.hooks().is_empty())` — asserts the push actually happened,
       not just that the shared input set was left unmutated.
-- [ ] Mention in the `read` tool description that `--plain` does not arm the
+- [x] Mention in the `read` tool description that `--plain` does not arm the
       digest cache (a model that reads plain before writing gets no protection).
+
+## 20. Digest-CAS chain-test residuals (item 19 review debt)
+
+**New.** Item 19 (`3886148`) passed second-layer review; the reviewer's
+non-blocking test-coverage extensions:
+
+- [ ] A chain step through `edit` (not just `write`) — it also exercises the
+      anchor-resolution path *after* the CAS check.
+- [ ] Drive the chain through the real `HooksSet` (both hooks composed, as the
+      loop invokes them) to cover the ordering seam; today `after_tool_call` is
+      driven directly.
+- [ ] A negative test that a `--plain` read output parses to `None` and arms
+      nothing (pairs with the description note).
 
 ## 15. TUI team sidebar: status + live action
 
@@ -579,4 +594,5 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 16. **16** session groups — team persistence/resume; see [`session-groups.md`](session-groups.md). Done.
 17. **17** session-groups follow-ups — small review debts; see §17.
 18. **18** workspace concurrency — whole-file digest CAS. Done (`94069f0`).
-19. **19** digest-CAS follow-ups — small review debts; see §19.
+19. **19** digest-CAS follow-ups. Done (`3886148`).
+20. **20** digest-CAS chain-test residuals — non-blocking test gaps; see §20.
