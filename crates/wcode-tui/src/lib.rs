@@ -116,7 +116,11 @@ pub struct Options {
     /// the first draw.
     pub theme: ThemeSpec,
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
+    /// Where the root's prompt history is persisted (`None` keeps it in memory).
     pub history: Option<PathBuf>,
+    /// True when this TUI is a `--socket` client: `/reload` (rebuild + re-exec)
+    /// has no local binary or session, so it is refused.
+    pub remote: bool,
 }
 
 /// How a TUI run ended — the return value tells the composition root whether to
@@ -128,6 +132,10 @@ pub enum Outcome {
     /// The user picked a session to resume (`/resume`); the caller should
     /// re-exec with `--resume <path>`.
     Resume(PathBuf),
+    /// The user asked to rebuild + re-exec into the current session (`/reload`);
+    /// the caller runs the build then re-execs (the REPL's `/reload`).
+    /// `no_session` = start fresh with `--no-session`.
+    Reload { no_session: bool },
 }
 
 /// Run the TUI over `surfaces` (index 0 is the root) until the user quits.
@@ -148,6 +156,7 @@ pub async fn run(
         sessions,
         history,
         theme,
+        remote,
     } = options;
     // Install the theme before the terminal is entered and anything draws.
     theme::install(theme);
@@ -159,6 +168,7 @@ pub async fn run(
     app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
     // The root's full status line (members derive a reduced one).
     app.set_status(status);
+    app.set_remote(remote);
 
     let backends: Vec<(SessionId, Backend)> = surfaces
         .iter()
@@ -186,10 +196,15 @@ pub async fn run(
     drop(guard);
     result?;
 
-    // The TUI only *decides* to resume; the composition root owns the re-exec.
-    Ok(match app.pending_resume() {
-        Some(path) => Outcome::Resume(path.to_path_buf()),
-        None => Outcome::Quit,
+    // The TUI only *decides* to hand off; the composition root owns the re-exec
+    // — a plain `--resume` for `Resume`, or the REPL's rebuild+re-exec for
+    // `Reload`.
+    Ok(match app.pending_reload() {
+        Some(no_session) => Outcome::Reload { no_session },
+        None => match app.pending_resume() {
+            Some(path) => Outcome::Resume(path.to_path_buf()),
+            None => Outcome::Quit,
+        },
     })
 }
 
@@ -435,6 +450,7 @@ mod tests {
             sessions: Vec::new(),
             history: None,
             theme: ThemeSpec::default(),
+            remote: false,
         };
         assert_eq!(run(Vec::new(), options, None).await.unwrap(), Outcome::Quit);
     }

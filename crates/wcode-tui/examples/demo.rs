@@ -142,6 +142,7 @@ async fn main() -> std::io::Result<()> {
         sessions: Vec::new(),
         theme: Default::default(),
         history: None,
+        remote: false,
     };
     // A static roster so the example shows the team sidebar (root + two members).
     let surfaces = vec![

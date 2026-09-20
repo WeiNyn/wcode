@@ -328,6 +328,12 @@ const COMMANDS: &[Command] = &[
         summary: "resume a saved session",
     },
     Command {
+        name: "reload",
+        aliases: &[],
+        args: Some("[--no-session]"),
+        summary: "rebuild and re-exec into this session",
+    },
+    Command {
         name: "usage",
         aliases: &[],
         args: None,
@@ -1189,6 +1195,12 @@ pub struct App {
     /// Set when the user picks a session to resume; the run returns it so the CLI
     /// can re-exec with `--resume <path>`.
     pending_resume: Option<PathBuf>,
+    /// Set by `/reload`; the run returns it so the CLI can rebuild + re-exec
+    /// into the same session (`no_session` = start fresh with `--no-session`).
+    pending_reload: Option<bool>,
+    /// True when this TUI is a `--socket` client: there is no local binary or
+    /// session to rebuild/re-exec, so `/reload` is refused.
+    remote: bool,
     /// The open modal, if any. While one is shown it captures every key.
     overlay: Option<Overlay>,
     /// The inline command-completion popup, if one is showing. Recomputed after
@@ -1228,6 +1240,8 @@ impl App {
             models: Vec::new(),
             sessions: Vec::new(),
             pending_resume: None,
+            pending_reload: None,
+            remote: false,
             overlay: None,
             completion: None,
             dirty: true,
@@ -2021,6 +2035,11 @@ impl App {
             "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
+            "reload" => match arg {
+                None => self.request_reload(false),
+                Some("--no-session") => self.request_reload(true),
+                Some(_) => self.notice("usage: /reload [--no-session]"),
+            },
             "copy" => self.copy_last(),
             "team" => self.notice(team_text(&self.member_rows())),
             "surface" => self.open_surface_picker(),
@@ -2546,6 +2565,29 @@ impl App {
     /// after it exits so the composition root can re-exec with `--resume`.
     pub fn pending_resume(&self) -> Option<&Path> {
         self.pending_resume.as_deref()
+    }
+
+    /// Set by `/reload` when the run should rebuild + re-exec into this session
+    /// instead of quitting (`Some(no_session)`).
+    pub fn pending_reload(&self) -> Option<bool> {
+        self.pending_reload
+    }
+
+    /// Mark this TUI as a `--socket` client, so `/reload` is refused.
+    pub fn set_remote(&mut self, remote: bool) {
+        self.remote = remote;
+    }
+
+    /// `/reload [--no-session]`: ask the composition root to rebuild + re-exec
+    /// into this session (the REPL's semantics). Over a socket there is no local
+    /// binary or session to re-exec, so refuse as the REPL does.
+    fn request_reload(&mut self, no_session: bool) {
+        if self.remote {
+            self.notice("/reload (rebuild + re-exec) is unavailable over a socket");
+            return;
+        }
+        self.pending_reload = Some(no_session);
+        self.should_quit = true;
     }
 
     /// Seed the model list the picker offers (e.g. from `list_models`).
@@ -3736,6 +3778,54 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn reload_requests_a_reexec_and_quits() {
+        let mut app = App::new();
+        submit(&mut app, "/reload");
+        assert_eq!(app.pending_reload(), Some(false));
+        assert!(app.should_quit(), "a reload quits the TUI to re-exec");
+        assert_eq!(app.pending_resume(), None);
+    }
+
+    #[test]
+    fn reload_no_session_flag_is_carried() {
+        let mut app = App::new();
+        submit(&mut app, "/reload --no-session");
+        assert_eq!(app.pending_reload(), Some(true));
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn reload_rejects_a_bad_argument_without_quitting() {
+        let mut app = App::new();
+        submit(&mut app, "/reload wat");
+        assert_eq!(app.pending_reload(), None);
+        assert!(!app.should_quit());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("usage: /reload")
+        ));
+    }
+
+    #[test]
+    fn reload_is_refused_over_a_socket() {
+        let mut app = App::new();
+        app.set_remote(true);
+        submit(&mut app, "/reload");
+        assert_eq!(app.pending_reload(), None, "a socket client cannot re-exec");
+        assert!(!app.should_quit());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("unavailable over a socket")
+        ));
+    }
+
+    #[test]
+    fn the_command_table_lists_reload() {
+        assert!(COMMANDS.iter().any(|c| c.name == "reload"));
+        assert!(help_text().contains("/reload [--no-session]"));
+    }
+
     fn completion_labels(app: &App) -> Vec<String> {
         app.completion_rows().into_iter().map(|r| r.label).collect()
     }
@@ -3750,13 +3840,13 @@ mod tests {
         assert!(
             text.starts_with(
                 "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /usage /copy /surface /team /help"
+                 /resume /reload [--no-session] /usage /copy /surface /team /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
-            "exit", "model", "effort", "compact", "changes", "resume", "usage", "copy", "surface",
-            "team", "help",
+            "exit", "model", "effort", "compact", "changes", "resume", "reload", "usage", "copy",
+            "surface", "team", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),

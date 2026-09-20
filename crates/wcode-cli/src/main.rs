@@ -441,6 +441,7 @@ async fn main() {
                         sessions: Vec::new(),
                         theme: cfg.theme.clone(),
                         history: Some(repl::history_path()),
+                        remote: true,
                     };
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
@@ -507,6 +508,10 @@ async fn main() {
                     };
                     match wcode_tui::run(surfaces, options, new_surfaces).await {
                         Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                        Ok(wcode_tui::Outcome::Reload { .. }) => {
+                            eprintln!("tui: cannot reload over a socket");
+                            std::process::exit(1);
+                        }
                         Ok(wcode_tui::Outcome::Resume(_)) => {
                             eprintln!("tui: cannot resume over a socket");
                             std::process::exit(1);
@@ -942,7 +947,9 @@ async fn main() {
                     sessions: session_items(),
                     theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
+                    remote: false,
                 };
+                let session_path = agent.session_path().map(Path::to_path_buf);
                 let handle = SessionActor::spawn(agent);
                 if let Some(o) = &orchestrator {
                     o.register_root(handle.clone());
@@ -1015,6 +1022,22 @@ async fn main() {
                 };
                 match wcode_tui::run(surfaces, options, new_surfaces).await {
                     Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                    Ok(wcode_tui::Outcome::Reload { no_session }) => {
+                        // Rebuild + re-exec into the same session (the REPL's
+                        // `/reload`); the terminal is already restored.
+                        repl::reload(
+                            &llm,
+                            session_path.as_deref(),
+                            no_session,
+                            args.agents,
+                            args.config.as_deref(),
+                            args.owner.as_deref(),
+                            args.name.as_deref(),
+                            None,
+                        )
+                        .await;
+                        std::process::exit(1); // reached only if the build failed
+                    }
                     Ok(wcode_tui::Outcome::Resume(path)) => {
                         // The TUI cannot rebuild an agent: hand off by re-exec'ing
                         // with `--resume <path>` (the terminal is already restored).

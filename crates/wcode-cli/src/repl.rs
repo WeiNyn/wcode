@@ -509,7 +509,7 @@ fn build_dir() -> Option<PathBuf> {
 /// build is not specially cancellable — Ctrl-C is a developer-session
 /// non-case, so a build is simply awaited to completion.
 #[allow(clippy::too_many_arguments)]
-async fn reload(
+pub async fn reload(
     llm: &LlmOpts,
     session: Option<&Path>,
     no_session: bool,
@@ -517,7 +517,7 @@ async fn reload(
     overlay: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
-    in_flight: &AtomicBool,
+    in_flight: Option<&AtomicBool>,
 ) {
     use std::sync::atomic::Ordering;
     let Some(dir) = build_dir() else {
@@ -535,7 +535,9 @@ async fn reload(
     // Swallow Ctrl-C for the duration of the build (`in_flight` routes it to
     // the actor as a `Cancel`, a no-op while idle) so a stray Ctrl-C does not
     // kill the session mid-build.
-    in_flight.store(true, Ordering::SeqCst);
+    if let Some(f) = in_flight {
+        f.store(true, Ordering::SeqCst);
+    }
     let status = tokio::process::Command::new("cargo")
         .arg("build")
         .arg("--bin")
@@ -543,7 +545,9 @@ async fn reload(
         .current_dir(&dir)
         .status()
         .await;
-    in_flight.store(false, Ordering::SeqCst);
+    if let Some(f) = in_flight {
+        f.store(false, Ordering::SeqCst);
+    }
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => {
@@ -998,7 +1002,7 @@ pub async fn run(
                 println!("{DIM}/reload (rebuild + re-exec) is unavailable over a socket{RESET}")
             }
             Some(Command::Reload { no_session }) => {
-reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overlay, owner, name, &in_flight).await
+reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overlay, owner, name, Some(&in_flight)).await
             }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
@@ -1046,6 +1050,7 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
             None => run_turn(&backend, line, &in_flight).await,
         }
     }
+
 }
 
 /// `/skills`: what was discovered, one block per skill, with the file the
