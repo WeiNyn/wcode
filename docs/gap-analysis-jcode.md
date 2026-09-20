@@ -15,7 +15,7 @@ This is a *feature* diff, not a line diff: `../jcode` is ~670k LOC over 80+ crat
 | 5 | **`todo` tool** | no model-facing checklist; `task` is root/team-scoped (`tools/task.rs` "Root-only"). jcode's is a plain `{content,status}` list (skip its goal/gate machinery). | S |
 | 6 | **Widen the per-model context catalog** | `limits::model_limit` returns real windows only when `is_opencode_go` holds; every other endpoint falls back to `DEFAULT_CONTEXT_WINDOW = 128_000`. The table already exists (`OPENCODE_GO`) — key it off the model, not one provider. | S |
 | 7 | **Soft-interrupt point B** | `Agent::steer`/`follow_up` drain at turn start (`loop_.rs` steering drain) and after the inner loop (`follow_ups.try_recv`), so a steer arriving during a tool-free turn is not injected. Inject before the `calls.is_empty()` break; tag a `source`. | S–M |
-| 8 | **Dedicated reasoning + usage events** | `AgentEvent` has no *dedicated* reasoning-delta or token-usage variant — but there is **no functional gap**: thinking already rides `AgentEvent::MessageUpdate` as `ContentBlock::Thinking` (rendered live by `ui.rs::content_lines` / `theme.thinking`) and usage rides `AgentMessage::Assistant.usage` on `MessageEnd`/`TurnEnd` (`app.rs::record_usage`, surfaced by `/usage`). A separate event would only tidy the seam. | S (cosmetic) |
+| 8 | **Dedicated reasoning + usage events** | `AgentEvent` has no *dedicated* reasoning-delta or token-usage variant — but there is **no functional gap**: thinking already rides `AgentEvent::MessageUpdate` as `ContentBlock::Thinking` (rendered live by `ui.rs::content_lines` / `theme.thinking`) and usage rides `AgentMessage::Assistant.usage`, recorded by `app.rs::record_usage` on `TurnEnd` (and on seed/`History` replay), surfaced by `/usage`. A separate event would only tidy the seam. | S (cosmetic) |
 
 **Correction to the draft.** Row 8 was originally scoped as "reasoning + usage: the TUI can't show thinking deltas or live cost". Reading the tree, both are *already* surfaced (see the row); the true residual is cosmetic. Treat #8 as optional, not a gap.
 
@@ -43,7 +43,7 @@ wcode's team (star: `spawn`/`message`/`peers`/`task`) is already compared agains
 
 ## 7. Incidental findings
 - **Security parity gaps** (Tier 1 #2): socket mode + frame bound, and no `0600` on session files (`Session::append` opens without a mode; jcode's storage forces owner-only via `set_permissions_owner_only`).
-- **Stale doc**: `docs/tui-sidebar-plan.md` claims "S1/S2 landed" and cites `ui.rs:draw_sidebar`, but the sidebar was replaced by `draw_team_strip` (`ui.rs`); no `draw_sidebar`/`member_rows` remain.
+- **Stale doc**: `docs/tui-sidebar-plan.md` claims "S1/S2 landed" and cites `ui.rs:draw_sidebar` — that symbol is gone (the sidebar was replaced by `draw_team_strip`, `ui.rs`). Its data source survives: `app.rs::member_rows` (pub fn) now feeds `draw_team_strip` (`ui.rs` calls `app.member_rows()`) and backs `/team` (`app.rs`). Only the `draw_sidebar` citation is stale.
 
 ## 8. Recommendation
 Do the **Tier 1 sweep** first — eight items, each S (one S–M), none crossing a subsystem boundary or the kernel/CLI split (though #8 is cosmetic and can be skipped). If a second wave is wanted, **`bash` command-risk as a `Hooks` policy** is the most defensible behavioral improvement.
