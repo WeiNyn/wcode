@@ -25,7 +25,7 @@ the boxes as each task completes and keep the status table current.
 | 17 | Session-groups follow-ups (reviewer's non-blocking list) | ☐ todo — see §17 |
 | 18 | Workspace concurrency: whole-file **digest CAS** (detail: [`workspace-concurrency.md`](workspace-concurrency.md)) | ☑ done — `94069f0`; **claims dropped** (orchestrator owns targeting/scope by prompt); second-layer review APPROVED |
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
-| 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☐ todo — see §20 |
+| 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -532,16 +532,20 @@ second-layer review with a reviewer's non-blocking list; all three landed in
 
 ## 20. Digest-CAS chain-test residuals (item 19 review debt)
 
-**New.** Item 19 (`3886148`) passed second-layer review; the reviewer's
-non-blocking test-coverage extensions:
+**Done.** Item 19 (`3886148`) passed second-layer review; the three non-blocking
+test-coverage extensions landed (`1b2ca6b`, `28fde3e`) and passed second-layer
+review:
 
-- [ ] A chain step through `edit` (not just `write`) — it also exercises the
+- [x] A chain step through `edit` (not just `write`) — it also exercises the
       anchor-resolution path *after* the CAS check.
-- [ ] Drive the chain through the real `HooksSet` (both hooks composed, as the
-      loop invokes them) to cover the ordering seam; today `after_tool_call` is
-      driven directly.
-- [ ] A negative test that a `--plain` read output parses to `None` and arms
+- [x] Drive the chain through the real `HooksSet` (both hooks composed, in
+      insertion order, as the loop invokes them).
+- [x] A negative test that a `--plain` read output parses to `None` and arms
       nothing (pairs with the description note).
+
+Optional follow-ons (not tracked as an item): the `edit` chain derives its
+`from` anchor via `anchor::anchor(..)` rather than parsing it out of the read
+output; `edits`/`replace` have unit tests but no full chain.
 
 ## 15. TUI team sidebar: status + live action
 
@@ -595,4 +599,4 @@ This entry stays as the pointer plus status only, like items 3, 6, 7, 8, and 13.
 17. **17** session-groups follow-ups — small review debts; see §17.
 18. **18** workspace concurrency — whole-file digest CAS. Done (`94069f0`).
 19. **19** digest-CAS follow-ups. Done (`3886148`).
-20. **20** digest-CAS chain-test residuals — non-blocking test gaps; see §20.
+20. **20** digest-CAS chain-test residuals. Done (`1b2ca6b`, `28fde3e`).
