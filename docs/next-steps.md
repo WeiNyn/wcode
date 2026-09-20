@@ -21,6 +21,7 @@ the boxes as each task completes and keep the status table current.
 | 13 | TUI browse mode: select a transcript block (see [`tui-browse-plan.md`](tui-browse-plan.md)) | ☑ phases 1–3 |
 | 14 | TUI palette & theming (see [`tui-theming-plan.md`](tui-theming-plan.md)) | ☑ T1 (palette B) + T2 (color-mode ladder, hex-gated truecolor) + T3 (`[theme]` overlay) landed; tier palettes open |
 | 15 | TUI team sidebar: status + live action (see [`tui-sidebar-plan.md`](tui-sidebar-plan.md)) | ☑ S1 + S2 (socket roster model) landed |
+| 16 | Session groups: team session persistence & resume (see [`session-groups.md`](session-groups.md)) | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
