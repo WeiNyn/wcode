@@ -29,7 +29,7 @@ the boxes as each task completes and keep the status table current.
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
 | 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
 | 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
-| 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ◐ review snapshot |
+| 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ review snapshot; Tier-1 sweep complete — see the summary below |
 | 25 | Tier-1 gap sweep: Retry-After + socket hardening (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ done — b3b3240, 9705f06 |
 | 26 | Session search: cross-session + in-session (see [session-search-plan.md](session-search-plan.md)) | ☑ done — `5eb7d78`/`7ef9084`/`0a1bce3`/`4078db1`; second-layer review tightened it |
 | 27 | Tier-1 gap sweep 2: `todo` tool + steer at the tool-free boundary (see [gap-analysis-jcode.md](gap-analysis-jcode.md) §2 rows 5/7) | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` (todo), `a3a5705` (steer point B) |
@@ -708,6 +708,30 @@ OAuth/credential store/provider picker, MCP/browser/computer-use/sandbox, the
 embedding memory graph + sideagents, config-driven/spawn/scheduled hooks,
 semantic compaction — all excluded by doctrine or by the missing-daemon
 constraint.
+
+---
+
+## Tier-1 gap sweep — status
+
+The jcode feature-gap analysis ([`gap-analysis-jcode.md`](gap-analysis-jcode.md))
+produced eight Tier-1 candidates. Their disposition:
+
+| gap (gap-analysis §2) | status |
+|---|---|
+| 1. Honor `Retry-After` on 429/503 | ☑ done — `b3b3240` |
+| 2. Socket `0600` + bounded frame read | ☑ done — `9705f06` |
+| 3. Cross-session `session_search` | ☑ done — `5eb7d78`/`7ef9084`/`0a1bce3`/`4078db1` (one tool; `scope` covers rows 3+4) |
+| 4. In-session `conversation_search` | ☑ done — same tool; `scope:"current"` recovers turns a compaction hid |
+| 5. `todo` tool | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` |
+| 6. Widen the per-model context catalog | ☐ deferred — `limits::model_limit` still returns a window only for `is_opencode_go` |
+| 7. Soft-interrupt point B | ☑ done — `a3a5705` |
+| 8. Reasoning/usage events | — dropped: cosmetic (`AgentEvent::MessageUpdate` already streams thinking; usage rides `MessageEnd`) |
+
+**6 of 8 done, #8 dropped, #6 deferred.** Follow-ups landed alongside:
+`70a14cd`/`7bed04e` (gap-doc corrections), `4078db1` (session-search tighten),
+`25749bd` (todo resume wart). The session-search design lives in
+[`session-search-plan.md`](session-search-plan.md). Tier-2 (medium) and Tier-3
+(larger) candidates are in `gap-analysis-jcode.md` §3–§4; none started.
 
 ---
 
