@@ -267,6 +267,7 @@ pub type EventFrame = Frame<AgentEvent>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{TodoItem, TodoStatus};
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
@@ -389,6 +390,33 @@ mod tests {
         );
         // `AgentEvent` is not `PartialEq` (see event.rs); compare re-serialized
         // JSON, matching that module's round-trip convention.
+        let back: EventFrame = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), v);
+    }
+
+    #[test]
+    fn frame_carries_a_todo_event_body() {
+        let f = EventFrame {
+            v: PROTOCOL_VERSION,
+            id: 9,
+            reply_to: None,
+            session: SessionId::from("s1"),
+            sender: None,
+            body: AgentEvent::Todo {
+                todos: vec![TodoItem {
+                    content: "write tests".into(),
+                    status: TodoStatus::Pending,
+                }],
+            },
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "v": PROTOCOL_VERSION, "id": 9, "session": "s1", "type": "todo",
+                "todos": [{"content": "write tests", "status": "pending"}],
+            })
+        );
         let back: EventFrame = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&back).unwrap(), v);
     }

@@ -38,6 +38,24 @@ pub enum LlmStreamEvent {
     },
 }
 
+/// The status of a [`TodoItem`]. `Cancelled` is deliberately absent in v1: the
+/// model drops an item by rewriting the whole list.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One entry in the `todo` tool's session-local checklist. Lives in the harness
+/// because it rides the serialized [`AgentEvent`] (the CLI tool reuses it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TodoItem {
+    /// What the item is about (non-empty after trim; the tool validates).
+    pub content: String,
+    pub status: TodoStatus,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -135,6 +153,13 @@ pub enum AgentEvent {
     /// deserialize.
     Spawned {
         worker: crate::protocol::SessionId,
+    },
+    /// The `todo` checklist, streamed on every write (mirror `Compaction` /
+    /// `Retrying`: a plain state payload the UI reduces). The field is `todos`,
+    /// not `id`: the envelope already carries a top-level `id` and a flattened
+    /// duplicate key would not deserialize.
+    Todo {
+        todos: Vec<TodoItem>,
     },
     AgentEnd,
 }
@@ -278,6 +303,21 @@ mod tests {
                 worker: crate::protocol::SessionId::agent("w1"),
             },
             "spawned",
+        );
+        roundtrip(
+            AgentEvent::Todo {
+                todos: vec![
+                    TodoItem {
+                        content: "write tests".into(),
+                        status: TodoStatus::Pending,
+                    },
+                    TodoItem {
+                        content: "ship it".into(),
+                        status: TodoStatus::Completed,
+                    },
+                ],
+            },
+            "todo",
         );
     }
 
