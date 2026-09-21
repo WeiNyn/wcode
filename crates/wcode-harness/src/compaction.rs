@@ -537,7 +537,9 @@ paths, names, decisions, errors) and omitting pleasantries:
 - Context: what we are working on and why.
 - What we did: key actions taken, files changed, problems solved.
 - Current state: what works, what is broken, what is next.
-- User preferences: requirements or decisions the user made.";
+- User preferences: requirements or decisions the user made. The turns you \
+summarize are not lost: they remain in this session's transcript and can be \
+searched later with the session_search tool (use scope=\"current\").";
 
 /// Per-message/-block character cap when rendering a conversation for the
 /// summarizer, so one giant tool result can't crowd out the rest.
