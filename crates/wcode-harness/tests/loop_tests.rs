@@ -1367,6 +1367,87 @@ async fn steering_is_drained_before_streaming() {
     assert!(matches!(&ctx[1], AgentMessage::User { .. } if ctx[1].as_text() == "steer"));
 }
 
+#[tokio::test]
+async fn a_steer_at_the_tool_free_boundary_starts_a_second_turn() {
+    // Point B: a steer queued AFTER turn 1's turn-start drain (here, from inside
+    // the first stream call) is injected at the outer tail and starts a second
+    // turn. This FAILS if the tail only drains `follow_ups`.
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("a".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("b".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let (steer_tx, steering) = mpsc::unbounded_channel();
+    let (_follow_tx, follow_ups) = mpsc::unbounded_channel();
+
+    // Queue the steer on the FIRST stream call: turn 1's turn-start drain has
+    // already run, so only the tail can pick it up.
+    let steer = steer_tx.clone();
+    let rec_fn = rec.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_fn = calls.clone();
+    let stream_fn: StreamFn = Arc::new(
+        move |ctx: &[AgentMessage],
+              system: &str,
+              tools: &[rig::completion::ToolDefinition],
+              _opts: &LlmOpts| {
+            rec_fn.calls.lock().unwrap().push(StreamCall {
+                ctx: ctx.to_vec(),
+                system: system.to_string(),
+                tools: tools.iter().map(|t| t.name.clone()).collect(),
+            });
+            if calls_fn.fetch_add(1, Ordering::SeqCst) == 0 {
+                steer.send(AgentMessage::user_text("steer")).unwrap();
+            }
+            let events = rec_fn.script.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(futures::stream::iter(events)) as LlmStream
+        },
+    );
+
+    let cfg = LoopConfig {
+        system: "sys".into(),
+        tools: vec![],
+        llm: LlmOpts {
+            model: "m1".into(),
+            ..LlmOpts::default()
+        },
+        stream_fn,
+        hooks: HooksSet::default(),
+        steering,
+        follow_ups,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        working_dir: std::path::PathBuf::from("."),
+        session: None,
+        max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+        parallel: true,
+        compaction: CompactionPolicy::default(),
+    };
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(rec.calls().len(), 2, "the tail steer starts a second turn");
+    assert!(
+        ctx.iter().any(|m| m.as_text() == "steer"),
+        "the steer reached ctx: {ctx:?}"
+    );
+    let t = tags(&events);
+    assert_eq!(t.iter().filter(|&&x| x == "turn_start").count(), 2);
+    assert!(t.windows(2).any(|w| w == ["message_start", "message_end"]));
+}
+
 /// Smoke: the loop runs a full tool round with pure-default hooks.
 #[tokio::test]
 async fn default_hooks_smoke() {

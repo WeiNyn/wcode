@@ -88,6 +88,17 @@ fn finish(
     })
 }
 
+/// The next message to inject at the outer tail: a queued follow-up first
+/// (preserving the original behavior), else a queued steer (soft interrupt,
+/// point B). One per outer iteration; `continue 'outer` re-runs the turn-start
+/// drain, which picks up any remainder.
+fn next_injected(cfg: &mut LoopConfig<'_>) -> Option<AgentMessage> {
+    cfg.follow_ups
+        .try_recv()
+        .ok()
+        .or_else(|| cfg.steering.try_recv().ok())
+}
+
 pub async fn run_loop(
     ctx: &mut Vec<AgentMessage>,
     mut cfg: LoopConfig<'_>,
@@ -624,8 +635,13 @@ pub async fn run_loop(
             }
         }
 
-        match cfg.follow_ups.try_recv() {
-            Ok(m) => {
+        // Soft-interrupt point B: drain a follow-up OR a steer at this shared
+        // boundary. A `steer` that arrived during a tool-free turn used to be
+        // deferred to a future run; now it injects here and starts the next turn.
+        // The stop hook already ran on the way in, so `should_stop_after_turn`
+        // stays authoritative.
+        match next_injected(&mut cfg) {
+            Some(m) => {
                 if sink
                     .send(AgentEvent::MessageStart { message: m.clone() })
                     .is_err()
@@ -641,10 +657,7 @@ pub async fn run_loop(
                 }
                 continue 'outer;
             }
-            Err(
-                tokio::sync::mpsc::error::TryRecvError::Empty
-                | tokio::sync::mpsc::error::TryRecvError::Disconnected,
-            ) => {
+            None => {
                 let _ = sink.send(AgentEvent::AgentEnd);
                 return finish(StopReason::Stop, cfg.steering, cfg.follow_ups);
             }
