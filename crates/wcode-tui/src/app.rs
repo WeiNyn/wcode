@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use wcode_harness::event::AgentEvent;
+use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 use wcode_harness::protocol::{Request, SessionId};
 
@@ -171,6 +171,27 @@ fn copy_text(block: &Block) -> Option<String> {
         Block::Diff { diff, .. } => diff.clone(),
     };
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Render the `todo` checklist as one line per item, for a transcript notice.
+/// Local to the TUI — `wcode-tui` does not depend on `wcode-cli`, so it cannot
+/// reach the tool's `render`: `[ ]` pending, `[>]` in progress, `[x]` completed.
+fn render_todos(todos: &[TodoItem]) -> String {
+    if todos.is_empty() {
+        return "todos: (none)".to_string();
+    }
+    let lines: Vec<String> = todos
+        .iter()
+        .map(|item| {
+            let mark = match item.status {
+                TodoStatus::Pending => "[ ]",
+                TodoStatus::InProgress => "[>]",
+                TodoStatus::Completed => "[x]",
+            };
+            format!("{mark} {}", item.content)
+        })
+        .collect();
+    format!("todos:\n{}", lines.join("\n"))
 }
 
 /// A transient modal drawn over the three bands. Shared infrastructure: any
@@ -939,6 +960,13 @@ impl Surface {
             AgentEvent::Error { message } => {
                 self.flush_live();
                 self.transcript.push(Block::Error(message));
+                true
+            }
+            AgentEvent::Todo { todos } => {
+                // Minimal v1: a notice. A dedicated panel is a follow-on. This arm
+                // runs for a local run AND a socket client — the point of routing
+                // `todo` through the event seam.
+                self.transcript.push(Block::Notice(render_todos(&todos)));
                 true
             }
             AgentEvent::Compaction { summarized, kept } => {
@@ -2950,6 +2978,33 @@ mod tests {
         app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
         assert!(!app.running());
         assert_eq!(app.transcript().last(), Some(&Block::Notice("⏹ aborted".into())));
+    }
+
+    #[test]
+    fn a_todo_event_renders_a_notice() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Todo {
+                todos: vec![
+                    TodoItem {
+                        content: "step one".into(),
+                        status: TodoStatus::Pending,
+                    },
+                    TodoItem {
+                        content: "step two".into(),
+                        status: TodoStatus::Completed,
+                    },
+                ],
+            },
+        ));
+        match app.transcript().last() {
+            Some(Block::Notice(text)) => {
+                assert!(text.contains("[ ] step one"), "{text}");
+                assert!(text.contains("[x] step two"), "{text}");
+            }
+            other => panic!("expected a todo notice, got {other:?}"),
+        }
     }
 
     #[test]
