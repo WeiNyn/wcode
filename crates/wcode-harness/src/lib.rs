@@ -8,5 +8,6 @@ pub mod loop_;
 pub mod message;
 pub mod protocol;
 pub mod session;
+pub mod stats;
 pub mod streamfn;
 pub mod tool;
