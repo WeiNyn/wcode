@@ -391,6 +391,19 @@ async fn dispatch(
             }) => AgentEvent::Compaction { summarized, kept },
             Err(e) => AgentEvent::Error { message: e },
         },
+        // `/btw`: a tool-free side call. `side_ask` takes `&self`, so no borrow
+        // conflict with the run. A `SideAsk` arriving mid-run is deferred to a
+        // turn boundary like any other inbox request (see the run loop's
+        // `deferred.push_back`) — queued, not refused.
+        Request::SideAsk { text } => match agent.side_ask(&text).await {
+            Ok(answer) => AgentEvent::SideAnswer {
+                text: answer.text,
+                usage: answer.usage,
+            },
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },

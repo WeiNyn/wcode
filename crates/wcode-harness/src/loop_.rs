@@ -62,6 +62,11 @@ pub struct LoopConfig<'a> {
 pub enum LoopError {
     #[error(transparent)]
     Session(std::io::Error), // session append failure while persisting produced messages
+    /// A side-call (`Agent::side_ask`) failure: a stream error, or a stream that
+    /// produced no text. Not produced by `run_loop` (which surfaces a stream
+    /// failure as `AgentEvent::Error`).
+    #[error("{0}")]
+    Stream(String),
 }
 
 /// Return value of [`run_loop`]: the stop reason plus the two input channels

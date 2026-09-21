@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::StreamExt as _;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::{self, CompactOutcome, CompactionPolicy};
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, LlmStreamEvent};
 use crate::hooks::HooksSet;
 use crate::loop_::{LoopConfig, LoopError, run_loop};
-use crate::message::{AgentMessage, StopReason};
+use crate::message::{AgentMessage, StopReason, Usage};
 use crate::session::{Session, SessionEntry};
 use crate::streamfn::{LlmOpts, StreamFn};
 use crate::tool::Tool;
@@ -270,6 +271,41 @@ impl Agent {
         Ok(message)
     }
 
+    /// Answer `text` tool-free, from the current context, as a one-off side call.
+    ///
+    /// CLONES `ctx`, appends the (framed) question, runs the raw `stream_fn` once
+    /// with an EMPTY tool list, and folds `TextDelta` → text until `Done`
+    /// (capturing `usage`). `self.ctx` and `self.session` are never mutated or
+    /// appended — hence `&self`, so it stays callable while the actor holds
+    /// `&mut Agent` for a run.
+    ///
+    /// Errors become [`LoopError::Stream`]: a stream `Error`, or a call that
+    /// ended with no text. No retry loop of its own — it inherits whatever
+    /// retry/idle-timeout the configured `stream_fn` adapter applies internally,
+    /// exactly as [`crate::compaction::summarize`] does. No cancel path in v1.
+    pub async fn side_ask(&self, text: &str) -> Result<SideAnswer, LoopError> {
+        let mut msgs = self.ctx.clone();
+        msgs.push(AgentMessage::user_text(frame_btw(text)));
+        let mut stream = (self.stream_fn)(&msgs, &self.system, &[], &self.llm);
+        let mut out = String::new();
+        let mut usage = None;
+        while let Some(ev) = stream.next().await {
+            match ev {
+                LlmStreamEvent::TextDelta(delta) => out.push_str(&delta),
+                LlmStreamEvent::Done { usage: u, .. } => {
+                    usage = u;
+                    break;
+                }
+                LlmStreamEvent::Error { message, .. } => return Err(LoopError::Stream(message)),
+                _ => {}
+            }
+        }
+        let text = out.trim().to_string();
+        if text.is_empty() {
+            return Err(LoopError::Stream("side answer produced no text".to_string()));
+        }
+        Ok(SideAnswer { text, usage })
+    }
     /// Summarize the older part of the conversation in place: keep the newest
     /// messages per [`CompactionPolicy`] and replace the rest with a single
     /// summary message. `instructions` focuses the summary (the
@@ -301,6 +337,20 @@ impl Agent {
     }
 }
 
+/// The reply to a `/btw` side question: the answer text and the turn's token
+/// usage (`None` when the provider reported none). Harness data — no styling.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SideAnswer {
+    pub text: String,
+    pub usage: Option<Usage>,
+}
+
+/// Frame a raw `/btw` question so the model knows it is a tool-free aside: the
+/// tools are simply absent, so without a hint it may try to call one and fail.
+fn frame_btw(q: &str) -> String {
+    format!("[side question — no tools available; answer briefly and directly from the conversation above]\n{q}")
+}
+
 /// Process cwd, used only when `AgentConfig.working_dir` is left empty.
 fn default_working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -312,4 +362,129 @@ fn session_header_id(session: &Session) -> Option<String> {
         SessionEntry::Header { id, .. } => Some(id.clone()),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compaction::CompactionPolicy;
+    use crate::hooks::HooksSet;
+    use crate::streamfn::{LlmStream, StreamFn};
+
+    /// A `StreamFn` that replays `script` on each call.
+    fn scripted(script: Vec<LlmStreamEvent>) -> StreamFn {
+        Arc::new(move |_ctx: &[AgentMessage], _system, _tools, _opts: &LlmOpts| {
+            Box::pin(futures::stream::iter(script.clone())) as LlmStream
+        })
+    }
+
+    fn make_agent(session: Option<Session>, stream_fn: StreamFn, context: Vec<AgentMessage>) -> Agent {
+        Agent::new(AgentConfig {
+            system: "sys".into(),
+            tools: vec![],
+            llm: LlmOpts {
+                model: "m1".into(),
+                ..LlmOpts::default()
+            },
+            stream_fn,
+            hooks: HooksSet::default(),
+            session,
+            context,
+            working_dir: PathBuf::new(),
+            max_turns: crate::loop_::DEFAULT_MAX_TURNS,
+            parallel_tools: true,
+            compaction: CompactionPolicy::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn side_ask_leaves_ctx_and_session_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::create(dir.path()).unwrap();
+        let stream = scripted(vec![
+            LlmStreamEvent::TextDelta("an".into()),
+            LlmStreamEvent::TextDelta("swer".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let agent = make_agent(Some(session), stream, vec![AgentMessage::user_text("earlier")]);
+
+        let ctx_before = agent.ctx.clone();
+        let path = agent.session.as_ref().unwrap().path().unwrap().to_path_buf();
+        let entries_before = agent.session.as_ref().unwrap().entries().to_vec();
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let answer = agent.side_ask("why?").await.unwrap();
+        assert_eq!(answer.text, "answer");
+
+        assert_eq!(agent.ctx, ctx_before, "ctx is unchanged");
+        assert_eq!(agent.messages(), &ctx_before[..]);
+        assert_eq!(
+            agent.session.as_ref().unwrap().entries(),
+            &entries_before[..],
+            "session entries unchanged"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes_before,
+            "session file bytes unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn side_ask_folds_deltas_and_captures_usage() {
+        let usage = Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_tokens: Some(2),
+            cache_write_tokens: None,
+        };
+        let stream = scripted(vec![
+            LlmStreamEvent::TextDelta("he".into()),
+            LlmStreamEvent::TextDelta("llo".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: Some(usage),
+            },
+        ]);
+        let agent = make_agent(None, stream, vec![]);
+        assert_eq!(
+            agent.side_ask("hi").await.unwrap(),
+            SideAnswer {
+                text: "hello".into(),
+                usage: Some(usage),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn side_ask_surfaces_a_stream_error() {
+        let stream = scripted(vec![LlmStreamEvent::Error {
+            message: "boom".into(),
+            fatal: true,
+        }]);
+        let agent = make_agent(None, stream, vec![]);
+        let err = agent.side_ask("hi").await.unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn side_ask_errors_on_empty_output() {
+        let stream = scripted(vec![LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        }]);
+        let agent = make_agent(None, stream, vec![]);
+        let err = agent.side_ask("hi").await.unwrap_err();
+        assert!(err.to_string().contains("no text"), "{err}");
+    }
+
+    #[test]
+    fn frame_btw_wraps_the_question() {
+        let framed = frame_btw("why?");
+        assert!(framed.starts_with("[side question"));
+        assert!(framed.ends_with("\nwhy?"));
+    }
 }

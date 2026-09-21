@@ -178,6 +178,12 @@ pub enum Request {
     /// by `instructions`.
     Compact { instructions: Option<String> },
 
+    /// Ask a side question (`/btw`): answer `text` tool-free, from the current
+    /// context, WITHOUT recording it. A read — carries user content, names no
+    /// `AgentMessage` (see the enum doc above). Reply:
+    /// [`AgentEvent::SideAnswer`]. A `SideAsk` arriving mid-run is deferred to
+    /// the next turn boundary (like any other inbox request), not refused.
+    SideAsk { text: String },
     /// Read back the conversation so far. Reply:
     /// [`AgentEvent::History`].
     GetHistory,
@@ -303,6 +309,7 @@ mod tests {
         roundtrip(Request::Notify { content: "n".into() }, "notify");
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
+        roundtrip(Request::SideAsk { text: "why?".into() }, "side_ask");
         roundtrip(Request::ListSessions, "list_sessions");
         roundtrip(
             Request::Define {
@@ -349,6 +356,7 @@ mod tests {
         assert!(is_inbound(&Request::Wake { content: "x".into() }));
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
         assert!(!is_inbound(&Request::GetHistory));
+        assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
         assert!(!is_inbound(&Request::Cancel));
         assert!(!is_inbound(&Request::ListSessions));
         assert!(!is_inbound(&Request::Define {

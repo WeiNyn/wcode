@@ -132,6 +132,13 @@ pub enum AgentEvent {
     Stopped {
         stop_reason: StopReason,
     },
+    /// Reply: a tool-free side answer to a `Request::SideAsk` (`/btw`). Never
+    /// streamed (see [`AgentEvent::Ack`]). Carries the answer text and the
+    /// turn's usage (for a `/usage`-style readout); styling is the front-end's.
+    SideAnswer {
+        text: String,
+        usage: Option<Usage>,
+    },
     /// Reply: the conversation so far, answering a `Request::GetHistory`. Never
     /// streamed (see [`AgentEvent::Ack`]).
     History {
@@ -268,6 +275,13 @@ mod tests {
                 stop_reason: StopReason::Aborted,
             },
             "stopped",
+        );
+        roundtrip(
+            AgentEvent::SideAnswer {
+                text: "hi".into(),
+                usage: None,
+            },
+            "side_answer",
         );
         roundtrip(
             AgentEvent::History {
