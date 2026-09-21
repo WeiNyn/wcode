@@ -513,6 +513,14 @@ pub async fn run_loop(
                 // Fan out the runnable calls of this group. `after_tool_call`
                 // runs inside the task so a tool's hooks stay with its result.
                 let mut running = Vec::new();
+                // D4 — the live session path, threaded into the tool ctx so
+                // `session_search` can read this run's transcript. `cfg.session`
+                // is `Option<&mut Session>`; `Session::path()` is `Option<&Path>`.
+                let session_path = cfg
+                    .session
+                    .as_deref()
+                    .and_then(|s| s.path())
+                    .map(std::path::Path::to_path_buf);
                 for (i, c) in group.iter().enumerate() {
                     if !started[i] {
                         continue;
@@ -534,6 +542,7 @@ pub async fn run_loop(
                         working_dir: cfg.working_dir.clone(),
                         cancel: cfg.cancel.clone(),
                         events: sink.clone(),
+                        session_path: session_path.clone(),
                     };
                     let hooks = cfg.hooks.clone();
                     running.push(async move {

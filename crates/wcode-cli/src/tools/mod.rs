@@ -117,6 +117,7 @@ pub(crate) fn test_ctx(
         working_dir: dir.to_path_buf(),
         cancel: tokio_util::sync::CancellationToken::new(),
         events: tx,
+        session_path: None,
     };
     (ctx, rx)
 }

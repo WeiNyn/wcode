@@ -821,6 +821,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             cancel: tokio_util::sync::CancellationToken::new(),
             events,
+            session_path: None,
         };
 
         let mut root_rx = root.subscribe();
@@ -919,6 +920,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             cancel: tokio_util::sync::CancellationToken::new(),
             events,
+            session_path: None,
         };
         let out = tool
             .execute(serde_json::json!({ "task": "hi", "name": "reviewer" }), ctx)

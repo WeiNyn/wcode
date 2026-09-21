@@ -8,6 +8,10 @@ pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
     pub cancel: tokio_util::sync::CancellationToken,
     pub events: tokio::sync::mpsc::UnboundedSender<AgentEvent>, // tool may send ToolExecutionUpdate
+    /// The current run's session transcript path, when it has one — `None` for
+    /// an in-memory session. `session_search` (`scope:"current"`) reads it to
+    /// recover turns a compaction replaced with a summary.
+    pub session_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -170,6 +174,7 @@ mod tests {
                 working_dir: std::env::temp_dir(),
                 cancel,
                 events: tx,
+                session_path: None,
             },
             rx,
         )
