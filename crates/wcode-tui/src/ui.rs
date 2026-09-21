@@ -403,6 +403,7 @@ fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         Block::Assistant(content) => content_lines(content, width, false),
         Block::Tool(tool) => tool_lines(tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
+        Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
     }

@@ -87,6 +87,9 @@ pub enum Block {
     Tool(Tool),
     Notice(String),
     Error(String),
+    /// A `/btw` side answer: display-only, never committed to ctx/session.
+    /// The renderer styles it distinctly (a `btw:` gutter, dim/italic).
+    Btw(String),
     /// A changed file's diff, re-shown from `/changes` (not the live render).
     Diff { path: String, diff: String },
 }
@@ -158,7 +161,10 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
 /// - `Diff`: the diff body.
 fn copy_text(block: &Block) -> Option<String> {
     let text = match block {
-        Block::User(text) | Block::Notice(text) | Block::Error(text) => text.clone(),
+        Block::User(text)
+        | Block::Notice(text)
+        | Block::Error(text)
+        | Block::Btw(text) => text.clone(),
         Block::Assistant(content) => content
             .iter()
             .filter_map(|c| match c {
@@ -354,6 +360,12 @@ const COMMANDS: &[Command] = &[
         aliases: &[],
         args: Some("[--no-session]"),
         summary: "rebuild and re-exec into this session",
+    },
+    Command {
+        name: "btw",
+        aliases: &[],
+        args: Some("<question>"),
+        summary: "ask a tool-free side question",
     },
     Command {
         name: "usage",
@@ -987,6 +999,10 @@ impl Surface {
                 true
             }
             AgentEvent::TurnEnd { message } => self.record_usage(&message),
+            AgentEvent::SideAnswer { text, .. } => {
+                self.transcript.push(Block::Btw(text)); // display-only; no ctx/session
+                true
+            }
             AgentEvent::History { messages } => {
                 self.render_usage(&messages);
                 true
@@ -2074,6 +2090,12 @@ impl App {
             "compact" => self.actions.push(Action::Ask(Request::Compact {
                 instructions: arg.map(str::to_string),
             })),
+            "btw" => match arg {
+                Some(q) => self
+                    .actions
+                    .push(Action::Ask(Request::SideAsk { text: q.to_string() })),
+                None => self.notice("usage: /btw <question>"),
+            },
             "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
@@ -3154,6 +3176,17 @@ mod tests {
         submit(&mut app, "/usage");
         assert_eq!(app.take_actions(), vec![Action::Ask(Request::GetHistory)]);
 
+        submit(&mut app, "/btw why the sky?");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SideAsk {
+                text: "why the sky?".into()
+            })]
+        );
+
+        submit(&mut app, "/btw");
+        assert!(app.take_actions().is_empty(), "a bare /btw nudges only");
+
         submit(&mut app, "/nonsense");
         assert!(app.take_actions().is_empty());
     }
@@ -3206,6 +3239,22 @@ mod tests {
         assert!(matches!(
             app.transcript().last(),
             Some(Block::Notice(text)) if text == "(no usage reported)"
+        ));
+    }
+
+    #[test]
+    fn a_side_answer_pushes_a_btw_block() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::SideAnswer {
+                text: "42".into(),
+                usage: None,
+            },
+        ));
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Btw(t)) if t == "42"
         ));
     }
 
@@ -4001,7 +4050,8 @@ mod tests {
         assert!(
             text.starts_with(
                 "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /reload [--no-session] /usage /copy /surface /team /tasks /help"
+                 /resume /reload [--no-session] /btw <question> /usage /copy /surface \
+                 /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
