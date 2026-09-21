@@ -15,8 +15,8 @@ pub mod replace;
 pub mod spawn;
 pub mod task;
 pub mod session_search;
+pub mod todo;
 pub mod write;
-
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +37,10 @@ pub fn default_tools(cfg: &ToolsConfig, sessions_dir: &Path) -> Vec<Tool> {
         erased(edits::Edits::new(lock.clone())),
         erased(replace::Replace::new(lock.clone())),
         erased(write::Write::new(lock.clone())),
+        // Session-local and event-sourced: every session (workers included) gets
+        // it; not behind the mutation `lock` (its `parallel_safe` default makes a
+        // write a barrier anyway).
+        erased(todo::Todo::new()),
         // A core read-only capability (like `read`): always on, not behind the
         // mutation `lock`.
         erased(session_search::SessionSearch::new(sessions_dir.to_path_buf())),
@@ -166,6 +170,7 @@ mod tests {
             "replace",
             "write",
             "session_search",
+            "todo",
         ] {
             assert!(n.contains(&core.to_string()), "{core} missing from {n:?}");
         }
