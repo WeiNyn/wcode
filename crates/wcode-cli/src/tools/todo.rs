@@ -11,7 +11,11 @@
 //!
 //! State is an in-memory `Mutex<Vec<TodoItem>>` inside the tool instance: one
 //! `Agent` builds its own tools, so the checklist is per-session for free. It is
-//! NOT persisted in v1 — `--resume`/`/reload` start empty (a follow-on).
+//! NOT persisted in v1, which has a model-facing wart: after `--resume`/`/reload`
+//! the tool starts empty, yet the restored transcript still shows the earlier
+//! `todo` ToolResults — so a bare read answers `(no todos)` against a visible
+//! list. Persisting it (a `SessionEntry::Todo`, or a sidecar via
+//! `ToolContext.session_path`) is the follow-on that closes the gap.
 
 use std::sync::Mutex;
 
