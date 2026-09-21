@@ -116,6 +116,9 @@ pub enum Command {
     Reload {
         no_session: bool,
     },
+    /// Ask a tool-free side question (`/btw <question>`): answered from the
+    /// current context, NEVER recorded in ctx or the session.
+    Btw(String),
     /// Print aggregate token usage for the current conversation.
     Usage,
     /// Summarize older messages now, optionally focused by <prompt>.
@@ -149,6 +152,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
             Some("--no-session") => Some(Command::Reload { no_session: true }),
             _ => None,
         },
+        "btw" => Some(Command::Btw(arg.unwrap_or_default())),
         "usage" => Some(Command::Usage),
         "compact" => Some(Command::Compact(arg)),
         "skills" => Some(Command::Skills),
@@ -1017,6 +1021,20 @@ pub async fn run(
             Some(Command::Reload { no_session }) => {
 reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overlay, owner, name, Some(&in_flight)).await
             }
+            Some(Command::Btw(q)) => {
+                if q.trim().is_empty() {
+                    println!("usage: /btw <question>");
+                } else {
+                    match backend.ask(Request::SideAsk { text: q }).await {
+                        Ok(AgentEvent::SideAnswer { text, usage: _ }) => {
+                            println!("{DIM}btw: {text}{RESET}");
+                        }
+                        Ok(AgentEvent::Error { message }) => eprintln!("btw: {message}"),
+                        Ok(_) => eprintln!("btw: unexpected reply"),
+                        Err(_) => eprintln!("btw: session closed"),
+                    }
+                }
+            }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
                     let stats = session_stats(&messages);
@@ -1334,6 +1352,8 @@ mod tests {
 
     #[test]
     fn parse_command_table() {
+        assert_eq!(parse_command("/btw why?"), Some(Command::Btw("why?".into())));
+        assert_eq!(parse_command("/btw"), Some(Command::Btw(String::new())));
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("hello"), None);
         assert_eq!(parse_command("/unknown x"), None);
