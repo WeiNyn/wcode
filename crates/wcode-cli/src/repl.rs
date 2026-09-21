@@ -382,7 +382,7 @@ pub fn build_agent(
     digest_cas: bool,
 ) -> Agent {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut tools = default_tools(spec.tools);
+    let mut tools = default_tools(spec.tools, &session_dir());
     tools.extend(extra_tools);
     // A FRESH WorkspaceHooks per agent (per-session digest cache). It must NOT
     // live in the shared `spec.hooks` set: `/new` and `/resume` rebuild the

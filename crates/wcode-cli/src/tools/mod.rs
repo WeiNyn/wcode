@@ -14,6 +14,7 @@ pub mod read;
 pub mod replace;
 pub mod spawn;
 pub mod task;
+pub mod session_search;
 pub mod write;
 
 
@@ -24,7 +25,7 @@ use wcode_harness::tool::{Tool, erased};
 
 use crate::config::ToolsConfig;
 
-pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
+pub fn default_tools(cfg: &ToolsConfig, sessions_dir: &Path) -> Vec<Tool> {
     // Mutating tools share one lock: read-only tools may run concurrently with
     // each other (see `TypedTool::parallel_safe`), but no two mutations and no
     // read-vs-mutation interleave inside a batch.
@@ -36,6 +37,9 @@ pub fn default_tools(cfg: &ToolsConfig) -> Vec<Tool> {
         erased(edits::Edits::new(lock.clone())),
         erased(replace::Replace::new(lock.clone())),
         erased(write::Write::new(lock.clone())),
+        // A core read-only capability (like `read`): always on, not behind the
+        // mutation `lock`.
+        erased(session_search::SessionSearch::new(sessions_dir.to_path_buf())),
     ];
     // grep/find are redundant with `bash` (it can grep/find itself), so they
     // register only when explicitly enabled in `[tools]`.
@@ -127,7 +131,7 @@ mod tests {
     use super::*;
 
     fn names(cfg: &ToolsConfig) -> Vec<String> {
-        default_tools(cfg)
+        default_tools(cfg, &std::env::temp_dir())
             .iter()
             .map(|t| t.name().to_string())
             .collect()
@@ -171,7 +175,7 @@ mod tests {
     #[test]
     #[ignore = "diagnostic: print tool definition sizes"]
     fn print_tool_definition_sizes() {
-        let tools = default_tools(&ToolsConfig::default());
+        let tools = default_tools(&ToolsConfig::default(), &std::env::temp_dir());
         let mut total = 0usize;
         for t in &tools {
             let d = t.definition();

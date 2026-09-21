@@ -100,6 +100,10 @@ pub struct WorkerTemplate {
     /// `[workspace] digest_cas` — each worker builds its OWN `WorkspaceHooks`
     /// with this (per-session cache; never shared).
     pub digest_cas: bool,
+    /// The sessions store a worker's `session_search` (`scope:"all"`) scans — the
+    /// same dir the root uses (`repl::session_dir()`), so a worker searches the
+    /// same store the root does.
+    pub sessions_dir: PathBuf,
 }
 
 /// How to build one worker. `Default` reproduces v1 behavior: inherit the
@@ -166,7 +170,7 @@ impl SessionFactory {
     /// set. `spawn` is absent by construction (a worker cannot spawn); `message`
     /// is also always kept. Use [`Self::validate_tools`] as the allow-list gate.
     pub fn default_tool_names(&self) -> Vec<String> {
-        default_tools(&self.template.tools)
+        default_tools(&self.template.tools, &self.template.sessions_dir)
             .iter()
             .map(|tool| tool.name().to_string())
             .collect()
@@ -351,7 +355,7 @@ impl SessionFactory {
         }
         // `None` = the whole default set; `Some(list)` = only the named tools.
         // `message` is always kept — the worker's only way to report (D3).
-        let mut tools = default_tools(&t.tools);
+        let mut tools = default_tools(&t.tools, &t.sessions_dir);
         if let Some(allow) = &spec.tools {
             tools.retain(|tool| allow.iter().any(|name| name == tool.name()));
         }
@@ -635,6 +639,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             members_dir: None,
             digest_cas: true,
+            sessions_dir: std::env::temp_dir(),
         };
         (SessionFactory::new(registry.clone(), template), registry)
     }
@@ -952,6 +957,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             members_dir: None,
             digest_cas: true,
+            sessions_dir: std::env::temp_dir(),
         };
         let o = Orchestrator::new(registry.clone(), template);
 
@@ -1003,6 +1009,7 @@ mod tests {
             working_dir: std::env::temp_dir(),
             members_dir: None,
             digest_cas: true,
+            sessions_dir: std::env::temp_dir(),
         };
         Orchestrator::new(Registry::new(), template)
     }
@@ -1179,7 +1186,7 @@ mod tests {
         let owner = SessionId::agent("orch");
         let cfg = factory.worker_config(&id, &owner, &WorkerSpec::default());
 
-        let mut expected: Vec<String> = default_tools(&factory.template.tools)
+        let mut expected: Vec<String> = default_tools(&factory.template.tools, &factory.template.sessions_dir)
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -1247,7 +1254,7 @@ mod tests {
         let root: Vec<String> = o.tools().iter().map(|t| t.name().to_string()).collect();
         assert!(root.contains(&"task".to_string()), "root tools: {root:?}");
 
-        let defaults: Vec<String> = default_tools(&ToolsConfig::default())
+        let defaults: Vec<String> = default_tools(&ToolsConfig::default(), &std::env::temp_dir())
             .iter()
             .map(|t| t.name().to_string())
             .collect();

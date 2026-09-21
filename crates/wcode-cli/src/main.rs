@@ -688,6 +688,7 @@ async fn main() {
             working_dir: cwd.clone(),
             members_dir: active_group.as_ref().map(|g| g.members_dir.clone()),
             digest_cas: cfg.workspace.digest_cas,
+            sessions_dir: crate::repl::session_dir(),
         };
         crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
     });
