@@ -123,20 +123,28 @@ impl TypedTool for SessionSearch {
     }
 
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
-        // Validation (design C): exactly one mode, and it must be usable.
+        // Validation: exactly one selector (design C, tightened), and it must be
+        // usable. "Exactly one" subsumes the former turns+stats and query+turns
+        // rejections and closes the gap where `query`+`stats` was silently
+        // ignored (stats won).
         let scope = args.scope.unwrap_or_default();
-        let wants_stats = args.stats == Some(true);
-        if args.query.is_none() && args.turns.is_none() && !wants_stats {
-            return error("session_search: provide at least one of `query`, `turns`, or `stats`");
+        let has_query = args.query.is_some();
+        let has_turns = args.turns.is_some();
+        let has_stats = args.stats == Some(true);
+        let selectors = [has_query, has_turns, has_stats]
+            .into_iter()
+            .filter(|b| *b)
+            .count();
+        if selectors != 1 {
+            return error("session_search: provide exactly one of `query`, `turns`, or `stats`");
         }
-        if scope != Scope::Current && (args.turns.is_some() || wants_stats) {
+        if let Some(q) = &args.query
+            && q.trim().is_empty()
+        {
+            return error("session_search: `query` must not be empty");
+        }
+        if scope != Scope::Current && (has_turns || has_stats) {
             return error("session_search: `turns`/`stats` require scope=\"current\"");
-        }
-        if args.turns.is_some() && wants_stats {
-            return error("session_search: `turns` and `stats` are mutually exclusive");
-        }
-        if args.query.is_some() && args.turns.is_some() {
-            return error("session_search: `query` and `turns` are mutually exclusive");
         }
 
         let report = match scope {
@@ -317,7 +325,7 @@ pub fn scan_current(session_path: &Path, args: &SessionSearchArgs) -> Result<Rep
         return Ok(Report::Sessions(Vec::new()));
     }
     Ok(Report::Sessions(vec![SessionHit {
-        id: stem_of(session_path),
+        id: session_id_of(session_path),
         created,
         cwd,
         path: session_path.to_path_buf(),
@@ -449,6 +457,18 @@ fn header_of(entries: &[SessionEntry]) -> (Option<String>, Option<String>) {
         }
     }
     (None, None)
+}
+
+/// The session id a `scope:"current"` hit reports: a group's root transcript is
+/// `<dir>/root.jsonl`, whose id is the **group dir** name (not `"root"`); a flat
+/// legacy file keeps its own stem.
+fn session_id_of(path: &Path) -> String {
+    if path.file_name().and_then(|n| n.to_str()) == Some("root.jsonl")
+        && let Some(dir) = path.parent().and_then(|p| p.file_name())
+    {
+        return dir.to_string_lossy().into_owned();
+    }
+    stem_of(path)
 }
 
 fn stem_of(path: &Path) -> String {
@@ -642,6 +662,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_query_is_rejected() {
+        // Finding #3: a blank query used to yield `terms == []` → match
+        // everything. It is now an error.
+        let tool = SessionSearch::new(std::env::temp_dir());
+        for q in ["", "   ", "\t\n"] {
+            let out = tool.execute(query(q), &ctx(None)).await;
+            assert!(
+                out.is_error && out.output.contains("must not be empty"),
+                "blank query {q:?} rejected: {out:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn turns_and_stats_require_current_scope() {
         let tool = SessionSearch::new(std::env::temp_dir());
         // turns with scope=all (default)
@@ -669,34 +703,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflicting_selectors_are_rejected() {
+    async fn more_than_one_selector_is_rejected() {
         let tool = SessionSearch::new(std::env::temp_dir());
-        // turns + stats
-        let out = tool
-            .execute(
-                SessionSearchArgs {
-                    scope: Some(Scope::Current),
-                    turns: Some(TurnsRange { start: 0, end: 0 }),
-                    stats: Some(true),
-                    ..Default::default()
-                },
-                &ctx(None),
-            )
-            .await;
-        assert!(out.is_error && out.output.contains("mutually exclusive"), "{out:?}");
-        // query + turns
-        let out = tool
-            .execute(
-                SessionSearchArgs {
-                    scope: Some(Scope::Current),
-                    query: Some("x".into()),
-                    turns: Some(TurnsRange { start: 0, end: 0 }),
-                    ..Default::default()
-                },
-                &ctx(None),
-            )
-            .await;
-        assert!(out.is_error && out.output.contains("mutually exclusive"), "{out:?}");
+        let cases = vec![
+            // turns + stats
+            SessionSearchArgs {
+                scope: Some(Scope::Current),
+                turns: Some(TurnsRange { start: 0, end: 0 }),
+                stats: Some(true),
+                ..Default::default()
+            },
+            // query + turns
+            SessionSearchArgs {
+                scope: Some(Scope::Current),
+                query: Some("x".into()),
+                turns: Some(TurnsRange { start: 0, end: 0 }),
+                ..Default::default()
+            },
+            // query + stats (finding #5: this used to be silently ignored)
+            SessionSearchArgs {
+                scope: Some(Scope::Current),
+                query: Some("x".into()),
+                stats: Some(true),
+                ..Default::default()
+            },
+        ];
+        for args in cases {
+            let out = tool.execute(args, &ctx(None)).await;
+            assert!(
+                out.is_error && out.output.contains("exactly one"),
+                "two selectors rejected: {out:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -798,6 +836,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scope_all_excludes_a_group_whose_root_is_current() {
+        // Finding #7: `current` is the group's ROOT (not a member); the whole
+        // group is still excluded.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let group_root = root.join("200_bbbbbbbb/root.jsonl");
+        write_lines(&group_root, &[header_line("/w"), user_line("m1", "needle")]);
+
+        let report = scan_all(root, Some(&group_root), &query("needle")).unwrap();
+        let Report::Sessions(hits) = report else {
+            panic!()
+        };
+        assert!(hits.is_empty(), "the group root is excluded: {hits:?}");
+    }
+
+    #[tokio::test]
+    async fn current_on_a_group_root_reports_the_group_id() {
+        // Finding #4: a group's root is `<dir>/root.jsonl`; the reported id is
+        // the GROUP DIR name, not "root".
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("200_bbbbbbbb/root.jsonl");
+        write_lines(&path, &[header_line("/w"), user_line("m1", "needle")]);
+
+        let args = SessionSearchArgs {
+            scope: Some(Scope::Current),
+            ..query("needle")
+        };
+        let report = scan_current(&path, &args).unwrap();
+        let Report::Sessions(hits) = report else {
+            panic!()
+        };
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].id, "200_bbbbbbbb", "group dir name, not \"root\"");
+    }
+
+    #[tokio::test]
+    async fn member_cap_limits_members_scanned() {
+        // Finding #2(a): the per-group member cap has teeth. 51 members, the
+        // needle only in the last-sorted one (#51) — beyond `MAX_MEMBERS_PER_GROUP`.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let group = root.join("100_aaaaaaaa");
+        write_lines(&group.join("root.jsonl"), &[header_line("/w")]);
+        for i in 0..MAX_MEMBERS_PER_GROUP {
+            write_lines(
+                &group.join(format!("members/m{i:02}.jsonl")),
+                &[header_line("/w"), user_line("m1", "filler")],
+            );
+        }
+        // Member #51 sorts last (`m50` > `m49`), so `.take(50)` never reaches it.
+        write_lines(
+            &group.join("members/m50.jsonl"),
+            &[header_line("/w"), user_line("m1", "needle")],
+        );
+
+        let report = scan_all(root, None, &query("needle")).unwrap();
+        let Report::Sessions(hits) = report else {
+            panic!()
+        };
+        assert!(
+            hits.iter().all(|h| h.id != "100_aaaaaaaa"),
+            "the needle is past the member cap: {hits:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn limit_caps_the_sessions_reported() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -817,6 +921,31 @@ mod tests {
         };
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].id, "300_cccc", "newest first on an equal score");
+    }
+
+    #[tokio::test]
+    async fn session_scan_cap_limits_sessions_scanned() {
+        // Finding #2(b): `MAX_SESSIONS_SCANNED` has teeth. `MAX_SESSIONS_SCANNED
+        // + 1` sessions; the needle is only in the OLDEST, which is beyond the
+        // `MAX_SESSIONS_SCANNED` newest that `list_groups` returns.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..(MAX_SESSIONS_SCANNED + 1) {
+            // Zero-padded so name order is chronological; the needle is in `i == 0`.
+            let text = if i == 0 { "needle" } else { "filler" };
+            write_lines(
+                &root.join(format!("{i:04}_aaaa.jsonl")),
+                &[header_line("/w"), user_line("m1", text)],
+            );
+        }
+        let report = scan_all(root, None, &query("needle")).unwrap();
+        let Report::Sessions(hits) = report else {
+            panic!()
+        };
+        assert!(
+            hits.is_empty(),
+            "the needle is in the oldest, past the scan cap: {hits:?}"
+        );
     }
 
     #[tokio::test]

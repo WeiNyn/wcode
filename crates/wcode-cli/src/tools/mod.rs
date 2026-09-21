@@ -156,7 +156,17 @@ mod tests {
         let n = names(&ToolsConfig::default());
         assert!(!n.iter().any(|s| s == "grep"));
         assert!(!n.iter().any(|s| s == "find"));
-        for core in ["read", "bash", "edit", "edits", "replace", "write"] {
+        // `session_search` is a core read-only capability (like `read`): always
+        // registered, never gated. Finding #1: this pins the registration.
+        for core in [
+            "read",
+            "bash",
+            "edit",
+            "edits",
+            "replace",
+            "write",
+            "session_search",
+        ] {
             assert!(n.contains(&core.to_string()), "{core} missing from {n:?}");
         }
     }

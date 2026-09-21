@@ -19,7 +19,7 @@ wcode persists every session as JSONL but can only replay one at a time. Two rec
 - **D5 — prompt tie-in.** One line in compaction's `SUMMARY_PROMPT` telling the model the summarized turns remain searchable via `session_search` (makes the recall path discoverable exactly when it matters).
 
 ## 4. Interface
-`session_search { query?, scope?, working_dir?, limit?, include_current?, include_tools?, turns?, stats? }` — at least one of `query`/`turns`/`stats`; `limit` default 10 / max 50; `scope` default `all`; `include_current` default false.
+`session_search { query?, scope?, working_dir?, limit?, include_current?, include_tools?, turns?, stats? }` — **exactly one** of `query`/`turns`/`stats` (a non-empty `query`; `turns`/`stats` require `scope:"current"`); `limit` default 10 / max 50; `scope` default `all`; `include_current` default false.
 
 ## 5. Non-goals (v1)
 Cross-**harness** import (Claude Code / Codex / opencode stores — the separate `jcode-import-core` gap); embeddings/semantic memory; the Bloom-filter index (jcode's 657-LOC pre-filter is unneeded for one harness's store).
