@@ -32,6 +32,7 @@ the boxes as each task completes and keep the status table current.
 | 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ◐ review snapshot |
 | 25 | Tier-1 gap sweep: Retry-After + socket hardening (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ done — b3b3240, 9705f06 |
 | 26 | Session search: cross-session + in-session (see [session-search-plan.md](session-search-plan.md)) | ☑ done — `5eb7d78`/`7ef9084`/`0a1bce3`/`4078db1`; second-layer review tightened it |
+| 27 | Tier-1 gap sweep 2: `todo` tool + steer at the tool-free boundary (see [gap-analysis-jcode.md](gap-analysis-jcode.md) §2 rows 5/7) | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` (todo), `a3a5705` (steer point B) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
