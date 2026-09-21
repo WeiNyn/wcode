@@ -17,6 +17,7 @@ use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
+use wcode_harness::stats::session_stats;
 use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
 use wcode_harness::tool::Tool;
 use wcode_protocol::Backend;
@@ -250,67 +251,6 @@ pub fn tool_output_note(output: &str) -> String {
         note.push('…');
     }
     note
-}
-
-// ---------------------------------------------------------------------------
-// Usage
-// ---------------------------------------------------------------------------
-
-/// Aggregate token usage across the assistant messages that reported it.
-/// Cache counts absent per-call are treated as 0.
-#[derive(Default, Debug, PartialEq, Eq)]
-pub struct UsageTotals {
-    /// Assistant messages whose `usage` was Some.
-    pub turns: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-}
-
-/// Sum `Usage` over every assistant message in `messages` that carried one.
-pub fn usage_totals(messages: &[AgentMessage]) -> UsageTotals {
-    let mut t = UsageTotals::default();
-    for m in messages {
-        let AgentMessage::Assistant { usage: Some(u), .. } = m else {
-            continue;
-        };
-        t.turns += 1;
-        t.input_tokens += u.input_tokens;
-        t.output_tokens += u.output_tokens;
-        t.cache_read_tokens += u.cache_read_tokens.unwrap_or(0);
-        t.cache_write_tokens += u.cache_write_tokens.unwrap_or(0);
-    }
-    t
-}
-
-/// Provider-reported input tokens of the most recent assistant message: how
-/// full the context was on the last request. `None` until a turn reports usage.
-pub fn last_input_tokens(messages: &[AgentMessage]) -> Option<u64> {
-    messages.iter().rev().find_map(|m| match m {
-        AgentMessage::Assistant { usage: Some(u), .. } => Some(u.input_tokens),
-        _ => None,
-    })
-}
-
-/// `/usage`: one line of totals for the current conversation, or a note when
-/// no turn has reported usage yet.
-pub fn format_usage(t: &UsageTotals) -> String {
-    if t.turns == 0 {
-        return "(no usage reported)".to_string();
-    }
-    let mut parts = vec![
-        format!("{} turn{}", t.turns, if t.turns == 1 { "" } else { "s" }),
-        format!("{} in", t.input_tokens),
-        format!("{} out", t.output_tokens),
-    ];
-    if t.cache_read_tokens > 0 {
-        parts.push(format!("{} cache read", t.cache_read_tokens));
-    }
-    if t.cache_write_tokens > 0 {
-        parts.push(format!("{} cache write", t.cache_write_tokens));
-    }
-    format!("usage: {}", parts.join(", "))
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,9 +1019,10 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
             }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
-                    println!("{}", format_usage(&usage_totals(&messages)));
+                    let stats = session_stats(&messages);
+                    println!("{}", stats.summary());
                     if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
-                        let used = last_input_tokens(&messages).unwrap_or(0);
+                        let used = stats.last_input_tokens.unwrap_or(0);
                         let pct = used * 100 / limit.context.max(1);
                         println!("context: {used}/{} ({pct}%)", limit.context);
                     }
@@ -1380,7 +1321,7 @@ mod tests {
         );
     }
     use serde_json::json;
-    use wcode_harness::message::{StopReason, Usage};
+    use wcode_harness::message::StopReason;
 
     fn assistant(content: Vec<ContentBlock>) -> AgentMessage {
         AgentMessage::Assistant {
@@ -1976,98 +1917,6 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["300_d.jsonl", "200_a.jsonl", "100_b.jsonl"]);
-    }
-
-    #[test]
-    fn last_input_tokens_takes_most_recent_reported_usage() {
-        let messages = vec![
-            assistant_with_usage(10, 20, None, None),
-            AgentMessage::user_text("q"),
-            assistant_with_usage(41, 3, None, None),
-            assistant(vec![]), // no usage: skipped
-        ];
-        assert_eq!(last_input_tokens(&messages), Some(41));
-        assert_eq!(last_input_tokens(&[]), None);
-        assert_eq!(last_input_tokens(&[AgentMessage::user_text("q")]), None);
-    }
-
-    fn assistant_with_usage(
-        input: u64,
-        output: u64,
-        cache_read: Option<u64>,
-        cache_write: Option<u64>,
-    ) -> AgentMessage {
-        AgentMessage::Assistant {
-            content: vec![ContentBlock::Text { text: "a".into() }],
-            stop_reason: StopReason::Stop,
-            usage: Some(Usage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_tokens: cache_read,
-                cache_write_tokens: cache_write,
-            }),
-            model: None,
-        }
-    }
-
-    #[test]
-    fn usage_totals_sums_reported_usage_only() {
-        let messages = vec![
-            AgentMessage::user_text("q"),
-            assistant_with_usage(10, 20, Some(3), None),
-            assistant(
-                // no usage reported
-                vec![ContentBlock::Text { text: "x".into() }],
-            ),
-            assistant_with_usage(30, 40, None, Some(5)),
-        ];
-        let t = usage_totals(&messages);
-        assert_eq!(
-            t,
-            UsageTotals {
-                turns: 2,
-                input_tokens: 40,
-                output_tokens: 60,
-                cache_read_tokens: 3,
-                cache_write_tokens: 5,
-            }
-        );
-    }
-
-    #[test]
-    fn usage_totals_empty_and_no_usage() {
-        assert_eq!(usage_totals(&[]), UsageTotals::default());
-        assert_eq!(
-            usage_totals(&[assistant(vec![]), AgentMessage::user_text("q")]),
-            UsageTotals::default()
-        );
-    }
-
-    #[test]
-    fn format_usage_lines_and_empty() {
-        let empty = UsageTotals::default();
-        assert_eq!(format_usage(&empty), "(no usage reported)");
-
-        let t = UsageTotals {
-            turns: 2,
-            input_tokens: 40,
-            output_tokens: 60,
-            cache_read_tokens: 3,
-            cache_write_tokens: 5,
-        };
-        assert_eq!(
-            format_usage(&t),
-            "usage: 2 turns, 40 in, 60 out, 3 cache read, 5 cache write"
-        );
-
-        // No cache hits: omit the cache fields entirely.
-        let t = UsageTotals {
-            turns: 1,
-            input_tokens: 10,
-            output_tokens: 20,
-            ..UsageTotals::default()
-        };
-        assert_eq!(format_usage(&t), "usage: 1 turn, 10 in, 20 out");
     }
 }
 
