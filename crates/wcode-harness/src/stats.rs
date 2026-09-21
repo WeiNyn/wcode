@@ -237,11 +237,16 @@ mod tests {
 
     #[test]
     fn tools_sorted_count_desc_then_name_asc() {
-        // ["zzz","aaa","aaa"] → [("aaa",2),("zzz",1)] (tie on count → name asc).
-        let stats = session_stats(&[assistant_tools(&["zzz", "aaa", "aaa"])]);
+        // ["zzz","aaa","aaa","bbb"] → [("aaa",2),("bbb",1),("zzz",1)]:
+        // count desc, then name asc on the tied count-1 entries.
+        let stats = session_stats(&[assistant_tools(&["zzz", "aaa", "aaa", "bbb"])]);
         assert_eq!(
             stats.tools,
-            vec![("aaa".to_string(), 2), ("zzz".to_string(), 1)]
+            vec![
+                ("aaa".to_string(), 2),
+                ("bbb".to_string(), 1),
+                ("zzz".to_string(), 1),
+            ]
         );
     }
 
