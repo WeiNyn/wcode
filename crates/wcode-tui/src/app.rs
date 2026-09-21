@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
+use wcode_harness::stats::session_stats;
 use wcode_harness::protocol::{Request, SessionId};
 
 use crate::{SurfaceInfo, TeamState};
@@ -1033,44 +1034,18 @@ impl Surface {
 
     /// Render a `GetHistory` reply as a one-line usage summary.
     fn render_usage(&mut self, messages: &[AgentMessage]) {
-        let mut turns = 0u64;
-        let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
-        let mut last_input = None;
-        for message in messages {
-            if let AgentMessage::Assistant {
-                usage: Some(u), ..
-            } = message
-            {
-                turns += 1;
-                input += u.input_tokens;
-                output += u.output_tokens;
-                cache_read += u.cache_read_tokens.unwrap_or(0);
-                cache_write += u.cache_write_tokens.unwrap_or(0);
-                last_input = Some(u.input_tokens);
-            }
-        }
-        if let Some(used) = last_input {
+        let stats = session_stats(messages);
+        // Keep the live context-fullness readout the status line consumes.
+        if let Some(used) = stats.last_input_tokens {
             self.context_used = Some(used);
         }
-        if turns == 0 {
-            self.push_notice("usage: no usage reported");
-        } else {
-            let mut parts = vec![
-                format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
-                format!("{input} in"),
-                format!("{output} out"),
-            ];
-            if cache_read > 0 {
-                parts.push(format!("{cache_read} cache read"));
-            }
-            if cache_write > 0 {
-                parts.push(format!("{cache_write} cache write"));
-            }
-            if let (Some(used), Some(limit)) = (last_input, self.status.context_limit) {
-                parts.push(format!("context {used}/{limit}"));
-            }
-            self.push_notice(format!("usage: {}", parts.join(", ")));
+        // `summary()` carries the shared body; the TUI appends its own context
+        // chrome (the REPL prints context on a separate line instead).
+        let mut line = stats.summary();
+        if let (Some(used), Some(limit)) = (stats.last_input_tokens, self.status.context_limit) {
+            line.push_str(&format!(", context {used}/{limit}"));
         }
+        self.push_notice(line);
     }
 
     /// The text of the most recent assistant reply, if any.
@@ -3196,7 +3171,14 @@ mod tests {
         let mut app = App::new();
         app.handle(AppEvent::Agent(root(), AgentEvent::History {
             messages: vec![AgentMessage::Assistant {
-                content: vec![ContentBlock::Text { text: "x".into() }],
+                content: vec![
+                    ContentBlock::Text { text: "x".into() },
+                    ContentBlock::ToolCall {
+                        id: "t1".into(),
+                        name: "read".into(),
+                        arguments: "{}".parse().unwrap(),
+                    },
+                ],
                 stop_reason: StopReason::Stop,
                 usage: Some(wcode_harness::message::Usage {
                     input_tokens: 500,
@@ -3210,7 +3192,20 @@ mod tests {
         assert_eq!(app.context_used(), Some(500));
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(text)) if text.contains("1 turn")
+            Some(Block::Notice(text)) if text.contains("1 turn") && text.contains("tools: read×1")
+        ));
+    }
+
+    #[test]
+    fn a_history_reply_without_usage_reports_none() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), AgentEvent::History {
+            messages: vec![AgentMessage::user_text("q")],
+        }));
+        assert_eq!(app.context_used(), None);
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(text)) if text == "(no usage reported)"
         ));
     }
 
