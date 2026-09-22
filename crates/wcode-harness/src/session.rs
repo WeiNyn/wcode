@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::event::TodoItem;
 use crate::message::{AgentMessage, Usage};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -42,6 +43,13 @@ pub enum SessionEntry {
         tokens_before: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
+    },
+    /// The persisted checklist (the `todo` tool's state): last write wins.
+    /// Written by the `todo` tool on every write so plan→todo survives
+    /// `--resume`/`/reload`; read by the tool's seed path and by `/verify` (D8).
+    Todo {
+        id: String,
+        todos: Vec<TodoItem>,
     },
     #[serde(other)]
     Unknown,
@@ -236,11 +244,21 @@ impl Session {
             _ => None,
         })
     }
+
+    /// The most recently persisted checklist, if any (`None` = never written).
+    /// Last write wins, like [`Self::model`]/[`Self::effort`].
+    pub fn todo(&self) -> Option<Vec<TodoItem>> {
+        self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::Todo { todos, .. } => Some(todos.clone()),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::TodoStatus;
     use crate::message::{ContentBlock, StopReason};
     use serde_json::json;
 
@@ -349,11 +367,21 @@ mod tests {
         })
         .unwrap();
 
+        s.append(SessionEntry::Todo {
+            id: "td1".into(),
+            todos: vec![TodoItem {
+                content: "step".into(),
+                status: TodoStatus::Pending,
+            }],
+        })
+        .unwrap();
+
         let path = s.path().unwrap().to_path_buf();
         let reopened = Session::open(&path).unwrap();
         assert_eq!(reopened.entries(), s.entries());
         assert_eq!(reopened.messages().len(), 2);
         assert_eq!(reopened.model().as_deref(), Some("claude-x"));
+        assert_eq!(reopened.todo().unwrap()[0].content, "step");
     }
 
     #[test]
@@ -470,6 +498,39 @@ mod tests {
         let path = s.path().unwrap().to_path_buf();
         let reopened = Session::open(&path).unwrap();
         assert_eq!(reopened.effort(), Some(Some("low".into())));
+    }
+
+    #[test]
+    fn todo_latest_wins_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        s.append(SessionEntry::Todo {
+            id: "t1".into(),
+            todos: vec![TodoItem {
+                content: "first".into(),
+                status: TodoStatus::Pending,
+            }],
+        })
+        .unwrap();
+        s.append(SessionEntry::Todo {
+            id: "t2".into(),
+            todos: vec![TodoItem {
+                content: "second".into(),
+                status: TodoStatus::InProgress,
+            }],
+        })
+        .unwrap();
+
+        let path = s.path().unwrap().to_path_buf();
+        let reopened = Session::open(&path).unwrap();
+        let restored = reopened.todo().unwrap();
+        assert_eq!(restored.len(), 1, "last write wins");
+        assert_eq!(restored[0].content, "second");
+        assert_eq!(restored[0].status, TodoStatus::InProgress);
+
+        // The serde wire tag is `todo` (the extensible-`type` path).
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""type":"todo""#), "{raw}");
     }
 
     #[test]

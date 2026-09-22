@@ -16,7 +16,7 @@ use crate::tool::Tool;
 
 /// The system-prompt section appended while plan mode is on (D2). The kernel owns
 /// it so a socket client never has to compose the server's prompt.
-pub const PLAN_SECTION: &str = "# Plan mode\nYou are planning, not executing. Explore and propose only — do NOT modify the\nworkspace: the editing tools are disabled and mutating shell commands are refused.\nFine-tune the plan with the user first.";
+pub const PLAN_SECTION: &str = "# Plan mode\nYou are planning, not executing. Explore and propose only — do NOT modify the\nworkspace: the editing tools are disabled and mutating shell commands are refused.\nFine-tune the plan with the user first. When the plan is final, record it as a\ntodo list (status pending), then tell the user to run `/plan off` to execute.";
 
 pub struct AgentConfig {
     pub system: String,
@@ -522,6 +522,10 @@ mod tests {
         assert!(agent.plan_mode.get());
         assert_eq!(agent.system, format!("{base}\n\n{PLAN_SECTION}"));
         assert!(agent.system.contains("# Plan mode"));
+        assert!(
+            agent.system.contains("record it as a\ntodo list (status pending)"),
+            "the P2 plan\u{2192}todo instruction is present"
+        );
 
         agent.set_plan_mode(false);
         assert!(!agent.plan_mode.get());
