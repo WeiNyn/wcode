@@ -11,16 +11,18 @@
 //!
 //! State is an in-memory `Mutex<Vec<TodoItem>>` inside the tool instance: one
 //! `Agent` builds its own tools, so the checklist is per-session for free. It is
-//! NOT persisted in v1, which has a model-facing wart: after `--resume`/`/reload`
-//! the tool starts empty, yet the restored transcript still shows the earlier
-//! `todo` ToolResults — so a bare read answers `(no todos)` against a visible
-//! list. Persisting it (a `SessionEntry::Todo`, or a sidecar via
-//! `ToolContext.session_path`) is the follow-on that closes the gap.
+//! **persisted** as a `SessionEntry::Todo` (D7): every write appends the list to
+//! the session, and on first access the tool seeds from
+//! `ToolContext.session_path`, so a bare read after `--resume`/`/reload` reflects
+//! the restored checklist instead of answering `(no todos)` against a visible
+//! one.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
+use wcode_harness::session::{Session, SessionEntry};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
 /// Args for the `todo` tool. A `todos` array is a full-list WRITE; omitting it
@@ -39,12 +41,49 @@ pub struct TodoArgs {
 /// `task`).
 pub struct Todo {
     items: Mutex<Vec<TodoItem>>,
+    /// Whether the persisted checklist has been loaded once (D7); guards the
+    /// first-access seed so an empty/cleared list is not re-read every call.
+    seeded: AtomicBool,
 }
 
 impl Todo {
+    /// Lazily load the persisted checklist the first time the tool runs in a
+    /// session that has one (D7). Runs once per tool instance — guarded by
+    /// `seeded`, so a legitimately empty/cleared list is not re-read every call.
+    fn seed_from_session(&self, ctx: &ToolContext) {
+        if self.seeded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(path) = &ctx.session_path else {
+            return;
+        };
+        if let Ok(session) = Session::open(path)
+            && let Some(restored) = session.todo()
+        {
+            *self.items.lock().unwrap_or_else(|e| e.into_inner()) = restored;
+        }
+    }
+
+    /// Persist a write so the checklist survives `--resume`/`/reload` (D7). The
+    /// tool opens its OWN session handle (the agent's in-memory `Session` never
+    /// sees this entry); both writers open O_APPEND and write one full JSON line
+    /// per call, and a turn is serialized around its tool calls, so appends
+    /// cannot interleave.
+    fn persist(&self, todos: &[TodoItem], ctx: &ToolContext) {
+        let Some(path) = &ctx.session_path else {
+            return;
+        };
+        if let Ok(mut session) = Session::open(path) {
+            let _ = session.append(SessionEntry::Todo {
+                id: uuid::Uuid::new_v4().to_string(),
+                todos: todos.to_vec(),
+            });
+        }
+    }
     pub fn new() -> Self {
         Self {
             items: Mutex::new(Vec::new()),
+            seeded: AtomicBool::new(false),
         }
     }
 
@@ -117,12 +156,14 @@ impl TypedTool for Todo {
     }
 
     async fn execute(&self, args: TodoArgs, ctx: &ToolContext) -> ToolOutput {
+        self.seed_from_session(ctx);
         match args.todos {
             Some(list) => {
                 if let Err(message) = validate(&list) {
                     return err(message);
                 }
                 *self.items.lock().unwrap_or_else(|e| e.into_inner()) = list.clone();
+                self.persist(&list, ctx);
                 // The event IS the read path (the UI reduces it; the tool holds no
                 // shared handle).
                 let _ = ctx.events.send(AgentEvent::Todo { todos: list.clone() });
@@ -291,5 +332,87 @@ mod tests {
             ]),
             "[ ] a\n[>] b\n[x] c"
         );
+    }
+
+    /// A context whose `session_path` is `path`, so the seed/persist paths engage.
+    fn ctx_at(path: &std::path::Path) -> ToolContext {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ToolContext {
+            call_id: "t1".into(),
+            name: "todo".into(),
+            working_dir: std::env::temp_dir(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            events: tx,
+            session_path: Some(path.to_path_buf()),
+        }
+    }
+
+    /// A fresh session file carrying one `Todo` entry with `todos`.
+    fn session_with_todo(dir: &std::path::Path, todos: Vec<TodoItem>) -> std::path::PathBuf {
+        let mut s = wcode_harness::session::Session::create(dir).unwrap();
+        s.append(wcode_harness::session::SessionEntry::Todo {
+            id: "t0".into(),
+            todos,
+        })
+        .unwrap();
+        s.path().unwrap().to_path_buf()
+    }
+
+    #[tokio::test]
+    async fn a_write_persists_a_session_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_with_todo(dir.path(), Vec::new());
+        let tool = Todo::new();
+        let ctx = ctx_at(&path);
+        let list = vec![
+            item("a", TodoStatus::Pending),
+            item("b", TodoStatus::Completed),
+        ];
+        tool.execute(
+            TodoArgs {
+                todos: Some(list.clone()),
+            },
+            &ctx,
+        )
+        .await;
+
+        // The write appended a `SessionEntry::Todo`; a reopen reads it back.
+        let reopened = wcode_harness::session::Session::open(&path).unwrap();
+        assert_eq!(reopened.todo().unwrap(), list);
+    }
+
+    #[tokio::test]
+    async fn a_bare_read_seeds_from_the_persisted_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_with_todo(dir.path(), vec![item("restored", TodoStatus::InProgress)]);
+        let tool = Todo::new();
+        let ctx = ctx_at(&path);
+
+        // A brand-new tool (empty in memory) reflects the persisted list.
+        let out = tool.execute(TodoArgs { todos: None }, &ctx).await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(out.output, "[>] restored", "the bare read reflects the seed");
+    }
+
+    #[tokio::test]
+    async fn the_seed_flag_keeps_a_cleared_list_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_with_todo(dir.path(), vec![item("restored", TodoStatus::Pending)]);
+        let tool = Todo::new();
+        let ctx = ctx_at(&path);
+
+        // First access seeds the persisted list.
+        let out = tool.execute(TodoArgs { todos: None }, &ctx).await;
+        assert_eq!(out.output, "[ ] restored");
+
+        // Clear it — the persisted file still holds the old list.
+        tool.execute(TodoArgs { todos: Some(Vec::new()) }, &ctx).await;
+        assert_eq!(tool.len(), 0);
+
+        // A later bare read must NOT re-seed the empty list from the file: the
+        // list stays cleared.
+        let out = tool.execute(TodoArgs { todos: None }, &ctx).await;
+        assert_eq!(out.output, "(no todos)", "a cleared list stays cleared");
+        assert_eq!(tool.len(), 0);
     }
 }

@@ -27,6 +27,7 @@ regex = "1"
 ignore = "0.4"
 globset = "0.4"
 libc = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

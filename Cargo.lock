@@ -7499,6 +7499,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "uuid",
  "wcode-harness",
  "wcode-protocol",
  "wcode-tui",
