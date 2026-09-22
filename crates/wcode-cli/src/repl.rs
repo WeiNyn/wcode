@@ -11,7 +11,7 @@ use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
-use wcode_harness::hooks::{HooksSet, PlanModeHandle, PlanModeHooks};
+use wcode_harness::hooks::{BashRiskHooks, HooksSet, PlanModeHandle, PlanModeHooks};
 use wcode_harness::limits::model_limit;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
@@ -311,10 +311,14 @@ pub fn resolve_session_path(arg: &str) -> PathBuf {
 }
 
 /// Materialize the default hook set from config. Every built-in native hook
-/// gets a slot here — rtk first — so future integrations each add one entry
-/// (plus a field in [`HooksConfig`]) and nothing in the loop changes.
+/// gets a slot here — the bash risk gate (always on) first, then rtk — so
+/// future integrations each add one entry (plus a field in [`HooksConfig`]) and
+/// nothing in the loop changes.
 pub fn default_hooks(cfg: &HooksConfig) -> HooksSet {
-    HooksSet::one(Arc::new(RtkHooks::new(cfg.rtk)))
+    let mut hooks = HooksSet::new();
+    hooks.push(Arc::new(BashRiskHooks::new())); // safety gate first
+    hooks.push(Arc::new(RtkHooks::new(cfg.rtk))); // rtk proxy second
+    hooks
 }
 
 /// The agent configuration that is fixed for a run; `/new` and `/resume`
