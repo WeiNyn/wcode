@@ -43,6 +43,13 @@ pub trait TypedTool: Send + Sync + 'static {
         false
     }
 
+    /// Whether this tool may mutate the workspace. Default `false` — a mutator
+    /// opts in, so plan mode's `MUTATING_TOOLS` denylist and this flag stay in
+    /// sync (a test in `wcode-cli` asserts it).
+    fn mutating(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput;
 }
 
@@ -52,6 +59,7 @@ trait ErasedToolCore: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
     fn parallel_safe(&self) -> bool;
+    fn mutating(&self) -> bool;
     async fn execute(&self, args: serde_json::Value, ctx: ToolContext) -> ToolOutput;
 }
 
@@ -72,6 +80,10 @@ impl<T: TypedTool> ErasedToolCore for T {
 
     fn parallel_safe(&self) -> bool {
         TypedTool::parallel_safe(self)
+    }
+
+    fn mutating(&self) -> bool {
+        TypedTool::mutating(self)
     }
 
     async fn execute(&self, args: serde_json::Value, ctx: ToolContext) -> ToolOutput {
@@ -111,6 +123,11 @@ pub fn erased<T: TypedTool>(t: T) -> Tool {
 impl Tool {
     pub fn parallel_safe(&self) -> bool {
         self.0.parallel_safe()
+    }
+
+    /// Whether this tool may mutate the workspace (see [`TypedTool::mutating`]).
+    pub fn mutating(&self) -> bool {
+        self.0.mutating()
     }
 
     pub fn name(&self) -> &str {

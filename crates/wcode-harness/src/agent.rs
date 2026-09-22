@@ -7,12 +7,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compaction::{self, CompactOutcome, CompactionPolicy};
 use crate::event::{AgentEvent, LlmStreamEvent};
-use crate::hooks::HooksSet;
+use crate::hooks::{HooksSet, PlanModeHandle};
 use crate::loop_::{LoopConfig, LoopError, run_loop};
 use crate::message::{AgentMessage, StopReason, Usage};
 use crate::session::{Session, SessionEntry};
 use crate::streamfn::{LlmOpts, StreamFn};
 use crate::tool::Tool;
+
+/// The system-prompt section appended while plan mode is on (D2). The kernel owns
+/// it so a socket client never has to compose the server's prompt.
+pub const PLAN_SECTION: &str = "# Plan mode\nYou are planning, not executing. Explore and propose only — do NOT modify the\nworkspace: the editing tools are disabled and mutating shell commands are refused.\nFine-tune the plan with the user first.";
 
 pub struct AgentConfig {
     pub system: String,
@@ -37,10 +41,15 @@ pub struct AgentConfig {
     /// When to compact and how much recent context to keep
     /// (see [`crate::compaction`]). Use [`CompactionPolicy::default`].
     pub compaction: CompactionPolicy,
+    /// The shared plan-mode switch; the same handle is held by the
+    /// `PlanModeHooks` in `hooks`, so `set_plan_mode` flips both.
+    pub plan_mode: PlanModeHandle,
 }
 
 pub struct Agent {
     system: String,
+    /// The composed prompt as passed (plan mode off); `system` derives from it.
+    base_system: String,
     tools: Vec<Tool>,
     llm: LlmOpts,
     stream_fn: StreamFn,
@@ -50,6 +59,7 @@ pub struct Agent {
     max_turns: usize,
     parallel_tools: bool,
     compaction: CompactionPolicy,
+    plan_mode: PlanModeHandle,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
     steer_rx: Option<UnboundedReceiver<AgentMessage>>,
@@ -79,7 +89,8 @@ impl Agent {
             cfg.working_dir
         };
         Agent {
-            system: cfg.system,
+            system: cfg.system.clone(),
+            base_system: cfg.system,
             tools: cfg.tools,
             llm: cfg.llm,
             stream_fn: cfg.stream_fn,
@@ -89,6 +100,7 @@ impl Agent {
             max_turns: cfg.max_turns,
             parallel_tools: cfg.parallel_tools,
             compaction: cfg.compaction,
+            plan_mode: cfg.plan_mode,
             ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
@@ -103,6 +115,18 @@ impl Agent {
         let _ = self.steer_tx.send(m);
     }
 
+    /// Toggle plan mode: flips the shared handle and recomposes `system` from
+    /// `base_system` — appending [`PLAN_SECTION`] when on, restoring the base
+    /// prompt exactly when off. Takes effect on the NEXT run (the in-flight one
+    /// cloned `system` into its `LoopConfig` at start). Not persisted.
+    pub fn set_plan_mode(&mut self, on: bool) {
+        self.plan_mode.set(on);
+        self.system = if on {
+            format!("{}\n\n{}", self.base_system, PLAN_SECTION)
+        } else {
+            self.base_system.clone()
+        };
+    }
     /// Swaps the model mid-conversation (takes effect on the next run) and
     /// logs a `ModelChange` entry when a session is open.
     pub fn set_model(&mut self, model: String) -> std::io::Result<()> {
@@ -394,6 +418,7 @@ mod tests {
             max_turns: crate::loop_::DEFAULT_MAX_TURNS,
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
+            plan_mode: PlanModeHandle::new(),
         })
     }
 
@@ -486,5 +511,20 @@ mod tests {
         let framed = frame_btw("why?");
         assert!(framed.starts_with("[side question"));
         assert!(framed.ends_with("\nwhy?"));
+    }
+
+    #[test]
+    fn set_plan_mode_appends_and_restores_the_section() {
+        let mut agent = make_agent(None, scripted(vec![]), vec![]);
+        let base = agent.system.clone();
+
+        agent.set_plan_mode(true);
+        assert!(agent.plan_mode.get());
+        assert_eq!(agent.system, format!("{base}\n\n{PLAN_SECTION}"));
+        assert!(agent.system.contains("# Plan mode"));
+
+        agent.set_plan_mode(false);
+        assert!(!agent.plan_mode.get());
+        assert_eq!(agent.system, base, "restored exactly");
     }
 }

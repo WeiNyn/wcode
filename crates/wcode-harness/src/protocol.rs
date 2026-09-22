@@ -178,6 +178,11 @@ pub enum Request {
     /// by `instructions`.
     Compact { instructions: Option<String> },
 
+    /// Toggle plan mode. The actor flips the agent's shared `PlanModeHandle`
+    /// (removing mutating tools + mutating `bash`) and recomposes the system
+    /// prompt. Infallible — replies [`AgentEvent::Ack`].
+    SetPlanMode { on: bool },
+
     /// Ask a side question (`/btw`): answer `text` tool-free, from the current
     /// context, WITHOUT recording it. A read — carries user content, names no
     /// `AgentMessage` (see the enum doc above). Reply:
@@ -306,6 +311,7 @@ mod tests {
             "compact",
         );
         roundtrip(Request::Compact { instructions: None }, "compact");
+        roundtrip(Request::SetPlanMode { on: true }, "set_plan_mode");
         roundtrip(Request::Notify { content: "n".into() }, "notify");
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
@@ -357,6 +363,7 @@ mod tests {
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
         assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
+        assert!(!is_inbound(&Request::SetPlanMode { on: true }));
         assert!(!is_inbound(&Request::Cancel));
         assert!(!is_inbound(&Request::ListSessions));
         assert!(!is_inbound(&Request::Define {

@@ -404,6 +404,12 @@ async fn dispatch(
                 message: e.to_string(),
             },
         },
+        // Toggle plan mode: flips the shared handle (the `PlanModeHooks` reads
+        // the same one) and recomposes the system prompt. Infallible.
+        Request::SetPlanMode { on } => {
+            agent.set_plan_mode(on);
+            AgentEvent::Ack
+        }
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },
@@ -572,6 +578,7 @@ mod tests {
             max_turns: crate::loop_::DEFAULT_MAX_TURNS,
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
+            plan_mode: crate::hooks::PlanModeHandle::new(),
         }
     }
 
