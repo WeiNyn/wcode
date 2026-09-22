@@ -1028,7 +1028,13 @@ impl Surface {
                 self.render_usage(&messages);
                 true
             }
-            // Start and non-streamed replies need no state.
+            // A successful non-streamed reply settles any optimistic `/plan`
+            // toggle, so a later unrelated error cannot revert the chip.
+            AgentEvent::Ack => {
+                self.plan_pending = None;
+                false
+            }
+            // Other start/reply events need no per-surface state.
             _ => false,
         }
     }
@@ -3256,6 +3262,26 @@ mod tests {
             },
         ));
         assert!(!app.status().plan, "the chip reverts on error");
+    }
+
+    #[test]
+    fn ack_settles_a_pending_plan_toggle_so_a_later_error_does_not_revert() {
+        let mut app = App::new();
+        submit(&mut app, "/plan on");
+        let _ = app.take_actions();
+        assert!(app.status().plan, "optimistically on");
+
+        // The success reply (`Ack`) settles the toggle.
+        app.handle(AppEvent::Agent(root(), AgentEvent::Ack));
+
+        // An unrelated later error must NOT revert the settled chip.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert!(app.status().plan, "a settled toggle is not reverted");
     }
 
     #[test]
