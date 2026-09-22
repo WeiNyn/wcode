@@ -4266,7 +4266,6 @@ mod tests {
         for name in [
             "exit", "model", "effort", "compact", "changes", "resume", "reload", "btw", "plan",
             "verify", "usage", "copy", "surface", "team", "tasks", "help",
-            "surface", "team", "tasks", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),
