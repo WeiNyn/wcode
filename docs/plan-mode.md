@@ -1,6 +1,6 @@
 # wcode plan mode — design & phases
 
-Status: **design locked; P1 shipped, P2–P3 not started.** A project, not a task — the detail
+Status: **design locked; P1–P2 shipped, P3 not started.** A project, not a task — the detail
 lives here so it can be picked up as its own workstream. Companion row in
 [`next-steps.md`](next-steps.md).
 
@@ -58,13 +58,14 @@ A rebuild (`build_agent`) is rejected: it drops the live `ctx`, the open
 `set_plan_mode`.) Takes effect on the next run. The handle is threaded in via
 `AgentConfig::plan_mode`, shared with the `PlanModeHooks`.
 
-`PLAN_SECTION` (P1; the `todo`-recording sentence is deferred to P2):
+`PLAN_SECTION` (P1 text + the P2 plan→todo sentence):
 
 ```
 # Plan mode
 You are planning, not executing. Explore and propose only — do NOT modify the
 workspace: the editing tools are disabled and mutating shell commands are refused.
-Fine-tune the plan with the user first.
+Fine-tune the plan with the user first. When the plan is final, record it as a
+todo list (status pending), then tell the user to run `/plan off` to execute.
 ```
 
 ### 2.3 Enforcement is a `Hooks` impl (D3)
@@ -122,26 +123,32 @@ about when it is done.
 
 ### 2.6 Plan → todo (D6)
 
-A prompt instruction, not plumbing: "when the plan is final, record it as a `todo`
-list." The `todo` tool already exists and is allowed (§2.3); a write emits
-`AgentEvent::Todo { todos }` (`event.rs:113`; `TodoItem { content, status }`
-`event.rs:44`; `TodoStatus { Pending, InProgress, Completed }` `event.rs:37`) on
-the run's sink, so the plan shows up in the transcript for free.
+A prompt instruction, not plumbing. `PLAN_SECTION` (`agent.rs`, §2.2) now ends
+"When the plan is final, record it as a todo list (status pending), then tell the
+user to run `/plan off` to execute." The `todo` tool already exists and is allowed
+(§2.3); a write emits `AgentEvent::Todo { todos }` (`event.rs`; `TodoItem`,
+`TodoStatus`) on the run's sink, so the plan shows up in the transcript for free.
+No new plumbing — the sentence rides the same prompt section P1 added.
 
 ### 2.7 Todo persistence (D7)
 
-Plan → todo makes the checklist load-bearing, so the current wart (`todo.rs:1-16`:
-the list is in-memory in the tool, lost on `--resume`/`/reload`) must be closed.
+Plan → todo makes the checklist load-bearing, so the in-memory list (`todo.rs`) is
+persisted:
 
-- **Persist:** add `SessionEntry::Todo { id, todos }` (`session.rs:12`), appended
-  by the `todo` tool on each write (mirror `ModelChange`/`Session::append`,
-  `session.rs:~EcNck`), with a last-wins accessor `Session::todo()`
-  (mirror `model()`/`effort()`, `session.rs:~UsWF4`).
-- **Seed:** `default_tools` (`tools/mod.rs:36`) has no session handle (recon E8),
-  so the tool seeds **on first access** from `ToolContext.session_path`
-  (`tool.rs:22`): if `items` is empty and a session exists, load `Session::todo()`.
-  Recommended over threading the list into `Todo::new(seed)` (which would couple
-  tool construction to session I/O).
+- **`SessionEntry::Todo { id, todos }`** (`session.rs`), appended by the `todo`
+  tool on **every write** (Q4; mirror `ModelChange`), with a last-wins
+  `Session::todo()` accessor (mirror `model()`/`effort()`). `#[serde(other)]
+  Unknown` keeps old files forward-compatible; the wire tag is `todo`.
+- **Seed on first access:** `default_tools` has no session handle (recon E8), so
+  the tool seeds from `ToolContext.session_path` on its first `execute` — a bare
+  READ reflects the restored list. An explicit `seeded: AtomicBool` guards it, so
+  a legitimately empty/cleared list is not re-read every call.
+- **Two writers, one file:** the tool opens its OWN `Session::open(path)` to
+  append, so the agent's in-memory `entries` never sees the `Todo` entry. Both
+  writers open `O_APPEND` and write one full JSON line per call, and a turn is
+  serialized around its tool calls, so appends cannot interleave — the
+  `SessionEntry::Todo` route is safe. (A sidecar would avoid the second writer,
+  but D7 chose the entry: one transcript, replayed by `/verify` in P3.)
 
 ### 2.8 Verify if we finished (D8)
 
@@ -171,7 +178,7 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
 | D4 | **bash read-gate**: a heuristic `bash` block (guardrail, not sandbox); FP/FN table in §2.4. |
 | D5 | **Halting needs no hook**: the run ends on the tool-free turn; `/plan off` executes. No `should_stop_after_turn`. |
 | D6 | **Plan→todo is a prompt instruction**; uses the existing `todo` tool + `AgentEvent::Todo`. |
-| D7 | **Persist the todo list**: `SessionEntry::Todo` + last-wins `todo()`; seed the tool on first access from `ToolContext.session_path`. |
+| D7 | **Persist the todo list**: `SessionEntry::Todo` + last-wins `todo()`; seed the tool on first access from `ToolContext.session_path` (guarded by `seeded`). |
 | D8 | **Verify**: `/verify` command (recommended); optional soft reminder; hard-block rejected (loop risk). |
 
 ## 4. Phases
@@ -179,7 +186,7 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
 | phase | scope | status |
 |-------|-------|--------|
 | P1 | **Core mode**: `PlanModeHandle` + `PlanModeHooks` (D3/D4); `Agent::set_plan_mode` + kernel `PLAN_SECTION` (D2); `/plan` toggle in REPL + TUI (`Request::SetPlanMode`); status-line chip. | ✅ shipped |
-| P2 | **Todo integration + persistence**: plan→todo prompt (D6); `SessionEntry::Todo` + `todo()` + seed (D7); `todo` tool writes the entry. | ☐ todo |
+| P2 | **Todo integration + persistence**: plan→todo prompt (D6); `SessionEntry::Todo` + `todo()` + seed (D7); `todo` tool writes the entry. | ✅ shipped |
 | P3 | **Verify**: `/verify` command (D8); optional soft reminder. | ☐ todo |
 
 ## 5. Where the design fights the code
@@ -200,9 +207,9 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
   `Backend` clients, so the flip needs a `Request::SetPlanMode`, and the actor
   needs the same `PlanModeHandle`.
 
-## 6. Resolved questions (P1)
+## 6. Resolved questions (P1–P2)
 
-The P1 review settled these; kept here so the design record matches the code.
+The P1/P2 reviews settled these; kept here so the design record matches the code.
 
 1. **Toggle transport — settled.** A `Request::SetPlanMode { on }` whose actor arm
    flips the agent's shared `PlanModeHandle` and recomposes the prompt (§2.1). No
@@ -213,7 +220,8 @@ The P1 review settled these; kept here so the design record matches the code.
    `tsc` are allowed (artifacts are not a workspace mutation); the build
    subcommands that mutate the source tree/lockfiles (`cargo fmt`, `npm install`,
    `go mod tidy`, `pip install`, …) are blocked.
-4. **Plan session entries — deferred to P2 (D7).** Each `todo` write persists.
+4. **Plan session entries — shipped (D7, P2).** Every `todo` write appends a
+   `SessionEntry::Todo`; the tool seeds from it on first access (§2.7).
 5. **`/verify` output shape — deferred to P3 (D8).** Recommended: checklist +
    changed files + last reply.
 6. **Live mid-run toggle — settled.** Takes effect on the *next* run; the
