@@ -1,6 +1,6 @@
 # wcode plan mode — design & phases
 
-Status: **design locked; P1–P2 shipped, P3 not started.** A project, not a task — the detail
+Status: **design locked; P1–P3 shipped (complete).** A project, not a task — the detail
 lives here so it can be picked up as its own workstream. Companion row in
 [`next-steps.md`](next-steps.md).
 
@@ -152,21 +152,22 @@ persisted:
 
 ### 2.8 Verify if we finished (D8)
 
-"When the plan is done, prove it." Three candidate shapes:
+"When the plan is done, prove it."
 
-- **(a) `/verify` command** (REPL + TUI): prints the persisted checklist with
-  incomplete items flagged, plus the run's changed files (TUI already tracks a
-  per-run changeset) and the final assistant text. **No hook, no loop risk,
-  user-driven.** Recommended for v1.
-- **(b) Soft reminder** (`Hooks::transform_context`, `hooks.rs`, runs at every
-  turn start): append "the plan has N unfinished items: …" so the model
-  self-corrects. Cheap, but can nag; no forcing.
-- **(c) Hard block** (`Hooks::should_stop_after_turn`): end the run when
-  incomplete todos remain. **Flagged risk:** the model, told it is not done,
-  may re-run and thrash trying to satisfy an item it cannot — a near-infinite
-  loop, and it fights D5's natural stop. Do not ship in v1.
+- **(a) `/verify` command (REPL + TUI) — shipped (P3).** It renders the **cached
+  `AgentEvent::Todo`** (a client-side view of the last emitted list — **not**
+  `Session::todo()`, whose own-session write never reaches the agent's in-memory
+  entries; §2.7), the done count (`N/M done`), the remaining items, and whether
+  anything is unfinished ("not finished" when any item is not `Completed`). It
+  also shows the last assistant reply, and (TUI) the run's changed files. **No
+  hook, no loop risk, user-driven — and no new `Request`.**
+- **(b) Soft reminder** (`Hooks::transform_context`) — optional, not built: cheap
+  but can nag; no forcing.
+- **(c) Hard block** (`Hooks::should_stop_after_turn`) — **rejected.** The model,
+  told it is not done, may re-run and thrash trying to satisfy an item it cannot —
+  a near-infinite loop, and it fights D5's natural stop.
 
-Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** rejected.
+Recommended **(a)**; **(b)** stays an optional later nag, **(c)** is rejected.
 
 ## 3. Locked decisions
 
@@ -179,7 +180,7 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
 | D5 | **Halting needs no hook**: the run ends on the tool-free turn; `/plan off` executes. No `should_stop_after_turn`. |
 | D6 | **Plan→todo is a prompt instruction**; uses the existing `todo` tool + `AgentEvent::Todo`. |
 | D7 | **Persist the todo list**: `SessionEntry::Todo` + last-wins `todo()`; seed the tool on first access from `ToolContext.session_path` (guarded by `seeded`). |
-| D8 | **Verify**: `/verify` command (recommended); optional soft reminder; hard-block rejected (loop risk). |
+| D8 | **Verify**: `/verify` command renders the **cached `AgentEvent::Todo`** (not `Session::todo()`); checklist + done count + remaining, last reply, run changeset. No hook; hard-block rejected. |
 
 ## 4. Phases
 
@@ -187,7 +188,7 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
 |-------|-------|--------|
 | P1 | **Core mode**: `PlanModeHandle` + `PlanModeHooks` (D3/D4); `Agent::set_plan_mode` + kernel `PLAN_SECTION` (D2); `/plan` toggle in REPL + TUI (`Request::SetPlanMode`); status-line chip. | ✅ shipped |
 | P2 | **Todo integration + persistence**: plan→todo prompt (D6); `SessionEntry::Todo` + `todo()` + seed (D7); `todo` tool writes the entry. | ✅ shipped |
-| P3 | **Verify**: `/verify` command (D8); optional soft reminder. | ☐ todo |
+| P3 | **Verify**: `/verify` command (D8). | ✅ shipped |
 
 ## 5. Where the design fights the code
 
@@ -207,9 +208,9 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
   `Backend` clients, so the flip needs a `Request::SetPlanMode`, and the actor
   needs the same `PlanModeHandle`.
 
-## 6. Resolved questions (P1–P2)
+## 6. Resolved questions (P1–P3)
 
-The P1/P2 reviews settled these; kept here so the design record matches the code.
+The P1–P3 reviews settled these; kept here so the design record matches the code.
 
 1. **Toggle transport — settled.** A `Request::SetPlanMode { on }` whose actor arm
    flips the agent's shared `PlanModeHandle` and recomposes the prompt (§2.1). No
@@ -222,8 +223,10 @@ The P1/P2 reviews settled these; kept here so the design record matches the code
    `go mod tidy`, `pip install`, …) are blocked.
 4. **Plan session entries — shipped (D7, P2).** Every `todo` write appends a
    `SessionEntry::Todo`; the tool seeds from it on first access (§2.7).
-5. **`/verify` output shape — deferred to P3 (D8).** Recommended: checklist +
-   changed files + last reply.
+5. **`/verify` output shape — shipped (D8, P3).** A client render of the cached
+   `AgentEvent::Todo`
+   (checklist + `N/M done` + remaining + "not finished"), plus the last reply and
+   the run's changed files.
 6. **Live mid-run toggle — settled.** Takes effect on the *next* run; the
    in-flight one keeps its cloned prompt (`set_plan_mode`, §2.2).
 7. **Chip styling & team tools — settled.** The chip reuses the existing
