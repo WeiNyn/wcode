@@ -621,7 +621,7 @@ auto-forward is tested. `cli:` `d99ab65`.
       `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [ ] C3 — task DAG + scheduler (decision gate; needs its own plan doc).
 - [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
-- [ ] C5 — lifecycle footer (small, presentation).
+- [ ] C5 — lifecycle footer (partial: `failed` shipped, `5911eab`; `blocked`/`waiting-on-detail` deferred).
 
 ---
 

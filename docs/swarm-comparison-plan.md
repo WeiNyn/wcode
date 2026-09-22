@@ -140,9 +140,15 @@ commitment — decide in §6/§7.
 - **C4 — gate as a `Hooks` policy.** Auto-run a verify step (a reviewer worker)
   after an `implement` node before the root accepts it. A `Hooks` impl, not
   config — stays true to the stance. Rides on C2/C3 to have a "node" to gate.
-- **C5 — lifecycle footer.** Richer worker states (running / waiting-on-detail /
-  blocked / failed) in the sidebar; today it is idle/running/done. Small;
-  presentation-only.
+- **C5 — lifecycle footer.** Richer worker states in the sidebar; today it is
+  idle/running/done. **Partial — `failed` shipped** (`tui:` `5911eab`): a
+  run-failure `AgentEvent::Error` (the loop emits it before `AgentEnd`) marks a
+  member `✗`, surviving `AgentEnd` and clearing on the next `AgentStart`; an idle
+  command-reply `Error` does not. FP note: a fed-back, non-fatal error the run
+  recovers from reads `failed` until the next run starts. **Deferred:** `blocked`
+  (not a distinct state — a blocked `bash` is just an errored tool) and
+  `waiting-on-detail` (a server-side fact needing a new event / `SessionInfo`
+  field). Small; presentation-only.
 
 ## 6. Recommendation
 
@@ -177,7 +183,8 @@ report shape and (maybe) the task list; leave the framework and the DAG.*
       `/tasks`. `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [ ] **C3 — task DAG + scheduler** (decision gate): own plan doc first.
 - [ ] **C4 — verify gate as a `Hooks` policy** (rides on C2/C3).
-- [ ] **C5 — lifecycle footer** (small, presentation).
+- [ ] **C5 — lifecycle footer** (small, presentation): `failed` shipped
+      (`5911eab`); `blocked`/`waiting-on-detail` deferred.
 
 ## 9. References
 
