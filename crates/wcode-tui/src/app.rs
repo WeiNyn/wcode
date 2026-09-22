@@ -374,6 +374,12 @@ const COMMANDS: &[Command] = &[
         summary: "toggle plan mode (explore, don't mutate)",
     },
     Command {
+        name: "verify",
+        aliases: &[],
+        args: None,
+        summary: "check the plan's progress (are we finished?)",
+    },
+    Command {
         name: "usage",
         aliases: &[],
         args: None,
@@ -811,6 +817,10 @@ pub struct Surface {
     /// The pre-toggle value of `status.plan` while a `/plan` `SetPlanMode` is in
     /// flight; restored if the reply is an `AgentEvent::Error` (amendment 8).
     plan_pending: Option<bool>,
+    /// The latest `AgentEvent::Todo` list, cached for `/verify` (a client-side
+    /// render of the event — never `Session::todo()`, whose own-session write the
+    /// agent's in-memory entries never see).
+    last_todos: Option<Vec<TodoItem>>,
     /// Lines scrolled up from the bottom; `0` follows the tail.
     scroll: usize,
     /// Clamp for [`Surface::scroll`], set by the renderer from the line count.
@@ -861,6 +871,7 @@ impl Surface {
             cancelled: false,
             context_used: None,
             plan_pending: None,
+            last_todos: None,
             scroll: 0,
             max_scroll: 0,
             viewport: 0,
@@ -1000,6 +1011,7 @@ impl Surface {
                 // Minimal v1: a notice. A dedicated panel is a follow-on. This arm
                 // runs for a local run AND a socket client — the point of routing
                 // `todo` through the event seam.
+                self.last_todos = Some(todos.clone());
                 self.transcript.push(Block::Notice(render_todos(&todos)));
                 true
             }
@@ -2140,6 +2152,7 @@ impl App {
                 surface.status.plan = on;
                 self.actions.push(Action::Ask(Request::SetPlanMode { on }));
             }
+            "verify" => self.notice(self.verify_text()),
             "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
@@ -2305,6 +2318,49 @@ impl App {
             }
             None => self.notice("nothing to copy yet"),
         }
+    }
+
+    /// `/verify`: render the cached `AgentEvent::Todo` checklist (a client view of
+    /// the last emitted list — never `Session::todo()`), the done count, the
+    /// remaining items, and the last assistant reply + this run's changed files.
+    fn verify_text(&self) -> String {
+        let surface = self.focused();
+        let mut out = match &surface.last_todos {
+            None => "(no plan/todos recorded yet)".to_string(),
+            Some(list) if list.is_empty() => "(no todos — the plan list is empty)".to_string(),
+            Some(list) => {
+                let done = list
+                    .iter()
+                    .filter(|t| t.status == TodoStatus::Completed)
+                    .count();
+                let remaining: Vec<&str> = list
+                    .iter()
+                    .filter(|t| t.status != TodoStatus::Completed)
+                    .map(|t| t.content.as_str())
+                    .collect();
+                let mut s = render_todos(list);
+                s.push_str(&format!("\n{done}/{} done", list.len()));
+                if remaining.is_empty() {
+                    s.push_str("\nfinished — all items completed");
+                } else {
+                    s.push_str(&format!(
+                        "\nnot finished — {} remaining: {}",
+                        remaining.len(),
+                        remaining.join(", ")
+                    ));
+                }
+                s
+            }
+        };
+        if let Some(text) = surface.last_assistant_text() {
+            out.push_str("\n— last reply —\n");
+            out.push_str(&text);
+        }
+        if !surface.changes.is_empty() {
+            out.push_str("\n— changed files —\n");
+            out.push_str(&surface.changes_summary());
+        }
+        out
     }
 
     fn notice(&mut self, text: impl Into<String>) {
@@ -3046,6 +3102,65 @@ mod tests {
             }
             other => panic!("expected a todo notice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verify_renders_the_checklist_and_flags_unfinished() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Todo {
+                todos: vec![
+                    TodoItem {
+                        content: "step one".into(),
+                        status: TodoStatus::Completed,
+                    },
+                    TodoItem {
+                        content: "step two".into(),
+                        status: TodoStatus::Pending,
+                    },
+                ],
+            },
+        ));
+        submit(&mut app, "/verify");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a verify notice");
+        };
+        assert!(text.contains("[x] step one"), "{text}");
+        assert!(text.contains("[ ] step two"), "{text}");
+        assert!(text.contains("1/2 done"), "{text}");
+        assert!(text.contains("not finished"), "{text}");
+    }
+
+    #[test]
+    fn verify_when_all_items_are_done_reports_finished() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Todo {
+                todos: vec![TodoItem {
+                    content: "only step".into(),
+                    status: TodoStatus::Completed,
+                }],
+            },
+        ));
+        submit(&mut app, "/verify");
+        let Some(Block::Notice(text)) = app.transcript().last() else {
+            panic!("expected a verify notice");
+        };
+        assert!(text.contains("1/1 done"), "{text}");
+        assert!(text.contains("finished"), "{text}");
+        assert!(!text.contains("not finished"), "{text}");
+    }
+
+    #[test]
+    fn verify_without_todos_reports_none() {
+        let mut app = App::new();
+        submit(&mut app, "/verify");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("no plan/todos recorded")
+        ));
     }
 
     #[test]
@@ -4143,13 +4258,14 @@ mod tests {
         assert!(
             text.starts_with(
                 "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /reload [--no-session] /btw <question> /plan [on|off] /usage \
-                 /copy /surface /team /tasks /help"
+                 /resume /reload [--no-session] /btw <question> /plan [on|off] /verify \
+                 /usage /copy /surface /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
-            "exit", "model", "effort", "compact", "changes", "resume", "reload", "usage", "copy",
+            "exit", "model", "effort", "compact", "changes", "resume", "reload", "btw", "plan",
+            "verify", "usage", "copy", "surface", "team", "tasks", "help",
             "surface", "team", "tasks", "help",
         ] {
             assert!(
