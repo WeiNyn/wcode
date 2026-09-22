@@ -39,6 +39,7 @@ fn config(stream_fn: StreamFn) -> AgentConfig {
         max_turns: DEFAULT_MAX_TURNS,
         parallel_tools: false,
         compaction: CompactionPolicy::default(),
+        plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
     }
 }
 

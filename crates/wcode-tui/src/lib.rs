@@ -417,6 +417,7 @@ mod tests {
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: false,
             compaction: CompactionPolicy::default(),
+            plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
         });
         Backend::from(SessionActor::spawn(agent))
     }

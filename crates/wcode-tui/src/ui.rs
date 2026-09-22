@@ -885,7 +885,14 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let mut spans: Vec<Span> = vec![
             Span::raw(" "),
             Span::styled(status.model.clone(), dim()),
+            Span::styled(status.model.clone(), dim()),
         ];
+        // The plan chip sits next to the model, ahead of the fields the loop
+        // drops when space is tight, so it does not vanish first (A2).
+        if status.plan {
+            spans.push(sep());
+            spans.push(Span::styled("⏻ plan", accent()));
+        }
         if show_effort && let Some(effort) = &status.effort {
             spans.push(sep());
             spans.push(Span::styled(effort.clone(), dim()));
@@ -1278,6 +1285,7 @@ mod tests {
             effort: Some("high".into()),
             session: Some("abcdef0123456789".into()),
             context_limit: Some(1_000_000),
+            plan: false,
         });
         app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::TurnEnd {
             message: AgentMessage::Assistant {

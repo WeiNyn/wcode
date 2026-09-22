@@ -431,6 +431,7 @@ async fn main() {
                             &llm.model,
                         )
                         .map(|l| l.context),
+                        plan: false,
                     };
                     let options = wcode_tui::Options {
                         status,
@@ -944,6 +945,7 @@ async fn main() {
                         &llm.model,
                     )
                     .map(|l| l.context),
+                    plan: false,
                 };
                 let options = wcode_tui::Options {
                     status,

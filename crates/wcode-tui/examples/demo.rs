@@ -128,6 +128,7 @@ async fn main() -> std::io::Result<()> {
         max_turns: DEFAULT_MAX_TURNS,
         parallel_tools: false,
         compaction: CompactionPolicy::default(),
+        plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
     };
     let handle = SessionActor::spawn(Agent::new(config));
     let status = Status {
@@ -135,6 +136,7 @@ async fn main() -> std::io::Result<()> {
         effort: None,
         session: Some("demo-session".into()),
         context_limit: Some(200_000),
+        plan: false,
     };
     let options = wcode_tui::Options {
         status,

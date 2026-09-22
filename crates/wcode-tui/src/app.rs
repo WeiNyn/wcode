@@ -368,6 +368,12 @@ const COMMANDS: &[Command] = &[
         summary: "ask a tool-free side question",
     },
     Command {
+        name: "plan",
+        aliases: &[],
+        args: Some("[on|off]"),
+        summary: "toggle plan mode (explore, don't mutate)",
+    },
+    Command {
         name: "usage",
         aliases: &[],
         args: None,
@@ -669,7 +675,11 @@ pub struct Status {
     /// The session's id, shown in the status line (local sessions only).
     pub session: Option<String>,
     /// The model's context window, for the `used / limit` readout.
+    /// The model's context window, for the `used / limit` readout.
     pub context_limit: Option<u64>,
+    /// Plan mode is on (the status line shows a `plan` chip). Optimistic on the
+    /// client; the harness hook is the source of truth.
+    pub plan: bool,
 }
 
 impl Default for Status {
@@ -679,6 +689,7 @@ impl Default for Status {
             effort: None,
             session: None,
             context_limit: None,
+            plan: false,
         }
     }
 }
@@ -690,6 +701,7 @@ impl Status {
             effort: None,
             session: None,
             context_limit: None,
+            plan: false,
         }
     }
 }
@@ -796,6 +808,9 @@ pub struct Surface {
     cancelled: bool,
     /// Provider-reported input tokens of the last turn: how full the context was.
     context_used: Option<u64>,
+    /// The pre-toggle value of `status.plan` while a `/plan` `SetPlanMode` is in
+    /// flight; restored if the reply is an `AgentEvent::Error` (amendment 8).
+    plan_pending: Option<bool>,
     /// Lines scrolled up from the bottom; `0` follows the tail.
     scroll: usize,
     /// Clamp for [`Surface::scroll`], set by the renderer from the line count.
@@ -845,6 +860,7 @@ impl Surface {
             last_action_at: None,
             cancelled: false,
             context_used: None,
+            plan_pending: None,
             scroll: 0,
             max_scroll: 0,
             viewport: 0,
@@ -952,6 +968,7 @@ impl Surface {
             AgentEvent::AgentStart => {
                 self.running = true;
                 self.finished = false;
+                self.plan_pending = None; // a run supersedes any settled toggle
                 self.last_action = None;
                 true
             }
@@ -972,6 +989,10 @@ impl Surface {
             }
             AgentEvent::Error { message } => {
                 self.flush_live();
+                // A pending optimistic `/plan` toggle whose reply errored: revert.
+                if let Some(prev) = self.plan_pending.take() {
+                    self.status.plan = prev;
+                }
                 self.transcript.push(Block::Error(message));
                 true
             }
@@ -2096,6 +2117,23 @@ impl App {
                     .push(Action::Ask(Request::SideAsk { text: q.to_string() })),
                 None => self.notice("usage: /btw <question>"),
             },
+            "plan" => {
+                let prev = self.focused().status.plan;
+                let on = match arg {
+                    None => !prev, // bare `/plan` toggles
+                    Some("on") => true,
+                    Some("off") => false,
+                    Some(_) => {
+                        self.notice("usage: /plan [on|off]");
+                        return;
+                    }
+                };
+                // Optimistic; reverted if the reply is an `Error` (amendment 8).
+                let surface = self.focused_mut();
+                surface.plan_pending = Some(prev);
+                surface.status.plan = on;
+                self.actions.push(Action::Ask(Request::SetPlanMode { on }));
+            }
             "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
@@ -3187,8 +3225,37 @@ mod tests {
         submit(&mut app, "/btw");
         assert!(app.take_actions().is_empty(), "a bare /btw nudges only");
 
+        submit(&mut app, "/plan on");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetPlanMode { on: true })]
+        );
+        assert!(app.status().plan, "optimistic on");
+
+        submit(&mut app, "/plan");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetPlanMode { on: false })]
+        );
+        assert!(!app.status().plan);
+
         submit(&mut app, "/nonsense");
         assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_plan_error_reverts_the_optimistic_chip() {
+        let mut app = App::new();
+        submit(&mut app, "/plan on");
+        let _ = app.take_actions();
+        assert!(app.status().plan, "optimistically on");
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert!(!app.status().plan, "the chip reverts on error");
     }
 
     #[test]
@@ -4050,8 +4117,8 @@ mod tests {
         assert!(
             text.starts_with(
                 "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /reload [--no-session] /btw <question> /usage /copy /surface \
-                 /team /tasks /help"
+                 /resume /reload [--no-session] /btw <question> /plan [on|off] /usage \
+                 /copy /surface /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
