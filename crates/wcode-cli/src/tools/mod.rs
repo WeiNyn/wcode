@@ -211,4 +211,24 @@ mod tests {
             total / 4
         );
     }
+
+    #[test]
+    fn every_mutating_tool_is_in_the_plan_mode_denylist() {
+        // Keep `MUTATING_TOOLS` (plan mode's denylist) in sync with the tools
+        // that declare themselves `mutating`.
+        let cfg = ToolsConfig {
+            grep: true,
+            find: true,
+            ..ToolsConfig::default()
+        };
+        for tool in default_tools(&cfg, &std::env::temp_dir()) {
+            if tool.mutating() {
+                assert!(
+                    wcode_harness::hooks::MUTATING_TOOLS.contains(&tool.name()),
+                    "`{}` is mutating but missing from MUTATING_TOOLS",
+                    tool.name()
+                );
+            }
+        }
+    }
 }

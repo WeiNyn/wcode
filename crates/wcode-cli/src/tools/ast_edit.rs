@@ -55,6 +55,11 @@ impl TypedTool for AstEdit {
     fn description(&self) -> &str {
         "AST-structural rewrite of ONE file via ast-grep. pattern uses $UPPERCASE wildcards; rewrite re-emits them (e.g. println!($A, $B) → dbg!($B)). commit:true (default) applies atomically and echoes the diff; commit:false dry-runs. Bypasses line anchors — re-read before further edits."
     }
+    /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;
         let Some(bin) = super::ast::find_bin() else {

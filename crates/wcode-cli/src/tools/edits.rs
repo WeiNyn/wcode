@@ -65,6 +65,11 @@ impl TypedTool for Edits {
     fn description(&self) -> &str {
         "Apply a batch of anchor-range edits (same args as edit) to ONE file atomically: every op resolves against the same snapshot, and any stale/ambiguous/overlapping op aborts the whole batch with nothing written. Use for several same-file edits in one round-trip."
     }
+    /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;
         if args.edits.is_empty() {

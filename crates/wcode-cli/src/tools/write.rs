@@ -37,6 +37,11 @@ impl TypedTool for Write {
     fn description(&self) -> &str {
         "Write full contents to a file, creating parent directories. Overwrites existing files. content is written byte-for-byte — leading whitespace preserved exactly; never reformats."
     }
+    /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;
         let path = super::resolve(&ctx.working_dir, &args.path);

@@ -41,6 +41,11 @@ impl TypedTool for Replace {
     fn description(&self) -> &str {
         "Replace an exact literal string in a file: old_string must occur exactly once unless replace_all is set. Byte-exact match (whitespace counts). Prefer edit for line-targeted changes."
     }
+    /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         // Async lock + sync fs: the guard may cross awaits, but the fs work stays
         // serialized and synchronous.

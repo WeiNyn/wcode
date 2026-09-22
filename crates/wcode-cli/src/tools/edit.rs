@@ -59,6 +59,11 @@ impl TypedTool for Edit {
     fn description(&self) -> &str {
         "Replace the line range covered by the from/to anchors with replacement — content-addressed, so edits above never shift the target. Ambiguous (identical lines share an anchor) or stale anchors are rejected with candidates, nothing written; old_string disambiguates, replace_all applies to every match. replacement is verbatim — preserve leading whitespace; re-read if the file changed before editing. Whole-file rewrite = write; literal string = replace."
     }
+    /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let _guard = self.lock.lock().await;
         let path = super::resolve(&ctx.working_dir, &args.path);

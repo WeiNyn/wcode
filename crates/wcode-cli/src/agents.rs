@@ -402,6 +402,7 @@ impl SessionFactory {
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: true,
             compaction: t.compaction,
+            plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
         }
     }
 }
@@ -799,6 +800,7 @@ mod tests {
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
+            plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
         }))
     }
 

@@ -11,7 +11,7 @@ use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::AgentEvent;
-use wcode_harness::hooks::HooksSet;
+use wcode_harness::hooks::{HooksSet, PlanModeHandle, PlanModeHooks};
 use wcode_harness::limits::model_limit;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
@@ -119,6 +119,8 @@ pub enum Command {
     /// Ask a tool-free side question (`/btw <question>`): answered from the
     /// current context, NEVER recorded in ctx or the session.
     Btw(String),
+    /// Toggle plan mode (`/plan` = toggle; `/plan on|off` = set explicitly).
+    Plan(Option<bool>),
     /// Print aggregate token usage for the current conversation.
     Usage,
     /// Summarize older messages now, optionally focused by <prompt>.
@@ -153,6 +155,12 @@ pub fn parse_command(line: &str) -> Option<Command> {
             _ => None,
         },
         "btw" => Some(Command::Btw(arg.unwrap_or_default())),
+        "plan" => Some(Command::Plan(match arg.as_deref() {
+            None => None, // bare `/plan` toggles
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => return None, // unknown arg → prompt text
+        })),
         "usage" => Some(Command::Usage),
         "compact" => Some(Command::Compact(arg)),
         "skills" => Some(Command::Skills),
@@ -328,6 +336,9 @@ pub fn build_agent(
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut tools = default_tools(spec.tools, &session_dir());
     tools.extend(extra_tools);
+    // One handle shared by the `PlanModeHooks` and the agent, so `set_plan_mode`
+    // flips both. Created here (per build) — see the doc's toggle flag.
+    let plan_mode = PlanModeHandle::new();
     // A FRESH WorkspaceHooks per agent (per-session digest cache). It must NOT
     // live in the shared `spec.hooks` set: `/new` and `/resume` rebuild the
     // agent in-process from that shared set, so a shared instance would either
@@ -336,6 +347,7 @@ pub fn build_agent(
     hooks.push(std::sync::Arc::new(crate::workspace::WorkspaceHooks::new(
         digest_cas,
     )));
+    hooks.push(std::sync::Arc::new(PlanModeHooks::new(plan_mode.clone())));
     Agent::new(AgentConfig {
         system: system_prompt(
             spec.tools,
@@ -355,6 +367,7 @@ pub fn build_agent(
         max_turns: DEFAULT_MAX_TURNS,
         parallel_tools: spec.tools.parallel.unwrap_or(true),
         compaction: spec.compaction,
+        plan_mode,
     })
 }
 
@@ -733,6 +746,10 @@ pub async fn run(
     }
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    // Local mirror of plan mode (the REPL may be a socket client, so it does not
+    // hold the agent's handle). Updated on a successful `SetPlanMode`; reset when
+    // `/new`/`/resume` rebuild the agent (which starts with plan mode off).
+    let mut plan = false;
     loop {
         print!("❯ ");
         let _ = io::stdout().flush();
@@ -789,6 +806,7 @@ pub async fn run(
                         backend = Backend::from(handle);
                         *lock_slot(&backend_slot) = backend.clone();
                         session_path = path;
+                        plan = false; // the fresh agent starts with plan mode off
                         match &session_path {
                             Some(p) => println!("new session: {}", p.display()),
                             None => println!("new conversation"),
@@ -941,6 +959,7 @@ pub async fn run(
                                 // re-execs `--resume <dir>/root.jsonl`, mapped back
                                 // up to the group on the way in (amendment 6b).
                                 session_path = Some(group.root().to_path_buf());
+                                plan = false; // the rebuilt agent starts with plan mode off
                                 println!("resumed {} ({n} messages)", group.root().display());
                             }
                             Err(e) => eprintln!("open {}: {e}", group.root().display()),
@@ -984,6 +1003,7 @@ pub async fn run(
                         backend = Backend::from(handle);
                         *lock_slot(&backend_slot) = backend.clone();
                         session_path = Some(path.clone());
+                        plan = false; // the rebuilt agent starts with plan mode off
                         println!("resumed {} ({n} messages)", path.display());
                     }
                     Err(e) => eprintln!("open {}: {e}", path.display()),
@@ -1033,6 +1053,21 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
                         Ok(_) => eprintln!("btw: unexpected reply"),
                         Err(_) => eprintln!("btw: session closed"),
                     }
+                }
+            }
+            Some(Command::Plan(want)) => {
+                // The REPL may be a socket client, so it keeps a local mirror
+                // rather than the agent's handle; the toggle reaches the agent
+                // (flipping the shared `PlanModeHooks`) via `SetPlanMode`.
+                let on = want.unwrap_or(!plan);
+                match backend.ask(Request::SetPlanMode { on }).await {
+                    Ok(AgentEvent::Ack) => {
+                        plan = on;
+                        println!("{DIM}plan mode: {}{RESET}", if on { "on" } else { "off" });
+                    }
+                    Ok(AgentEvent::Error { message }) => eprintln!("plan: {message}"),
+                    Ok(_) => eprintln!("plan: unexpected reply"),
+                    Err(_) => eprintln!("plan: session closed"),
                 }
             }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
@@ -1354,6 +1389,10 @@ mod tests {
     fn parse_command_table() {
         assert_eq!(parse_command("/btw why?"), Some(Command::Btw("why?".into())));
         assert_eq!(parse_command("/btw"), Some(Command::Btw(String::new())));
+        assert_eq!(parse_command("/plan"), Some(Command::Plan(None)));
+        assert_eq!(parse_command("/plan on"), Some(Command::Plan(Some(true))));
+        assert_eq!(parse_command("/plan off"), Some(Command::Plan(Some(false))));
+        assert_eq!(parse_command("/plan bogus"), None);
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("hello"), None);
         assert_eq!(parse_command("/unknown x"), None);
