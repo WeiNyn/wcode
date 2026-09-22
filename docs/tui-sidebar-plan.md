@@ -7,7 +7,7 @@ Status: **S1 (glyph + live action, model dropped) and S2 (socket roster model) l
 ## 1. Problem
 
 The sidebar renders one line per member: `name · model · state`
-(`ui.rs:draw_sidebar`, `app.rs:member_rows`). The **model column is the waste** — it is
+(`ui.rs:draw_team_strip`, formerly `draw_sidebar`; `app.rs:member_rows`). The **model column is the waste** — it is
 usually identical across members, and over `--socket` it is *wrong* (every member gets
 the root's model, `main.rs:452`). Meanwhile nothing shows *what a teammate is doing*;
 `Surface` retains no tool/action state (`ToolExecutionStart` only pushes a `Block::Tool`).
@@ -50,11 +50,11 @@ One line per member: a **status glyph**, the **name**, and a dim **live action**
 
 - `app.rs:member_rows()` → `Vec<(&str, TeamState, bool, Option<&str>)>`
   (label, state, focused, action); `/team`'s `team_text` updated to match.
-- `ui.rs:draw_sidebar` builds `"{glyph} {name}"` + the dim action, clipped to the
-  pane (`SIDEBAR_WIDTH = 26`); `state_style` unchanged; drop the `model` argument.
+- `ui.rs:draw_team_strip` builds `"{glyph} {name}"` + the dim action, clipped to the
+  slot (`MAX_TEAM_SLOTS` share the width); `state_style` unchanged; drop the `model` argument.
 - Tests that hard-code the model in the row must change:
   `app.rs::the_team_command_lists_the_member_surfaces` and
-  `ui.rs::the_team_sidebar_lists_members_and_hides_when_narrow` (plus the
+  `ui.rs::the_team_strip_lists_members_and_hides_when_narrow` (plus the
   `with_member`/`set_surfaces` helpers' model arg).
 
 ## 5. Phases
