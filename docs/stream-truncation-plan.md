@@ -115,13 +115,16 @@ sets `captured = Some(Error)` so the stop computation yields `Error`, and
 
 ### Audit — can the backstop false-fire?
 
-No. Every scripted turn in the in-repo suites terminates on a record that sets
+No. Excluding the three backstop tests added below (which under-script on
+purpose to trip it), every scripted turn terminates on a record that sets
 `captured`:
 
-- `loop_tests.rs`: 36 `rec.push` turns end with a `Done`; 2 end with a non-fatal
-  `Error` (both set `captured`). Raw event counts are higher (38 `Done`, 4
-  `Error` lines) because two inline `StreamFn` closures yield their events
-  directly rather than via `rec.push`.
+- `loop_tests.rs`: 38 `Done` turns (37 `rec.push(vec![…])` + `script_batches`'
+  `rec.push(first)`) and 2 non-fatal `Error` turns (both set `captured`). Raw
+  line counts run higher — 40 `Done` lines (37 in `rec.push`, 2 in inline
+  `StreamFn` closures, 1 in `script_batches`' `first.push`) and 4 `Error` lines
+  (2 in `rec.push`, 2 inline) — because not every scripted event rides a literal
+  `rec.push(vec![…])`.
 - `agent_tests.rs`: all 15 `rec.push` turns end `Done` (16 `Done` lines; 1
   `Error` line in an inline closure).
 

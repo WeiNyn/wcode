@@ -1834,15 +1834,17 @@ async fn the_diff_rides_the_event_but_not_the_model_context() {
 // ---------------------------------------------------------------------------
 
 // The Layer-2 backstop fires only when a turn's stream ended with NO terminal
-// record — no `Done`, no `Error`. In-repo nothing under-scripts it: in
-// `loop_tests.rs` every scripted turn (`rec.push`) terminates with a `Done`
-// (36 turns) or a non-fatal `Error` (2 turns, both setting `captured`), and in
+// record — no `Done`, no `Error`. In the pre-existing corpus nothing relies on
+// an under-scripted clean end: every `rec.push` turn in `loop_tests.rs`
+// terminates with a `Done` or a non-fatal `Error` (both set `captured`), and in
 // `agent_tests.rs` all 15 pushed turns end `Done`. One pre-existing test
 // (`after_tool_call_patches`) had omitted its terminal turn and relied on the
 // old silent default `Stop`; it now scripts that turn like its siblings. The
-// adapter's own `_ = tx.closed()` arm is unrelated — the kernel select has no
-// `tx.closed()` arm (only `cancel.cancelled()`, `stream.next()`, and the idle
-// sleep), so no `aborted = true` is warranted anywhere.
+// three tests below, by contrast, under-script ON PURPOSE (their streams end
+// with no `Done`) to trip the backstop. The adapter's own `_ = tx.closed()` arm
+// is unrelated — the kernel select has no `tx.closed()` arm (only
+// `cancel.cancelled()`, `stream.next()`, and the idle sleep), so no
+// `aborted = true` is warranted anywhere.
 
 /// A stream that yields a delta and then ends with no `Done`/`Error` must not
 /// look like a clean stop: the kernel synthesizes an `Error`, feeds it back
