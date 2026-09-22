@@ -188,6 +188,255 @@ fn mutating_build_command(lead: &str, rest: &[&str]) -> bool {
         _ => false,
     }
 }
+// ---- bash command-risk gate (Tier-2; docs/gap-analysis-jcode.md §3) ---------
+//
+// Doctrine fit: code, not config — ALWAYS ON, no knob, no `HooksConfig` field.
+//
+// WHY BESIDE `PlanModeHooks`: both are kernel `Hooks` policies that gate `bash`.
+// Unlike plan mode this one carries NO handle and NO flag (`PlanModeHandle` has
+// no analogue here) — it is unconditionally active, so a unit struct suffices.
+//
+// SEAM: `Hooks::before_tool_call` -> `Some(reason)` blocks. The loop converts it
+// to `Planned::fail(id, name, format!("blocked: {reason}"))`, so the model
+// receives `blocked: catastrophic shell command (…) …` as a tool error and can
+// adapt. This is the exact plan-mode block path.
+//
+// ARG EXTRACTION mirrors `plan_bash_reason` (hooks.rs:cVnkO): skip unless
+// `call.name == "bash"`; then `call.arguments.get("command").and_then(|c| c.as_str())`.
+//
+// NOT REUSED: `looks_mutating` / `segment_mutates`. They are PRIVATE and test
+// *any* mutation (`rm -rf build`, `cargo fmt`, any `>` redirect) — the wrong
+// predicate for a catastrophic-only guard. This gate is SELF-CONTAINED: it does
+// NOT share a tokenizer with plan mode. Rationale: the two policies have OPPOSITE
+// FP budgets (plan mode over-blocks by design; this one must under-block to stay
+// a guardrail), so a shared scanner would have to satisfy both. Duplicating ~30
+// lines of splitting is cheaper — and keeps the FP tables independent.
+//
+// SCOPE: catastrophic ONLY — irreversible system loss (jcode's crate exists
+// because a user lost a home dir; issue #604). NOT a sandbox. Default = ALLOW
+// (`None`); block only on a clear match. Over-blocking is the lesser evil here,
+// but keep the subset tight.
+
+/// Always-on catastrophic-shell guard. Stateless — a unit struct is the entire
+/// type.
+pub struct BashRiskHooks;
+
+impl BashRiskHooks {
+    /// Kept for symmetry with `PlanModeHooks::new`, so the wiring in the CLI
+    /// reads `Arc::new(BashRiskHooks::new())` like every other built-in hook.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for BashRiskHooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Hooks for BashRiskHooks {
+    /// `Some(reason)` iff this is a `bash` call whose command is catastrophic;
+    /// `None` (allow) otherwise — the hot path.
+    async fn before_tool_call(&self, call: &ToolCall) -> Option<String> {
+        if call.name != "bash" {
+            return None; // every non-bash tool is untouched
+        }
+        // Mirrors plan_bash_reason's extraction (hooks.rs:cVnkO). A missing /
+        // non-string `command` (malformed call, or args already rewritten by an
+        // earlier hook) => allow.
+        let cmd = call.arguments.get("command").and_then(|c| c.as_str())?;
+        bash_risk_reason(cmd)
+    }
+}
+
+/// `/dev/` device-name prefixes. A write *target* — `dd of=<dev>`, a `>`/`>>`
+/// redirect into a device, or an `mkfs*`/`wipefs`/`shred` operand — whose
+/// basename starts with one of these is catastrophic. Deliberately blunt:
+/// `/dev/sdafoo` would also match. Acceptable: an FP merely yields a reason;
+/// the guardrail never silently allows a real device.
+const DEVICE_PREFIXES: &[&str] = &["sd", "hd", "nvme", "vd", "disk", "mmcblk"];
+
+/// Targets that make a RECURSIVE delete/perm change catastrophic. Compared
+/// quote-trimmed, with a trailing `/*` glob folding onto its root (`~/*` -> `~`,
+/// `/*` -> `/`).
+const ROOT_TARGETS: &[&str] = &["/", "~", "$HOME", "${HOME}"];
+
+/// `rm` letters that mark a delete recursive (`-r`, `-rf`, `-fr`, `-R`).
+const RM_RECURSIVE: &[char] = &['r', 'R'];
+
+/// Canonical fork bomb, whitespace-free. [`forkbomb`] strips ALL ASCII
+/// whitespace and tests `contains` — covers `:(){ :|:& };:`, `:(){:|:&};:`, and a
+/// bomb hidden after a `;`/`&&` separator.
+const FORK_BOMB: &str = ":(){:|:&};:";
+
+/// Map a `bash` command to a refusal reason, or `None` to allow. Tries each
+/// predicate in turn; the first hit supplies a verbatim `label`.
+///
+/// The reason must NOT start with `refused: ` — the loop already prefixes
+/// `blocked: ` (loop_.rs:STqt9), and the `({label})` + "run it outside wcode"
+/// shape mirrors plan mode's tone.
+fn bash_risk_reason(cmd: &str) -> Option<String> {
+    let label = device_write(cmd)
+        .or_else(|| mkfs_or_wipe(cmd))
+        .or_else(|| recursive_root_delete(cmd))
+        .or_else(|| forkbomb(cmd))
+        .or_else(|| recursive_perm_root(cmd))?;
+    Some(format!(
+        "catastrophic shell command (`{label}`) — this would destroy the system; \
+         run it outside wcode if you really mean it"
+    ))
+}
+
+/// (1) Device write: `dd … of=/dev/<dev>` or a `>`/`>>` redirect into
+/// `/dev/<dev>`. Returns the offending segment as the label, or `None`.
+///
+/// Only `of=` counts for `dd` — `dd if=/dev/sda of=/tmp/img` (read a device into
+/// a file) stays allowed.
+fn device_write(cmd: &str) -> Option<String> {
+    for seg in scan_segments(cmd) {
+        let lead = seg.first().map(String::as_str).unwrap_or("");
+        let dd_write = lead == "dd"
+            && seg.iter().skip(1).any(|w| {
+                w.strip_prefix("of=")
+                    .is_some_and(|dev| is_device_path(dev, DEVICE_PREFIXES))
+            });
+        let redirect = seg.iter().enumerate().any(|(i, w)| {
+            let target = if let Some(t) = redirect_target(w) {
+                Some(t)
+            } else if matches!(w.as_str(), ">" | ">>") {
+                seg.get(i + 1).map(String::as_str)
+            } else {
+                None
+            };
+            target.is_some_and(|t| is_device_path(t, DEVICE_PREFIXES))
+        });
+        if dd_write || redirect {
+            return Some(seg.join(" "));
+        }
+    }
+    None
+}
+
+/// The redirect target baked into a single token, if any: `>/dev/sda`,
+/// `>>/dev/sda`, `2>/dev/sda`, … A bare `>`/`>>` (target in the *next* token)
+/// yields `None` — the caller handles that case.
+fn redirect_target(w: &str) -> Option<&str> {
+    let rest = w.trim_start_matches(|c: char| c.is_ascii_digit());
+    let after = rest.strip_prefix(">>").or_else(|| rest.strip_prefix('>'))?;
+    (!after.is_empty()).then_some(after)
+}
+
+/// (2) `mkfs` / `mkfs.<fs>` / `wipefs` / `shred` whose operand is a device path.
+/// `shred -n1 /dev/sda` blocks; `shred build/x` is allowed.
+fn mkfs_or_wipe(cmd: &str) -> Option<String> {
+    for seg in scan_segments(cmd) {
+        let Some(lead) = seg.first() else { continue };
+        let formats = lead == "mkfs" || lead.starts_with("mkfs.");
+        let wipes = lead == "wipefs" || lead == "shred";
+        if (formats || wipes) && seg.iter().skip(1).any(|w| is_device_path(w, DEVICE_PREFIXES)) {
+            return Some(seg.join(" "));
+        }
+    }
+    None
+}
+
+/// (3) `rm` with a recursive flag AND a root/home target (`rm -rf /`, `rm -fr ~`,
+/// `rm -R /*`, `rm -rf $HOME/*`).
+fn recursive_root_delete(cmd: &str) -> Option<String> {
+    for seg in scan_segments(cmd) {
+        let Some(lead) = seg.first() else { continue };
+        if lead == "rm"
+            && seg.iter().skip(1).any(|w| is_recursive_flag(w))
+            && seg.iter().skip(1).any(|w| is_root_target(w))
+        {
+            return Some(seg.join(" "));
+        }
+    }
+    None
+}
+
+/// (4) Fork bomb (`:(){ :|:& };:` and spacing variants). See [`FORK_BOMB`].
+fn forkbomb(cmd: &str) -> Option<String> {
+    let squeezed: String = cmd.chars().filter(|c| !c.is_whitespace()).collect();
+    if squeezed.contains(FORK_BOMB) {
+        Some(FORK_BOMB.to_string())
+    } else {
+        None
+    }
+}
+
+/// (5) `chmod`/`chown` with `-R`/`--recursive` on a root/home target
+/// (`chmod -R 777 /`, `chown -R me ~`).
+fn recursive_perm_root(cmd: &str) -> Option<String> {
+    for seg in scan_segments(cmd) {
+        let Some(lead) = seg.first() else { continue };
+        if (lead == "chmod" || lead == "chown")
+            && seg.iter().skip(1).any(|w| is_recursive_flag(w))
+            && seg.iter().skip(1).any(|w| is_root_target(w))
+        {
+            return Some(seg.join(" "));
+        }
+    }
+    None
+}
+
+/// True iff `s` (quote-trimmed) is `/dev/` immediately followed by one of
+/// `prefixes`.
+fn is_device_path(s: &str, prefixes: &[&str]) -> bool {
+    let t = s.trim_matches(|c| c == '"' || c == '\'');
+    t.strip_prefix("/dev/")
+        .is_some_and(|rest| prefixes.iter().any(|p| rest.starts_with(p)))
+}
+
+/// Whether a token is a recursive flag: `--recursive`, or a short cluster
+/// (`-r`, `-rf`, `-fr`, `-Rf`) carrying an `r`/`R`.
+fn is_recursive_flag(w: &str) -> bool {
+    if w == "--recursive" {
+        return true;
+    }
+    match w.strip_prefix('-') {
+        Some(rest) if !rest.is_empty() && !rest.starts_with('-') => {
+            rest.chars().any(|c| RM_RECURSIVE.contains(&c))
+        }
+        _ => false,
+    }
+}
+
+/// True iff `s` (quote-trimmed) names a root/home dir — `/`, `~`, `$HOME`,
+/// `${HOME}` — with an optional trailing `/*` glob. The glob folds onto its root
+/// (see [`root_glob`]), so `rm -rf ~/*` is as catastrophic as `rm -rf ~`.
+fn is_root_target(s: &str) -> bool {
+    let t = s.trim_matches(|c| c == '"' || c == '\'');
+    ROOT_TARGETS
+        .iter()
+        .any(|root| t == *root || t == root_glob(root).as_str())
+}
+
+/// The `/*`-glob spelling of a root target: `~` -> `~/*`, but `/` -> `/*` (it
+/// already ends in the separator).
+fn root_glob(root: &str) -> String {
+    if root.ends_with('/') {
+        format!("{root}*")
+    } else {
+        format!("{root}/*")
+    }
+}
+
+/// Split a command into segments on `;`/`&`/`|`/newline, then each segment into
+/// whitespace tokens with surrounding quotes trimmed. Self-contained —
+/// deliberately NOT `segment_mutates`.
+fn scan_segments(cmd: &str) -> Vec<Vec<String>> {
+    cmd.split([';', '&', '|', '\n'])
+        .map(|seg| {
+            seg.split_whitespace()
+                .map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string())
+                .collect::<Vec<String>>()
+        })
+        .filter(|seg| !seg.is_empty())
+        .collect()
+}
 /// Ordered set of hook implementations run at every hook point.
 ///
 /// Adding a hook is just pushing another [`Hooks`] impl: `transform_*` and
@@ -462,6 +711,88 @@ mod tests {
             name: "bash".into(),
             arguments: serde_json::json!({ "command": cmd }),
         }
+    }
+
+    // The gate is plan-mode-INDEPENDENT: no handle/flag is set up; a bare
+    // `BashRiskHooks::new()` drives it (`bash_call` (ucUhO) / `tool_call`
+    // (JHwEE) are the helpers above).
+
+    #[tokio::test]
+    async fn bash_risk_blocks_catastrophic() {
+        let hooks = BashRiskHooks::new();
+        for cmd in [
+            // (1) device writes — dd only for its `of=`, plus `>`/`>>` redirects
+            "dd if=/dev/zero of=/dev/sda",
+            "echo x > /dev/sda",
+            "echo x >>/dev/nvme0n1",
+            // (2) mkfs / wipefs / shred on a device
+            "mkfs.ext4 /dev/sdb",
+            "wipefs -a /dev/sdb",
+            "shred -n1 /dev/sda",
+            // (3) recursive root/home delete, incl. the `/*` fold
+            "rm -rf /",
+            "rm -fr ~",
+            "rm -R /*",
+            "rm -rf ~/*",
+            "rm -rf $HOME/*",
+            "rm -rf ${HOME}/*",
+            // (4) fork bomb (spacing variants)
+            ":(){ :|:& };:",
+            ":(){:|:&};:",
+            // (5) recursive perm/owner of root, incl. the fold
+            "chmod -R 777 /",
+            "chmod -R 777 /*",
+            "chown --recursive me ~",
+        ] {
+            assert!(
+                hooks.before_tool_call(&bash_call(cmd)).await.is_some(),
+                "`{cmd}` should be blocked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bash_risk_allows_benign() {
+        let hooks = BashRiskHooks::new();
+        for cmd in [
+            "rm -rf build",
+            "rm -rf /tmp/x",
+            "rm -r build",
+            "rm -f /", // non-recursive delete of / is not this gate's target
+            "dd if=/dev/zero of=/tmp/f bs=1M count=1",
+            "dd if=/dev/sda of=/tmp/img", // read a device into a file: allowed
+            "shred build/x",
+            "chmod 777 /", // non-recursive perm change: allowed
+            "ls -la",
+            "cargo build",
+        ] {
+            assert!(
+                hooks.before_tool_call(&bash_call(cmd)).await.is_none(),
+                "`{cmd}` should be allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bash_risk_ignores_non_bash_tools() {
+        let hooks = BashRiskHooks::new();
+        assert!(hooks.before_tool_call(&tool_call("read")).await.is_none());
+        assert!(hooks.before_tool_call(&tool_call("edit")).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bash_risk_is_independent_of_plan_mode() {
+        // The risk gate never consults the plan flag: it fires whether or not a
+        // `PlanModeHooks` is present / on. Pins the ordering claim in the wiring.
+        let hooks = BashRiskHooks::new();
+        assert!(hooks.before_tool_call(&bash_call("rm -rf /")).await.is_some());
+
+        // In a set beside an OFF plan hook, the risk gate still blocks first.
+        let set = HooksSet::from_iter([
+            Arc::new(BashRiskHooks::new()) as Arc<dyn Hooks>,
+            Arc::new(PlanModeHooks::new(PlanModeHandle::new())),
+        ]);
+        assert!(set.before_tool_call(&bash_call("rm -rf /")).await.is_some());
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
-use wcode_harness::hooks::{Hooks, HooksSet, ToolCall as HookToolCall};
+use wcode_harness::hooks::{BashRiskHooks, Hooks, HooksSet, ToolCall as HookToolCall};
 use wcode_harness::loop_::{LoopConfig, LoopError, run_loop};
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
@@ -808,6 +808,67 @@ async fn before_tool_call_blocks() {
     assert!(matches!(
         &ctx[2],
         AgentMessage::ToolResult { output, is_error: true, .. } if output == "blocked: nope"
+    ));
+    assert_eq!(rec.calls().len(), 2, "loop continues after a blocked call");
+}
+
+/// The catastrophic-shell gate is a real seam, not just a `before_tool_call`
+/// unit: a `bash` `rm -rf /` call must reach the model as a `blocked:` error
+/// `ToolResult`, and the loop must continue. No `bash` tool is registered, so
+/// the block is provably the hook's (not a missing-tool error, not a real exec).
+#[tokio::test]
+async fn bash_risk_gate_blocks_rm_rf_root_through_the_loop() {
+    let rec = Recorder::default();
+    // Turn 1: the model proposes the catastrophic command.
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "rm -rf /" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    // Turn 2: it recovers and finishes.
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![],
+        HooksSet::one(Arc::new(BashRiskHooks::new())),
+    );
+
+    let mut ctx = vec![AgentMessage::user_text("wipe the disk")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let end = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                output, is_error, ..
+            } => Some((output, *is_error)),
+            _ => None,
+        })
+        .expect("ToolExecutionEnd emitted");
+    assert!(end.1, "blocked output must be an error");
+    assert!(
+        end.0.starts_with("blocked: catastrophic shell command"),
+        "unexpected output: {}",
+        end.0
+    );
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { output, is_error: true, .. }
+            if output.starts_with("blocked: catastrophic shell command")
     ));
     assert_eq!(rec.calls().len(), 2, "loop continues after a blocked call");
 }
