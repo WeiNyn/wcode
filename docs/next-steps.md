@@ -699,9 +699,10 @@ multi-agent slice). Status: **review snapshot** — read-only, no build/run.
 - Dedicated reasoning/usage `AgentEvent`s — *cosmetic only* (both are already
   surfaced).
 
-**Second wave (Tier 2).** The most defensible is a **`bash` command-risk gate**
-built as a `Hooks` policy (code, not config) — the catastrophic-only subset, the
-one jcode feature that fits wcode's doctrine. Also: native Anthropic/Gemini
+**Second wave (Tier 2).** The most defensible — now **shipped** as
+`harness::hooks::BashRiskHooks`, an always-on `Hooks` policy (code, not config)
+for the catastrophic-only subset — was a **`bash` command-risk gate**, the one
+jcode feature that fits wcode's doctrine. Also: native Anthropic/Gemini
 provider, markdown maturity, `webfetch`, skill authoring, plan card, live theme
 reload, a narrow side panel, tool backgrounding.
 

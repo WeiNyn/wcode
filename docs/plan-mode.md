@@ -113,6 +113,24 @@ The FP/FN table is the honest boundary: bash can always escape a string scan, so
 plan mode's *guarantee* is "the model must actively disguise a mutation to bypass
 it", not "mutation is impossible". The reason string tells the model the same.
 
+### 2.4b Always-on `bash` command-risk gate (not plan mode)
+
+Separate from plan mode, and live whatever its flag: `harness::hooks::BashRiskHooks`
+(D4's kernel sibling) blocks a **catastrophic-only** subset of `bash` — always on,
+no knob. It is wired first in `repl::default_hooks` (before rtk); the impl and
+predicate notes live in `hooks.rs`. Unlike §2.4 it must **under**-block to stay a
+guardrail (an FP merely yields a reason, never a silent allow).
+
+| Input | Verdict | Why |
+|---|---|---|
+| `rm -rf /`, `rm -rf ~/*`, `rm -rf $HOME/*` | block | recursive delete of a root/home (a trailing `/*` folds onto its root) |
+| `dd of=/dev/sda`, `echo x > /dev/sda`, `mkfs.ext4 /dev/sdb`, `shred /dev/sda` | block | device write / format / wipe |
+| `:(){ :\|:& };:` | block | fork bomb |
+| `chmod -R 777 /` | block | recursive perm change of root |
+| `rm -rf build`, `rm -rf /tmp/x`, `rm -f /` (non-recursive) | allow | not a root wipe |
+| `dd if=/dev/sda of=/tmp/img` | allow | reads a device *into* a file (`of=` is the only `dd` write) |
+| `ls -la`, `cargo build` | allow | reads / read-only builds |
+
 ### 2.5 Halting at the plan (D5)
 
 No hook. The loop ends naturally when the model stops calling tools (the run ends
