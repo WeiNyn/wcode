@@ -34,6 +34,7 @@ the boxes as each task completes and keep the status table current.
 | 26 | Session search: cross-session + in-session (see [session-search-plan.md](session-search-plan.md)) | ☑ done — `5eb7d78`/`7ef9084`/`0a1bce3`/`4078db1`; second-layer review tightened it |
 | 27 | Tier-1 gap sweep 2: `todo` tool + steer at the tool-free boundary (see [gap-analysis-jcode.md](gap-analysis-jcode.md) §2 rows 5/7) | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` (todo), `a3a5705` (steer point B) |
 | 28 | Plan mode: explore + plan, don't mutate until approved (see [plan-mode.md](plan-mode.md)) | ☑ P1–P3 complete (mode/prompt/hook/bash-gate/`/plan`/chip + todo persistence & seed + `/verify`) |
+| 29 | Stream truncation ends a turn silently (no terminal record) | ☑ done — see [stream-truncation-plan.md](stream-truncation-plan.md) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -709,6 +710,29 @@ OAuth/credential store/provider picker, MCP/browser/computer-use/sandbox, the
 embedding memory graph + sideagents, config-driven/spawn/scheduled hooks,
 semantic compaction — all excluded by doctrine or by the missing-daemon
 constraint.
+
+---
+
+## 29. Stream truncation ends a turn silently (no terminal record)
+
+**Problem.** A turn ended when the stream yielded `None`, not when it yielded a
+terminal record (`Final` → `Done`). A provider SSE body that ends early — a
+proxy idle-close / half-close / EOF, no `[DONE]`/`finish_reason` — makes rig
+emit neither a `Final` nor an `Err`, so `forward_stream`'s `None` arm `break`
+treated the truncation as a clean stop: no `Done`, no `Error`, and the kernel
+defaulted the missing `Done` to `StopReason::Stop`. A partial thinking-only
+assistant, or a silent empty turn, went unnoticed.
+
+**Fix.** Two layers. The adapter tracks `done_seen` (set on a mapped `Final`)
+and turns the `None` arm into the real terminal condition: pre-content it
+retries on the shared budget; post-content it surfaces a non-fatal `Error`. The
+kernel adds a backstop guard so a custom `StreamFn` that ends with no terminal
+record is fed back (bounded by `DEFAULT_MAX_STREAM_ERROR_TURNS`) instead of
+silently stopping. Detail & status: [`stream-truncation-plan.md`](stream-truncation-plan.md)
+(☑ done).
+
+**Out of scope (follow-up).** A `Done` with empty **non-tool** content is a
+completed turn, not a truncation — left as-is.
 
 ---
 
