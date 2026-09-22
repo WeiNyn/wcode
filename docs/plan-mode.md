@@ -200,20 +200,24 @@ Recommend **(a)** now, and **(b)** as an optional later nag, with **(c)** reject
   `Backend` clients, so the flip needs a `Request::SetPlanMode`, and the actor
   needs the same `PlanModeHandle`.
 
-## 6. Open questions for the reviewer
+## 6. Resolved questions (P1)
 
-1. **Toggle transport.** Confirm `Request::SetPlanMode { on }` (and threading the
-   `PlanModeHandle` into the actor) over a purely-local Arc flip.
-2. **Denylist vs allowlist** for the mutating tools, and the `MUTATING_TOOLS` set.
-3. **bash heuristic** — the exact verb/redirection list; is `cargo build`/`make`
-   allowed (read-only build) or blocked (writes artifacts)?
-4. **Plan session entries.** Should the plan→todo write also persist a
-   `SessionEntry::Todo` even mid-plan, or only on approval? (D7 assumes each write.)
-5. **`/verify` output shape** — checklist + changed files + last reply? Over a
-   socket, does the client get the checklist from `Session::todo()` or replay the
-   last `AgentEvent::Todo`?
-6. **`set_system` on a live mid-run toggle** — confirm "next run" is acceptable
-   (the in-flight run keeps its cloned prompt).
-7. **Not decided:** exact prompt wording; whether `task`/`peers`/`message` should
-   also be blocked (currently allowed); and whether the plan chip needs a
-   theme role (`theme.rs`) or reuses `accent()`.
+The P1 review settled these; kept here so the design record matches the code.
+
+1. **Toggle transport — settled.** A `Request::SetPlanMode { on }` whose actor arm
+   flips the agent's shared `PlanModeHandle` and recomposes the prompt (§2.1). No
+   front-end holds the handle; a socket client just sends the request.
+2. **Denylist, not allowlist — settled.** `MUTATING_TOOLS` (§2.3); each mutator
+   also opts in via `TypedTool::mutating()`, and a test keeps the two in sync.
+3. **bash heuristic — settled.** §2.4: `cargo build/test/check/run`, `make`, and
+   `tsc` are allowed (artifacts are not a workspace mutation); the build
+   subcommands that mutate the source tree/lockfiles (`cargo fmt`, `npm install`,
+   `go mod tidy`, `pip install`, …) are blocked.
+4. **Plan session entries — deferred to P2 (D7).** Each `todo` write persists.
+5. **`/verify` output shape — deferred to P3 (D8).** Recommended: checklist +
+   changed files + last reply.
+6. **Live mid-run toggle — settled.** Takes effect on the *next* run; the
+   in-flight one keeps its cloned prompt (`set_plan_mode`, §2.2).
+7. **Chip styling & team tools — settled.** The chip reuses the existing
+   `accent()` role; no `theme.rs` field (§5 A2). `task`/`peers`/`message` stay
+   allowed (§2.3).
