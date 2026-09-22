@@ -259,6 +259,7 @@ async fn forward_stream<S, F>(
 {
     let mut errored = false;
     let mut content_forwarded = false;
+    let mut done_seen = false;
     loop {
         // The next item: a buffered first item, or one from the stream under the
         // idle deadline. Cancel-safe: a dropped `next_or_stall` drops an
@@ -270,8 +271,55 @@ async fn forward_stream<S, F>(
             None => tokio::select! {
                 biased;
                 result = next_or_stall(&mut stream, policy.idle) => match result {
-                    // The stream ended.
-                    None => break,
+                    // The stream ended. A `Final` record (mapped to `Done`) is the
+                    // only clean end: rig emits neither a `Final` nor an `Err` when
+                    // the provider SSE body ends early (proxy idle-close / half-close
+                    // / EOF), so the normalized stream just ends with `None` — a
+                    // truncated turn, not a stop.
+                    None => {
+                        if done_seen || errored {
+                            break;
+                        }
+                        let error = truncation_error();
+                        if !content_forwarded && state.budget > 0 {
+                            // Pre-content: retry on the shared budget, exactly like
+                            // the idle-stall arm (one retry path, via the helper).
+                            match pre_content_retry(&policy, &mut state, &open, &tx, &error).await {
+                                PreContent::Ready { stream: s, first } => {
+                                    stream = s;
+                                    pending = first;
+                                    continue;
+                                }
+                                PreContent::Cancelled => return,
+                                PreContent::Failed(e) => {
+                                    if tx
+                                        .send(LlmStreamEvent::Error {
+                                            message: e.to_string(),
+                                            fatal: fatal_class(&e),
+                                        })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    break;
+                                }
+                            }
+                        } else {
+                            // NON-fatal: the loop feeds it back next turn and, if it
+                            // persists, ends StopReason::Error.
+                            // Chosen Error.message: `truncation_error().to_string()`.
+                            if tx
+                                .send(LlmStreamEvent::Error {
+                                    message: error.to_string(),
+                                    fatal: false,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                    }
                     // One item — the stream's own `Result`.
                     Some(Stall::Item(item)) => item,
                     // The idle deadline fired. Pre-content → a transient retry
@@ -281,12 +329,7 @@ async fn forward_stream<S, F>(
                     Some(Stall::Idle) => {
                         let error = stall_error(policy.idle);
                         if !content_forwarded && state.budget > 0 {
-                            state.attempts += 1;
-                            state.budget -= 1;
-                            if !retry_wait(&tx, &policy, state.attempts, &error).await {
-                                return;
-                            }
-                            match connect_with_retry(&policy, &mut state, &open, &tx).await {
+                            match pre_content_retry(&policy, &mut state, &open, &tx, &error).await {
                                 PreContent::Ready { stream: s, first } => {
                                     stream = s;
                                     pending = first;
@@ -326,7 +369,8 @@ async fn forward_stream<S, F>(
         };
         let events = match item {
             Ok(content) => {
-                if errored && matches!(content, StreamedAssistantContent::Final(_)) {
+                let is_final = matches!(content, StreamedAssistantContent::Final(_));
+                if errored && is_final {
                     continue;
                 }
                 let events = map_item(content);
@@ -334,6 +378,7 @@ async fn forward_stream<S, F>(
                 // once anything reached the consumer a later error cannot
                 // be retried (it would duplicate output).
                 content_forwarded |= !events.is_empty();
+                done_seen |= is_final;
                 events
             }
             Err(error) => {
@@ -585,6 +630,18 @@ fn fatal_class(error: &CompletionError) -> bool {
 fn stall_error(d: Duration) -> CompletionError {
     CompletionError::ProviderError(format!("stream stalled: no item within {d:?} (timed out)"))
 }
+/// A synthesized stream-truncation failure, shaped like [`stall_error`]. The
+/// stream ended without its terminal record: rig emits neither a `Final` nor an
+/// `Err` when the provider SSE body ends early (no `[DONE]`/finish_reason), so
+/// the normalized stream simply ends with `None`. Not necessarily `retryable()`
+/// — the pre-content branch re-opens unconditionally — the message only feeds
+/// `retry_wait`'s notice text and the surfaced `Error.message`.
+fn truncation_error() -> CompletionError {
+    CompletionError::ProviderError(
+        "stream ended before its terminal record (truncated)".to_string(),
+    )
+}
+
 async fn connect_with_retry<S, F>(
     policy: &RetryPolicy,
     state: &mut RetryState,
@@ -672,6 +729,31 @@ where
             }
         }
     }
+}
+
+/// One pre-content retry shared by the idle-stall arm and the truncation arm:
+/// spend one attempt + one budget unit on the shared [`RetryState`], back off
+/// (abandoning if the consumer dropped `tx`), then re-open via
+/// [`connect_with_retry`] with the SAME state so the budget stays monotone.
+/// Returns the same [`PreContent<S>`] the direct connect path returns, so both
+/// callers match identically — no new enum, no duplicated match.
+async fn pre_content_retry<S, F>(
+    policy: &RetryPolicy,
+    state: &mut RetryState,
+    open: &F,
+    tx: &tokio::sync::mpsc::UnboundedSender<LlmStreamEvent>,
+    error: &CompletionError,
+) -> PreContent<S>
+where
+    F: Fn() -> Pin<Box<dyn std::future::Future<Output = Result<S, CompletionError>> + Send>>,
+    S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin + Send,
+{
+    state.attempts += 1;
+    state.budget -= 1;
+    if !retry_wait(tx, policy, state.attempts, error).await {
+        return PreContent::Cancelled;
+    }
+    connect_with_retry(policy, state, open, tx).await
 }
 
 /// The server's `Retry-After` header (integer delta-seconds), when the failed
@@ -2116,6 +2198,143 @@ mod retry_tests {
         assert!(
             !events.iter().any(|e| matches!(e, LlmStreamEvent::Error { .. })),
             "no error once the retry succeeded: {events:?}"
+        );
+    }
+
+    /// A re-open that ALSO ends immediately, pre-content: paired with an empty
+    /// initial stream, it drives the truncation arm's retries to exhaustion (each
+    /// re-open yields no item, so nothing is ever forwarded).
+    fn open_empty()
+    -> Pin<Box<dyn std::future::Future<Output = Result<BoxStream, CompletionError>> + Send>> {
+        Box::pin(async { Ok::<_, CompletionError>(boxed(empty())) })
+    }
+
+    /// A delta followed by an early EOF (no `Final`) is a truncation: content
+    /// already flowed, so it is NOT retried — a single NON-fatal `Error` ends the
+    /// turn (the loop feeds it back), and no `Done` is emitted.
+    #[tokio::test(start_paused = true)]
+    async fn a_delta_then_a_truncated_end_is_a_nonfatal_error() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max: 3,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            idle: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let stream = boxed(futures::stream::iter(vec![Ok::<_, CompletionError>(
+            StreamedAssistantContent::Text(rig::message::Text::new("hi")),
+        )]));
+        let state = RetryState::new(policy.max);
+        forward_stream(stream, None, policy, open_silent, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::TextDelta(t) if t == "hi")),
+            "{events:?}"
+        );
+        let (message, fatal) = events
+            .iter()
+            .find_map(|e| match e {
+                LlmStreamEvent::Error { message, fatal } => Some((message.clone(), *fatal)),
+                _ => None,
+            })
+            .expect("a truncated end surfaced an error");
+        assert!(!fatal, "a post-content truncation is non-fatal: {message}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "no Done on a truncated stream: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Retrying { .. })),
+            "no retry once content flowed: {events:?}"
+        );
+    }
+
+    /// A `Final`-terminated stream is unchanged: it forwards `Done` and never
+    /// trips the truncation guard (which would surface a spurious error).
+    #[tokio::test(start_paused = true)]
+    async fn a_final_terminated_stream_is_unchanged() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            idle: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let stream = boxed(futures::stream::iter(vec![
+            Ok::<_, CompletionError>(StreamedAssistantContent::Text(rig::message::Text::new(
+                "hi",
+            ))),
+            Ok::<_, CompletionError>(done()),
+        ]));
+        let state = RetryState::new(policy.max);
+        forward_stream(stream, None, policy, open_silent, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Error { .. })),
+            "a clean turn surfaces no error: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Retrying { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// A pre-content no-item stream with budget remaining retries on the shared
+    /// budget; each re-open also ends empty, so the whole budget is spent before
+    /// a NON-fatal error ends the turn — one `Retrying` notice per retry, no
+    /// `Done`.
+    #[tokio::test(start_paused = true)]
+    async fn a_pre_content_no_item_stream_retries_then_errors() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let policy = RetryPolicy {
+            max: 2,
+            base: Duration::from_millis(10),
+            cap: Duration::from_millis(10),
+            idle: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        let state = RetryState::new(policy.max);
+        forward_stream(boxed(empty()), None, policy, open_empty, tx, state).await;
+
+        let events: Vec<LlmStreamEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let retries = events
+            .iter()
+            .filter(|e| matches!(e, LlmStreamEvent::Retrying { .. }))
+            .count();
+        assert_eq!(
+            retries, policy.max as usize,
+            "one Retrying notice per retry: {events:?}"
+        );
+        let (message, fatal) = events
+            .iter()
+            .find_map(|e| match e {
+                LlmStreamEvent::Error { message, fatal } => Some((message.clone(), *fatal)),
+                _ => None,
+            })
+            .expect("an exhausted truncation budget surfaced an error");
+        assert!(!fatal, "an exhausted truncation is non-fatal: {message}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
+            "no Done on a truncated stream: {events:?}"
         );
     }
 }

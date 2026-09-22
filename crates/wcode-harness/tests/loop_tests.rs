@@ -904,6 +904,14 @@ async fn after_tool_call_patches() {
         },
     ]);
 
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
     let (tool, _seen) = echo_tool();
     let TestSetup { cfg, .. } = setup(
         fake_stream_fn(&rec),
@@ -1819,4 +1827,111 @@ async fn the_diff_rides_the_event_but_not_the_model_context() {
         &ctx[2],
         AgentMessage::ToolResult { output, .. } if output == "edited f"
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Stream truncation backstop: a turn must end on a terminal record
+// ---------------------------------------------------------------------------
+
+// The Layer-2 backstop fires only when a turn's stream ended with NO terminal
+// record — no `Done`, no `Error`. In-repo nothing under-scripts it: in
+// `loop_tests.rs` every scripted turn (`rec.push`) terminates with a `Done`
+// (36 turns) or a non-fatal `Error` (2 turns, both setting `captured`), and in
+// `agent_tests.rs` all 15 pushed turns end `Done`. One pre-existing test
+// (`after_tool_call_patches`) had omitted its terminal turn and relied on the
+// old silent default `Stop`; it now scripts that turn like its siblings. The
+// adapter's own `_ = tx.closed()` arm is unrelated — the kernel select has no
+// `tx.closed()` arm (only `cancel.cancelled()`, `stream.next()`, and the idle
+// sleep), so no `aborted = true` is warranted anywhere.
+
+/// A stream that yields a delta and then ends with no `Done`/`Error` must not
+/// look like a clean stop: the kernel synthesizes an `Error`, feeds it back
+/// through the corrective-turn path, and ends `StopReason::Error` — never a
+/// silent `Stop`.
+#[tokio::test]
+async fn a_scripted_stream_without_done_ends_stop_reason_error() {
+    let rec = Recorder::default();
+    // One scripted turn: a partial delta and NO `Done`. Every later call
+    // under-scripts, so it gets the empty default stream — which now also trips
+    // the backstop rather than ending cleanly.
+    rec.push(vec![LlmStreamEvent::TextDelta("partial".into())]);
+
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error, "never a silent Stop");
+    assert_eq!(
+        rec.calls().len(),
+        1 + wcode_harness::loop_::DEFAULT_MAX_STREAM_ERROR_TURNS,
+        "the truncation is fed back and bounded by the cap"
+    );
+    assert!(
+        tags(&events).contains(&"error"),
+        "the truncation surfaced an error: {:?}",
+        tags(&events)
+    );
+    // The partial content streamed before the truncation is kept...
+    assert!(
+        ctx.iter().any(|m| m.as_text() == "partial"),
+        "the partial assistant survives: {ctx:?}"
+    );
+    // ...and the fed-back notice reaches a later stream call.
+    assert!(
+        rec.calls().iter().any(|c| c.ctx.iter().any(|m| m
+            .as_text()
+            .contains("stream ended without a terminal record"))),
+        "the fed-back notice reached a stream call"
+    );
+    assert_eq!(*tags(&events).last().unwrap(), "agent_end");
+}
+
+/// The same backstop on a stream that yields nothing at all (an immediate EOF):
+/// the run ends `StopReason::Error`, no empty assistant is recorded, and the
+/// failure is bounded by the cap like any stream error.
+#[tokio::test]
+async fn a_nothing_then_end_stream_errors_and_records_no_empty_assistant() {
+    let rec = Recorder::default();
+    rec.push(vec![]); // an explicit empty turn; later calls under-script too
+
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Error);
+    assert_eq!(
+        ctx.len(),
+        1 + wcode_harness::loop_::DEFAULT_MAX_STREAM_ERROR_TURNS,
+        "one fed-back notice per capped turn; no assistant recorded"
+    );
+    assert!(
+        ctx.iter().all(|m| matches!(m, AgentMessage::User { .. })),
+        "no empty assistant was recorded: {ctx:?}"
+    );
+}
+
+/// The backstop cannot false-fire on a clean turn: a `Done`-terminated stream
+/// still ends `StopReason::Stop` with no synthesized error.
+#[tokio::test]
+async fn a_done_terminated_stream_is_unaffected() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("hi".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(rec.calls().len(), 1, "a clean turn makes exactly one call");
+    assert!(
+        !tags(&events).contains(&"error"),
+        "no synthesized error on a clean turn: {:?}",
+        tags(&events)
+    );
 }

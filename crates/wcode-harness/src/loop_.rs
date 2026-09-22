@@ -333,6 +333,23 @@ pub async fn run_loop(
                 captured = Some(StopReason::Error);
             }
 
+            // Layer 2 kernel backstop: a `StreamFn` that ends a turn with no
+            // terminal event at all — no `Done`, no `Error` — is a truncated turn.
+            // The adapter (Layer 1) already synthesizes an error for the rig wire,
+            // but a custom `StreamFn` (a test double, an embedder's provider) can
+            // still reach here as a clean stop. Feed it back through the same
+            // corrective-turn path as a stream error (bounded by
+            // DEFAULT_MAX_STREAM_ERROR_TURNS) instead of silently stopping.
+            //
+            // Fires only when the select ended with NO terminal event: `captured`
+            // is None and `stream_error` is None. Setting `stream_error` to a
+            // non-None note deliberately bypasses the hard-fatal early-return below.
+            if !aborted && stream_error.is_none() && captured.is_none() {
+                let message = "stream ended without a terminal record".to_string();
+                let _ = sink.send(AgentEvent::Error { message: message.clone() });
+                stream_error = Some(message);
+                captured = Some(StopReason::Error);
+            }
             // Cancellation finalizes the partial assistant as Aborted.
             let stop = if aborted {
                 StopReason::Aborted
