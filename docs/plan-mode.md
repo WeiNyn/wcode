@@ -130,6 +130,7 @@ guardrail (an FP merely yields a reason, never a silent allow).
 | `rm -rf build`, `rm -rf /tmp/x`, `rm -f /` (non-recursive) | allow | not a root wipe |
 | `dd if=/dev/sda of=/tmp/img` | allow | reads a device *into* a file (`of=` is the only `dd` write) |
 | `ls -la`, `cargo build` | allow | reads / read-only builds |
+| `cat x >&/dev/sda` | **under-blocked** | the `>&` device-redirect bashism isn't parsed (the `&>` form is caught only by accident, via the `&` segment split) — the guardrail accepts it |
 
 ### 2.5 Halting at the plan (D5)
 
