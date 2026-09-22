@@ -405,10 +405,19 @@ fn is_recursive_flag(w: &str) -> bool {
 }
 
 /// True iff `s` (quote-trimmed) names a root/home dir — `/`, `~`, `$HOME`,
-/// `${HOME}` — with an optional trailing `/*` glob. The glob folds onto its root
-/// (see [`root_glob`]), so `rm -rf ~/*` is as catastrophic as `rm -rf ~`.
+/// `${HOME}` — with an optional trailing `/` or `/*` glob. Both fold onto the
+/// root (see [`root_glob`]), so `rm -rf ~/`, `rm -rf ~/*`, and `rm -rf //` are
+/// all as catastrophic as `rm -rf ~` / `/`.
 fn is_root_target(s: &str) -> bool {
-    let t = s.trim_matches(|c| c == '"' || c == '\'');
+    let raw = s.trim_matches(|c| c == '"' || c == '\'');
+    // A trailing `/` (or several) does not change the target — `~/` is `~`,
+    // `//` is `/` — so collapse it before comparing; keep a bare `/` intact.
+    let trimmed = raw.trim_end_matches('/');
+    let t = if trimmed.is_empty() && raw.starts_with('/') {
+        "/"
+    } else {
+        trimmed
+    };
     ROOT_TARGETS
         .iter()
         .any(|root| t == *root || t == root_glob(root).as_str())
@@ -743,6 +752,12 @@ mod tests {
             "chmod -R 777 /",
             "chmod -R 777 /*",
             "chown --recursive me ~",
+            // (3)/(5) a trailing slash folds onto its root too
+            "rm -rf ~/",
+            "rm -rf $HOME/",
+            "rm -rf ${HOME}/",
+            "rm -rf /*/",
+            "chmod -R 777 //",
         ] {
             assert!(
                 hooks.before_tool_call(&bash_call(cmd)).await.is_some(),
@@ -787,12 +802,29 @@ mod tests {
         let hooks = BashRiskHooks::new();
         assert!(hooks.before_tool_call(&bash_call("rm -rf /")).await.is_some());
 
-        // In a set beside an OFF plan hook, the risk gate still blocks first.
-        let set = HooksSet::from_iter([
+        // In a set beside an OFF plan hook, the risk gate still blocks.
+        let off = HooksSet::from_iter([
             Arc::new(BashRiskHooks::new()) as Arc<dyn Hooks>,
             Arc::new(PlanModeHooks::new(PlanModeHandle::new())),
         ]);
-        assert!(set.before_tool_call(&bash_call("rm -rf /")).await.is_some());
+        assert!(off.before_tool_call(&bash_call("rm -rf /")).await.is_some());
+
+        // Beside an ON plan hook (which would ALSO block `rm -rf /`, with its own
+        // "plan mode: …" reason), the risk gate is FIRST in the set, so ITS reason
+        // wins — pins the ratified ordering.
+        let plan = PlanModeHandle::new();
+        plan.set(true);
+        let on = HooksSet::from_iter([
+            Arc::new(BashRiskHooks::new()) as Arc<dyn Hooks>,
+            Arc::new(PlanModeHooks::new(plan)),
+        ]);
+        let reason = on.before_tool_call(&bash_call("rm -rf /")).await;
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("catastrophic shell command")),
+            "the risk gate's reason must win over plan mode's, got {reason:?}"
+        );
     }
 
     #[tokio::test]
