@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::event::AgentEvent;
+use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::hooks::{HooksSet, PlanModeHandle, PlanModeHooks};
 use wcode_harness::limits::model_limit;
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
@@ -121,6 +121,9 @@ pub enum Command {
     Btw(String),
     /// Toggle plan mode (`/plan` = toggle; `/plan on|off` = set explicitly).
     Plan(Option<bool>),
+    /// `/verify`: render the plan's progress — the cached todo checklist, the
+    /// done count, and whether anything is unfinished.
+    Verify,
     /// Print aggregate token usage for the current conversation.
     Usage,
     /// Summarize older messages now, optionally focused by <prompt>.
@@ -161,6 +164,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
             Some("off") => Some(false),
             _ => return None, // unknown arg → prompt text
         })),
+        "verify" => Some(Command::Verify),
         "usage" => Some(Command::Usage),
         "compact" => Some(Command::Compact(arg)),
         "skills" => Some(Command::Skills),
@@ -750,6 +754,10 @@ pub async fn run(
     // hold the agent's handle). Updated on a successful `SetPlanMode`; reset when
     // `/new`/`/resume` rebuild the agent (which starts with plan mode off).
     let mut plan = false;
+    // The latest `AgentEvent::Todo` from a run, cached for `/verify` (a client
+    // render of the event — NOT `Session::todo()`, whose own-session write the
+    // agent's in-memory entries never see). Shared with the printer task.
+    let last_todos: Arc<Mutex<Option<Vec<TodoItem>>>> = Arc::new(Mutex::new(None));
     loop {
         print!("❯ ");
         let _ = io::stdout().flush();
@@ -1070,6 +1078,21 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
                     Err(_) => eprintln!("plan: session closed"),
                 }
             }
+            Some(Command::Verify) => {
+                let cached = last_todos.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                // The last assistant reply (a remote-safe read).
+                let last_text = match backend.ask(Request::GetHistory).await {
+                    Ok(AgentEvent::History { messages }) => messages.iter().rev().find_map(|m| match m {
+                        AgentMessage::Assistant { .. } => {
+                            let text = m.as_text();
+                            (!text.is_empty()).then_some(text)
+                        }
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                print_verify(cached.as_deref(), last_text.as_deref());
+            }
             Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
                 Ok(AgentEvent::History { messages }) => {
                     let stats = session_stats(&messages);
@@ -1108,13 +1131,13 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
                             Err(e) => eprintln!("read {}: {e}", skill.path.display()),
                             Ok(body) => {
                                 let input = skill_turn(&skill.name, &body, extra);
-                                run_turn(&backend, &input, &in_flight).await;
+                                run_turn(&backend, &input, &in_flight, &last_todos).await;
                             }
                         },
                     }
                 }
             },
-            None => run_turn(&backend, line, &in_flight).await,
+            None => run_turn(&backend, line, &in_flight, &last_todos).await,
         }
     }
 
@@ -1133,6 +1156,42 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
 
 /// `/skills`: what was discovered, one block per skill, with the file the
 /// model would `read`.
+/// `/verify`: the last cached `AgentEvent::Todo` checklist (a client render of the
+/// emitted event — NOT `Session::todo()`), the done count, remaining items, and
+/// the last assistant reply.
+fn print_verify(todos: Option<&[TodoItem]>, last_text: Option<&str>) {
+    match todos {
+        None => println!("{DIM}(no plan/todos recorded yet){RESET}"),
+        Some([]) => println!("{DIM}(no todos — the plan list is empty){RESET}"),
+        Some(list) => {
+            let done = list
+                .iter()
+                .filter(|t| t.status == TodoStatus::Completed)
+                .count();
+            println!("{}", crate::tools::todo::render(list));
+            println!("{done}/{} done", list.len());
+            let remaining: Vec<&str> = list
+                .iter()
+                .filter(|t| t.status != TodoStatus::Completed)
+                .map(|t| t.content.as_str())
+                .collect();
+            if remaining.is_empty() {
+                println!("{DIM}finished — all items completed{RESET}");
+            } else {
+                println!(
+                    "{DIM}not finished — {} remaining: {}{RESET}",
+                    remaining.len(),
+                    remaining.join(", ")
+                );
+            }
+        }
+    }
+    if let Some(text) = last_text {
+        println!("{DIM}— last reply —{RESET}");
+        println!("{text}");
+    }
+}
+
 fn print_skills(skills: &SkillSet) {
     if skills.is_empty() {
         println!("(no skills discovered)");
@@ -1187,9 +1246,15 @@ async fn replay(backend: &Backend) {
 
 /// One user turn: subscribe for the printer, submit, and await the run's stop
 /// reason.
-async fn run_turn(backend: &Backend, input: &str, in_flight: &AtomicBool) {
+async fn run_turn(
+    backend: &Backend,
+    input: &str,
+    in_flight: &AtomicBool,
+    last_todos: &Arc<Mutex<Option<Vec<TodoItem>>>>,
+) {
     let mut rx = backend.subscribe();
-    let printer = tokio::spawn(async move { print_events(&mut rx).await });
+    let todos = last_todos.clone();
+    let printer = tokio::spawn(async move { print_events(&mut rx, &todos).await });
     in_flight.store(true, Ordering::SeqCst);
     let reply = backend
         .ask(Request::Submit {
@@ -1210,7 +1275,10 @@ async fn run_turn(backend: &Backend, input: &str, in_flight: &AtomicBool) {
     }
 }
 
-async fn print_events(rx: &mut broadcast::Receiver<AgentEvent>) {
+async fn print_events(
+    rx: &mut broadcast::Receiver<AgentEvent>,
+    last_todos: &Mutex<Option<Vec<TodoItem>>>,
+) {
     let mut p = MessagePrinter::default();
     let mut st = PrintState::default();
     loop {
@@ -1267,6 +1335,10 @@ async fn print_events(rx: &mut broadcast::Receiver<AgentEvent>) {
                 out(&format!(
                     "{DIM}⋯ retrying ({attempt}/{max}): {reason}{RESET}\n"
                 ));
+            }
+            AgentEvent::Todo { todos } => {
+                // Cache for `/verify` (a client render of the last emitted list).
+                *last_todos.lock().unwrap_or_else(|e| e.into_inner()) = Some(todos);
             }
             _ => {}
         }
@@ -1433,6 +1505,7 @@ mod tests {
             Some(Command::Reload { no_session: true })
         );
         assert_eq!(parse_command("/reload foo"), None);
+        assert_eq!(parse_command("/verify"), Some(Command::Verify));
         assert_eq!(parse_command("/usage"), Some(Command::Usage));
         assert_eq!(parse_command("/compact"), Some(Command::Compact(None)));
         assert_eq!(
@@ -1976,6 +2049,26 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["300_d.jsonl", "200_a.jsonl", "100_b.jsonl"]);
+    }
+
+    #[tokio::test]
+    async fn print_events_caches_the_latest_todo_event() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let cache: Mutex<Option<Vec<TodoItem>>> = Mutex::new(None);
+        // A stale value is replaced by the newest event.
+        *cache.lock().unwrap() = Some(vec![TodoItem {
+            content: "old".into(),
+            status: TodoStatus::Pending,
+        }]);
+        let list = vec![TodoItem {
+            content: "new".into(),
+            status: TodoStatus::InProgress,
+        }];
+        tx.send(AgentEvent::Todo { todos: list.clone() }).unwrap();
+        tx.send(AgentEvent::AgentEnd).unwrap();
+
+        print_events(&mut rx, &cache).await;
+        assert_eq!(cache.lock().unwrap().as_deref(), Some(list.as_slice()));
     }
 }
 
