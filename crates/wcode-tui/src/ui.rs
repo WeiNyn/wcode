@@ -1044,12 +1044,13 @@ fn success() -> Style {
 
 /// The style for a member's row, keyed by state: idle = dim, running = green
 /// [`success`] (a clear "active" signal, distinct from the dim status line and
-/// from idle/done), done = muted.
+/// from idle/done), done = muted, failed = red [`error_style`].
 fn state_style(state: TeamState) -> Style {
     match state {
         TeamState::Idle => dim(),
         TeamState::Running => success(),
         TeamState::Done => muted(),
+        TeamState::Failed => error_style(),
     }
 }
 
@@ -1079,7 +1080,7 @@ fn slot_geometry(area_width: usize, n: usize) -> (usize, usize, usize) {
 }
 
 /// One slot's spans: a state-colored `glyph label` head plus a dim tail — the
-/// live action, or ` —` for idle/done members with nothing running — clipped
+/// live action, or ` —` for idle/done/failed members with nothing running — clipped
 /// to `width` with a single trailing `…` when cut. The clip takes from the
 /// whole slot text up front (reserving the ellipsis), so a long label can
 /// never push past the slot into a neighbor's share.
@@ -1095,7 +1096,7 @@ fn slot_span(
     let head = format!("{} {label}", state.glyph());
     let tail = match (state, action) {
         (_, Some(action)) => format!(" {action}"),
-        (TeamState::Idle | TeamState::Done, None) => " —".to_string(),
+        (TeamState::Idle | TeamState::Done | TeamState::Failed, None) => " —".to_string(),
         (TeamState::Running, None) => String::new(),
     };
     let head_len = head.chars().count();
@@ -1679,6 +1680,28 @@ mod tests {
         assert!(
             !wide.contains("m1") && !wide.contains("m2"),
             "the model should be gone from the strip:\n{wide}"
+        );
+
+        // A failed run reads `✗`, and the failure survives `AgentEnd` (the loop
+        // emits `Error` before `AgentEnd`).
+        app.handle(AppEvent::Agent(
+            SessionId::agent("reviewer"),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        app.handle(AppEvent::Agent(
+            SessionId::agent("reviewer"),
+            wcode_harness::event::AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            SessionId::agent("reviewer"),
+            wcode_harness::event::AgentEvent::AgentEnd,
+        ));
+        let failed = buffer_text(&render(&mut app, 80, 20));
+        assert!(
+            failed.contains("✗ reviewer"),
+            "failed member missing:\n{failed}"
         );
 
         // Narrow (< 50 cols): the strip is hidden.

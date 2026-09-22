@@ -42,7 +42,12 @@ pub enum TeamState {
     /// A run is in flight.
     Running,
     /// The run finished.
+    /// The run finished.
     Done,
+    /// The last run failed (a run-failure `AgentEvent::Error`; kept across
+    /// `AgentEnd`, cleared by the next `AgentStart`). A command-reply error
+    /// while idle does not set this.
+    Failed,
 }
 
 impl TeamState {
@@ -52,15 +57,17 @@ impl TeamState {
             TeamState::Idle => "idle",
             TeamState::Running => "running",
             TeamState::Done => "done",
+            TeamState::Failed => "failed",
         }
     }
 
-    /// The team strip's status glyph: running · idle · done.
+    /// The team strip's status glyph: running · idle · done · failed.
     pub fn glyph(self) -> &'static str {
         match self {
             TeamState::Idle => "○",
             TeamState::Running => "●",
             TeamState::Done => "✓",
+            TeamState::Failed => "✗",
         }
     }
 }

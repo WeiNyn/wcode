@@ -803,6 +803,9 @@ pub struct Surface {
     running: bool,
     /// A run finished (drives the team strip's `done`).
     finished: bool,
+    /// The last run failed (set on a run-failure `Error` while running, kept
+    /// across `AgentEnd`, cleared on the next `AgentStart`).
+    failed: bool,
     /// The current run's live action (`"{tool} {target}"`) for the team strip
     /// and `/team`; cleared at run start/end so it reflects the current run
     /// only (§3).
@@ -866,6 +869,7 @@ impl Surface {
             changes: Vec::new(),
             running: false,
             finished: false,
+            failed: false,
             last_action: None,
             last_action_at: None,
             cancelled: false,
@@ -887,7 +891,9 @@ impl Surface {
 
     /// The team strip/`/team` state, derived from the run flags.
     fn state(&self) -> TeamState {
-        if self.running {
+        if self.failed {
+            TeamState::Failed
+        } else if self.running {
             TeamState::Running
         } else if self.finished {
             TeamState::Done
@@ -979,6 +985,7 @@ impl Surface {
             AgentEvent::AgentStart => {
                 self.running = true;
                 self.finished = false;
+                self.failed = false; // a new run clears the previous failure
                 self.plan_pending = None; // a run supersedes any settled toggle
                 self.last_action = None;
                 true
@@ -1000,6 +1007,12 @@ impl Surface {
             }
             AgentEvent::Error { message } => {
                 self.flush_live();
+                // A run failure (the loop emits `Error` before `AgentEnd`) marks the
+                // member failed; an idle reply error (SetModel/Compact/…) does not.
+                // `failed` is never cleared here — only `AgentStart` clears it.
+                if self.running {
+                    self.failed = true;
+                }
                 // A pending optimistic `/plan` toggle whose reply errored: revert.
                 if let Some(prev) = self.plan_pending.take() {
                     self.status.plan = prev;
@@ -3801,6 +3814,85 @@ mod tests {
     }
 
     #[test]
+    fn a_run_failure_marks_the_member_failed_until_the_next_run() {
+        let mut app = App::new();
+        let id = SessionId::agent("w1");
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: id.clone(),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+
+        // The loop emits `Error` before `AgentEnd`; `Failed` must survive the end.
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
+        assert_eq!(app.member_rows()[0].1, TeamState::Running);
+        app.handle(AppEvent::Agent(
+            id.clone(),
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert_eq!(
+            app.member_rows()[0].1,
+            TeamState::Failed,
+            "a run error fails the member"
+        );
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentEnd));
+        assert_eq!(
+            app.member_rows()[0].1,
+            TeamState::Failed,
+            "AgentEnd must not clear the failure"
+        );
+
+        // The next run clears it.
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentStart));
+        assert_eq!(
+            app.member_rows()[0].1,
+            TeamState::Running,
+            "a fresh run clears the failure"
+        );
+    }
+
+    #[test]
+    fn an_idle_error_does_not_fail_a_member() {
+        let mut app = App::new();
+        let id = SessionId::agent("w1");
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: id.clone(),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+
+        // No `AgentStart`: a command-reply error (SetModel/Compact/…) must not
+        // mark the member failed.
+        app.handle(AppEvent::Agent(
+            id,
+            AgentEvent::Error {
+                message: "no such model".into(),
+            },
+        ));
+        assert_eq!(app.member_rows()[0].1, TeamState::Idle);
+    }
+
+    #[test]
     fn the_team_command_lists_the_member_surfaces() {
         // No members reads as "(no team)".
         let mut app = App::new();
@@ -3950,6 +4042,7 @@ mod tests {
         assert_eq!(TeamState::Idle.glyph(), "○");
         assert_eq!(TeamState::Running.glyph(), "●");
         assert_eq!(TeamState::Done.glyph(), "✓");
+        assert_eq!(TeamState::Failed.glyph(), "✗");
     }
 
     #[test]
