@@ -55,6 +55,9 @@ const SIDEBAR_MIN_WIDTH: u16 = 80;
 /// teammate is running.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
+    // Start every frame from an empty hit map: a closed sidebar / a resize must
+    // never leave stale geometry behind (the app holds no layout constants).
+    app.clear_hit_map();
     // PHASE 2 — the docked left SIDEBAR. When Ctrl-B has it open AND the
     // terminal is wide enough, split the WHOLE area horizontally into
     // [sidebar | bands] and render the existing band stack in the right
@@ -429,6 +432,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
+    // Publish the transcript viewport for hit-testing: `start` is the global
+    // line at the band's top row.
+    app.set_transcript_hit(area, start);
     frame.render_widget(Paragraph::new(window), area);
 }
 
@@ -1253,7 +1259,7 @@ fn state_style(state: TeamState) -> Style {
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
 /// - Todos   → [`App::last_todos`] (`☑`/`☐` + `content`, header `done/total`).
 /// - Changes → [`App::changes`] (`path · +added −removed`).
-fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1262,11 +1268,21 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 
     // ---- Team -----------------------------------------------------------
     lines.push(Line::from(Span::styled("Team", dim())));
-    let rows = app.member_rows();
-    if rows.is_empty() {
+    // Publish each drawn member row for hit-testing. `member_rows_indexed`
+    // borrows `app` immutably; that borrow ends before `set_sidebar_hit` needs
+    // `&mut app`, so iterate the owned rows BY VALUE and collect `(index, y)`.
+    let indexed = app.member_rows_indexed();
+    let mut members: Vec<(usize, u16)> = Vec::new();
+    if indexed.is_empty() {
         lines.push(Line::from(Span::styled("  —", dim())));
     }
-    for (label, state, focused, action) in rows {
+    let bottom = area.y.saturating_add(area.height);
+    let mut y = area.y + 1; // the "Team" header owns area.y
+    for (idx, label, state, focused, action) in indexed {
+        if y < bottom {
+            members.push((idx, y));
+        }
+        y += 1;
         // `  ● explorer *  read a.rs` — glyph colored by state, the live
         // action dim, `*` marks the focused surface. A per-member elapsed is
         // not exposed, so the focused row carries the run elapsed instead.
@@ -1282,6 +1298,8 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
         let tail = action.map(|a| format!("  {a}")).unwrap_or_default();
         lines.push(clipped_row(vec![(head, state_style(state)), (tail, dim())], w));
     }
+
+    app.set_sidebar_hit(area, members);
 
     // ---- Todos ----------------------------------------------------------
     match app.last_todos() {
@@ -1441,7 +1459,7 @@ pub(crate) fn code_style() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, AppEvent, Key};
+    use crate::app::{App, AppEvent, Key, MouseEvent, MouseKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wcode_harness::protocol::SessionId;
@@ -2357,6 +2375,21 @@ mod tests {
     /// The transcript rows that begin with the selection bar.
     fn barred(text: &str) -> Vec<&str> {
         text.lines().filter(|l| l.starts_with('▌')).collect()
+    }
+
+    #[test]
+    fn click_a_block_frame_shows_the_bar_on_the_clicked_block() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+        let _ = render(&mut app, 60, 20); // publish the hit map
+        // Read the band geometry back rather than hardcoding a row: click the
+        // first visible row of the transcript band.
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        let row = hit.rect.y;
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 2, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 2, row }));
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(!barred(&text).is_empty(), "the clicked block carries the bar:\n{text}");
     }
 
     #[test]

@@ -14,7 +14,9 @@ use wcode_harness::stats::session_stats;
 use wcode_harness::protocol::{Request, SessionId};
 
 // The per-block render cache stores `ui`'s own output type (`Line`) so a hit hands
-// the renderer ready lines; `Line` is the one render-backend type app.rs names.
+// the renderer ready lines. `Rect` joins it for the mouse hit map
+// (docs/tui-mouse-plan.md); both are render-backend types app.rs names deliberately.
+use ratatui::layout::Rect;
 use ratatui::text::Line;
 
 use crate::{SurfaceInfo, TeamState};
@@ -58,6 +60,27 @@ pub enum Key {
     BackTab,
 }
 
+/// Which button gesture arrived — the app's own vocabulary, decoupled from
+/// crossterm. Only the three gestures the plan acts on exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseKind {
+    /// Button pressed (candidate click, or the start of a drag).
+    Down,
+    /// Button held and the pointer moved (a drag in progress).
+    Drag,
+    /// Button released — the end of a click OR of a drag.
+    Up,
+}
+
+/// A positioned mouse gesture: what happened and the terminal cell it happened
+/// on (`col` = x, `row` = y, both 0-based from the frame's top-left).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub kind: MouseKind,
+    pub col: u16,
+    pub row: u16,
+}
+
 /// Everything the app can react to, from any source.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -69,6 +92,10 @@ pub enum AppEvent {
     Tick,
     /// The terminal was resized; force a redraw and re-measure the scroll.
     Resize,
+    /// A positioned click/drag/release. Routed to `App::on_mouse` and — unlike a
+    /// `Key` — NOT gated by `Mode` (a mouse is not a key; it works in Input and
+    /// Browse alike, plan §"Locked decisions" #3).
+    Mouse(MouseEvent),
 }
 
 /// A side effect the event loop must perform — the app's only outward channel.
@@ -1447,6 +1474,44 @@ enum ViewEdge {
     Bottom,
 }
 
+/// Screen geometry the draw pass publishes for hit-testing — the app holds no
+/// layout constants. CLEARED at the top of every `ui::draw`, so a closed sidebar
+/// / a resize never leaves stale geometry.
+#[derive(Default)]
+pub(crate) struct HitMap {
+    /// The transcript viewport, when one was drawn this frame. `None` after the
+    /// clear until `draw_transcript` republishes it.
+    pub(crate) transcript: Option<TranscriptHit>,
+    /// The docked sidebar, when it was drawn this frame. `None` when the sidebar
+    /// is closed, the terminal is narrower than `SIDEBAR_MIN_WIDTH`, or before
+    /// the sidebar is drawn.
+    pub(crate) sidebar: Option<SidebarHit>,
+}
+
+/// The transcript viewport as drawn: where it sits, which global line is its top
+/// row, and the plain text of each visible row (index 0 = the top row). The app
+/// maps a click cell to a global line/char through these.
+pub(crate) struct TranscriptHit {
+    /// The transcript band's rect (from `Layout`). `row - rect.y` is the row
+    /// within the window; a click outside `rect` is not a transcript hit.
+    pub(crate) rect: Rect,
+    /// The global line index drawn at `rect.y` — the SAME `start` the bar pass
+    /// uses: `total - scroll - height`. Global line = `top_line + (row - rect.y)`.
+    pub(crate) top_line: usize,
+}
+
+/// The open sidebar as drawn: its rect and each member row's `(surface index, y)`.
+/// A click on a row focuses that surface index via `set_focus`.
+pub(crate) struct SidebarHit {
+    /// The sidebar band's rect. A click outside it is not a sidebar hit; a click
+    /// inside but not on a member row is a no-op.
+    pub(crate) rect: Rect,
+    /// `(surface index, screen y)` per drawn member row, in draw order. The index
+    /// is a real index into `App::surfaces` — recovered by `member_rows_indexed`
+    /// (the plain `member_rows` drops it).
+    pub(crate) members: Vec<(usize, u16)>,
+}
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 pub struct App {
     /// One entry per conversation surface. Index 0 is the root; the rest are
@@ -1507,6 +1572,16 @@ pub struct App {
     /// flips this bit and marks dirty, never touching a surface. The renderer
     /// keys its horizontal split on `App::sidebar()` (see `ui::draw`).
     sidebar: bool,
+    /// Screen geometry the last `ui::draw` published for hit-testing. Cleared at
+    /// the top of each frame; read by `on_mouse`.
+    pub(crate) hit: HitMap,
+    /// The cell the button last went down on, while a gesture is in flight. `None`
+    /// when no button is held. `Down` sets it; `Up` compares it to `mouse_focus`
+    /// to decide click vs drag, then clears it.
+    mouse_down: Option<(u16, u16)>,
+    /// The latest cell a mouse gesture reached (`Down`/`Drag`). Compared to
+    /// `mouse_down` on `Up` to tell a click (same cell) from a drag (moved).
+    mouse_focus: (u16, u16),
 }
 
 impl Default for App {
@@ -1546,6 +1621,9 @@ impl App {
             // OFF by default: the base three-band layout is byte-identical
             // until the user hits Ctrl-B.
             sidebar: false,
+            hit: HitMap::default(),
+            mouse_down: None,
+            mouse_focus: (0, 0),
         }
     }
 
@@ -1766,24 +1844,9 @@ impl App {
     /// (stable: surface order breaks ties). The action is the current run's
     /// live tool label, if any (§3).
     pub fn member_rows(&self) -> Vec<(&str, TeamState, bool, Option<&str>)> {
-        let mut rows: Vec<_> = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_root)
-            .map(|(i, s)| {
-                (
-                    s.label.as_str(),
-                    s.state(),
-                    i == self.focus,
-                    s.last_action.as_deref(),
-                    s.last_action_at,
-                )
-            })
-            .collect();
-        rows.sort_by_key(|(_, state, _, _, at)| (*state != TeamState::Running, std::cmp::Reverse(at.unwrap_or(0))));
-        rows.into_iter()
-            .map(|(label, state, focused, action, _)| (label, state, focused, action))
+        self.member_rows_indexed()
+            .into_iter()
+            .map(|(_, label, state, focused, action)| (label, state, focused, action))
             .collect()
     }
 
@@ -2167,10 +2230,148 @@ impl App {
         surface.scroll = target.min(surface.max_scroll);
     }
 
+    /// Drop the published hit map. Called at the TOP of every `ui::draw` so a
+    /// closed sidebar / a resize never leaves stale geometry. The ONLY clearing
+    /// point; nothing else may leave a stale hit behind.
+    pub(crate) fn clear_hit_map(&mut self) {
+        self.hit = HitMap::default();
+    }
+
+    /// Publish the transcript viewport for hit-testing (called by
+    /// `draw_transcript` after it measured and sliced the window): the band's
+    /// rect and the global line at its top row.
+    pub(crate) fn set_transcript_hit(&mut self, rect: Rect, top_line: usize) {
+        self.hit.transcript = Some(TranscriptHit { rect, top_line });
+    }
+
+    /// Publish the open sidebar for hit-testing (called by `draw_sidebar`).
+    /// `members` is `(surface index, y)` per drawn member row.
+    pub(crate) fn set_sidebar_hit(&mut self, rect: Rect, members: Vec<(usize, u16)>) {
+        self.hit.sidebar = Some(SidebarHit { rect, members });
+    }
+
+    /// Dispatch a positioned mouse event. NOT gated by `Mode` (plan #3): the wheel
+    /// arms already live in `on_key`/`on_browse_key` and are untouched; only
+    /// Down/Drag/Up reach here. A modal — the help/picker overlay or the browse
+    /// search prompt — owns the screen, so a mouse behind it is ignored (mirrors
+    /// `on_key`'s gate).
+    fn on_mouse(&mut self, m: MouseEvent) {
+        if self.overlay.is_some() || self.search.is_some() {
+            return;
+        }
+        match m.kind {
+            MouseKind::Down => self.on_mouse_down(m.col, m.row),
+            MouseKind::Drag => self.on_mouse_drag(m.col, m.row),
+            MouseKind::Up => self.on_mouse_up(),
+        }
+    }
+
+    /// Button down. Records the cell; a hit on a sidebar member row focuses that
+    /// surface and stops (the sidebar has no drag semantics). A miss is a no-op.
+    fn on_mouse_down(&mut self, col: u16, row: u16) {
+        self.mouse_down = Some((col, row));
+        self.mouse_focus = (col, row);
+        if let Some(idx) = self.sidebar_member_at(row, col) {
+            self.set_focus(idx);
+            self.mouse_down = None; // no drag follows a focus click
+        }
+    }
+
+    /// Pointer moved with the button held: remember the latest cell so `Up` can
+    /// tell a drag (moved) from a click (same cell). A no-op with no button down.
+    fn on_mouse_drag(&mut self, col: u16, row: u16) {
+        if self.mouse_down.is_some() {
+            self.mouse_focus = (col, row);
+        }
+    }
+
+    /// Button released. The same cell as the `Down` is a CLICK (select the block
+    /// under it); a moved cell is a DRAG (handled in the text-selection pass). A
+    /// drag never selects a block; a click never copies (plan #4). The `Up` cell
+    /// is not consulted — `mouse_focus` already carries the latest gesture cell.
+    fn on_mouse_up(&mut self) {
+        let down = self.mouse_down.take();
+        let moved = down.is_some_and(|d| d != self.mouse_focus);
+        if !moved
+            && down.is_some()
+            && let Some(i) = self.block_at(self.mouse_focus.1, self.mouse_focus.0)
+        {
+            self.select_block(i);
+        }
+    }
+
+    /// The global committed-block index whose recorded range contains the clicked
+    /// global line, or `None`. A click on the live (streaming) block or a blank
+    /// separator finds no block (the live block is never in `ranges`).
+    fn block_at(&self, row: u16, col: u16) -> Option<usize> {
+        let hit = self.hit.transcript.as_ref()?;
+        if !hit.rect.contains((col, row).into()) {
+            return None;
+        }
+        let line = hit.top_line + (row - hit.rect.y) as usize;
+        self.focused().ranges.iter().position(|r| r.contains(&line))
+    }
+
+    /// Select committed block `i` in browse: enter `Browse` if not already (plan
+    /// #5), set `selected`, and bring it into view. The index-targeting twin of
+    /// `enter_browse`.
+    fn select_block(&mut self, i: usize) {
+        if i >= self.focused().transcript.len() {
+            return;
+        }
+        self.mode = Mode::Browse;
+        self.completion = None;
+        self.focused_mut().selected = Some(i);
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
+    /// The surface index of the sidebar member row at screen `(row, col)` (inside
+    /// the published sidebar rect), or `None`.
+    fn sidebar_member_at(&self, row: u16, col: u16) -> Option<usize> {
+        let hit = self.hit.sidebar.as_ref()?;
+        if !hit.rect.contains((col, row).into()) {
+            return None;
+        }
+        hit.members.iter().find(|(_, y)| *y == row).map(|(idx, _)| *idx)
+    }
+
+    /// The non-root surfaces as `(index, label, state, focused, action)` — the
+    /// index-carrying sibling of `member_rows` (which drops the index and now
+    /// delegates here). Same ordering: active-first, then by action recency,
+    /// stable on surface order.
+    pub(crate) fn member_rows_indexed(&self) -> Vec<(usize, &str, TeamState, bool, Option<&str>)> {
+        let mut rows: Vec<_> = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_root)
+            .map(|(i, s)| {
+                (
+                    i,
+                    s.label.as_str(),
+                    s.state(),
+                    i == self.focus,
+                    s.last_action.as_deref(),
+                    s.last_action_at,
+                )
+            })
+            .collect();
+        rows.sort_by_key(|(_, _, state, _, _, at)| {
+            (*state != TeamState::Running, std::cmp::Reverse(at.unwrap_or(0)))
+        });
+        rows.into_iter()
+            .map(|(i, label, state, focused, action, _)| (i, label, state, focused, action))
+            .collect()
+    }
+
     /// Apply one event. Pure state transition; sets [`App::dirty`] on a change.
     pub fn handle(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.on_key(key),
+            // A mouse is not a key: routed directly, so `on_key`'s overlay/browse
+            // gates never see it (a mouse works in both modes — plan #3).
+            AppEvent::Mouse(m) => self.on_mouse(m),
             AppEvent::Paste(text) => {
                 // A modal owns the input: a paste must not edit the buffer.
                 // With the browse search prompt up (not an `Overlay`, so its
@@ -4539,6 +4740,39 @@ mod tests {
             },
         ]);
         (app, root_id, member)
+    }
+
+    /// A `Rect` for the hit-map setters.
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn click_a_block_enters_browse_and_selects_it() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("one"), assistant("two")]);
+        app.set_block_ranges(vec![0..1, 2..3]); // two committed blocks
+        app.set_transcript_hit(rect(0, 0, 40, 10), 0);
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 2, row: 0 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 2, row: 0 }));
+        assert_eq!(app.mode(), Mode::Browse, "a click enters browse");
+        assert_eq!(app.selected(), Some(0), "the clicked block is selected");
+    }
+
+    #[test]
+    fn click_a_sidebar_row_focuses_the_surface() {
+        let (mut app, _root, _member) = two_surfaces();
+        app.set_sidebar_hit(rect(0, 0, 30, 10), vec![(1, 1)]); // member 1 at y = 1
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 3, row: 1 }));
+        assert_eq!(app.focus(), 1, "the clicked member is focused");
+    }
+
+    #[test]
+    fn sidebar_click_is_ignored_when_closed_or_narrow() {
+        let (mut app, _root, _member) = two_surfaces();
+        app.clear_hit_map(); // closed/narrow: `draw_sidebar` published nothing
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 3, row: 1 }));
+        assert_eq!(app.focus(), 0, "the focus is unchanged");
     }
 
     #[test]

@@ -4,10 +4,10 @@
 //! [`Key`] instead, so it stays terminal-free.
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use crate::app::{AppEvent, Key};
+use crate::app::{AppEvent, Key, MouseEvent as AppMouseEvent, MouseKind};
 
 /// Translate one crossterm event into zero or more app events.
 pub fn translate(event: Event) -> Vec<AppEvent> {
@@ -16,10 +16,7 @@ pub fn translate(event: Event) -> Vec<AppEvent> {
         Event::Key(k) if k.kind != KeyEventKind::Release => {
             translate_key(k).map(AppEvent::Key).into_iter().collect()
         }
-        Event::Mouse(mouse) => translate_mouse(mouse)
-            .map(AppEvent::Key)
-            .into_iter()
-            .collect(),
+        Event::Mouse(mouse) => translate_mouse(mouse).into_iter().collect(),
         Event::Paste(text) => vec![AppEvent::Paste(text)],
         Event::Resize(_, _) => vec![AppEvent::Resize],
         _ => Vec::new(),
@@ -61,12 +58,30 @@ fn translate_key(k: KeyEvent) -> Option<Key> {
     })
 }
 
-/// The mouse has no click targets (P3 panels will add them); only the wheel
-/// matters — it scrolls the transcript.
-fn translate_mouse(m: MouseEvent) -> Option<Key> {
+/// The wheel still scrolls the transcript; a Down/Drag/Up now carries its
+/// position so the app can hit-test a click (a block, a sidebar row) or a drag
+/// (transcript text). Only the LEFT button maps — a right/middle gesture is
+/// ignored, so it can never select or enter Browse.
+fn translate_mouse(m: MouseEvent) -> Option<AppEvent> {
     match m.kind {
-        MouseEventKind::ScrollUp => Some(Key::ScrollUp),
-        MouseEventKind::ScrollDown => Some(Key::ScrollDown),
+        MouseEventKind::ScrollUp => Some(AppEvent::Key(Key::ScrollUp)),
+        MouseEventKind::ScrollDown => Some(AppEvent::Key(Key::ScrollDown)),
+        MouseEventKind::Down(MouseButton::Left) => Some(AppEvent::Mouse(AppMouseEvent {
+            kind: MouseKind::Down,
+            col: m.column,
+            row: m.row,
+        })),
+        MouseEventKind::Drag(MouseButton::Left) => Some(AppEvent::Mouse(AppMouseEvent {
+            kind: MouseKind::Drag,
+            col: m.column,
+            row: m.row,
+        })),
+        MouseEventKind::Up(MouseButton::Left) => Some(AppEvent::Mouse(AppMouseEvent {
+            kind: MouseKind::Up,
+            col: m.column,
+            row: m.row,
+        })),
+        // `Moved` (no button) and any non-left button stay ignored, as before.
         _ => None,
     }
 }
@@ -84,6 +99,16 @@ mod tests {
             kind,
             column: 1,
             row: 1,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// Like [`mouse`], but carrying a position — for the positioned-events test.
+    fn mouse_at(kind: MouseEventKind, col: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
             modifiers: KeyModifiers::NONE,
         })
     }
@@ -129,8 +154,32 @@ mod tests {
             keys(translate(mouse(MouseEventKind::ScrollDown))),
             vec![Key::ScrollDown]
         );
-        // No click targets yet: a click must not reach the app at all.
+        // `Moved` (no button) still carries nothing; the wheel path is unchanged.
         assert!(translate(mouse(MouseEventKind::Moved)).is_empty());
+    }
+
+    #[test]
+    fn clicks_carry_their_position_and_the_wheel_stays_a_scroll() {
+        for (kind, want) in [
+            (MouseEventKind::Down(MouseButton::Left), MouseKind::Down),
+            (MouseEventKind::Drag(MouseButton::Left), MouseKind::Drag),
+            (MouseEventKind::Up(MouseButton::Left), MouseKind::Up),
+        ] {
+            match translate(mouse_at(kind, 7, 4)).as_slice() {
+                [AppEvent::Mouse(m)] => {
+                    assert_eq!(m.kind, want);
+                    assert_eq!((m.col, m.row), (7, 4));
+                }
+                other => panic!("expected a positioned Mouse event, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            keys(translate(mouse_at(MouseEventKind::ScrollUp, 7, 4))),
+            vec![Key::ScrollUp]
+        );
+        assert!(translate(mouse_at(MouseEventKind::Moved, 7, 4)).is_empty());
+        // Only the LEFT button: a right-button press is ignored.
+        assert!(translate(mouse_at(MouseEventKind::Down(MouseButton::Right), 7, 4)).is_empty());
     }
 
     #[test]
