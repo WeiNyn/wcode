@@ -37,6 +37,7 @@ the boxes as each task completes and keep the status table current.
 | 29 | Stream truncation ends a turn silently (no terminal record) | ☑ done — see [stream-truncation-plan.md](stream-truncation-plan.md) |
 | 30 | TUI markdown maturity: per-block render cache + parser features (see [`tui-markdown-plan.md`](tui-markdown-plan.md)) | ☐ planned |
 | 31 | Review-driven cleanup: TUI status bugs, dead code, event visibility, tool dedup, `main()` split | ☑ done — `3b28eb5`/`563ed4c`/`61ebf66`/`8fa0b03`/`50b2dad`/`edc1782`; the second-layer review found one `main()`-split deviation, folded into `edc1782`; see [review-cleanup.md](review-cleanup.md) |
+| 32 | TUI info/UX: richer status, per-tool timing, docked sidebar | ☑ done — `7fea5c5` (harness tool duration), `08843bc` (tool timing), `c31fbf0` (elapsed + changes + todos chips), `5464318` (cwd + git branch), `fa88406` (docked sidebar, `Ctrl-B`); see [tui-design.md](tui-design.md) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

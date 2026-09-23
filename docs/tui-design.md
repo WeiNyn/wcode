@@ -150,7 +150,9 @@ while streaming; scroll-lock when the user scrolls up (P1). At startup the loop
 asks `GetHistory` and `App::seed_history` rebuilds the transcript from it, so a
 resumed session (or a reconnecting socket client) opens on its earlier turns
 instead of an empty pane — a dim `⋯ N earlier message(s)` divider marks the
-replayed prefix.
+replayed prefix. A completed tool line carries its wall-clock duration —
+`✓ read · 128 lines · 12ms` — from `ToolExecutionEnd::duration_ms` (UI-only,
+like the diff and path).
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
 continuation lines align under the text, as in draft B's `···` block). The
@@ -177,16 +179,29 @@ beside the sessions. (Shift-Enter needs a terminal that reports the modifier —
 kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
 **Status** — one dim "chrome" row, full width, left-aligned:
-`model · effort · tokens · session · state`, where tokens is an 8-cell gauge
-colored by fill (green/yellow/red) plus `used / limit` (e.g. `██████░░ 150k / 200k`,
-shown once a turn has reported usage) and state is `⏸ idle` / `⠹ running`. The
-state glyph is the single source of "am I running"; the spinner also rides the
-active tool line, so a long tool never looks frozen. Committed assistant
-messages are rendered as markdown (headings, bullets, fenced code, tables with
-alignment, inline `code`/`**bold**`), live and committed; long words and table
-cells wrap rather than overflow.
-When narrow, fields drop least-important-first: **session, then effort, then
-tokens** (model and state always stay). The session id is shortened to 8 chars.
+`model · [⏻ plan] · effort · [gauge] used/limit · session · ±N files +a −r · ☑ d/t · repo ⎇ branch* · [▤ browse] · state · [↑ N]`,
+where tokens is an 8-cell gauge colored by fill plus `used / limit`; the changes
+chip is the run's changeset (`± 3 files +42 −7`); the todos chip is `☑ done/total`;
+`repo` is the cwd and `branch*` the git branch with a `*` dirty marker (both
+injected at startup by the composition root); and state is `⏸ idle` /
+`⠹ running 3.1s` — the run elapsed is injected by the event loop on each tick
+(the reducer stays pure). The state glyph is the single source of "am I running";
+the spinner also rides the active tool line, so a long tool never looks frozen.
+Committed assistant messages are rendered as markdown (headings, bullets, fenced
+code, tables with alignment, inline `code`/`**bold**`), live and committed; long
+words and table cells wrap rather than overflow.
+When narrow, fields drop least-important-first: **cwd/branch, then todos, then
+changes, then session, then effort, then tokens** (model, plan and state always
+stay). The session id is shortened to 8 chars.
+
+**Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
+≥ 80 cols; below that the layout is untouched), **off by default** so the base
+three bands stay byte-identical while it is closed. It stacks four dim-headed
+sections: **Team** (each member's state glyph, label, a `*` on the focused
+surface, and its live action), **Todos** (`☑`/`☐` + text, header `done/total`),
+**Changes** (`path · +added −removed`), and **Context** (the gauge). An empty
+section keeps its header with a dim `—`; rows clip to the panel and never wrap.
+The modal overlay floats over the whole terminal so it covers the panel.
 
 **Keys** — `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Del` forward-delete · `Up`/`Down` history ·
 `Ctrl-A`/`Ctrl-E` move to the start/end of the input · `Ctrl-W` delete the previous word,
@@ -198,7 +213,7 @@ transcript, `↑ N` in the status while scrolled ·
 reply (OSC-52) · `Ctrl-T` expands/collapses every tool's output (a collapsed tool
 shows a 4-line preview, a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface, `Alt-1..9` jumps to the Nth · `Ctrl-B`
-toggles the team sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
+docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
 (a `▌` selection over the committed blocks — `j`/`k` next/prev, `g`/`G` first/last,
 `PgUp`/`PgDn` by a page, the wheel scrolls the view), where `Esc`/`q`/`Ctrl-G`
@@ -236,7 +251,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
   expandable. Lean inline at P0; thinking still stays inline. Tool *output* is now
   collapsible (`Ctrl-T`, or one block at a time in browse mode) — see [`tui-polish-plan.md`](tui-polish-plan.md).
 - **Timestamps** on turns: lean no.
-- **Header/title bar** (session, cwd): lean no — the status line carries it.
+- **Header/title bar**: decided **no** — the status line carries session/cwd/branch, and `Ctrl-B` docks the sidebar for the rest.
 - **Block separation**: blank between *roles* (drafted) vs between every block.
 - **Gutter vs flat**: gutter (drafted) — it is the main thing the TUI buys over
   the line loop. Revisit only if it costs width on 80-col terminals.
