@@ -268,6 +268,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::TurnEnd { .. } => "turn_end",
         AgentEvent::Error { .. } => "error",
         AgentEvent::Compaction { .. } => "compaction",
+        AgentEvent::CompactionSkipped { .. } => "compaction_skipped",
         AgentEvent::Retrying { .. } => "retrying",
         AgentEvent::MessageReceived { .. } => "message_received",
         AgentEvent::Ack => "ack",
@@ -1615,6 +1616,70 @@ async fn auto_compacts_when_over_the_ceiling() {
         calls[1].ctx[0].as_text().contains("CONDENSED"),
         "the request carries the summary: {:?}",
         calls[1].ctx[0]
+    );
+}
+
+/// A summarizer failure is non-fatal: the run surfaces a `CompactionSkipped`
+/// (never an `AgentEvent::Error`), leaves the context un-summarized, and still
+/// proceeds to a normal `AgentEnd`.
+#[tokio::test]
+async fn a_failed_auto_compaction_is_non_fatal() {
+    let rec = Recorder::default();
+    // 1st stream call is the summarizer and fails; 2nd is the turn itself.
+    rec.push(vec![LlmStreamEvent::Error {
+        message: "summarizer 500".into(),
+        fatal: true,
+    }]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("real reply".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+    let TestSetup { mut cfg, .. } = setup(fake_stream_fn(&rec), vec![], HooksSet::default());
+    cfg.compaction = CompactionPolicy {
+        budget: Some(10),
+        min_remaining: 0,
+        keep_recent_tokens: 1, // keep only the newest message
+        keep_recent_turns: 0,
+        ..Default::default()
+    };
+
+    // Seed a turn whose assistant reported a context far over the ceiling.
+    let earlier = AgentMessage::Assistant {
+        content: vec![ContentBlock::Text { text: "earlier".into() }],
+        stop_reason: StopReason::Stop,
+        usage: Some(wcode_harness::message::Usage {
+            input_tokens: 9_999,
+            ..Default::default()
+        }),
+        model: None,
+    };
+    let mut ctx = vec![AgentMessage::user_text("first"), earlier];
+
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop, "the run still completes");
+    let t = tags(&events);
+    assert!(
+        t.contains(&"compaction_skipped"),
+        "the miss is surfaced: {t:?}"
+    );
+    assert!(
+        !t.contains(&"error"),
+        "a best-effort miss must not be an Error: {t:?}"
+    );
+    assert_eq!(*t.last().unwrap(), "agent_end");
+    let reason = events.iter().find_map(|e| match e {
+        AgentEvent::CompactionSkipped { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    assert_eq!(reason, Some("summarizer 500"));
+    // The failed compaction left the context intact (the prefix survives).
+    assert!(
+        ctx.iter().any(|m| m.as_text().contains("earlier")),
+        "a failed compaction leaves the context un-summarized: {ctx:?}"
     );
 }
 

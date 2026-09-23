@@ -1153,6 +1153,14 @@ impl Surface {
                 self.push_block(Block::Notice(render_todos(&todos)));
                 true
             }
+            AgentEvent::CompactionSkipped { reason } => {
+                // Non-fatal: a best-effort auto-compaction miss. Surface it as a
+                // Notice but do NOT set `self.failed` — that flag is set only on a
+                // run-failure `Error` while running (app.rs:tT4I8), so routing
+                // this here would falsely mark the run failed.
+                self.push_block(Block::Notice(format!("⋯ compaction skipped: {reason}")));
+                true
+            }
             AgentEvent::Compaction { summarized, kept } => {
                 self.push_block(Block::Notice(format!(
                     "⋯ compacted {summarized} messages, kept {kept}"
@@ -5201,6 +5209,9 @@ mod tests {
             vec![Action::Copy("⋯ compacted 3 messages, kept 1".into())]
         );
 
+        // CompactionSkipped rides the same Notice seam as Compaction (a
+        // non-fatal, best-effort miss). The "does not mark failed" contract is
+        // covered by `compaction_skipped_notices_and_does_not_mark_failed`.
         // Error
         let mut app = App::new();
         app.handle(AppEvent::Agent(
@@ -5212,6 +5223,55 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         app.handle(AppEvent::Key(Key::Char('y')));
         assert_eq!(app.take_actions(), vec![Action::Copy("boom".into())]);
+    }
+
+    #[test]
+    fn compaction_skipped_notices_and_does_not_mark_failed() {
+        // `failed` lives on the private `Surface`, so observe it through the same
+        // member-state seam `a_run_failure_marks_the_member_failed_until_the_next_run`
+        // uses.
+        let mut app = App::new();
+        let id = SessionId::agent("w1");
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: id.clone(),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
+        assert_eq!(app.member_rows()[0].1, TeamState::Running);
+
+        app.handle(AppEvent::Agent(
+            id,
+            AgentEvent::CompactionSkipped {
+                reason: "summarizer 500".into(),
+            },
+        ));
+
+        // Visible as a Notice: focus the member and copy its last block.
+        app.set_focus(1);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Copy("⋯ compaction skipped: summarizer 500".into())]
+        );
+
+        // …and CRUCIALLY the run is NOT failed: contrast the `Error` arm, which
+        // sets `failed` while running (app.rs:1139).
+        assert_eq!(
+            app.member_rows()[0].1,
+            TeamState::Running,
+            "a best-effort compaction miss must not fail the run"
+        );
     }
 
     #[test]

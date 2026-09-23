@@ -101,6 +101,18 @@ pub enum AgentEvent {
         summarized: usize,
         kept: usize,
     },
+    /// Best-effort auto-compaction was attempted (the context was near the
+    /// ceiling) but did NOT complete — a summarizer/stream failure. The run
+    /// continues. Deliberately NOT [`AgentEvent::Error`], whose contract is a
+    /// *stream-level* failure: a TUI renders `Error` as a failed run, so routing
+    /// a best-effort compaction miss through it would falsely mark the run
+    /// failed. `reason` is the summarizer's error text, for display only — never
+    /// fed back to the model and never fatal. Purely additive on the wire
+    /// (`{"type":"compaction_skipped","reason":…}`), so
+    /// [`crate::protocol::PROTOCOL_VERSION`] need not bump.
+    CompactionSkipped {
+        reason: String,
+    },
     /// The adapter retried a failed connect after a transient error.
     Retrying {
         attempt: u32,
@@ -260,6 +272,12 @@ mod tests {
                 kept: 2,
             },
             "compaction",
+        );
+        roundtrip(
+            AgentEvent::CompactionSkipped {
+                reason: "summarizer 500".into(),
+            },
+            "compaction_skipped",
         );
         roundtrip(
             AgentEvent::Retrying {

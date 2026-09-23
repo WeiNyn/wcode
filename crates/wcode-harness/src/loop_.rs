@@ -179,8 +179,19 @@ pub async fn run_loop(
                         cfg.session.as_deref_mut(),
                     )
                     .await;
-                    if let Ok(CompactOutcome::Done { summarized, kept, .. }) = outcome {
-                        let _ = sink.send(AgentEvent::Compaction { summarized, kept });
+                    match outcome {
+                        Ok(CompactOutcome::Done { summarized, kept, .. }) => {
+                            let _ = sink.send(AgentEvent::Compaction { summarized, kept });
+                        }
+                        // Nothing to summarize is the quiet happy path — no event.
+                        Ok(CompactOutcome::NothingToDo) => {}
+                        // Best-effort: report the miss and keep the run going.
+                        // Deliberately NOT `AgentEvent::Error` — that would trip
+                        // the TUI `failed` state and the repl run-error line for a
+                        // run that can still proceed.
+                        Err(reason) => {
+                            let _ = sink.send(AgentEvent::CompactionSkipped { reason });
+                        }
                     }
                 }
             }

@@ -1112,6 +1112,10 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
             },
             Some(Command::Compact(arg)) => {
                 match backend.ask(Request::Compact { instructions: arg }).await {
+                    // `/compact` is a request/reply (`Request::Compact`), not the
+                    // auto-compaction stream, so it never answers with
+                    // `CompactionSkipped`; the wildcard below covers any
+                    // unexpected reply.
                     Ok(AgentEvent::Compaction { summarized, kept }) => {
                         println!("compacted: summarized {summarized}, kept {kept} (+ summary)")
                     }
@@ -1327,6 +1331,13 @@ async fn print_events(
                 close_blocks(&mut p, &mut st);
                 eprintln!("{DIM}error: {message}{RESET}");
                 let _ = io::stderr().flush();
+            }
+            AgentEvent::CompactionSkipped { reason } => {
+                // Non-fatal: a best-effort auto-compaction miss. Rendered like the
+                // success line below, never through the `Error` arm above (which
+                // would print the run-error path).
+                close_blocks(&mut p, &mut st);
+                out(&format!("{DIM}⋯ compaction skipped: {reason}{RESET}\n"));
             }
             AgentEvent::Compaction { summarized, kept } => {
                 close_blocks(&mut p, &mut st);
