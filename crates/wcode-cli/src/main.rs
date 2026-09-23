@@ -4,11 +4,12 @@ use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 
 use wcode_harness::actor::SessionActor;
+use wcode_harness::agent::Agent;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
-use wcode_harness::streamfn::rig_stream_fn;
+use wcode_harness::streamfn::{LlmOpts, rig_stream_fn};
 use wcode_protocol::Backend;
 
 mod agents;
@@ -251,8 +252,15 @@ fn discover_skills_for(args: &Args, cfg: &Config, cwd: &std::path::Path) -> Skil
     }
 }
 
-#[tokio::main]
-async fn main() {
+// ---------------------------------------------------------------------------
+// main() phases. Pure decomposition — each helper keeps the exact `eprintln!`
+// text, `std::process::exit` code, and side-effect order of the pre-split
+// `main()`. `std::process::exit` stays inside the helper that used it.
+// ---------------------------------------------------------------------------
+
+/// P1: read `argv` (skip(1)) and parse it, resolving `--help`/`-h`. The only
+/// argv reader; both exits are byte-identical to the pre-split `main`.
+fn parse_cli() -> Args {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
@@ -261,15 +269,21 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let args = match parsed {
+    match parsed {
         Parsed::Help => {
             print!("{USAGE}");
             let _ = std::io::stdout().flush();
             std::process::exit(0);
         }
         Parsed::Args(a) => a,
-    };
+    }
+}
 
+/// P2: resolve the `--config`/`WCODE_CONFIG` overlay, load the config (rescuing
+/// a model-less file when `--model`/`--dump-system-prompt` is set), apply the
+/// flag overrides in order, then derive the `LlmOpts`. `to_llm_opts()` runs
+/// LAST, after every override.
+fn load_config(args: &Args) -> (Config, LlmOpts) {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
     // `--config` / `WCODE_CONFIG`: an overlay file deep-merged over the global
@@ -341,54 +355,61 @@ async fn main() {
     if args.sequential {
         cfg.tools.parallel = Some(false);
     }
-    let mut llm = cfg.to_llm_opts();
+    let llm = cfg.to_llm_opts();
+    (cfg, llm)
+}
 
-    // `--dump-system-prompt`: print the composed prompt (instructions
-    // included) and exit. Needs no endpoint, model, or session.
-    if args.dump_system_prompt {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let mode = if args.no_instructions {
-            Mode::Off
-        } else {
-            cfg.instructions.mode()
-        };
-        let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
-        let skills = discover_skills_for(&args, &cfg, &cwd);
-        println!(
-            "{}",
-            repl::system_prompt(
-                &cfg.tools,
-                &instructions,
-                &skills,
-                &cfg.team,
-                cfg.orchestrator.guidelines.as_deref(),
-                &cwd,
-            )
-        );
-        std::process::exit(0);
-    }
+/// P3a: `--dump-system-prompt` — print the composed prompt (instructions
+/// included) and exit. Needs no endpoint, model, or session. Diverges.
+fn print_system_prompt(args: &Args, cfg: &Config) -> ! {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mode = if args.no_instructions {
+        Mode::Off
+    } else {
+        cfg.instructions.mode()
+    };
+    let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
+    let skills = discover_skills_for(args, cfg, &cwd);
+    println!(
+        "{}",
+        repl::system_prompt(
+            &cfg.tools,
+            &instructions,
+            &skills,
+            &cfg.team,
+            cfg.orchestrator.guidelines.as_deref(),
+            &cwd,
+        )
+    );
+    std::process::exit(0)
+}
 
-    // `--list-models`: resolve against the same base_url/key as chat, print
-    // sorted ids (`*` marks the configured model), exit. No session touched.
-    if args.list_models {
-        match wcode_harness::streamfn::list_models(&llm).await {
-            Ok(ids) if ids.is_empty() => {
-                println!("(no models)");
-            }
-            Ok(ids) => {
-                for id in ids {
-                    let mark = if id == llm.model { "*" } else { " " };
-                    println!("{mark} {id}");
-                }
-            }
-            Err(e) => {
-                eprintln!("error: list models: {e}");
-                std::process::exit(1);
+/// P3b: `--list-models` — resolve against the same base_url/key as chat, print
+/// sorted ids (`*` marks the configured model), exit. No session touched.
+/// Diverges.
+async fn list_models_and_exit(llm: &LlmOpts) -> ! {
+    match wcode_harness::streamfn::list_models(llm).await {
+        Ok(ids) if ids.is_empty() => {
+            println!("(no models)");
+        }
+        Ok(ids) => {
+            for id in ids {
+                let mark = if id == llm.model { "*" } else { " " };
+                println!("{mark} {id}");
             }
         }
-        std::process::exit(0);
+        Err(e) => {
+            eprintln!("error: list models: {e}");
+            std::process::exit(1);
+        }
     }
+    std::process::exit(0)
+}
 
+/// P3c: `--socket` (without `serve`): connect to a session served elsewhere and
+/// drive it (one-shot, remote TUI, or remote line REPL). Every handled path
+/// diverges; returns `false` to fall through when no socket is being handled.
+async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
     // `--socket`: connect to a session served elsewhere. No local session is
     // created — the server owns it.
     #[cfg(unix)]
@@ -420,7 +441,7 @@ async fn main() {
                 std::process::exit(code)
             }
             None => {
-                if choose_tui(&args, is_tty()) {
+                if choose_tui(args, is_tty()) {
                     let status = wcode_tui::Status {
                         model: llm.model.clone(),
                         effort: llm.effort.clone(),
@@ -435,7 +456,7 @@ async fn main() {
                     };
                     let options = wcode_tui::Options {
                         status,
-                        models: wcode_harness::streamfn::list_models(&llm)
+                        models: wcode_harness::streamfn::list_models(llm)
                             .await
                             .unwrap_or_default(),
                         // The server owns the session; a socket client cannot see
@@ -537,7 +558,7 @@ async fn main() {
                         }
                         None => repl::SessionSource::Remote(client),
                     },
-                    llm,
+                    llm.clone(),
                     default_hooks(&cfg.hooks),
                     cfg.tools,
                     cfg.compaction,
@@ -552,7 +573,7 @@ async fn main() {
                     cfg.workspace.digest_cas,
                 )
                 .await;
-                std::process::exit(0);
+                std::process::exit(0)
             }
         }
     }
@@ -561,7 +582,25 @@ async fn main() {
         eprintln!("error: `--socket` is not supported on this platform");
         std::process::exit(2);
     }
+    false
+}
 
+/// P4: the session a run resumes or creates, plus the working dir and the group
+/// state the later phases need.
+struct SessionSetup {
+    cwd: PathBuf,
+    active_group: Option<session_groups::SessionGroup>,
+    resuming_group: bool,
+    session: Option<Session>,
+    context: Vec<AgentMessage>,
+}
+
+/// P4: compute the working dir; on `--resume` resolve and open the session (a
+/// group dir resumes its whole team; a bare flat file resumes as before),
+/// restoring the session's model/effort unless the flag was set; otherwise
+/// create a fresh group unless `--no-session`. Mutates `llm` in place because
+/// the resume branch restores model/effort from the session.
+fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // The active session group, when this run owns one (a fresh root always
     // creates one; a resumed group sets it below). Threaded into the worker
@@ -662,7 +701,33 @@ async fn main() {
             None => (None, Vec::new()),
         },
     };
+    SessionSetup {
+        cwd,
+        active_group,
+        resuming_group,
+        session,
+        context,
+    }
+}
 
+/// P5: the run's discovered context — instructions, skills, hooks, and the
+/// orchestrator wiring (present when `--agents`).
+struct Runtime {
+    instructions: InstructionSet,
+    skills: SkillSet,
+    hooks: wcode_harness::hooks::HooksSet,
+    orchestrator: Option<crate::agents::Orchestrator>,
+}
+
+/// P5: load instructions (`--no-instructions` → `Mode::Off`) and skills; build
+/// the hooks; build the orchestrator when `--agents` (its `WorkerTemplate` needs
+/// `cwd` and `setup.active_group.members_dir`). Then the guards: `--peer` /
+/// `[team]` / non-empty `[orchestrator].guidelines` each `exit(2)` without
+/// `--agents`; register `--peer` remotes; non-unix `--peer` `exit(2)`; register
+/// `[peers]` aliases/remotes; rebuild a resumed group's team; spawn `[team]`
+/// members; print the `team: ...` line.
+fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup) -> Runtime {
+    let cwd = &setup.cwd;
     // Instruction ("reference") files: discover the configured candidates
     // from the working dir up to the repo root (plus the config-dir global
     // file), unless --no-instructions disables it.
@@ -671,8 +736,8 @@ async fn main() {
     } else {
         cfg.instructions.mode()
     };
-    let instructions = load_instructions(&mode, &cwd, config_dir().as_deref());
-    let skills = discover_skills_for(&args, &cfg, &cwd);
+    let instructions = load_instructions(&mode, cwd, config_dir().as_deref());
+    let skills = discover_skills_for(args, cfg, cwd);
 
     let hooks = default_hooks(&cfg.hooks);
     // A2A (opt-in): an orchestrator wiring — the registry + factory + the root's
@@ -680,14 +745,14 @@ async fn main() {
     // (§10.1).
     let orchestrator = args.agents.then(|| {
         let template = crate::agents::WorkerTemplate {
-            system: system_prompt(&cfg.tools, &instructions, &skills, &[], None, &cwd),
+            system: system_prompt(&cfg.tools, &instructions, &skills, &[], None, cwd),
             llm: llm.clone(),
             stream_fn: rig_stream_fn(),
             hooks: hooks.clone(),
             tools: cfg.tools,
             compaction: cfg.compaction,
             working_dir: cwd.clone(),
-            members_dir: active_group.as_ref().map(|g| g.members_dir.clone()),
+            members_dir: setup.active_group.as_ref().map(|g| g.members_dir.clone()),
             digest_cas: cfg.workspace.digest_cas,
             sessions_dir: crate::repl::session_dir(),
         };
@@ -752,7 +817,9 @@ async fn main() {
     // team through the orchestrator's own factory/phonebook (amendment 6a),
     // seeding each member with its full persisted transcript (D1). Deferred to
     // here because `rebuild_team` needs the orchestrator (friction #3).
-    if resuming_group && let (Some(group), Some(o)) = (&active_group, &orchestrator) {
+    if setup.resuming_group
+        && let (Some(group), Some(o)) = (&setup.active_group, &orchestrator)
+    {
         let mut names = Vec::new();
         let mut seeded = 0usize;
         for outcome in session_groups::rebuild_team(group, o, o.id()) {
@@ -777,7 +844,7 @@ async fn main() {
     // the tool allow-list (D14) and registers the name in the phonebook. Only the
     // root orchestrator spawns — a served `--owner` worker does not.
     if args.owner.is_none()
-        && !resuming_group
+        && !setup.resuming_group
         && let Some(o) = &orchestrator
     {
         for member in &cfg.team {
@@ -795,16 +862,47 @@ async fn main() {
             }
         }
     }
-    if args.owner.is_none() && !cfg.team.is_empty() && !resuming_group {
+    if args.owner.is_none() && !cfg.team.is_empty() && !setup.resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
         println!("team: {}", names.join(", "));
     }
+    Runtime {
+        instructions,
+        skills,
+        hooks,
+        orchestrator,
+    }
+}
 
+/// The root's team and guidelines: `&[]`/`None` for a served `--owner` worker,
+/// `cfg.team`/`cfg.orchestrator.guidelines` otherwise. A borrow of `cfg`, so
+/// `dispatch` can pass it alongside the owned `llm`/`rt`/`agent` it moves into
+/// `repl::run`. Copy so both `build_agent_for` and `dispatch` can take it.
+#[derive(Clone, Copy)]
+struct RootCtx<'a> {
+    team: &'a [TeamMember],
+    guidelines: Option<&'a str>,
+}
+
+/// P6: build the root agent from the runtime, session, and context. A session
+/// with `--owner` is a served worker: push the `ReportBack` hook and take the
+/// worker tools (`--owner` without `--agents` → `exit(2)`). `root_team` /
+/// `root_guidelines` are computed in `main` (not here) because `dispatch`
+/// (P8) also needs them.
+fn build_agent_for(
+    args: &Args,
+    cfg: &Config,
+    llm: &LlmOpts,
+    rt: &Runtime,
+    root: RootCtx<'_>,
+    session: Option<Session>,
+    context: Vec<AgentMessage>,
+) -> Agent {
     // A session with `--owner` is a **served worker** (S4-4 reply): it gets a
     // `message` tool bound to its owner and a `ReportBack` hook, and the
     // ownership edge is recorded so its report is permitted.
-    let mut agent_hooks = hooks.clone();
-    let extra_tools = match (&orchestrator, &args.owner) {
+    let mut agent_hooks = rt.hooks.clone();
+    let extra_tools = match (&rt.orchestrator, &args.owner) {
         (Some(o), Some(owner)) => {
             let me = SessionId::agent(args.name.clone().unwrap_or_else(|| "worker".to_string()));
             let (tools, hook) = o.as_worker(me, SessionId::new(owner.clone()));
@@ -818,115 +916,128 @@ async fn main() {
         }
         (None, None) => Vec::new(),
     };
-    // The root orchestrator sees the team; a served worker (`--owner`) does not.
-    let root_team: &[TeamMember] = if args.owner.is_some() { &[] } else { &cfg.team };
-    let root_guidelines: Option<&str> = if args.owner.is_some() {
-        None
-    } else {
-        cfg.orchestrator.guidelines.as_deref()
-    };
-    let agent = build_agent(
+    build_agent(
         AgentSpec {
             llm: llm.clone(),
             hooks: agent_hooks,
             tools: &cfg.tools,
             compaction: cfg.compaction,
-            instructions: &instructions,
-            skills: &skills,
-            team: root_team,
-            guidelines: root_guidelines,
+            instructions: &rt.instructions,
+            skills: &rt.skills,
+            team: root.team,
+            guidelines: root.guidelines,
         },
         session,
         context,
         extra_tools,
         cfg.workspace.digest_cas,
-    );
+    )
+}
 
-    if args.serve {
-        #[cfg(unix)]
-        {
-            let session_id =
-                SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
-            let path = args
-                .socket
-                .clone()
-                .map(PathBuf::from)
-                .unwrap_or_else(default_socket_path);
-            let handle = SessionActor::spawn(agent);
-            if let Some(o) = &orchestrator {
-                o.register_root(handle.clone());
-            }
-            // Serve the root first (labelled by its session id), then the live
-            // team: the registry's local sessions minus the root's own
-            // `agent:orchestrator` alias. The roster stays live, so a worker
-            // spawned at runtime is served without a restart.
-            // The registry the server reads each served session's model from, so
-            // its `Sessions` push names the models it knows (S2).
-            let registry = orchestrator
-                .as_ref()
-                .map(|o| o.registry().clone())
-                .unwrap_or_default();
-            // Record the **root**'s effective model too, keyed by the id the server
-            // pushes first — `session_id`, this agent's own session, *not* the
-            // registry's `agent:orchestrator` alias (a distinct id, never served).
-            // Only with `--agents`: without it there is no orchestrator and the
-            // registry stays a bare `Registry::default()`, so nothing is registered
-            // and a client falls back to its own model (acceptable).
-            if orchestrator.is_some() {
-                registry.set_model(session_id.clone(), llm.model.clone());
-            }
-            let roster = match &orchestrator {
-                Some(o) => live_roster(o.registry(), o.id().clone()),
-                None => tokio::sync::watch::channel(Vec::new()).1,
-            };
-            let ids: Vec<String> = std::iter::once(session_id.to_string())
-                .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
-                .collect();
-            // With `--agents`, the served root can define workers for a peer:
-            // install the handler over this orchestrator's factory. Without it a
-            // `Define` is refused cleanly (the protocol default). The factory
-            // registers into the same registry the roster watches, so a defined
-            // worker is pushed to every client with no extra work.
-            let define = orchestrator.as_ref().map(|o| {
-                let o = o.clone();
-                std::sync::Arc::new(move |args: wcode_protocol::DefineArgs| {
-                    o.spawn_worker(crate::agents::WorkerSpec {
-                        name: args.name,
-                        model: args.model,
-                        system: args.role,
-                        tools: args.tools,
-                        base_url: args.base_url,
-                        api_key: args.api_key,
-                    })
-                    .map(|worker| worker.id)
-                }) as wcode_protocol::DefineHandler
-            });
-            println!("serving session on {}", path.display());
-            println!("serving {} session(s): {}", ids.len(), ids.join(", "));
-            let _ = std::io::stdout().flush();
-            if let Err(e) =
-                wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path)
-                    .await
-            {
-                eprintln!("serve: {e}");
-                std::process::exit(1);
-            }
-            std::process::exit(0);
+/// P7: `serve` — spawn the `SessionActor`, register the root, build the
+/// registry/roster/`define` handler, print the `serving ...` lines, and run
+/// `serve_at`. Non-unix `serve` is `exit(2)`. Diverges.
+async fn serve(
+    args: &Args,
+    llm: &LlmOpts,
+    agent: Agent,
+    orchestrator: &Option<crate::agents::Orchestrator>,
+) -> ! {
+    #[cfg(unix)]
+    {
+        let session_id = SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
+        let path = args
+            .socket
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(default_socket_path);
+        let handle = SessionActor::spawn(agent);
+        if let Some(o) = orchestrator {
+            o.register_root(handle.clone());
         }
-        #[cfg(not(unix))]
-        {
-            eprintln!("error: `serve` is not supported on this platform");
-            std::process::exit(2);
+        // Serve the root first (labelled by its session id), then the live
+        // team: the registry's local sessions minus the root's own
+        // `agent:orchestrator` alias. The roster stays live, so a worker
+        // spawned at runtime is served without a restart.
+        // The registry the server reads each served session's model from, so
+        // its `Sessions` push names the models it knows (S2).
+        let registry = orchestrator
+            .as_ref()
+            .map(|o| o.registry().clone())
+            .unwrap_or_default();
+        // Record the **root**'s effective model too, keyed by the id the server
+        // pushes first — `session_id`, this agent's own session, *not* the
+        // registry's `agent:orchestrator` alias (a distinct id, never served).
+        // Only with `--agents`: without it there is no orchestrator and the
+        // registry stays a bare `Registry::default()`, so nothing is registered
+        // and a client falls back to its own model (acceptable).
+        if orchestrator.is_some() {
+            registry.set_model(session_id.clone(), llm.model.clone());
         }
+        let roster = match orchestrator {
+            Some(o) => live_roster(o.registry(), o.id().clone()),
+            None => tokio::sync::watch::channel(Vec::new()).1,
+        };
+        let ids: Vec<String> = std::iter::once(session_id.to_string())
+            .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
+            .collect();
+        // With `--agents`, the served root can define workers for a peer:
+        // install the handler over this orchestrator's factory. Without it a
+        // `Define` is refused cleanly (the protocol default). The factory
+        // registers into the same registry the roster watches, so a defined
+        // worker is pushed to every client with no extra work.
+        let define = orchestrator.as_ref().map(|o| {
+            let o = o.clone();
+            std::sync::Arc::new(move |args: wcode_protocol::DefineArgs| {
+                o.spawn_worker(crate::agents::WorkerSpec {
+                    name: args.name,
+                    model: args.model,
+                    system: args.role,
+                    tools: args.tools,
+                    base_url: args.base_url,
+                    api_key: args.api_key,
+                })
+                .map(|worker| worker.id)
+            }) as wcode_protocol::DefineHandler
+        });
+        println!("serving session on {}", path.display());
+        println!("serving {} session(s): {}", ids.len(), ids.join(", "));
+        let _ = std::io::stdout().flush();
+        if let Err(e) =
+            wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path).await
+        {
+            eprintln!("serve: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0)
     }
+    #[cfg(not(unix))]
+    {
+        eprintln!("error: `serve` is not supported on this platform");
+        std::process::exit(2)
+    }
+}
 
-    match args.prompt {
+/// P8: dispatch the constructed agent — one-shot (`-p`), the TUI, or the line
+/// REPL. `root_team`/`root_guidelines` borrow `cfg`; `llm`, `rt` and `agent` are
+/// moved into `repl::run`. The one-shot and TUI branches diverge; the line REPL
+/// falls through and returns, exactly as before the split.
+async fn dispatch(
+    args: &Args,
+    cfg: &Config,
+    llm: LlmOpts,
+    rt: Runtime,
+    root: RootCtx<'_>,
+    setup: &SessionSetup,
+    agent: Agent,
+) -> () {
+    match &args.prompt {
         Some(prompt) => {
             let handle = SessionActor::spawn(agent);
-            if let Some(o) = &orchestrator {
+            if let Some(o) = &rt.orchestrator {
                 o.register_root(handle.clone());
             }
-            let code = one_shot(Backend::from(handle), &prompt).await;
+            let code = one_shot(Backend::from(handle), prompt).await;
             // Flush queued fire-and-forget deliveries to any `--peer`/`[peers]`
             // remotes (a `message`/`spawn { to }` sent during the turn) before
             // the runtime is dropped.
@@ -935,7 +1046,7 @@ async fn main() {
             std::process::exit(code)
         }
         None => {
-            if choose_tui(&args, is_tty()) {
+            if choose_tui(args, is_tty()) {
                 let status = wcode_tui::Status {
                     model: llm.model.clone(),
                     effort: llm.effort.clone(),
@@ -953,20 +1064,21 @@ async fn main() {
                         .await
                         .unwrap_or_default(),
                     sessions: session_items(),
-                    tasks: task_items(&orchestrator),
+                    tasks: task_items(&rt.orchestrator),
                     theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
                     remote: false,
                 };
                 let session_path = agent.session_path().map(Path::to_path_buf);
                 let handle = SessionActor::spawn(agent);
-                if let Some(o) = &orchestrator {
+                if let Some(o) = &rt.orchestrator {
                     o.register_root(handle.clone());
                 }
                 // Surface list: the root, then one per team member — only for
                 // the root orchestrator (a served `--owner` worker has no team).
                 let mut surfaces = vec![wcode_tui::SurfaceSpec {
-                    id: orchestrator
+                    id: rt
+                        .orchestrator
                         .as_ref()
                         .map(|o| o.id().clone())
                         .unwrap_or_else(|| SessionId::agent("root")),
@@ -976,23 +1088,24 @@ async fn main() {
                     backend: Backend::from(handle),
                 }];
                 if args.owner.is_none()
-                    && let Some(o) = &orchestrator
+                    && let Some(o) = &rt.orchestrator
                 {
                     // A resumed group's members come from its files; otherwise
                     // from `[team]`. Either way the phonebook resolves each name.
-                    let member_names: Vec<String> = match (resuming_group, &active_group) {
-                        (true, Some(group)) => session_groups::scan_members(group)
-                            .unwrap_or_default()
-                            .iter()
-                            .filter_map(|p| {
-                                p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
-                            })
-                            .collect(),
-                        _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
-                    };
+                    let member_names: Vec<String> =
+                        match (setup.resuming_group, &setup.active_group) {
+                            (true, Some(group)) => session_groups::scan_members(group)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter_map(|p| {
+                                    p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                                })
+                                .collect(),
+                            _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
+                        };
                     for name in member_names {
                         if let Some(backend) = o.worker_backend(&name) {
-                            let model = match (resuming_group, &active_group) {
+                            let model = match (setup.resuming_group, &setup.active_group) {
                                 (true, Some(group)) => {
                                     session_groups::member_spec(group, &name).model
                                 }
@@ -1017,7 +1130,7 @@ async fn main() {
                 // (already in `surfaces`) are not re-emitted. A served worker
                 // (`--owner`) has no team surfaces, so it installs nothing.
                 let new_surfaces = if args.owner.is_none() {
-                    match &orchestrator {
+                    match &rt.orchestrator {
                         Some(o) => {
                             let (tx, rx) =
                                 tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
@@ -1032,7 +1145,7 @@ async fn main() {
                 // Seed the plan and forward live updates: the TUI holds no
                 // `TaskList`, so the composition root maps each snapshot to the
                 // `TaskItem` view type over a feed shaped like `new_surfaces`.
-                let new_tasks = orchestrator.as_ref().map(|o| {
+                let new_tasks = rt.orchestrator.as_ref().map(|o| {
                     let (tx, rx) =
                         tokio::sync::mpsc::unbounded_channel::<Vec<wcode_tui::TaskItem>>();
                     let mut updates = o.tasks().subscribe();
@@ -1105,6 +1218,12 @@ async fn main() {
                     }
                 }
             }
+            let Runtime {
+                instructions,
+                skills,
+                hooks,
+                orchestrator,
+            } = rt;
             repl::run(
                 repl::SessionSource::Local(Box::new(agent)),
                 llm,
@@ -1113,17 +1232,74 @@ async fn main() {
                 cfg.compaction,
                 instructions,
                 skills,
-                root_team,
-                root_guidelines,
+                root.team,
+                root.guidelines,
                 args.config.as_deref(),
                 args.owner.as_deref(),
                 args.name.as_deref(),
                 orchestrator,
                 cfg.workspace.digest_cas,
             )
-            .await
+            .await;
         }
     }
+}
+#[tokio::main]
+async fn main() {
+    // Phase 1: parse argv, resolving `--help`.
+    let args = parse_cli();
+    // Phase 2: load config + apply flag overrides, deriving the `LlmOpts`.
+    let (cfg, mut llm) = load_config(&args);
+    // Phase 3a/3b: the request-reply one-shots that never touch a session.
+    if args.dump_system_prompt {
+        print_system_prompt(&args, &cfg);
+    }
+    if args.list_models {
+        list_models_and_exit(&llm).await;
+    }
+    // Phase 3c: a `--socket` client (no local session). Falls through otherwise.
+    if run_socket_client(&args, &cfg, &llm).await {
+        unreachable!("run_socket_client only returns when it handled nothing");
+    }
+    // Phase 4: resolve/create the session (may restore model/effort into `llm`).
+    let mut setup = load_session(&args, &mut llm);
+    // Phase 5: instructions/skills/hooks + orchestrator wiring.
+    let rt = build_runtime(&args, &cfg, &llm, &setup);
+    // The root orchestrator sees the team; a served worker (`--owner`) does not.
+    let root = RootCtx {
+        team: if args.owner.is_some() { &[] } else { &cfg.team },
+        guidelines: if args.owner.is_some() {
+            None
+        } else {
+            cfg.orchestrator.guidelines.as_deref()
+        },
+    };
+    // Phase 6: build the root agent (moving the session/context out of `setup`
+    // without partially moving the struct, so `dispatch` can still borrow it).
+    let agent = build_agent_for(
+        &args,
+        &cfg,
+        &llm,
+        &rt,
+        root,
+        setup.session.take(),
+        std::mem::take(&mut setup.context),
+    );
+    // Phase 7: `serve` owns the session; it diverges when taken.
+    if args.serve {
+        serve(&args, &llm, agent, &rt.orchestrator).await;
+    }
+    // Phase 8: one-shot / TUI / line REPL. Diverges.
+    dispatch(
+        &args,
+        &cfg,
+        llm,
+        rt,
+        root,
+        &setup,
+        agent,
+    )
+    .await;
 }
 
 /// The config overlay path: the `--config` flag beats `WCODE_CONFIG`; an empty
