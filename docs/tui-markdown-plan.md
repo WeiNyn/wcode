@@ -95,6 +95,25 @@ The **signature is unchanged**; `hard_break`/`used`/`avail` accounting is
 untouched. Accepted: a glued oversized word (`a**verylongbold**c`) breaks
 mid-word between its atoms (no separators).
 
+**1b-ii — syntax highlighting (shipped).** A language-tagged fence is
+token-highlighted with `syntect` (bundled syntaxes + `base16-ocean.dark`), gated
+on `ColorMode::Rgb` — under `Plain`/`Named`/`Indexed` a fence still renders as a
+code block, just with the uniform `code_style()`. Detection (`is_fence`) is split
+from info extraction (`fence_info`, the first whitespace/comma token); the syntax
+set + theme load once in a `OnceLock`, and the theme lookup is **total** (a
+missing key falls back, never panics). Highlighting is **stateful across a
+fence's lines** (`HighlightLines`), so a `Fenced` state — always `Some` inside a
+fence, its highlighter optional — is fed line-by-line; `code_line` stays the
+stateless plain fallback. `render_mode(text, width, mode)` is the color-mode seam
+`render` delegates to. **Dep:** `syntect = { version = "5",
+default-features = false, features = ["default-fancy"] }` (resolved **5.3.0**):
+the pure-Rust `regex-fancy` path with `onig`/`regex-onig` off — **no *second*
+regex engine**, not "no C dep" (the workspace already builds `onig_sys` via
+`tokenizers` ← `rig`). **Follow-up:** 256/16-color quantization for
+`Indexed`/`Named` (today they fall back to uniform, losing per-token color on a
+256-color terminal). **1a interaction: none** — the cache sits above `render`, so
+a block highlights once per `(rev, width)`; the cache amortises the first-use
+load.
 ### Non-goals
 
 - **Mermaid** — deferred, gated stretch (TUI P4): a parser subset (flowchart /
@@ -111,7 +130,8 @@ mid-word between its atoms (no separators).
 - [x] **1b-i — parser block features** (heading levels, ordered lists, blockquotes,
       nested indent, italic). Per-feature tests in `markdown.rs`; the 8 existing
       tests stay green. `tui:` `c9ceba1`.
-- [ ] **1b-ii — syntax highlighting** (`syntect`, language-tagged fences); a new dep.
+- [x] **1b-ii — syntax highlighting.** `syntect` 5.3.0 (`default-fancy`); language-tagged
+      fences, `Rgb`-gated (else uniform `code_style`). New dep. `tui:` `8b80a69`.
 - [x] **1b-iii — preserve source spacing in `wrap`.** Inline-run boundaries no longer
       become spaces; `wrap` carries a per-word "space-before" flag (signature
       unchanged). Regression tests in `markdown.rs`. `tui:` `eb8427f`.
@@ -125,9 +145,10 @@ mid-word between its atoms (no separators).
 - **Revision plumbing — resolved (1a).** A parallel `Vec<u64>` in `Surface`,
   bumped by the reducer, rather than a `rev` field on `Block` — the view type
   stays pure.
-- **`syntect` weight — open (1b-ii).** A `Theme`/`SyntaxSet` set is a sizeable dep +
-  first-use load; confirm it is worth it vs a hand-rolled keyword highlighter for a
-  few languages. Decide at 1b-ii.
+- **`syntect` weight — resolved (1b-ii).** Adopted: `syntect` 5.3.0 with
+  `default-fancy` (no *second* regex engine; `onig` stays off). **Follow-up:**
+  256/16-color quantization for `Indexed`/`Named` (they fall back to uniform
+  today, losing token color on a 256-color terminal).
 
 ## 5. References
 
