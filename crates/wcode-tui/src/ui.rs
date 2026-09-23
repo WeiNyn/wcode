@@ -478,6 +478,9 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     if !expanded && !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
+    if let Some(ms) = tool.duration_ms {
+        spans.push(Span::styled(format!(" · {}", format_ms(ms)), dim()));
+    }
     let mut lines = vec![Line::from(spans)];
 
     // Collapsed: the summary above plus a preview of the rest. Expanded: the
@@ -983,6 +986,18 @@ fn format_scaled(n: u64, unit: u64, suffix: &str) -> String {
         format!("{}{suffix}", n / unit)
     } else {
         format!("{:.1}{suffix}", n as f64 / unit as f64)
+    }
+}
+
+/// `12ms`, `1.2s`, `1m04s` — a duration for the tool header and the running
+/// state glyph, mirroring `format_tokens` / `format_scaled`.
+fn format_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
     }
 }
 
@@ -1551,6 +1566,22 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_tool_shows_its_duration() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionStart {
+            call_id: "t1".into(), name: "read".into(),
+        }));
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionEnd {
+            call_id: "t1".into(), name: "read".into(),
+            output: "128 lines".into(), is_error: false,
+            diff: None, path: None, duration_ms: Some(12),
+        }));
+        let text = buffer_text(&render(&mut app, 60, 12));
+        assert!(text.contains("read"), "name missing: {text}");
+        assert!(text.contains("12ms"), "duration missing: {text}");
+    }
+
+    #[test]
     fn a_tool_diff_renders_with_a_plus_minus_summary() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
@@ -1569,6 +1600,7 @@ mod tests {
                 is_error: false,
                 diff: Some("@@ -1,2 +1,2 @@\n ctx\n-old\n+new".into()),
                 path: Some("f.rs".into()),
+                duration_ms: None,
             },
         ));
         let text = buffer_text(&render(&mut app, 60, 12));
@@ -1596,6 +1628,7 @@ mod tests {
                 is_error: false,
                 diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
                 path: Some("src/a.rs".into()),
+                duration_ms: None,
             },
         ));
         app.handle(AppEvent::Agent(
@@ -2283,6 +2316,7 @@ mod tests {
                 is_error,
                 diff: diff.map(str::to_string),
                 path: None,
+                duration_ms: None,
             },
         ));
     }
@@ -2488,6 +2522,7 @@ mod tests {
                 is_error: false,
                 diff: Some(diff),
                 path: Some("src/a.rs".into()),
+                duration_ms: None,
             },
         ));
 
@@ -2883,6 +2918,7 @@ mod tests {
                 expanded,
                 diff: diff.map(str::to_string),
                 path: Some("f.rs".into()),
+                duration_ms: None,
             })
         };
         let blocks = [

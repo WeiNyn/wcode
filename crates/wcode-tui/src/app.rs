@@ -115,6 +115,11 @@ pub struct Tool {
     /// The file this tool changed (UI-only), from `ToolExecutionEnd`: labels the
     /// `⚙` line and feeds the run's changeset.
     pub path: Option<String>,
+    /// Wall-clock ms the tool's `execute` took (from `ToolExecutionEnd`).
+    /// UI-only: never copied (`copy_text`), never persisted. `None` while the
+    /// tool is still running, or for a tool reseeded from a resumed session
+    /// (the transcript has no timing).
+    pub duration_ms: Option<u64>,
 }
 
 /// A file the run changed, recorded from the UI-only `ToolExecutionEnd` fields.
@@ -1057,6 +1062,7 @@ impl Surface {
                     expanded: false,
                     diff: None,
                     path: None,
+                    duration_ms: None,
                 }));
                 true
             }
@@ -1078,6 +1084,7 @@ impl Surface {
                 is_error,
                 diff,
                 path,
+                duration_ms,
                 ..
             } => {
                 let idx = self.transcript.len().wrapping_sub(1);
@@ -1093,6 +1100,7 @@ impl Surface {
                     }
                     tool.path = path.clone();
                     tool.diff = diff.clone();
+                    tool.duration_ms = duration_ms;
                     true
                 } else {
                     false
@@ -1332,6 +1340,7 @@ impl Surface {
                         expanded: *is_error,
                         diff: None,
                         path: None,
+                        duration_ms: None,
                     }));
                 }
             }
@@ -3184,6 +3193,23 @@ mod tests {
     }
 
     #[test]
+    fn tool_execution_end_carries_duration_onto_the_block() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
+            call_id: "t1".into(), name: "read".into(),
+        }));
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionEnd {
+            call_id: "t1".into(), name: "read".into(),
+            output: "128 lines".into(), is_error: false,
+            diff: None, path: None, duration_ms: Some(12),
+        }));
+        match app.transcript().last() {
+            Some(Block::Tool(tool)) => assert_eq!(tool.duration_ms, Some(12)),
+            other => panic!("expected a tool block, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn tool_lifecycle_becomes_one_tool_block() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
@@ -3202,6 +3228,7 @@ mod tests {
             is_error: false,
             diff: None,
             path: None,
+            duration_ms: None,
         }));
         match app.transcript().last() {
             Some(Block::Tool(tool)) => {
@@ -3824,6 +3851,7 @@ mod tests {
             is_error: false,
             diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
             path: Some("f.rs".into()),
+            duration_ms: None,
         }));
         match app.transcript().last() {
             Some(Block::Tool(tool)) => {
@@ -3846,6 +3874,7 @@ mod tests {
             is_error: false,
             diff: diff.map(str::to_string),
             path: path.map(str::to_string),
+            duration_ms: None,
         }));
     }
 
@@ -4765,6 +4794,7 @@ mod tests {
                 is_error: false,
                 diff: None,
                 path: None,
+                duration_ms: None,
             },
         ));
     }
@@ -5294,6 +5324,7 @@ mod tests {
                 is_error: false,
                 diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
                 path: Some("f.rs".into()),
+                duration_ms: None,
             },
         ));
         // `/changes` → select → re-shows the diff as a `Block::Diff`.
