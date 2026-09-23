@@ -26,7 +26,7 @@ files by function, not line number (they drift).
 | `61ebf66` | `harness:` | add non-fatal `AgentEvent::CompactionSkipped { reason }`; emit it from the loop's `Err` arm; Notice arm in the TUI (never sets `failed`); non-fatal line in the repl |
 | `8fa0b03` | `cli:` | hoist one `include_path` into `tools/mod.rs`; grep/find call it |
 | `50b2dad` | `cli:` | hoist `stale_digest_guard` into `tools/mod.rs`; all mutators call it |
-| `edc1782` | `cli:` | split `main()` into parse_cli / load_config / print_system_prompt / list_models_and_exit / run_socket_client / load_session / build_runtime / build_agent_for / serve / dispatch (pure refactor) |
+| `edc1782` | `cli:` | split `main()` into parse_cli / load_config / print_system_prompt / list_models_and_exit / run_socket_client / load_session / build_runtime / build_agent_for / serve / dispatch (pure refactor); `dispatch` returns `()` and the line-REPL branch falls through, so the split is behavior-preserving |
 
 ## Gates
 
@@ -39,6 +39,19 @@ files by function, not line number (they drift).
   exactly once; `/model` then `/surface` reflects the new model; a summarizer
   failure emits `CompactionSkipped` with **no** `Error` and the run still reaches
   `AgentEnd`; the TUI surfaces a Notice without marking the run failed.
+
+## Reviewer's first-layer findings (applied)
+
+The reviewer's sketch review landed after implementation and found two defects in
+SKETCH A and two missing amendments in SKETCH B. The implementation already
+avoided one A defect (`SessionSetup` is consumed via `Option::take`/`mem::take`,
+not a partial move) and satisfied both B amendments (the exhaustive `tag()` match
+in `tests/loop_tests.rs` and the `event.rs` roundtrip entry), but it *did* carry
+the other A defect: `dispatch` was `-> !`, forcing `std::process::exit(0)` on the
+line-REPL branch, where the pre-split `main` fell through. The split commit
+(`edc1782`) restores the exact old behavior. The reviewer's wire-compat
+answer — keep
+`PROTOCOL_VERSION = 1`, additive only — matches what shipped.
 
 ## Deliberately not done
 
