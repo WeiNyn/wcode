@@ -320,18 +320,12 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // in a second pass. A range starts *after* the separator, so it never spans
     // the blank line above the block.
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for (i, block) in app.transcript().iter().enumerate() {
-        // A tool-call-only assistant block renders no lines. It keeps its slot in
-        // `ranges` (the selection index aligns with the transcript), but it must
-        // not contribute a separator — that would be a stray blank line.
-        let block_lines = block_lines(block, width);
-        if i > 0 && !block_lines.is_empty() && !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        let start = lines.len();
-        let len = block_lines.len();
-        lines.extend(block_lines);
-        ranges.push(start..start + len);
+    // Length FIRST (immutable), then each index appended through the `&mut` cache:
+    // `append_block_lines` owns the transcript/cache split borrow, so this loop
+    // never holds `transcript().iter()` across a mutable cache borrow.
+    let n = app.transcript().len();
+    for i in 0..n {
+        ranges.push(app.focused_mut().append_block_lines(i, width, &mut lines));
     }
     // The in-flight message trails the committed transcript (it is transient, so
     // it is never a selection target).
@@ -397,7 +391,7 @@ fn paint_bar(line: &mut Line<'static>) {
     }
 }
 
-fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
         Block::Assistant(content) => content_lines(content, width, false),
@@ -1270,6 +1264,144 @@ mod tests {
         out
     }
 
+    /// Commit a text `Assistant` block (the cache's most common entry).
+    fn push_assistant(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Text { text: text.into() }],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn cache_hit_keeps_the_same_frame() {
+        let mut app = App::new();
+        push_assistant(&mut app, "hello there");
+        push_tool(&mut app, "bash", "one\ntwo", false, None);
+
+        let first = buffer_text(&render(&mut app, 60, 20));
+        let before = app.focused().cache_misses();
+        let second = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(first, second, "an unchanged frame is byte-identical");
+        assert_eq!(
+            app.focused().cache_misses(),
+            before,
+            "the second frame hits every block (zero renders)"
+        );
+    }
+
+    #[test]
+    fn cache_misses_only_for_the_mutated_tool_block() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "one\ntwo", false, None);
+        push_tool(&mut app, "read", "three", false, None);
+        let _ = render(&mut app, 60, 20); // warm both entries
+        let before = app.focused().cache_misses();
+
+        // A live tool update mutates the LAST block only.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionUpdate {
+                call_id: "t".into(),
+                name: "bash".into(),
+                partial: " more".into(),
+            },
+        ));
+        let _ = render(&mut app, 60, 20);
+        assert_eq!(
+            app.focused().cache_misses() - before,
+            1,
+            "only the mutated tool block re-renders; the rest hit"
+        );
+    }
+
+    #[test]
+    fn cache_misses_every_block_after_a_width_change_then_hits() {
+        let mut app = App::new();
+        push_assistant(&mut app, "hello there");
+        push_tool(&mut app, "bash", "one\ntwo", false, None);
+        let _ = render(&mut app, 60, 20);
+        let n = app.transcript().len();
+
+        let before = app.focused().cache_misses();
+        let _ = render(&mut app, 61, 20);
+        assert_eq!(
+            app.focused().cache_misses() - before,
+            n,
+            "a resize re-renders every block once (the width key)"
+        );
+        let after = app.focused().cache_misses();
+        let _ = render(&mut app, 61, 20);
+        assert_eq!(app.focused().cache_misses(), after, "the re-cache then hits");
+    }
+
+    #[test]
+    fn the_live_message_is_never_cached() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "one\ntwo", false, None);
+        let _ = render(&mut app, 60, 20); // warm the committed block
+        let before = app.focused().cache_misses();
+
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageStart {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Text {
+                        text: "streaming".into(),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        let text = buffer_text(&render(&mut app, 60, 20));
+        assert!(text.contains("streaming"), "the live message renders:\n{text}");
+        assert_eq!(
+            app.focused().cache_misses(),
+            before,
+            "the committed block stayed a hit while the live message rendered"
+        );
+    }
+
+    /// The subtlest risk: `seed_history` inserts its divider MID-VEC, shifting
+    /// every later block. All three parallel vecs must shift together.
+    #[test]
+    fn a_seed_mid_vec_insert_keeps_the_cache_aligned() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "one\ntwo", false, None);
+        let _ = render(&mut app, 60, 20);
+
+        app.seed_history(
+            &root(),
+            &[
+                AgentMessage::user_text("earlier-1"),
+                AgentMessage::user_text("earlier-2"),
+            ],
+        );
+        let first = buffer_text(&render(&mut app, 60, 20));
+        assert!(first.contains("earlier-1"), "seeded block missing:\n{first}");
+        assert!(first.contains("earlier-2"), "second seeded block missing:\n{first}");
+        assert!(
+            first.contains("2 earlier message"),
+            "the mid-vec divider notice is missing:\n{first}"
+        );
+
+        let before = app.focused().cache_misses();
+        let second = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(first, second, "the frame is stable after the mid-vec insert");
+        assert_eq!(
+            app.focused().cache_misses(),
+            before,
+            "the shifted blocks re-cached, then hit"
+        );
+    }
     /// The team strip's row: the first buffer row that names `label`.
     fn strip_row(terminal: &Terminal<TestBackend>, label: &str) -> u16 {
         buffer_text(terminal)

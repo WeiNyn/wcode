@@ -13,6 +13,10 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 use wcode_harness::stats::session_stats;
 use wcode_harness::protocol::{Request, SessionId};
 
+// The per-block render cache stores `ui`'s own output type (`Line`) so a hit hands
+// the renderer ready lines; `Line` is the one render-backend type app.rs names.
+use ratatui::text::Line;
+
 use crate::{SurfaceInfo, TeamState};
 
 /// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
@@ -783,6 +787,30 @@ pub(crate) struct InputView {
 /// `label`/`model` the team strip shows, the transcript, run state, changeset,
 /// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
 /// root, the rest are team members.
+/// One committed block's cached render, index-aligned with `Surface::transcript`.
+///
+/// A frame hits iff `rev == block_revs[i] && width == draw_width`; a miss re-renders
+/// the block once (`ui::block_lines`) and overwrites. Stores PRE-bar lines — the
+/// browse selection bar is a second pass (`ui::paint_bar`).
+struct CacheEntry {
+    /// The block revision this entry rendered; compared to `block_revs[i]`.
+    rev: u64,
+    /// The width this entry rendered at; a resize invalidates every entry here.
+    width: usize,
+    /// The block's rendered lines (`lines.len()` is its height).
+    lines: Vec<Line<'static>>,
+}
+
+impl CacheEntry {
+    /// A guaranteed miss: no real draw is `usize::MAX` columns wide.
+    fn never() -> Self {
+        Self {
+            rev: 0,
+            width: usize::MAX,
+            lines: Vec::new(),
+        }
+    }
+}
 pub struct Surface {
     /// The id this surface's events route by.
     id: SessionId,
@@ -846,6 +874,14 @@ pub struct Surface {
     /// Each committed block's line range from the last drawn frame — the
     /// renderer's feedback for drawing the selection bar.
     ranges: Vec<Range<usize>>,
+    /// Per-block render cache, index-aligned with `transcript`.
+    cache: Vec<CacheEntry>,
+    /// Per-block revision, bumped at each `Block::Tool` mutation; `0` = append-only.
+    block_revs: Vec<u64>,
+    /// Cache misses so far (a `block_lines` render). Test-only; the renderer never
+    /// reads it.
+    #[cfg(test)]
+    cache_misses: usize,
 }
 
 impl Surface {
@@ -886,7 +922,89 @@ impl Surface {
             draft: String::new(),
             selected: None,
             ranges: Vec::new(),
+            cache: Vec::new(),
+            block_revs: Vec::new(),
+            #[cfg(test)]
+            cache_misses: 0,
         }
+    }
+
+    /// Ensure block `i` is rendered for `width`, then append the inter-block blank
+    /// separator (when `i > 0`, `out` is non-empty, and the block renders ≥1 line)
+    /// and the block's cached lines to `out`. Returns the range of the block's OWN
+    /// lines — the separator is excluded, so `ranges` stays exact.
+    ///
+    /// Owns the transcript/cache split borrow itself, so the caller never holds
+    /// `transcript().iter()` across the `&mut` cache.
+    pub(crate) fn append_block_lines(
+        &mut self,
+        i: usize,
+        width: usize,
+        out: &mut Vec<Line<'static>>,
+    ) -> Range<usize> {
+        // Defensive parity: a missed `push_block`/`insert_block` (or a test that
+        // edits `transcript` directly) must re-render, never index out of bounds.
+        if i >= self.cache.len() {
+            self.cache.resize_with(i + 1, CacheEntry::never);
+        }
+        if i >= self.block_revs.len() {
+            self.block_revs.resize(i + 1, 0);
+        }
+        let rev = self.block_revs[i];
+        if self.cache[i].rev != rev || self.cache[i].width != width {
+            let rendered = crate::ui::block_lines(&self.transcript[i], width);
+            self.cache[i] = CacheEntry {
+                rev,
+                width,
+                lines: rendered,
+            };
+            #[cfg(test)]
+            {
+                self.cache_misses += 1;
+            }
+        }
+        // Clone the cached lines — the entry stays populated for the next frame (a
+        // hit must still append; taking/emptying it would make the block vanish).
+        let lines = &self.cache[i].lines;
+        if i > 0 && !out.is_empty() && !lines.is_empty() {
+            out.push(Line::default());
+        }
+        let start = out.len();
+        let len = lines.len();
+        out.extend(lines.iter().cloned());
+        start..start + len
+    }
+
+    /// Bump block `i`'s revision (saturating). Call at every `Block::Tool`
+    /// mutation so the next frame re-renders that block.
+    fn bump_rev(&mut self, i: usize) {
+        if let Some(rev) = self.block_revs.get_mut(i) {
+            *rev = rev.saturating_add(1);
+        }
+    }
+
+    /// Push a committed block, keeping `cache`/`block_revs` index-aligned with
+    /// `transcript`. Every transcript push goes through here.
+    fn push_block(&mut self, block: Block) {
+        self.transcript.push(block);
+        self.block_revs.push(0);
+        self.cache.push(CacheEntry::never());
+    }
+
+    /// Insert a committed block mid-transcript, shifting all three parallel vecs
+    /// together. A mid-vec insert SHIFTS every later index, so a lazy
+    /// length-reconcile would be unsound.
+    fn insert_block(&mut self, at: usize, block: Block) {
+        self.transcript.insert(at, block);
+        self.block_revs.insert(at, 0);
+        self.cache.insert(at, CacheEntry::never());
+    }
+
+    /// Cache misses so far (each is a `ui::block_lines` render). Test-only; the
+    /// renderer never reads it.
+    #[cfg(test)]
+    pub(crate) fn cache_misses(&self) -> usize {
+        self.cache_misses
     }
 
     /// The team strip/`/team` state, derived from the run flags.
@@ -933,7 +1051,7 @@ impl Surface {
                 self.last_action = Some(action_label(&self.transcript, &call_id, &name));
                 self.last_action_at = Some(*action_seq);
                 *action_seq += 1;
-                self.transcript.push(Block::Tool(Tool {
+                self.push_block(Block::Tool(Tool {
                     name,
                     output: String::new(),
                     done: false,
@@ -945,12 +1063,17 @@ impl Surface {
                 true
             }
             AgentEvent::ToolExecutionUpdate { partial, .. } => {
-                if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
+                let idx = self.transcript.len().wrapping_sub(1);
+                let changed = if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
                     tool.output.push_str(&partial);
                     true
                 } else {
                     false
+                };
+                if changed {
+                    self.bump_rev(idx);
                 }
+                changed
             }
             AgentEvent::ToolExecutionEnd {
                 output,
@@ -959,6 +1082,7 @@ impl Surface {
                 path,
                 ..
             } => {
+                let idx = self.transcript.len().wrapping_sub(1);
                 let matched = if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
                     if !output.is_empty() {
                         tool.output = output;
@@ -975,6 +1099,9 @@ impl Surface {
                 } else {
                     false
                 };
+                if matched {
+                    self.bump_rev(idx);
+                }
                 // A mutating tool's UI-only (path, diff) pair feeds the run's
                 // changeset — recorded even if no block matched the call.
                 if let (Some(path), Some(diff)) = (path, diff) {
@@ -997,11 +1124,11 @@ impl Surface {
                 self.last_action = None;
                 if self.cancelled {
                     self.cancelled = false;
-                    self.transcript.push(Block::Notice("⏹ aborted".into()));
+                    self.push_block(Block::Notice("⏹ aborted".into()));
                 }
                 // Surface the run's changes once it settles; they stay for `/changes`.
                 if !self.changes.is_empty() {
-                    self.transcript.push(Block::Notice(self.changes_summary()));
+                    self.push_block(Block::Notice(self.changes_summary()));
                 }
                 true
             }
@@ -1017,7 +1144,7 @@ impl Surface {
                 if let Some(prev) = self.plan_pending.take() {
                     self.status.plan = prev;
                 }
-                self.transcript.push(Block::Error(message));
+                self.push_block(Block::Error(message));
                 true
             }
             AgentEvent::Todo { todos } => {
@@ -1025,11 +1152,11 @@ impl Surface {
                 // runs for a local run AND a socket client — the point of routing
                 // `todo` through the event seam.
                 self.last_todos = Some(todos.clone());
-                self.transcript.push(Block::Notice(render_todos(&todos)));
+                self.push_block(Block::Notice(render_todos(&todos)));
                 true
             }
             AgentEvent::Compaction { summarized, kept } => {
-                self.transcript.push(Block::Notice(format!(
+                self.push_block(Block::Notice(format!(
                     "⋯ compacted {summarized} messages, kept {kept}"
                 )));
                 true
@@ -1039,14 +1166,14 @@ impl Surface {
                 max,
                 reason,
             } => {
-                self.transcript.push(Block::Notice(format!(
+                self.push_block(Block::Notice(format!(
                     "⋯ retrying ({attempt}/{max}): {reason}"
                 )));
                 true
             }
             AgentEvent::TurnEnd { message } => self.record_usage(&message),
             AgentEvent::SideAnswer { text, .. } => {
-                self.transcript.push(Block::Btw(text)); // display-only; no ctx/session
+                self.push_block(Block::Btw(text)); // display-only; no ctx/session
                 true
             }
             AgentEvent::History { messages } => {
@@ -1071,7 +1198,7 @@ impl Surface {
         if let AgentMessage::Assistant { content, .. } = message
             && !content.is_empty()
         {
-            self.transcript.push(Block::Assistant(content));
+            self.push_block(Block::Assistant(content));
         }
     }
 
@@ -1097,7 +1224,7 @@ impl Surface {
     }
 
     fn push_notice(&mut self, text: impl Into<String>) {
-        self.transcript.push(Block::Notice(text.into()));
+        self.push_block(Block::Notice(text.into()));
     }
 
     /// Render a `GetHistory` reply as a one-line usage summary.
@@ -1173,7 +1300,7 @@ impl Surface {
                 AgentMessage::User { .. } => {
                     let text = message.as_text();
                     if !text.trim().is_empty() {
-                        self.transcript.push(Block::User(text));
+                        self.push_block(Block::User(text));
                     }
                 }
                 AgentMessage::Assistant { content, .. } => {
@@ -1181,7 +1308,7 @@ impl Surface {
                     // can name the call's target (§3); the renderer ignores them.
                     let visible = content.to_vec();
                     if !visible.is_empty() {
-                        self.transcript.push(Block::Assistant(visible));
+                        self.push_block(Block::Assistant(visible));
                     }
                     self.record_usage(message);
                 }
@@ -1191,7 +1318,7 @@ impl Surface {
                     is_error,
                     ..
                 } => {
-                    self.transcript.push(Block::Tool(Tool {
+                    self.push_block(Block::Tool(Tool {
                         name: name.clone(),
                         output: output.clone(),
                         done: true,
@@ -1204,7 +1331,9 @@ impl Surface {
             }
         }
         // Mark where the replayed prefix ends, mirroring the REPL's divider.
-        self.transcript.insert(
+        // Goes through `insert_block` so `cache`/`block_revs` shift WITH
+        // `transcript` (a mid-vec insert shifts every later index).
+        self.insert_block(
             start,
             Block::Notice(format!("⋯ {} earlier message(s)", messages.len())),
         );
@@ -1430,21 +1559,25 @@ impl App {
     /// all-tools complement to browse mode's per-block toggle. All expanded
     /// collapses; anything else expands all.
     fn toggle_all_tools(&mut self) {
-        let tools: Vec<&mut Tool> = self
-            .focused_mut()
+        let indices: Vec<usize> = self
+            .focused()
             .transcript
-            .iter_mut()
-            .filter_map(|block| match block {
-                Block::Tool(tool) => Some(tool),
-                _ => None,
-            })
+            .iter()
+            .enumerate()
+            .filter_map(|(i, block)| matches!(block, Block::Tool(_)).then_some(i))
             .collect();
-        if tools.is_empty() {
+        if indices.is_empty() {
             return;
         }
-        let expand = !tools.iter().all(|tool| tool.expanded);
-        for tool in tools {
-            tool.expanded = expand;
+        // All expanded collapses; anything else expands all.
+        let expand = !indices
+            .iter()
+            .all(|&i| matches!(&self.focused().transcript[i], Block::Tool(tool) if tool.expanded));
+        for i in indices {
+            if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(i) {
+                tool.expanded = expand;
+            }
+            self.focused_mut().bump_rev(i);
         }
         self.dirty = true;
     }
@@ -1889,6 +2022,7 @@ impl App {
             false
         };
         if toggled {
+            self.focused_mut().bump_rev(idx);
             self.dirty = true;
         }
     }
@@ -2096,7 +2230,7 @@ impl App {
             return;
         }
         self.focused_mut().history.push(text.clone());
-        self.focused_mut().transcript.push(Block::User(text.clone()));
+        self.focused_mut().push_block(Block::User(text.clone()));
         self.focused_mut().running = true;
         self.focused_mut().finished = false;
         self.focused_mut().cancelled = false;
@@ -2601,7 +2735,7 @@ impl App {
         if diff.is_empty() {
             return;
         }
-        self.focused_mut().transcript.push(Block::Diff {
+        self.focused_mut().push_block(Block::Diff {
             path: path.to_string(),
             diff,
         });
@@ -5114,7 +5248,7 @@ mod tests {
         // total is 14 lines and the viewport 8; each press is tested against a
         // fresh scroll position (reveal re-anchors, so we reset between keys).
         for text in ["a", "b", "c", "d", "e"] {
-            app.focused_mut().transcript.push(Block::User(text.into()));
+            app.focused_mut().push_block(Block::User(text.into()));
         }
         {
             let s = app.focused_mut();
@@ -5235,14 +5369,30 @@ mod tests {
         assert_eq!(app.selected(), Some(2), "Alt-j must not move the selection");
     }
 
+    #[test]
+    fn append_block_lines_extends_the_parallel_vecs_on_a_parity_miss() {
+        let mut app = App::new();
+        // Deliberately bypass `push_block` so `transcript` runs ahead of the
+        // parallel vecs — the guard must re-render, not panic.
+        app.focused_mut().transcript.push(Block::Notice("x".into()));
+        let mut out = Vec::new();
+        let range = app.focused_mut().append_block_lines(0, 40, &mut out);
+        assert_eq!(range, 0..1, "the block renders one line");
+        assert_eq!(out.len(), 1);
+    }
+
     /// A transcript with four blocks; "alpha" occurs in blocks 0 and 2.
     fn searchable_transcript(app: &mut App) {
-        app.focused_mut().transcript = vec![
+        let surface = app.focused_mut();
+        surface.transcript = vec![
             Block::User("alpha".into()),
             Block::User("beta".into()),
             Block::User("ALPHA too".into()),
             Block::User("gamma".into()),
         ];
+        // Replaced wholesale — keep the cache/revs parallel vecs aligned.
+        surface.cache.clear();
+        surface.block_revs.clear();
     }
 
     #[test]
