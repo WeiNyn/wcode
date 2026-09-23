@@ -21,7 +21,7 @@ pub mod write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use wcode_harness::tool::{Tool, erased};
+use wcode_harness::tool::{Tool, ToolOutput, erased};
 
 use crate::config::ToolsConfig;
 
@@ -118,6 +118,29 @@ pub(crate) fn include_path(
         return true;
     }
     includes.iter().any(|m| m.is_match(path))
+}
+
+/// Whole-file compare-and-swap guard shared by the mutating tools (`edit`,
+/// `edits`, `replace`, `write`): when the caller supplied an `expected_digest`,
+/// refuse (an error `ToolOutput` naming both digests) if the file's current
+/// content no longer matches it. `None` means the digest matched (or none was
+/// given) and the caller proceeds. `content` is the file's current text; `path`
+/// is used only to name the file in the message.
+pub(crate) fn stale_digest_guard(
+    path: &str,
+    content: &str,
+    expected: Option<&str>,
+) -> Option<ToolOutput> {
+    let expected = expected?;
+    let actual = anchor::file_digest(content.as_bytes());
+    if actual == expected {
+        return None;
+    }
+    Some(ToolOutput {
+        output: crate::workspace::stale_digest(path, expected, &actual),
+        is_error: true,
+        ..ToolOutput::default()
+    })
 }
 
 /// Same-directory temp name for atomic write+rename mutations. PID-suffixed so

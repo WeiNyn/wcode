@@ -3,8 +3,6 @@ use std::sync::Arc;
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::anchor;
-
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ReplaceArgs {
     /// File path (relative to the working directory unless absolute).
@@ -64,15 +62,10 @@ impl TypedTool for Replace {
         };
         // Whole-file CAS (D1): refuse when the file moved since the digest was
         // captured, before touching the match count. Nothing is written.
-        if let Some(expected) = &args.expected_digest {
-            let actual = anchor::file_digest(content.as_bytes());
-            if &actual != expected {
-                return ToolOutput {
-                    output: crate::workspace::stale_digest(&args.path, expected, &actual),
-                    is_error: true,
-                    ..ToolOutput::default()
-                };
-            }
+        if let Some(out) =
+            super::stale_digest_guard(&args.path, &content, args.expected_digest.as_deref())
+        {
+            return out;
         }
         let matches = content.matches(&args.old_string).count();
         if matches == 0 {
@@ -122,6 +115,7 @@ impl TypedTool for Replace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::anchor;
 
     #[tokio::test]
     async fn stale_digest_refuses_the_replace() {

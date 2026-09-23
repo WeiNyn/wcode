@@ -3,8 +3,6 @@ use std::sync::Arc;
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::anchor;
-
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct WriteArgs {
     /// File path (relative to the working directory unless absolute); parents are created.
@@ -61,15 +59,10 @@ impl TypedTool for Write {
         // A8 — whole-file CAS, verified HERE (after the `old` read, after
         // `create_dir_all`, before the diff/write). A missing file reads as "",
         // so a stale real digest mismatches (correct) while digest("") proceeds.
-        if let Some(expected) = &args.expected_digest {
-            let actual = anchor::file_digest(old.as_bytes());
-            if &actual != expected {
-                return ToolOutput {
-                    output: crate::workspace::stale_digest(&args.path, expected, &actual),
-                    is_error: true,
-                    ..ToolOutput::default()
-                };
-            }
+        if let Some(out) =
+            super::stale_digest_guard(&args.path, &old, args.expected_digest.as_deref())
+        {
+            return out;
         }
         let diff = super::diff::unified(&old, &args.content);
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
@@ -94,6 +87,7 @@ impl TypedTool for Write {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::anchor;
 
     #[tokio::test]
     async fn stale_digest_refuses_the_write() {

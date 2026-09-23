@@ -112,15 +112,12 @@ impl TypedTool for Edits {
         // Whole-file CAS (D1): the batch touches one file, so a single
         // top-level digest covers every op. Verified before any anchor
         // resolution; a mismatch refuses the whole batch, nothing written.
-        if let Some(expected) = &args.expected_digest {
-            let actual = anchor::file_digest(content.as_bytes());
-            if &actual != expected {
-                return ToolOutput {
-                    output: crate::workspace::stale_digest(&args.edits[0].path, expected, &actual),
-                    is_error: true,
-                    ..ToolOutput::default()
-                };
-            }
+        if let Some(out) = super::stale_digest_guard(
+            &args.edits[0].path,
+            &content,
+            args.expected_digest.as_deref(),
+        ) {
+            return out;
         }
 
         let empty = anchor::is_degenerate_empty(&content);

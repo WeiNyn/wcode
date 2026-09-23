@@ -91,15 +91,10 @@ impl TypedTool for Edit {
 
         // Whole-file CAS (D1): refuse when the file moved since the digest was
         // captured. Runs before anchor resolution; nothing is written on refuse.
-        if let Some(expected) = &args.expected_digest {
-            let actual = anchor::file_digest(content.as_bytes());
-            if &actual != expected {
-                return ToolOutput {
-                    output: crate::workspace::stale_digest(&args.path, expected, &actual),
-                    is_error: true,
-                    ..ToolOutput::default()
-                };
-            }
+        if let Some(out) =
+            super::stale_digest_guard(&args.path, &content, args.expected_digest.as_deref())
+        {
+            return out;
         }
 
         // A byte-empty or "\n"-only file is one anonymous empty insertion point, so
