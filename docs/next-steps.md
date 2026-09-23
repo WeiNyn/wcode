@@ -777,6 +777,14 @@ click-a-surface) and P2 (drag-to-select text + copy) shipped. Pointer only, like
 items 3, 6, 7, 8, 9, 10, and 13; the P3 unlocks (edge autoscroll, double-click to
 expand, wide-char-exact mapping) remain parked in the plan.
 
+**Commits.** `8b2630a` (plan), `f03a297` (positioned events + hit map + clicks),
+`02d7145` (drag-to-select + copy), `4b3954b` (docs), `c3bf3ff` (past-end anchor
+fix + highlight/ruling tests). First-layer review BLOCKED the sketch with 5
+amendments (all landed); the second-layer review APPROVED, and its two required
+follow-ups (the past-end WYSIWYG anchor; pinning the highlight and the rulings in
+tests) landed in `c3bf3ff`. Mouse is left-button-only and inert under a modal;
+real-terminal mouse behavior is untested (headless — `TestBackend` only).
+
 ---
 
 ## Tier-1 gap sweep — status

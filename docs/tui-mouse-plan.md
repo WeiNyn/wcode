@@ -133,6 +133,10 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
    closed or the terminal is narrower than `SIDEBAR_MIN_WIDTH`.
 7. Text selection is global line/char space; copy is WYSIWYG (gutter included).
 8. No edge autoscroll while dragging (parked, P3).
+9. **Left button only** — `translate_mouse` ignores right/middle `Down`/`Drag`/
+   `Up`, so a right-click never enters Browse or starts a selection.
+10. **A modal owns the mouse** — `on_mouse` is a no-op while an `Overlay` (help /
+    picker) or the browse search prompt is up.
 
 ## Open questions
 
@@ -140,6 +144,9 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
   — `Esc` keeps its cancel/quit meaning; a new `Down` clears the selection.
 - Should the highlight survive a wheel scroll? **Settled: yes** (it is global),
   but the *copy* is taken at release, so scrolling afterward cannot corrupt it.
+- Is the text selection ever empty? **Settled:** a zero-cell selection highlights
+  nothing and is a copy **no-op** (never an empty OSC-52 payload that would clear
+  the clipboard); `selected_text` stays total, `on_mouse_up` applies the policy.
 - Double-click to expand a tool? Parked (P3).
 
 ## Phases
@@ -157,6 +164,8 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
 | 1 | `docs: plan TUI mouse support` |
 | 2 | `tui: positioned mouse events + a hit map (click a block, focus a surface)` |
 | 3 | `tui: drag to select transcript text and copy it` |
+| 4 | `docs: mark TUI mouse support shipped` |
+| 5 | `tui: fix the past-end selection anchor and pin the highlight in tests` |
 
 ## Status
 
@@ -165,5 +174,7 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
 | 1 | plan + tracker | ☑ done |
 | 2 | clicks (block + sidebar) | ☑ done |
 | 3 | drag text selection | ☑ done |
+| 4 | docs status | ☑ done |
+| 5 | past-end anchor fix + highlight/ruling tests | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
