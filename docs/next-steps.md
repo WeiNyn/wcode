@@ -36,6 +36,7 @@ the boxes as each task completes and keep the status table current.
 | 28 | Plan mode: explore + plan, don't mutate until approved (see [plan-mode.md](plan-mode.md)) | ☑ P1–P3 complete (mode/prompt/hook/bash-gate/`/plan`/chip + todo persistence & seed + `/verify`) |
 | 29 | Stream truncation ends a turn silently (no terminal record) | ☑ done — see [stream-truncation-plan.md](stream-truncation-plan.md) |
 | 30 | TUI markdown maturity: per-block render cache + parser features (see [`tui-markdown-plan.md`](tui-markdown-plan.md)) | ☐ planned |
+| 31 | Review-driven cleanup: TUI status bugs, dead code, event visibility, tool dedup, `main()` split | ☑ done — `3b28eb5`/`563ed4c`/`61ebf66`/`8fa0b03`/`50b2dad`/`edc1782`; see [review-cleanup.md](review-cleanup.md) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
