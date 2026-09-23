@@ -190,7 +190,8 @@ fn block_bytes(block: &ContentBlock) -> u64 {
 /// Oldest index to keep when retaining `keep_budget` tokens of the most recent
 /// history, adjusted by [`safe_cut`] so the kept suffix never orphans a tool
 /// result.
-pub fn cut_for_budget(ctx: &[AgentMessage], keep_budget: u64) -> usize {
+#[cfg(test)]
+fn cut_for_budget(ctx: &[AgentMessage], keep_budget: u64) -> usize {
     safe_cut(ctx, token_cut(ctx, keep_budget))
 }
 

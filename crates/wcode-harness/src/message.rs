@@ -33,9 +33,6 @@ pub enum StopReason {
     Stop,
     Length,
     ToolUse,
-    /// Reserved: kept for the closed-enum contract inherited from pi, but no
-    /// provider maps to it yet — the kernel never produces this stop reason.
-    Deferred,
     Aborted,
     Error,
     /// Run stopped at the per-run turn cap (`LoopConfig::max_turns`) before the
@@ -174,7 +171,6 @@ mod tests {
             (StopReason::Stop, "stop"),
             (StopReason::Length, "length"),
             (StopReason::ToolUse, "tool_use"),
-            (StopReason::Deferred, "deferred"),
             (StopReason::Aborted, "aborted"),
             (StopReason::Error, "error"),
             (StopReason::MaxTurns, "max_turns"),
