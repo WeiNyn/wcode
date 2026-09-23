@@ -178,25 +178,16 @@ the draft and restoring it at the bottom; history persists one prompt per line
 beside the sessions. (Shift-Enter needs a terminal that reports the modifier —
 kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
-**Status** — one dim "chrome" row, full width, left-aligned:
-`model · [⏻ plan] · effort · [gauge] used/limit · session · ±N files +a −r · ☑ d/t · repo ⎇ branch* · [▤ browse] · state · [↑ N]`,
-where tokens is an 8-cell gauge colored by fill plus `used / limit`; the changes
-chip is the run's changeset (`± 3 files +42 −7`); the todos chip is `☑ done/total`;
-`repo` is the cwd and `branch*` the git branch with a `*` dirty marker (both
-injected at startup by the composition root); and state is `⏸ idle` /
-`⠹ running 3.1s` — the run elapsed is injected by the event loop on each tick
-(the reducer stays pure). The state glyph is the single source of "am I running";
-the spinner also rides the active tool line, so a long tool never looks frozen.
-Committed assistant messages are rendered as markdown (headings, bullets, fenced
-code, tables with alignment, inline `code`/`**bold**`), live and committed; long
-words and table cells wrap rather than overflow.
-When narrow, fields drop least-important-first: **cwd/branch, then todos, then
-changes, then session, then effort, then tokens** (model, plan and state always
-stay). The session id is shortened to 8 chars.
+**Layout** — top to bottom (the sidebar, `Ctrl-B`, is an optional left column):
+1. a dim **session line** (`session a1b2c3d4`) — collapses to zero rows when there is no session;
+2. the **transcript** (flex, plain, scrollable; committed assistant messages render as markdown — headings, bullets, fenced code, aligned tables, inline `code`/`**bold**`);
+3. the **team region** — 0..=3 rows, only `Running` teammates (the root is the orchestrator, excluded), ordered oldest→newest so the **latest event is the bottom row**;
+4. the **input box** — a rounded border whose four corners carry the chrome: `project ⎇ branch` top-left, `model · effort` top-right, the context gauge bottom-left, and `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s` · `[↑ N]` bottom-right.
+The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored green→yellow→red by fill, then `used / limit`. Corner titles clip with `…` then drop least-important-first (top: branch; bottom: the gauge). The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
 ≥ 80 cols; below that the layout is untouched), **off by default** so the base
-three bands stay byte-identical while it is closed. It stacks four dim-headed
+layout stays byte-identical while it is closed. It stacks four dim-headed
 sections: **Team** (each member's state glyph, label, a `*` on the focused
 surface, and its live action), **Todos** (`☑`/`☐` + text, header `done/total`),
 **Changes** (`path · +added −removed`), and **Context** (the gauge). An empty
