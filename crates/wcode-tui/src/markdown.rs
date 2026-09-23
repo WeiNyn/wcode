@@ -504,10 +504,41 @@ fn wrap(
     cont: &str,
     base: Style,
 ) -> Vec<Line<'static>> {
-    let mut words: Vec<(String, Style)> = Vec::new();
+    // Model each atom as `(text, style, space_before)`. A style change splits the
+    // atom (a word keeps ONE style); `space_before` records whether the SOURCE had
+    // >=1 whitespace immediately before it, so a run boundary is not blindly a
+    // space (`see `foo`.` stays `see foo.`, `a**b**c` stays `abc`).
+    let mut words: Vec<(String, Style, bool)> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_style = base;
+    let mut space_pending = false; // whitespace seen since the last atom
     for (text, style) in runs {
-        for word in text.split_whitespace() {
-            words.push((word.to_string(), style));
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                if !cur.is_empty() {
+                    words.push((
+                        std::mem::take(&mut cur),
+                        cur_style,
+                        !words.is_empty() && space_pending,
+                    ));
+                    // The whitespace below re-arms `space_pending`.
+                }
+                space_pending = true; // >=1 space collapses to one
+            } else {
+                if cur.is_empty() {
+                    cur_style = style;
+                }
+                cur.push(ch);
+            }
+        }
+        if !cur.is_empty() {
+            // Flush the run's tail so a style change ends the atom.
+            words.push((
+                std::mem::take(&mut cur),
+                cur_style,
+                !words.is_empty() && space_pending,
+            ));
+            space_pending = false;
         }
     }
 
@@ -521,17 +552,18 @@ fn wrap(
         .saturating_sub(disp(first).max(disp(cont)))
         .max(1);
 
-    for (word, style) in words {
+    for (word, style, space_before) in words {
         for piece in hard_break(&word, max_word) {
             let width_of = disp(&piece);
-            let gap = usize::from(!spans.is_empty());
+            // Only a source-separated atom reserves a column for the separator.
+            let gap = usize::from(!spans.is_empty() && space_before);
             if used + gap + width_of > avail && !spans.is_empty() {
                 lines.push(line_with(&prefix, std::mem::take(&mut spans), base));
                 prefix = cont.to_string();
                 avail = width.saturating_sub(disp(&prefix)).max(1);
                 used = 0;
             }
-            if !spans.is_empty() {
+            if !spans.is_empty() && space_before {
                 spans.push(Span::styled(" ", style));
                 used += 1;
             }
@@ -702,6 +734,61 @@ mod tests {
             "7 hashes is a paragraph, not a heading"
         );
     }
+    #[test]
+    fn inline_run_boundary_keeps_no_space() {
+        assert_eq!(text_of(&render("see `foo`.", 40)), ["   see foo."]);
+    }
+
+    #[test]
+    fn glued_runs_stay_glued() {
+        assert_eq!(text_of(&render("a**b**c", 40)), ["   abc"]);
+    }
+
+    #[test]
+    fn punctuation_after_italic_keeps_no_space() {
+        assert_eq!(text_of(&render("*i*,", 40)), ["   i,"]);
+    }
+
+    #[test]
+    fn a_real_space_between_words_is_preserved() {
+        assert_eq!(text_of(&render("one two", 40)), ["   one two"]);
+        // A wrap point still inserts exactly one space.
+        let lines = render("one two three four five six seven", 20);
+        let rejoined = text_of(&lines)
+            .iter()
+            .map(|l| l.trim_start().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(rejoined, "one two three four five six seven");
+    }
+
+    #[test]
+    fn multiple_spaces_collapse_to_one() {
+        assert_eq!(text_of(&render("one   two", 40)), ["   one two"]);
+    }
+
+    #[test]
+    fn a_cross_run_space_is_kept_once_in_either_direction() {
+        // A trailing space on run k, a leading space on run k+1 — exactly one space.
+        assert_eq!(text_of(&render("a `b`", 40)), ["   a b"]);
+        assert_eq!(text_of(&render("`x` y", 40)), ["   x y"]);
+    }
+
+    #[test]
+    fn a_glued_oversized_word_breaks_mid_word_without_separators() {
+        // `a**verylongbold**c` is three glued atoms; a narrow render may break
+        // between them (accepted) but must insert no separator and stay in width.
+        let lines = render("a**verylongbold**c", 12);
+        for line in &lines {
+            assert!(width_of(line) <= 12, "too long: {line:?}");
+        }
+        let joined: String = text_of(&lines)
+            .iter()
+            .map(|l| l.trim_start().to_string())
+            .collect();
+        assert_eq!(joined, "averylongboldc", "no separators between glued atoms");
+    }
+
     fn text_of(lines: &[Line]) -> Vec<String> {
         lines
             .iter()
