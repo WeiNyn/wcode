@@ -784,7 +784,8 @@ pub(crate) struct InputView {
 }
 
 /// One conversation's state: its identity (the id events route by), the
-/// `label`/`model` the team strip shows, the transcript, run state, changeset,
+/// One conversation's state: its identity (the id events route by), the
+/// `label` the team strip shows, the transcript, run state, changeset,
 /// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
 /// root, the rest are team members.
 /// One committed block's cached render, index-aligned with `Surface::transcript`.
@@ -816,8 +817,6 @@ pub struct Surface {
     id: SessionId,
     /// A short display name (the team strip + status line).
     label: String,
-    /// The effective model id (the status line).
-    model: String,
     /// The root surface (full status line); members are the team.
     is_root: bool,
     /// The status line (the root's; members get a reduced one).
@@ -897,7 +896,6 @@ impl Surface {
         Surface {
             id: info.id,
             label: info.label,
-            model: info.model,
             is_root: info.is_root,
             status,
             transcript: Vec::new(),
@@ -2782,7 +2780,7 @@ impl App {
         let items = self
             .surfaces
             .iter()
-            .map(|s| format!("{} · {}", s.label, s.model))
+            .map(|s| format!("{} · {}", s.label, s.status.model))
             .collect();
         let values = (0..self.surfaces.len()).map(|i| i.to_string()).collect();
         self.overlay = Some(Overlay::Pick(Picker::with_values(
@@ -3707,6 +3705,28 @@ mod tests {
         assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "model"));
         // Opening a picker emits nothing; the selection does.
         assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn surface_picker_reflects_a_model_change() {
+        // Regression: `Surface` carried its own `model`, so `/model` (which
+        // updates only the status line) left the `/surface` picker showing a
+        // stale model. The picker must read the single live source of truth.
+        let (mut app, _root, _member) = two_surfaces();
+        app.set_models(vec!["zeta".into()]);
+        submit(&mut app, "/model");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.status().model, "zeta", "the picker updates the status line");
+
+        submit(&mut app, "/surface");
+        let Some(Overlay::Pick(picker)) = app.overlay() else {
+            panic!("the surface picker is open");
+        };
+        assert_eq!(
+            picker.items[0], "root · zeta",
+            "the picker must read the live status model"
+        );
     }
 
     #[test]

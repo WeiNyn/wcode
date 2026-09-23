@@ -879,7 +879,6 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let mut spans: Vec<Span> = vec![
             Span::raw(" "),
             Span::styled(status.model.clone(), dim()),
-            Span::styled(status.model.clone(), dim()),
         ];
         // The plan chip sits next to the model, ahead of the fields the loop
         // drops when space is tight, so it does not vanish first (A2).
@@ -1436,6 +1435,26 @@ mod tests {
         let text = buffer_text(&render(&mut app, 80, 3));
         assert!(text.contains("14.2k / 1M"), "tokens missing: {text}");
         assert!(text.contains("session abcdef01"), "session missing: {text}");
+    }
+
+    #[test]
+    fn status_line_shows_the_model_exactly_once() {
+        // Regression: `draw_status` pushed the model span twice, so the status
+        // line printed the model twice. Count the occurrences to pin it to one.
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            model: "zephyr-9".into(),
+            effort: None,
+            session: None,
+            context_limit: None,
+            plan: false,
+        });
+        let text = buffer_text(&render(&mut app, 80, 3));
+        assert_eq!(
+            text.matches("zephyr-9").count(),
+            1,
+            "the model must appear exactly once: {text}"
+        );
     }
 
     #[test]
