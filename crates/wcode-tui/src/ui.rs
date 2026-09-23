@@ -1221,8 +1221,8 @@ fn state_style(state: TeamState) -> Style {
 }
 
 /// Draw the docked left sidebar: one fixed-width column stacking the “more
-/// info” the bands cannot all show at once — **Team**, **Todos**, **Changes**,
-/// **Context**. Each section is a dim header line followed by its rows; an
+/// info” the bands cannot all show at once — **Team**, **Todos**, **Changes**.
+/// Each section is a dim header line followed by its rows; an
 /// empty section keeps its header with a dim `—` placeholder, so the stack
 /// does not jump as data arrives.
 ///
@@ -1238,7 +1238,6 @@ fn state_style(state: TeamState) -> Style {
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
 /// - Todos   → [`App::last_todos`] (`☑`/`☐` + `content`, header `done/total`).
 /// - Changes → [`App::changes`] (`path · +added −removed`).
-/// - Context → the same [`token_spans`] the status chip uses.
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1331,21 +1330,6 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 w,
             ));
         }
-    }
-
-    // ---- Context --------------------------------------------------------
-    lines.push(Line::from(Span::styled("Context", dim())));
-    match token_spans(app) {
-        // `token_spans` already yields `bar(ratio, 8) used / limit` (or just
-        // `used`); reuse it verbatim so the panel and the status chip agree.
-        Some(spans) => lines.push(clipped_row(
-            spans
-                .into_iter()
-                .map(|s| (s.content.into_owned(), s.style))
-                .collect(),
-            w,
-        )),
-        None => lines.push(Line::from(Span::styled("  —", dim()))),
     }
 
     // Borderless by default so a 30-col panel is 30 cols of content; the
@@ -2703,7 +2687,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('b')));
         let frame = buffer_text(&render(&mut app, 100, 24));
         // Section headers are sidebar-only (the strip/status never spell these).
-        for header in ["Team", "Todos", "Changes", "Context"] {
+        for header in ["Team", "Todos", "Changes"] {
             assert!(frame.contains(header), "missing {header} header:\n{frame}");
         }
         assert!(frame.contains("explorer"), "member row missing:\n{frame}");
@@ -2734,7 +2718,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('b')));
         let narrow = buffer_text(&render(&mut app, 60, 20)); // < SIDEBAR_MIN_WIDTH
         assert!(
-            !narrow.contains("Context"),
+            !narrow.contains("Changes"),
             "no panel under the width threshold:\n{narrow}"
         );
     }
