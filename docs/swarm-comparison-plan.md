@@ -148,7 +148,13 @@ commitment — decide in §6/§7.
   recovers from reads `failed` until the next run starts. **Deferred:** `blocked`
   (not a distinct state — a blocked `bash` is just an errored tool) and
   `waiting-on-detail` (a server-side fact needing a new event / `SessionInfo`
-  field). Small; presentation-only.
+  field). Small; presentation-only. **Known limitation (item-4 review):** the
+  `synthesize_unexecuted` double-fault paths (`loop_.rs:~409/420/435/636`) send
+  `AgentEnd` *then* `return Err(e)`, so the actor's post-run `Error` arrives after
+  the surface stopped `running` — the member shows `✓ Done` while the transcript
+  shows the error. Closing it needs a kernel ordering fix (send `Error` before
+  `AgentEnd`, or emit the actor's post-run `Error` before the drain); it is a
+  double fault (a session-write error while synthesizing abort/error results).
 
 ## 6. Recommendation
 
