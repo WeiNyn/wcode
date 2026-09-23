@@ -2,10 +2,15 @@
 //! headings, bullets, tables, and inline `code` / **bold**. Deliberately small —
 //! the transcript needs readable prose and code, not a spec-complete parser.
 
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use std::sync::OnceLock;
 
-use crate::theme;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Style as SynStyle, Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+use crate::theme::{self, ColorMode};
 use crate::ui::{code_style, dim};
 
 /// The 3-column gutter every assistant line shares.
@@ -26,27 +31,37 @@ fn body_style() -> Style {
     theme::theme().body
 }
 
-/// Render markdown `text` to transcript lines wrapped to `width`.
+/// Render markdown `text` to transcript lines wrapped to `width`, under the
+/// process color mode.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
+    render_mode(text, width, theme::color_mode())
+}
+
+/// The color-mode seam: `render` delegates here so tests can pin a mode (the
+/// process-wide `color_mode()` is a `OnceLock`, not settable per test).
+pub(crate) fn render_mode(text: &str, width: usize, mode: ColorMode) -> Vec<Line<'static>> {
     let raw: Vec<&str> = text.split('\n').collect();
     let mut lines = Vec::new();
-    let mut in_fence = false;
+    // The stateful highlighter lives for exactly one fence (B1: always `Some`
+    // inside a fence; only its highlighter is optional).
+    let mut fence: Option<Fenced> = None;
     let mut i = 0;
 
     while i < raw.len() {
         let line = raw[i].trim_end();
 
-        if in_fence {
-            if line.trim_start().starts_with("```") {
-                in_fence = false;
+        if let Some(f) = fence.as_mut() {
+            if is_fence(line) {
+                fence = None; // close: drop the highlighter
             } else {
-                lines.push(code_line(line));
+                lines.push(f.line(line)); // stateful: feeds THIS fenced line
             }
             i += 1;
             continue;
         }
-        if line.trim_start().starts_with("```") {
-            in_fence = true;
+        if is_fence(line) {
+            // B2: a bare ``` still opens a fence; `Fenced::new` is infallible (B1).
+            fence = Some(Fenced::new(fence_info(line).unwrap_or(""), mode));
             i += 1;
             continue;
         }
@@ -90,6 +105,122 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// The bundled syntax definitions, loaded once (match `theme.rs`'s install-once
+/// style).
+static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+
+/// The bundled dark syntax theme, loaded once.
+static SYNTAX_THEME: OnceLock<Theme> = OnceLock::new();
+
+/// The bundled syntax set, loaded once — no-newline variants, since `render`
+/// feeds one trimmed line at a time.
+fn syntaxes() -> &'static SyntaxSet {
+    SYNTAXES.get_or_init(SyntaxSet::load_defaults_nonewlines)
+}
+
+/// The syntax theme, resolved once. B3: a TOTAL lookup — a missing/changed key
+/// falls back to an empty theme, never panics in a render path.
+fn syntax_theme() -> &'static Theme {
+    SYNTAX_THEME.get_or_init(|| {
+        ThemeSet::load_defaults()
+            .themes
+            .get("base16-ocean.dark")
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// A fence's state for one ```` ``` ```` block: always present inside a fence;
+/// only the highlighter is optional (B1). A bare fence or a non-`Rgb` mode is
+/// still a code block — just unhighlighted.
+struct Fenced {
+    hl: Option<HighlightLines<'static>>,
+}
+
+impl Fenced {
+    /// Infallible: build the highlighter only under `Rgb` with a resolved syntax.
+    fn new(info: &str, mode: ColorMode) -> Self {
+        let hl = (mode == ColorMode::Rgb)
+            .then(|| fence_syntax(info))
+            .flatten()
+            .map(|syn| HighlightLines::new(syn, syntax_theme()));
+        Self { hl }
+    }
+
+    /// One fenced line: highlighted when possible, else the uniform `code_line`.
+    fn line(&mut self, text: &str) -> Line<'static> {
+        match self.hl.as_mut() {
+            Some(hl) => highlight_line(hl, text),
+            None => code_line(text),
+        }
+    }
+}
+
+/// True for any ```` ``` ```` line (open or close), bare or tagged.
+fn is_fence(line: &str) -> bool {
+    line.trim_start().starts_with("```")
+}
+
+/// The token after the backticks, trimmed: ```` ```rust ```` → `Some("rust")`,
+/// ```` ``` ```` → `None`. Takes the FIRST whitespace/comma-delimited word, so
+/// ```` ```rust,no_run ```` / ```` ```rust ignore ```` still resolve.
+fn fence_info(line: &str) -> Option<&str> {
+    let after = line.trim_start().strip_prefix("```")?;
+    let token = after
+        .trim_start()
+        .split([' ', '\t', ','])
+        .next()
+        .unwrap_or("");
+    (!token.is_empty()).then_some(token)
+}
+
+/// B3: TOTAL. `find_syntax_by_token` then `find_syntax_by_extension`; `None` for a
+/// bare or unknown info string (the caller renders uniformly).
+fn fence_syntax(info: &str) -> Option<&'static SyntaxReference> {
+    let ss = syntaxes();
+    ss.find_syntax_by_token(info)
+        .or_else(|| ss.find_syntax_by_extension(info))
+}
+
+/// syntect token style → ratatui style, honoring wcode's color-mode ladder. Under
+/// `Rgb`: the exact `Color::Rgb` + font modifiers; under `Plain`/`Named`/`Indexed`:
+/// the uniform `code_style()` (256/16-color quantization is a follow-up).
+fn highlight_style(s: SynStyle, mode: ColorMode) -> Style {
+    if mode != ColorMode::Rgb {
+        return code_style();
+    }
+    let fg = s.foreground;
+    let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
+    if s.font_style.contains(FontStyle::BOLD) {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if s.font_style.contains(FontStyle::ITALIC) {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if s.font_style.contains(FontStyle::UNDERLINE) {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    style
+}
+
+/// One highlighted fenced line: the dim `{GUTTER}│ ` gutter + token spans (never
+/// wrapped). `hl` exists only under `ColorMode::Rgb` (see [`Fenced::new`]).
+fn highlight_line(hl: &mut HighlightLines<'static>, text: &str) -> Line<'static> {
+    let mut spans = vec![Span::styled(format!("{GUTTER}│ "), dim())];
+    match hl.highlight_line(text, syntaxes()) {
+        Ok(ranges) => {
+            for (style, piece) in ranges {
+                spans.push(Span::styled(
+                    piece.to_string(),
+                    highlight_style(style, ColorMode::Rgb),
+                ));
+            }
+        }
+        // A highlight failure must never panic in a render path — fall back.
+        Err(_) => spans.push(Span::styled(text.to_string(), code_style())),
+    }
+    Line::from(spans)
+}
 fn code_line(line: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{GUTTER}│ "), dim()),
@@ -789,6 +920,98 @@ mod tests {
         assert_eq!(joined, "averylongboldc", "no separators between glued atoms");
     }
 
+    /// The number of distinct styles in a sequence.
+    fn distinct_styles(styles: impl IntoIterator<Item = Style>) -> usize {
+        let mut seen: Vec<Style> = Vec::new();
+        for s in styles {
+            if !seen.contains(&s) {
+                seen.push(s);
+            }
+        }
+        seen.len()
+    }
+
+    #[test]
+    fn a_rust_fence_has_multiple_distinct_styles() {
+        let lines = render_mode("```rust\nlet x = 1; // c\n```", 60, ColorMode::Rgb);
+        let count = distinct_styles(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter().skip(1))
+                .map(|s| s.style),
+        );
+        assert!(
+            count >= 2,
+            "a Rust fence yields >= 2 distinct token styles: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_or_absent_language_is_uniform_and_guttered() {
+        for md in ["```\nplain text\n```", "```nope\nplain text\n```"] {
+            let lines = render_mode(md, 60, ColorMode::Rgb);
+            assert_eq!(lines.len(), 1, "{md:?}");
+            assert_eq!(
+                lines[0].spans[0].content.as_ref(),
+                "   │ ",
+                "the gutter proves it is a code block, not reparsed prose: {md:?}"
+            );
+            assert!(
+                lines[0].spans.iter().skip(1).all(|s| s.style == code_style()),
+                "an unknown/absent language is uniform: {md:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_rgb_mode_still_renders_a_code_block() {
+        // B1 regression guard: a non-Rgb mode is still a fence, never prose.
+        let lines = render_mode("```rust\nfn main() {}\n```", 60, ColorMode::Named);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
+        assert!(
+            lines[0].spans.iter().skip(1).all(|s| s.style == code_style()),
+            "a non-Rgb fence falls back to the uniform code style"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_fence_at_eof_renders_as_code() {
+        let lines = render_mode("```rust\nlet x = 1;", 60, ColorMode::Rgb);
+        assert_eq!(lines.len(), 1, "the unclosed body renders as one code line");
+        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
+        assert!(text_of(&lines)[0].contains("let x = 1;"));
+    }
+
+    #[test]
+    fn highlight_style_follows_the_color_mode() {
+        let s = syntect::highlighting::Style {
+            foreground: syntect::highlighting::Color {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 255,
+            },
+            background: syntect::highlighting::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            font_style: FontStyle::BOLD,
+        };
+        assert_eq!(
+            highlight_style(s, ColorMode::Rgb).fg,
+            Some(Color::Rgb(1, 2, 3))
+        );
+        for mode in [ColorMode::Plain, ColorMode::Named, ColorMode::Indexed] {
+            assert_eq!(
+                highlight_style(s, mode),
+                code_style(),
+                "under {mode:?} the token falls back to the uniform code style"
+            );
+        }
+    }
     fn text_of(lines: &[Line]) -> Vec<String> {
         lines
             .iter()
