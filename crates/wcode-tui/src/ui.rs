@@ -546,18 +546,24 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     };
     let expanded = tool.expanded || tool.is_error;
     let (note, wide) = summary_line(&tool.output);
+    // The ⚙ start line persists — so the command/target stays visible — and the
+    // ✓/✗ end line sits below it: two separated lines, matching `diff_lines`.
+    let mut header = vec![
+        Span::styled("   ⚙ ", dim()),
+        Span::styled(tool.name.clone(), tool_name()),
+    ];
+    header.extend(target_span(tool));
     let mut spans = vec![
         Span::styled(format!("   {mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
-    spans.extend(target_span(tool));
     if !expanded && !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
     if let Some(ms) = tool.duration_ms {
         spans.push(Span::styled(format!(" · {}", format_ms(ms)), dim()));
     }
-    let mut lines = vec![Line::from(spans)];
+    let mut lines = vec![Line::from(header), Line::from(spans)];
 
     // Collapsed: the summary above plus a preview of the rest. Expanded: the
     // summary is dropped (a line is never shown twice) and the whole output is
@@ -2634,14 +2640,15 @@ mod tests {
 
         let collapsed = buffer_text(&render(&mut app, 70, 30));
         assert!(!collapsed.contains("line-20"), "collapsed hides the tail:\n{collapsed}");
-        // The bar covers the whole block: header + 4 preview lines + the hint.
-        assert_eq!(barred(&collapsed).len(), 6, "{collapsed}");
+        // The bar covers the whole block: ⚙ header + ✓ status + 4 preview
+        // lines + the hint.
+        assert_eq!(barred(&collapsed).len(), 7, "{collapsed}");
 
         app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 30));
         assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
-        // Header + all 20 output lines.
-        assert_eq!(barred(&expanded).len(), 21, "{expanded}");
+        // ⚙ header + ✓ status + all 20 output lines.
+        assert_eq!(barred(&expanded).len(), 22, "{expanded}");
     }
 
     #[test]
@@ -2866,4 +2873,15 @@ mod tests {
             "the tool's input (command) must render:\n{text}"
         );
     }
+    #[test]
+    fn a_completed_tool_shows_a_start_line_and_an_end_line() {
+        // Regression: the done block rendered only the ✓ line, losing the ⚙
+        // start line. It must be two separated lines.
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "hello", false, None);
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(text.contains("⚙ bash"), "the ⚙ start line is missing:\n{text}");
+        assert!(text.contains("✓ bash"), "the ✓ end line is missing:\n{text}");
+    }
+
 }
