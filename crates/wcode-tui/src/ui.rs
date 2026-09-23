@@ -882,7 +882,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     // Fields are ordered most-important-first and dropped when space is tight:
     // session first, then effort, then tokens.
     let (mut show_tokens, mut show_effort, mut show_session) = (true, true, true);
-    let (mut show_todos, mut show_changes) = (true, true);
+    let (mut show_cwd, mut show_todos, mut show_changes) = (true, true, true);
     loop {
         let mut spans: Vec<Span> = vec![
             Span::raw(" "),
@@ -915,6 +915,16 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(sep());
             spans.push(Span::styled(format!("session {}", short_id(session)), dim()));
         }
+        if show_cwd {
+            if let Some(cwd) = app.cwd() {
+                spans.push(sep());
+                spans.push(Span::styled(cwd.to_string(), dim()));
+            }
+            if let Some(git) = app.git() {
+                spans.push(sep());
+                spans.push(Span::styled(format!("⎇ {git}"), dim()));
+            }
+        }
         if app.mode() == Mode::Browse {
             spans.push(sep());
             spans.push(Span::styled("▤ browse", accent()));
@@ -928,11 +938,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw(" "));
 
         let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if len <= width || !(show_tokens || show_effort || show_session || show_todos || show_changes) {
+        if len <= width || !(show_tokens || show_effort || show_session || show_todos || show_changes || show_cwd) {
             frame.render_widget(Paragraph::new(Line::from(spans)), area);
             return;
         }
-        if show_todos {
+        if show_cwd {
+            show_cwd = false;
+        } else if show_todos {
             show_todos = false;
         } else if show_changes {
             show_changes = false;
@@ -1532,6 +1544,27 @@ mod tests {
         let narrow = buffer_text(&render(&mut app, 24, 3));
         assert!(!narrow.contains("1/3"), "todos chip must drop when narrow: {narrow}");
         assert!(!narrow.contains("1 file"), "changes chip must drop when narrow: {narrow}");
+    }
+
+    #[test]
+    fn status_shows_cwd_and_git_and_drops_cwd_first() {
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            model: "m".into(),
+            effort: None,
+            session: None,
+            context_limit: None,
+            plan: false,
+        });
+        app.set_cwd(Some("myrepo".into()));
+        app.set_git(Some("main*".into()));
+        let text = buffer_text(&render(&mut app, 100, 3));
+        assert!(text.contains("myrepo"), "cwd missing: {text}");
+        assert!(text.contains("⎇ main*"), "branch/dirty missing: {text}");
+        // Narrow: cwd/git shed FIRST (least important).
+        let narrow = buffer_text(&render(&mut app, 20, 3));
+        assert!(!narrow.contains("myrepo"), "cwd must drop first: {narrow}");
+        assert!(!narrow.contains("main*"), "git must drop with cwd: {narrow}");
     }
 
     #[test]

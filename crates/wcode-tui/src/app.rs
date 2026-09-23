@@ -1476,6 +1476,12 @@ pub struct App {
     search: Option<BrowseSearch>,
     /// The term the last search jumped on; `n`/`N` repeat it in browse.
     last_search: Option<String>,
+    /// The process cwd (`repo`), shown last in the status line (drops first).
+    /// Injected at startup, like `models`/`sessions`.
+    cwd: Option<String>,
+    /// `branch`, with a trailing `*` when the worktree is dirty. Display-only;
+    /// never refreshed after startup.
+    git: Option<String>,
 }
 
 impl Default for App {
@@ -1510,6 +1516,8 @@ impl App {
             mode: Mode::Input,
             search: None,
             last_search: None,
+            cwd: None,
+            git: None,
         }
     }
 
@@ -2958,6 +2966,28 @@ impl App {
             self.dirty = true;
         }
     }
+    /// The process cwd (`repo`), for the status line.
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// The branch, with a `*` dirty marker, for the status line.
+    pub fn git(&self) -> Option<&str> {
+        self.git.as_deref()
+    }
+
+    /// Inject the startup cwd (see `Options::cwd`); marks the app dirty.
+    pub fn set_cwd(&mut self, cwd: Option<String>) {
+        self.cwd = cwd;
+        self.dirty = true;
+    }
+
+    /// Inject the startup branch/dirty marker (see `Options::git`); marks dirty.
+    pub fn set_git(&mut self, git: Option<String>) {
+        self.git = git;
+        self.dirty = true;
+    }
+
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;

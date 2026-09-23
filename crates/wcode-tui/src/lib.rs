@@ -132,6 +132,12 @@ pub struct Options {
     /// True when this TUI is a `--socket` client: `/reload` (rebuild + re-exec)
     /// has no local binary or session, so it is refused.
     pub remote: bool,
+    /// The process cwd (`repo`, e.g. `current_dir().file_name()`), for the
+    /// status line. `None` when it cannot be determined.
+    pub cwd: Option<String>,
+    /// `branch`, with a `*` dirty marker, from the CLI's git probe. `None`
+    /// outside a work tree (or when git is absent).
+    pub git: Option<String>,
 }
 
 /// How a TUI run ended — the return value tells the composition root whether to
@@ -170,6 +176,8 @@ pub async fn run(
         history,
         theme,
         remote,
+        cwd,
+        git,
     } = options;
     // Install the theme before the terminal is entered and anything draws.
     theme::install(theme);
@@ -183,6 +191,8 @@ pub async fn run(
     // The root's full status line (members derive a reduced one).
     app.set_status(status);
     app.set_remote(remote);
+    app.set_cwd(cwd);
+    app.set_git(git);
 
     let backends: Vec<(SessionId, Backend)> = surfaces
         .iter()
@@ -521,6 +531,8 @@ mod tests {
             history: None,
             theme: ThemeSpec::default(),
             remote: false,
+            cwd: None,
+            git: None,
         };
         assert_eq!(
             run(Vec::new(), options, None, None).await.unwrap(),

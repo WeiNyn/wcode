@@ -406,6 +406,24 @@ async fn list_models_and_exit(llm: &LlmOpts) -> ! {
     std::process::exit(0)
 }
 
+/// `branch`, with a trailing `*` when the worktree is dirty; `None` outside a
+/// work tree (or when git is absent). Best-effort: any probe failure is `None`.
+fn git_branch_dirty() -> Option<String> {
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    Some(if dirty { format!("{branch}*") } else { branch })
+}
+
 /// P3c: `--socket` (without `serve`): connect to a session served elsewhere and
 /// drive it (one-shot, remote TUI, or remote line REPL). Every handled path
 /// diverges; returns `false` to fall through when no socket is being handled.
@@ -454,6 +472,10 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         .map(|l| l.context),
                         plan: false,
                     };
+                    let cwd = std::env::current_dir().ok().and_then(|p| {
+                        p.file_name().map(|n| n.to_string_lossy().into_owned())
+                    });
+                    let git = git_branch_dirty();
                     let options = wcode_tui::Options {
                         status,
                         models: wcode_harness::streamfn::list_models(llm)
@@ -466,6 +488,8 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         theme: cfg.theme.clone(),
                         history: Some(repl::history_path()),
                         remote: true,
+                        cwd,
+                        git,
                     };
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
@@ -1058,6 +1082,10 @@ async fn dispatch(
                     .map(|l| l.context),
                     plan: false,
                 };
+                let cwd = std::env::current_dir().ok().and_then(|p| {
+                    p.file_name().map(|n| n.to_string_lossy().into_owned())
+                });
+                let git = git_branch_dirty();
                 let options = wcode_tui::Options {
                     status,
                     models: wcode_harness::streamfn::list_models(&llm)
@@ -1068,6 +1096,8 @@ async fn dispatch(
                     theme: cfg.theme.clone(),
                     history: Some(repl::history_path()),
                     remote: false,
+                    cwd,
+                    git,
                 };
                 let session_path = agent.session_path().map(Path::to_path_buf);
                 let handle = SessionActor::spawn(agent);

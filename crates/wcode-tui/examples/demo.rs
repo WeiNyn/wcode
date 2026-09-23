@@ -146,6 +146,8 @@ async fn main() -> std::io::Result<()> {
         theme: Default::default(),
         history: None,
         remote: false,
+        cwd: None,
+        git: None,
     };
     // A static roster so the example shows the team sidebar (root + two members).
     let surfaces = vec![
