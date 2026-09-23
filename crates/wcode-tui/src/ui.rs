@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
@@ -432,10 +432,74 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
-    // Publish the transcript viewport for hit-testing: `start` is the global
-    // line at the band's top row.
-    app.set_transcript_hit(area, start);
+    // Third pass: restyle the selected chars with `Modifier::REVERSED`. It only
+    // RESTYLES (splits spans, changes no content), so no row's width changes and no
+    // row is injected — the same invariant `paint_bar` protects. `start` is the
+    // global line of the window's top row (the value the bar pass used).
+    if let Some((a, b)) = app.text_sel() {
+        for (r, line) in window.iter_mut().enumerate() {
+            let g = start + r; // the global line of this row
+            if g < a.line || g > b.line {
+                continue;
+            }
+            let lo = if g == a.line { a.col } else { 0 };
+            // INCLUSIVE end: highlight through `b.col`, i.e. `[lo, b.col + 1)`.
+            let hi = if g == b.line { b.col + 1 } else { usize::MAX };
+            recolor_range(line, lo, hi, selection_style());
+        }
+    }
+    // Publish the transcript viewport for hit-testing: `start` is the global line
+    // at the band's top row; `rows` the plain text of each visible row.
+    let rows_text: Vec<String> = window
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    app.set_transcript_hit(area, start, rows_text);
     frame.render_widget(Paragraph::new(window), area);
+}
+
+/// Restyle the char range `[lo, hi)` of `line` with `style` (the caller passes
+/// `selection_style()`, i.e. `Modifier::REVERSED`). Splits spans at `lo`/`hi`
+/// exactly as `paint_bar` splits at column 0; NEVER changes `line`'s text, so its
+/// glyph width is identical before and after. `lo`/`hi` are char indices, clamped
+/// to the row's char count. The selection is INCLUSIVE on both ends, so a caller
+/// highlighting through `b.col` passes `hi = b.col + 1`.
+fn recolor_range(line: &mut Line<'static>, lo: usize, hi: usize, style: Style) {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    let lo = lo.min(total);
+    let hi = hi.min(total);
+    if lo >= hi {
+        return;
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut pos = 0;
+    for span in line.spans.drain(..) {
+        let n = span.content.chars().count();
+        let (start, end) = (pos, pos + n);
+        pos = end;
+        // No overlap with `[lo, hi)`: keep the span whole.
+        if end <= lo || start >= hi {
+            out.push(span);
+            continue;
+        }
+        let base = span.style;
+        let chars: Vec<char> = span.content.chars().collect();
+        let a = lo.saturating_sub(start).min(n);
+        let b = (hi - start).min(n);
+        if a > 0 {
+            out.push(Span::styled(chars[..a].iter().collect::<String>(), base));
+        }
+        out.push(Span::styled(chars[a..b].iter().collect::<String>(), base.patch(style)));
+        if b < n {
+            out.push(Span::styled(chars[b..].iter().collect::<String>(), base));
+        }
+    }
+    line.spans = out;
+}
+
+/// The selection highlight style: `Modifier::REVERSED` over the default style.
+fn selection_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
 }
 
 /// Overwrite column 0 of a transcript row with the selection bar, keeping the
@@ -2506,6 +2570,33 @@ mod tests {
     }
 
     #[test]
+    fn input_mode_frame_is_byte_identical_with_no_selection() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+        let plain = buffer_text(&render(&mut app, 60, 20));
+        let again = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(plain, again, "no selection => the frame is unchanged");
+    }
+
+    #[test]
+    fn a_drag_highlight_does_not_inject_rows() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+        let plain = buffer_text(&render(&mut app, 60, 20));
+        let plain_total = app.total_lines();
+
+        // A drag over the transcript restyles the covered cells; it adds no row and
+        // (being a restyle) changes no glyph.
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        let row = hit.rect.y;
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 0, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: 5, row }));
+        let dragged = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(app.total_lines(), plain_total, "a highlight injects no rows");
+        assert_eq!(dragged, plain, "a highlight restyles, never reflows");
+    }
+
+    #[test]
     fn leaving_browse_restores_the_input_frame() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
@@ -2657,6 +2748,25 @@ mod tests {
                         "a text row's width must not change: {line:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_drag_highlight_changes_no_row_width() {
+        // Mirror `paint_bar_never_shifts_a_text_row`: a restyle must not move a glyph.
+        for block in [
+            Block::User("hi there".into()),
+            Block::Assistant(vec![ContentBlock::Text {
+                text: "# Head\n\ntext `code` and **bold**".into(),
+            }]),
+            Block::Notice("a note".into()),
+        ] {
+            for line in block_lines(&block, 40) {
+                let before = line_width(&line);
+                let mut painted = line.clone();
+                recolor_range(&mut painted, 0, usize::MAX, selection_style());
+                assert_eq!(line_width(&painted), before, "a highlight must not reflow");
             }
         }
     }

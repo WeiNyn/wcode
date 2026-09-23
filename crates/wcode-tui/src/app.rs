@@ -1474,6 +1474,15 @@ enum ViewEdge {
     Bottom,
 }
 
+/// One endpoint of a text selection, in GLOBAL line/char space: `line` indexes
+/// the rendered transcript rows (the same space as `Surface::ranges`); `col` a
+/// char index within that row's plain text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SelPos {
+    pub(crate) line: usize,
+    pub(crate) col: usize,
+}
+
 /// Screen geometry the draw pass publishes for hit-testing — the app holds no
 /// layout constants. CLEARED at the top of every `ui::draw`, so a closed sidebar
 /// / a resize never leaves stale geometry.
@@ -1498,6 +1507,10 @@ pub(crate) struct TranscriptHit {
     /// The global line index drawn at `rect.y` — the SAME `start` the bar pass
     /// uses: `total - scroll - height`. Global line = `top_line + (row - rect.y)`.
     pub(crate) top_line: usize,
+    /// The plain text of each visible row (length == the window height). Used to
+    /// clamp a drag's column to the row's char count. Chars map to cells 1:1
+    /// (wide glyphs count as one), matching `markdown::disp` (plan §WYSIWYG).
+    pub(crate) rows: Vec<String>,
 }
 
 /// The open sidebar as drawn: its rect and each member row's `(surface index, y)`.
@@ -1582,6 +1595,10 @@ pub struct App {
     /// The latest cell a mouse gesture reached (`Down`/`Drag`). Compared to
     /// `mouse_down` on `Up` to tell a click (same cell) from a drag (moved).
     mouse_focus: (u16, u16),
+    /// The live transcript text selection in global line/char space, normalized
+    /// `(min, max)` — `None` when nothing is selected. Cleared on the next `Down`
+    /// in the transcript; read by the renderer's highlight pass.
+    text_sel: Option<(SelPos, SelPos)>,
 }
 
 impl Default for App {
@@ -1624,6 +1641,7 @@ impl App {
             hit: HitMap::default(),
             mouse_down: None,
             mouse_focus: (0, 0),
+            text_sel: None,
         }
     }
 
@@ -2238,10 +2256,11 @@ impl App {
     }
 
     /// Publish the transcript viewport for hit-testing (called by
-    /// `draw_transcript` after it measured and sliced the window): the band's
-    /// rect and the global line at its top row.
-    pub(crate) fn set_transcript_hit(&mut self, rect: Rect, top_line: usize) {
-        self.hit.transcript = Some(TranscriptHit { rect, top_line });
+    /// `draw_transcript` after it measured and sliced the window). `top_line` is
+    /// the global line at the rect's top row; `rows` is the plain text of each
+    /// visible row.
+    pub(crate) fn set_transcript_hit(&mut self, rect: Rect, top_line: usize, rows: Vec<String>) {
+        self.hit.transcript = Some(TranscriptHit { rect, top_line, rows });
     }
 
     /// Publish the open sidebar for hit-testing (called by `draw_sidebar`).
@@ -2274,32 +2293,51 @@ impl App {
         if let Some(idx) = self.sidebar_member_at(row, col) {
             self.set_focus(idx);
             self.mouse_down = None; // no drag follows a focus click
+            return;
         }
+        // A fresh Down in the transcript clears the previous highlight and starts
+        // a new selection anchored at the clicked cell (it persists until the next
+        // Down — plan §"…persists until the next Down"). A miss selects nothing.
+        self.text_sel = self.transcript_pos_at(row, col).map(|p| (p, p));
+        self.dirty = true;
     }
 
     /// Pointer moved with the button held: remember the latest cell so `Up` can
-    /// tell a drag (moved) from a click (same cell). A no-op with no button down.
+    /// tell a drag (moved) from a click (same cell). A transcript drag extends the
+    /// live selection from its anchor to the new cell (normalized on read).
     fn on_mouse_drag(&mut self, col: u16, row: u16) {
-        if self.mouse_down.is_some() {
-            self.mouse_focus = (col, row);
+        if self.mouse_down.is_none() {
+            return;
+        }
+        self.mouse_focus = (col, row);
+        if let (Some((anchor, _)), Some(pos)) =
+            (self.text_sel, self.transcript_pos_at(row, col))
+        {
+            self.text_sel = Some((anchor, pos));
+            self.dirty = true;
         }
     }
 
     /// Button released. The same cell as the `Down` is a CLICK (select the block
-    /// under it); a moved cell is a DRAG (handled in the text-selection pass). A
-    /// drag never selects a block; a click never copies (plan #4). The `Up` cell
-    /// is not consulted — `mouse_focus` already carries the latest gesture cell.
+    /// under it); a moved cell is a DRAG (copy the selected text). A drag never
+    /// selects a block; a click never copies (plan #4). The `Up` cell is not
+    /// consulted — `mouse_focus` already carries the latest gesture cell.
     fn on_mouse_up(&mut self) {
         let down = self.mouse_down.take();
         let moved = down.is_some_and(|d| d != self.mouse_focus);
-        if !moved
-            && down.is_some()
+        if moved {
+            // A drag: copy the selected text (WYSIWYG — see `selected_text`).
+            if let Some(text) = self.selected_text() {
+                let chars = text.chars().count();
+                self.actions.push(Action::Copy(text));
+                self.notice(format!("copied {chars} chars to the clipboard"));
+            }
+        } else if down.is_some()
             && let Some(i) = self.block_at(self.mouse_focus.1, self.mouse_focus.0)
         {
             self.select_block(i);
         }
     }
-
     /// The global committed-block index whose recorded range contains the clicked
     /// global line, or `None`. A click on the live (streaming) block or a blank
     /// separator finds no block (the live block is never in `ranges`).
@@ -2363,6 +2401,65 @@ impl App {
         rows.into_iter()
             .map(|(i, label, state, focused, action, _)| (i, label, state, focused, action))
             .collect()
+    }
+
+    /// The live text selection in GLOBAL line/char space, normalized to
+    /// `(earlier, later)` so a drag in any direction yields a non-empty range.
+    /// `None` when nothing is selected (so the input-mode frame is unchanged).
+    /// The renderer's highlight pass reads this.
+    pub(crate) fn text_sel(&self) -> Option<(SelPos, SelPos)> {
+        self.normalized_sel()
+    }
+
+    /// The selection normalized to `(earlier, later)`; `None` when empty. The
+    /// single read point, so both the highlight and the copy see the same bounds.
+    fn normalized_sel(&self) -> Option<(SelPos, SelPos)> {
+        let (a, b) = self.text_sel?;
+        Some(if (a.line, a.col) <= (b.line, b.col) {
+            (a, b)
+        } else {
+            (b, a)
+        })
+    }
+
+    /// Map a screen cell inside the transcript rect to a global `SelPos`, clamping
+    /// the column to the row's char count; `None` when the cell is outside the rect.
+    fn transcript_pos_at(&self, row: u16, col: u16) -> Option<SelPos> {
+        let hit = self.hit.transcript.as_ref()?;
+        if !hit.rect.contains((col, row).into()) {
+            return None;
+        }
+        let rel = (row - hit.rect.y) as usize;
+        let text = hit.rows.get(rel)?;
+        // `col` is absolute; the row's text starts at the band's left edge.
+        let col = (col.saturating_sub(hit.rect.x) as usize).min(text.chars().count());
+        Some(SelPos { line: hit.top_line + rel, col })
+    }
+
+    /// Join the selected transcript rows (char-sliced, `trim_end` per line,
+    /// WYSIWYG — the gutter is included) into the string to copy. INCLUSIVE on
+    /// both ends, so it is byte-identical to the highlighted cells. `None` when
+    /// nothing is selected.
+    fn selected_text(&self) -> Option<String> {
+        let (a, b) = self.normalized_sel()?;
+        let hit = self.hit.transcript.as_ref()?;
+        let mut out: Vec<String> = Vec::new();
+        for line in a.line..=b.line {
+            let Some(text) = line.checked_sub(hit.top_line).and_then(|r| hit.rows.get(r)) else {
+                continue;
+            };
+            let chars: Vec<char> = text.chars().collect();
+            if chars.is_empty() {
+                out.push(String::new());
+                continue;
+            }
+            let lo = (if line == a.line { a.col } else { 0 }).min(chars.len() - 1);
+            let hi = (if line == b.line { b.col } else { chars.len() - 1 }).min(chars.len() - 1);
+            let lo = lo.min(hi);
+            let slice: String = chars[lo..=hi].iter().collect();
+            out.push(slice.trim_end().to_string());
+        }
+        Some(out.join("\n"))
     }
 
     /// Apply one event. Pure state transition; sets [`App::dirty`] on a change.
@@ -4752,7 +4849,7 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("one"), assistant("two")]);
         app.set_block_ranges(vec![0..1, 2..3]); // two committed blocks
-        app.set_transcript_hit(rect(0, 0, 40, 10), 0);
+        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["one".into(), "".into(), "two".into()]);
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 2, row: 0 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 2, row: 0 }));
         assert_eq!(app.mode(), Mode::Browse, "a click enters browse");
@@ -4773,6 +4870,30 @@ mod tests {
         app.clear_hit_map(); // closed/narrow: `draw_sidebar` published nothing
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 3, row: 1 }));
         assert_eq!(app.focus(), 0, "the focus is unchanged");
+    }
+
+    #[test]
+    fn drag_selects_text_and_pushes_copy_on_release() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        app.set_block_ranges(std::iter::once(0..1).collect());
+        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["hello".into()]);
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 0, row: 0 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: 3, row: 0 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 3, row: 0 }));
+        // Inclusive both ends: cols 0..=3 of "hello" is "hell".
+        assert_eq!(app.take_actions(), vec![Action::Copy("hell".into())]);
+    }
+
+    #[test]
+    fn a_no_move_click_does_not_copy() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        app.set_block_ranges(std::iter::once(0..1).collect());
+        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["hello".into()]);
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 1, row: 0 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 1, row: 0 }));
+        assert!(app.take_actions().iter().all(|a| !matches!(a, Action::Copy(_))));
     }
 
     #[test]
