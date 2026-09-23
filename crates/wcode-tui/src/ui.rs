@@ -1523,7 +1523,7 @@ pub(crate) fn code_style() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, AppEvent, Key, MouseEvent, MouseKind};
+    use crate::app::{Action, App, AppEvent, Key, MouseEvent, MouseKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wcode_harness::protocol::SessionId;
@@ -1574,6 +1574,30 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// The `(x, y)` cells whose style carries `Modifier::REVERSED` — the selection
+    /// highlight. `buffer_text` reads only symbols, so it cannot see the highlight;
+    /// this is the style-aware probe the highlight tests assert against.
+    fn reversed_cells(terminal: &Terminal<TestBackend>) -> Vec<(u16, u16)> {
+        let buffer = terminal.backend().buffer();
+        let mut cells = Vec::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].modifier.contains(Modifier::REVERSED) {
+                    cells.push((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    /// The screen `(row, x0)` of the row carrying `needle`, from the last-published
+    /// transcript hit map (publish one with a `render` first).
+    fn row_of(app: &App, needle: &str) -> (u16, u16) {
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        let idx = hit.rows.iter().position(|r| r.contains(needle)).expect("the row");
+        (hit.rect.y + idx as u16, hit.rect.x)
     }
 
     /// Commit a text `Assistant` block (the cache's most common entry).
@@ -2570,12 +2594,24 @@ mod tests {
     }
 
     #[test]
-    fn input_mode_frame_is_byte_identical_with_no_selection() {
+    fn a_click_on_a_non_block_row_changes_nothing() {
         let mut app = App::new();
-        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
-        let plain = buffer_text(&render(&mut app, 60, 20));
-        let again = buffer_text(&render(&mut app, 60, 20));
-        assert_eq!(plain, again, "no selection => the frame is unchanged");
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let before = buffer_text(&render(&mut app, 60, 20));
+
+        // Click a blank separator row — it lies between blocks, inside no range.
+        let (row, x0) = {
+            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+            let idx = hit.rows.iter().position(|r| r.is_empty()).expect("a blank row");
+            (hit.rect.y + idx as u16, hit.rect.x)
+        };
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: x0, row }));
+
+        let after = buffer_text(&render(&mut app, 60, 20));
+        assert_eq!(after, before, "a non-block click leaves the frame byte-identical");
+        assert_eq!(app.mode(), Mode::Input, "no browse was entered");
+        assert_eq!(app.selected(), None, "nothing was selected");
     }
 
     #[test]
@@ -2594,6 +2630,124 @@ mod tests {
         let dragged = buffer_text(&render(&mut app, 60, 20));
         assert_eq!(app.total_lines(), plain_total, "a highlight injects no rows");
         assert_eq!(dragged, plain, "a highlight restyles, never reflows");
+    }
+
+    #[test]
+    fn a_drag_highlight_reverses_exactly_the_selected_cells() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let _ = render(&mut app, 60, 20);
+        let (row, x0) = row_of(&app, "hello");
+
+        // Drag over "hel" (the row is " ❯ hello", so the text begins at char col 3).
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0 + 3, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x0 + 5, row }));
+
+        let terminal = render(&mut app, 60, 20);
+        // Locate "hello" in the drawn buffer so the expectation is robust to the
+        // gutter's rendered width.
+        let start = {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .find(|&x| buffer[(x, row)].symbol() == "h")
+                .expect("the 'h' of hello")
+        };
+        let mut cells = reversed_cells(&terminal);
+        cells.sort_unstable();
+        assert_eq!(
+            cells,
+            vec![(start, row), (start + 1, row), (start + 2, row)],
+            "exactly the selected cells are reversed"
+        );
+    }
+
+    #[test]
+    fn a_past_end_anchor_copies_and_highlights_nothing() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let _ = render(&mut app, 60, 20);
+        let (row, x0) = row_of(&app, "hello");
+        let len = app
+            .hit
+            .transcript
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .find(|r| r.contains("hello"))
+            .unwrap()
+            .chars()
+            .count() as u16;
+        let past = x0 + len; // one cell past the row's end
+
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: past, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: past + 2, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: past + 2, row }));
+
+        assert!(
+            app.take_actions().iter().all(|a| !matches!(a, Action::Copy(_))),
+            "a past-end anchor copies nothing"
+        );
+        let terminal = render(&mut app, 60, 20);
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "a past-end anchor highlights nothing"
+        );
+    }
+
+    #[test]
+    fn the_highlight_persists_after_copy_and_a_wheel_scroll() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let _ = render(&mut app, 60, 20);
+        let (row, x0) = row_of(&app, "hello");
+
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x0 + 4, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: x0 + 4, row }));
+        assert!(
+            matches!(app.take_actions().as_slice(), [Action::Copy(_)]),
+            "the drag copied the selection"
+        );
+
+        let selection = app.text_sel();
+        assert!(selection.is_some(), "the highlight survives the copy");
+        // A wheel notch scrolls the view; it must not clear the selection.
+        app.handle(AppEvent::Key(Key::ScrollUp));
+        assert_eq!(app.text_sel(), selection, "a wheel scroll keeps the selection");
+    }
+
+    #[test]
+    fn esc_does_not_clear_a_live_selection() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let _ = render(&mut app, 60, 20);
+        let (row, x0) = row_of(&app, "hello");
+
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x0 + 3, row }));
+        let selection = app.text_sel();
+        assert!(selection.is_some(), "a live selection");
+
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.text_sel(), selection, "Esc keeps its cancel/quit meaning");
+    }
+
+    #[test]
+    fn a_mouse_click_under_an_overlay_is_a_no_op() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
+        let _ = render(&mut app, 60, 20);
+        let (row, x0) = row_of(&app, "hello");
+
+        app.handle(AppEvent::Key(Key::F(1))); // open the help overlay
+        assert!(app.overlay().is_some(), "the overlay is up");
+
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0 + 2, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: x0 + 2, row }));
+        assert_eq!(app.mode(), Mode::Input, "the click did not enter browse");
+        assert_eq!(app.selected(), None, "the click did not select a block");
+        assert!(app.text_sel().is_none(), "the click did not start a selection");
     }
 
     #[test]

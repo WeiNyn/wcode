@@ -2326,8 +2326,9 @@ impl App {
         let down = self.mouse_down.take();
         let moved = down.is_some_and(|d| d != self.mouse_focus);
         if moved {
-            // A drag: copy the selected text (WYSIWYG — see `selected_text`).
-            if let Some(text) = self.selected_text() {
+            // A drag: copy the selected text (WYSIWYG — see `selected_text`). An
+            // empty selection (e.g. an anchor past the row's end) copies nothing.
+            if let Some(text) = self.selected_text().filter(|t| !t.is_empty()) {
                 let chars = text.chars().count();
                 self.actions.push(Action::Copy(text));
                 self.notice(format!("copied {chars} chars to the clipboard"));
@@ -2437,9 +2438,11 @@ impl App {
     }
 
     /// Join the selected transcript rows (char-sliced, `trim_end` per line,
-    /// WYSIWYG — the gutter is included) into the string to copy. INCLUSIVE on
-    /// both ends, so it is byte-identical to the highlighted cells. `None` when
-    /// nothing is selected.
+    /// WYSIWYG — the gutter is included) into the string to copy. The bounds mirror
+    /// the highlight pass EXACTLY: `lo = a.col`, `hi = b.col + 1`, both clamped to
+    /// the row's char count (half-open `[lo, hi)`), so an anchor at `col == len`
+    /// yields an empty slice — copying nothing, just as the highlight paints nothing.
+    /// `None` when nothing is selected.
     fn selected_text(&self) -> Option<String> {
         let (a, b) = self.normalized_sel()?;
         let hit = self.hit.transcript.as_ref()?;
@@ -2449,14 +2452,11 @@ impl App {
                 continue;
             };
             let chars: Vec<char> = text.chars().collect();
-            if chars.is_empty() {
-                out.push(String::new());
-                continue;
-            }
-            let lo = (if line == a.line { a.col } else { 0 }).min(chars.len() - 1);
-            let hi = (if line == b.line { b.col } else { chars.len() - 1 }).min(chars.len() - 1);
+            let n = chars.len();
+            let lo = (if line == a.line { a.col } else { 0 }).min(n);
+            let hi = (if line == b.line { b.col + 1 } else { n }).min(n);
             let lo = lo.min(hi);
-            let slice: String = chars[lo..=hi].iter().collect();
+            let slice: String = chars[lo..hi].iter().collect();
             out.push(slice.trim_end().to_string());
         }
         Some(out.join("\n"))
