@@ -104,7 +104,7 @@ impl TypedTool for Grep {
             }
             let rel = file.strip_prefix(&ctx.working_dir).unwrap_or(&file);
             let rel_str = rel.to_string_lossy();
-            if !include_path(&rel_str, &includes, &excludes) {
+            if !super::include_path(&rel_str, &includes, &excludes) {
                 continue;
             }
             let Ok(mut f) = std::fs::File::open(&file) else {
@@ -234,20 +234,6 @@ pub(crate) fn parse_globs(
         }
     }
     (includes, excludes)
-}
-
-fn include_path(
-    path: &str,
-    includes: &[globset::GlobMatcher],
-    excludes: &[globset::GlobMatcher],
-) -> bool {
-    if excludes.iter().any(|m| m.is_match(path)) {
-        return false;
-    }
-    if includes.is_empty() {
-        return true;
-    }
-    includes.iter().any(|m| m.is_match(path))
 }
 
 #[cfg(test)]

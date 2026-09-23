@@ -102,6 +102,24 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Whether a walked path passes the include/exclude globs compiled by
+/// [`grep::parse_globs`]: an excluded path is out; an empty include set admits
+/// everything; otherwise any include match admits it. Shared by the `grep` and
+/// `find` tools so their filter semantics cannot drift apart.
+pub(crate) fn include_path(
+    path: &str,
+    includes: &[globset::GlobMatcher],
+    excludes: &[globset::GlobMatcher],
+) -> bool {
+    if excludes.iter().any(|m| m.is_match(path)) {
+        return false;
+    }
+    if includes.is_empty() {
+        return true;
+    }
+    includes.iter().any(|m| m.is_match(path))
+}
+
 /// Same-directory temp name for atomic write+rename mutations. PID-suffixed so
 /// two wcode processes editing the same file can't clobber each other's temp
 /// (rename is still atomic — last writer wins, never a truncation), and it

@@ -96,7 +96,7 @@ impl TypedTool for Find {
             if rel_str == "." {
                 continue;
             }
-            if !is_included(&rel_str, &includes, &excludes) {
+            if !super::include_path(&rel_str, &includes, &excludes) {
                 continue;
             }
             out.push_str(&rel_str);
@@ -113,20 +113,6 @@ impl TypedTool for Find {
             path: None,
         }
     }
-}
-
-fn is_included(
-    path: &str,
-    includes: &[globset::GlobMatcher],
-    excludes: &[globset::GlobMatcher],
-) -> bool {
-    if excludes.iter().any(|m| m.is_match(path)) {
-        return false;
-    }
-    if includes.is_empty() {
-        return true;
-    }
-    includes.iter().any(|m| m.is_match(path))
 }
 
 #[cfg(test)]
