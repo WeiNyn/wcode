@@ -556,6 +556,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
     ("Alt-1..9", "focus the Nth surface"),
     ("Ctrl-G", "browse the transcript"),
+    ("Ctrl-B", "toggle the sidebar"),
     ("j / k · g / G", "browse: next / previous · first / last"),
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
     ("Enter / Space (browse)", "expand / collapse the selected block"),
@@ -1482,6 +1483,13 @@ pub struct App {
     /// `branch`, with a trailing `*` when the worktree is dirty. Display-only;
     /// never refreshed after startup.
     git: Option<String>,
+    /// The docked left sidebar is open. OFF by default, so the base layout
+    /// (transcript · rule · [team strip] · input · status) is byte-identical
+    /// while it is closed. Toggled only by `Ctrl-B` (see `on_key` / `KEYS`).
+    /// It is view state like `mode`, not surface state: `toggle_sidebar`
+    /// flips this bit and marks dirty, never touching a surface. The renderer
+    /// keys its horizontal split on `App::sidebar()` (see `ui::draw`).
+    sidebar: bool,
 }
 
 impl Default for App {
@@ -1518,6 +1526,9 @@ impl App {
             last_search: None,
             cwd: None,
             git: None,
+            // OFF by default: the base three-band layout is byte-identical
+            // until the user hits Ctrl-B.
+            sidebar: false,
         }
     }
 
@@ -2203,6 +2214,11 @@ impl App {
             Key::Alt(c) => self.focus_digit(c),
             Key::F(1) => self.open_help(),
             Key::Ctrl('g') => self.enter_browse(),
+            // Ctrl-B docks/undocks the left sidebar. Reached only in INPUT
+            // mode: `on_key`'s head already returned for an open overlay, an
+            // open completion, and browse — so Ctrl-B is deliberately inert
+            // while any of those owns the keyboard.
+            Key::Ctrl('b') => self.toggle_sidebar(),
             // Tool detail: Ctrl-T toggles every tool at once; the per-block
             // toggle lives in browse mode, where the target is drawn.
             Key::Ctrl('t') => self.toggle_all_tools(),
@@ -2976,7 +2992,20 @@ impl App {
         self.git.as_deref()
     }
 
-    /// Inject the startup cwd (see `Options::cwd`); marks the app dirty.
+    /// Toggle the docked left sidebar (`Ctrl-B`). A pure reducer step: flip
+    /// the view bit and mark the app dirty so the next frame repaints the
+    /// split. Touches no surface and no transcript.
+    fn toggle_sidebar(&mut self) {
+        self.sidebar = !self.sidebar;
+        self.dirty = true;
+    }
+
+    /// Whether the docked left sidebar is open — the renderer's split key
+    /// (`ui::draw` reads it). A read-only view accessor; it never mutates.
+    pub fn sidebar(&self) -> bool {
+        self.sidebar
+    }
+    /// Inject the startup cwd (see [`Options::cwd`]); marks the app dirty.
     pub fn set_cwd(&mut self, cwd: Option<String>) {
         self.cwd = cwd;
         self.dirty = true;

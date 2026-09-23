@@ -39,10 +39,38 @@ const TEAM_STRIP_MIN_WIDTH: u16 = 50;
 const TEAM_STRIP_MIN_HEIGHT: u16 = 6;
 /// Slots shown before overflow folds the rest into a right-aligned `+N`.
 const MAX_TEAM_SLOTS: usize = 3;
+/// The docked left sidebar's fixed width in columns. Its content is clipped
+/// to fit; the bands to its right are NOT reflowed to compensate.
+const SIDEBAR_WIDTH: u16 = 30;
+/// The sidebar docks only when the WHOLE terminal is at least this wide —
+/// below it there is not enough room for a 30-col panel AND a usable bands
+/// column, so `draw` leaves the layout completely untouched.
+const SIDEBAR_MIN_WIDTH: u16 = 80;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
+    let full = frame.area();
+    // PHASE 2 — the docked left SIDEBAR. When Ctrl-B has it open AND the
+    // terminal is wide enough, split the WHOLE area horizontally into
+    // [sidebar | bands] and render the existing band stack in the right
+    // column. When closed (or too narrow) `area` is the full frame untouched,
+    // so every geometry below — and every popup/overlay anchor — is
+    // byte-identical.
+    let (sidebar, area) = if app.sidebar() && full.width >= SIDEBAR_MIN_WIDTH {
+        let [sb, bands] = Layout::horizontal([
+            Constraint::Length(SIDEBAR_WIDTH),
+            Constraint::Min(1),
+        ])
+        .areas(full);
+        (Some(sb), bands)
+    } else {
+        (None, full)
+    };
+    if let Some(sb) = sidebar {
+        // The docked panel floats nothing: it is the left column itself. The
+        // modal is drawn over `full` (see the tail), so it covers the sidebar.
+        draw_sidebar(frame, sb, app);
+    }
     // The input grows with its *wrapped* row count (Shift-Enter / Ctrl-J add
     // lines; long lines wrap), capped so it never crowds out the transcript.
     let width = input_content_width(area);
@@ -81,8 +109,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status(frame, status, app);
     draw_completion(frame, area, rule, app);
     draw_search_prompt(frame, area, rule, app);
-    // The modal, if any, is drawn last — over the bands.
-    draw_overlay(frame, area, app);
+    // The modal, if any, is drawn last — over the WHOLE terminal (`full`), so
+    // it covers the docked sidebar too; the popups above float over the bands.
+    draw_overlay(frame, full, app);
 }
 
 /// Draw the browse transcript-search prompt, floating just above the input
@@ -1207,6 +1236,178 @@ fn slot_span(
     spans
 }
 
+/// Draw the docked left sidebar: one fixed-width column stacking the “more
+/// info” the bands cannot all show at once — **Team**, **Todos**, **Changes**,
+/// **Context**. Each section is a dim header line followed by its rows; an
+/// empty section keeps its header with a dim `—` placeholder, so the stack
+/// does not jump as data arrives.
+///
+/// Never panics and never reflows the bands: it is a fixed column and every
+/// row is clipped to `area` (a `Paragraph` drops rows past the bottom and
+/// clips long text at the right edge — no wrap). A zero height/width
+/// draws nothing.
+///
+/// Data, per section:
+/// - Team    → [`App::member_rows`] (`label`, [`crate::TeamState`], focused,
+///   live action); glyph `state.glyph()` styled by `state_style(state)`.
+///   `member_rows` drops `last_action_at`, so a per-member elapsed is not
+///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
+/// - Todos   → [`App::last_todos`] (`☑`/`☐` + `content`, header `done/total`).
+/// - Changes → [`App::changes`] (`path · +added −removed`).
+/// - Context → the same [`token_spans`] the status chip uses.
+fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let w = area.width as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // ---- Team -----------------------------------------------------------
+    lines.push(Line::from(Span::styled("Team", dim())));
+    let rows = app.member_rows();
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled("  —", dim())));
+    }
+    for (label, state, focused, action) in rows {
+        // `  ● explorer *  read a.rs` — glyph colored by state, the live
+        // action dim, `*` marks the focused surface. A per-member elapsed is
+        // not exposed, so the focused row carries the run elapsed instead.
+        let mut head = format!(
+            "  {} {}{}",
+            state.glyph(),
+            label,
+            if focused { " *" } else { "" }
+        );
+        if focused && let Some(elapsed) = app.run_elapsed() {
+            head.push_str(&format!("  {}", format_ms(elapsed.as_millis() as u64)));
+        }
+        let tail = action.map(|a| format!("  {a}")).unwrap_or_default();
+        lines.push(clipped_row(vec![(head, state_style(state)), (tail, dim())], w));
+    }
+
+    // ---- Todos ----------------------------------------------------------
+    match app.last_todos() {
+        Some(todos) if !todos.is_empty() => {
+            let done = todos
+                .iter()
+                .filter(|t| t.status == wcode_harness::event::TodoStatus::Completed)
+                .count();
+            lines.push(Line::from(Span::styled(
+                format!("Todos  ☑ {done}/{}", todos.len()),
+                dim(),
+            )));
+            for t in todos {
+                let mark = if t.status == wcode_harness::event::TodoStatus::Completed {
+                    "☑"
+                } else {
+                    "☐"
+                };
+                lines.push(clipped_row(vec![(format!("  {mark} {}", t.content), dim())], w));
+            }
+        }
+        _ => {
+            lines.push(Line::from(Span::styled("Todos", dim())));
+            lines.push(Line::from(Span::styled("  —", dim())));
+        }
+    }
+
+    // ---- Changes --------------------------------------------------------
+    let changes = app.changes();
+    if changes.is_empty() {
+        lines.push(Line::from(Span::styled("Changes", dim())));
+        lines.push(Line::from(Span::styled("  —", dim())));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("Changes  {}", changes.len()),
+            dim(),
+        )));
+        for c in changes {
+            // `  src/a.rs · +3 −1` — path dim, `+a` added, `−r` removed. Clip
+            // the path first (reserving the counts) so the numbers stay visible.
+            let sep = " · ";
+            let added = format!("+{}", c.added);
+            let removed = format!("−{}", c.removed);
+            let fixed = 2 + sep.chars().count() + added.chars().count() + 1 + removed.chars().count();
+            let budget = w.saturating_sub(fixed);
+            let (cut, more) = split_at_char(&c.path, budget);
+            let path = if more.is_empty() || budget == 0 {
+                cut
+            } else {
+                let (shorter, _) = split_at_char(&c.path, budget - 1);
+                format!("{shorter}…")
+            };
+            lines.push(clipped_row(
+                vec![
+                    (format!("  {path}"), dim()),
+                    (sep.to_string(), dim()),
+                    (added, added_style()),
+                    (" ".to_string(), dim()),
+                    (removed, removed_style()),
+                ],
+                w,
+            ));
+        }
+    }
+
+    // ---- Context --------------------------------------------------------
+    lines.push(Line::from(Span::styled("Context", dim())));
+    match token_spans(app) {
+        // `token_spans` already yields `bar(ratio, 8) used / limit` (or just
+        // `used`); reuse it verbatim so the panel and the status chip agree.
+        Some(spans) => lines.push(clipped_row(
+            spans
+                .into_iter()
+                .map(|s| (s.content.into_owned(), s.style))
+                .collect(),
+            w,
+        )),
+        None => lines.push(Line::from(Span::styled("  —", dim()))),
+    }
+
+    // Borderless by default so a 30-col panel is 30 cols of content; the
+    // bands' own left padding separates the two columns. `Paragraph` clips
+    // the row list to `area` — a short panel just loses the bottom sections.
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One clipped sidebar row: concatenate the styled segments, and when the row
+/// overflows `width` columns drop the tail and ride a `…` on the last
+/// surviving span. Char-safe; mirrors `slot_span`'s reserve-the-ellipsis clip.
+fn clipped_row(segs: Vec<(String, Style)>, width: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if width == 0 {
+        return Line::from(spans);
+    }
+    let total: usize = segs.iter().map(|(t, _)| t.chars().count()).sum();
+    // Reserve the ellipsis column *before* taking, so a cut row never exceeds
+    // `width` columns.
+    let cut = total > width;
+    let mut budget = if cut { width - 1 } else { width };
+    for (text, style) in segs {
+        if budget == 0 {
+            break;
+        }
+        let n = text.chars().count();
+        if n <= budget {
+            budget -= n;
+            if !text.is_empty() {
+                spans.push(Span::styled(text, style));
+            }
+        } else {
+            let (head, _) = split_at_char(&text, budget);
+            budget = 0;
+            if !head.is_empty() {
+                spans.push(Span::styled(head, style));
+            }
+        }
+    }
+    if cut && let Some(last) = spans.pop() {
+        let mut text = last.content.into_owned();
+        text.push('…');
+        spans.push(Span::styled(text, last.style));
+    }
+    Line::from(spans)
+}
 /// Draw the active-team strip: one row between the rule and the input, up to
 /// [`MAX_TEAM_SLOTS`] equal-share member slots (`glyph label` + a dim action)
 /// with the rest folded into a right-aligned `+N`. Each share is filled out
@@ -3156,7 +3357,57 @@ mod tests {
             "the tool line is the first row, with no leading blank:\n{text}"
         );
     }
+
+    #[test]
+    fn ctrl_b_toggles_the_sidebar_flag() {
+        let mut app = App::new();
+        assert!(!app.sidebar(), "the sidebar is OFF by default");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert!(app.sidebar(), "Ctrl-B opens it");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert!(!app.sidebar(), "Ctrl-B closes it again");
+    }
+
+    #[test]
+    fn the_open_sidebar_shows_its_section_headers_and_a_member_row() {
+        let mut app = App::new();
+        with_member(&mut app, "explorer", "m1");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        let frame = buffer_text(&render(&mut app, 100, 24));
+        // Section headers are sidebar-only (the strip/status never spell these).
+        for header in ["Team", "Todos", "Changes", "Context"] {
+            assert!(frame.contains(header), "missing {header} header:\n{frame}");
+        }
+        assert!(frame.contains("explorer"), "member row missing:\n{frame}");
+    }
+
+    #[test]
+    fn a_closed_sidebar_is_byte_identical_to_the_base_layout() {
+        let mut app = App::new();
+        with_member(&mut app, "explorer", "m1");
+        let base = buffer_text(&render(&mut app, 100, 24)); // sidebar OFF
+        assert_eq!(base, buffer_text(&render(&mut app, 100, 24)));
+        // Open, then close: the frame returns to the exact base bytes.
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        let open = buffer_text(&render(&mut app, 100, 24));
+        assert_ne!(open, base, "the open frame actually differs");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        assert_eq!(
+            buffer_text(&render(&mut app, 100, 24)),
+            base,
+            "closing restores the byte-identical base frame"
+        );
+    }
+
+    #[test]
+    fn a_narrow_terminal_never_docks_the_sidebar() {
+        let mut app = App::new();
+        with_member(&mut app, "explorer", "m1");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        let narrow = buffer_text(&render(&mut app, 60, 20)); // < SIDEBAR_MIN_WIDTH
+        assert!(
+            !narrow.contains("Context"),
+            "no panel under the width threshold:\n{narrow}"
+        );
+    }
 }
-
-
-
