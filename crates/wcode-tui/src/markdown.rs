@@ -55,32 +55,35 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             i = next;
             continue;
         }
-        if let Some(heading) = heading(line) {
+        // Order: indentation first (so `  - x` is a nested bullet), then quote
+        // (wins over heading/bullet), heading, ordered, bullet, blank, paragraph.
+        let (level, rest) = leading_indent(line);
+        if let Some((body, depth)) = quote(rest) {
+            let (first, cont) = quote_gutter(level, depth);
+            lines.extend(wrap(inline(body), width, &first, &cont, quote_style()));
+        } else if let Some((lvl, text)) = heading(rest) {
+            let gutter = indent_prefix(level);
             lines.extend(wrap(
-                inline(heading),
+                inline(text),
                 width,
-                GUTTER,
-                GUTTER,
-                heading_style(),
+                &gutter,
+                &gutter,
+                heading_level_style(lvl),
             ));
-        } else if let Some(item) = bullet(line) {
-            lines.extend(wrap(
-                inline(item),
-                width,
-                &format!("{GUTTER}• "),
-                &format!("{GUTTER}  "),
-                body_style(),
-            ));
-        } else if line.is_empty() {
+        } else if let Some((marker, body)) = ordered(rest) {
+            let pad = " ".repeat(marker.chars().count());
+            let first = format!("{}{marker}", indent_prefix(level));
+            let cont = format!("{}{pad}", indent_prefix(level));
+            lines.extend(wrap(inline(body), width, &first, &cont, body_style()));
+        } else if let Some(item) = bullet(rest) {
+            let first = format!("{}• ", indent_prefix(level));
+            let cont = format!("{}  ", indent_prefix(level));
+            lines.extend(wrap(inline(item), width, &first, &cont, body_style()));
+        } else if rest.is_empty() {
             lines.push(Line::default());
         } else {
-            lines.extend(wrap(
-                inline(line),
-                width,
-                GUTTER,
-                GUTTER,
-                body_style(),
-            ));
+            let gutter = indent_prefix(level);
+            lines.extend(wrap(inline(rest), width, &gutter, &gutter, body_style()));
         }
         i += 1;
     }
@@ -94,17 +97,6 @@ fn code_line(line: &str) -> Line<'static> {
     ])
 }
 
-/// `# Title` (one to six `#`) → `Title`.
-fn heading(line: &str) -> Option<&str> {
-    let text = line.trim_start();
-    let hashes = text.chars().take_while(|c| *c == '#').count();
-    if (1..=6).contains(&hashes) && text[hashes..].starts_with(' ') {
-        Some(text[hashes..].trim_start())
-    } else {
-        None
-    }
-}
-
 /// `- item` / `* item` / `+ item` → `item`.
 fn bullet(line: &str) -> Option<&str> {
     let text = line.trim_start();
@@ -113,6 +105,83 @@ fn bullet(line: &str) -> Option<&str> {
         .find_map(|marker| text.strip_prefix(marker))
 }
 
+/// Split leading indentation: `(level, remainder)`. Each 2 columns — a space, or a
+/// tab counted as two — is one level; an odd trailing space floors. `remainder`
+/// carries no leading whitespace.
+fn leading_indent(line: &str) -> (usize, &str) {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let cols = line[..line.len() - rest.len()]
+        .chars()
+        .map(|c| if c == '\t' { 2 } else { 1 })
+        .sum::<usize>();
+    (cols / 2, rest)
+}
+
+/// `# Title` (one to six `#`) → `(level, "Title")`; the `#` marker is dropped.
+/// Seven-or-more hashes are not a heading.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let text = line.trim_start();
+    let hashes = text.chars().take_while(|c| *c == '#').count();
+    if (1..=6).contains(&hashes) && text[hashes..].starts_with(' ') {
+        Some((hashes, text[hashes..].trim_start()))
+    } else {
+        None
+    }
+}
+
+/// The style for a heading `level`: level 1 is the primary heading, deeper levels
+/// step down to the quieter `heading_sub`.
+fn heading_level_style(level: usize) -> Style {
+    match level {
+        1 => heading_style(),
+        _ => theme::theme().heading_sub,
+    }
+}
+
+/// `1. ` / `2) ` / `10. ` (1+ digits, then `. ` or `) `) → `(marker, body)`. The
+/// `marker` keeps its number and trailing space so a wrapped continuation aligns
+/// under the item text.
+fn ordered(line: &str) -> Option<(&str, &str)> {
+    let text = line.trim_start();
+    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
+    let after = &text[digits..];
+    if digits == 0 || !(after.starts_with(". ") || after.starts_with(") ")) {
+        return None;
+    }
+    Some((&text[..digits + 2], &text[digits + 2..]))
+}
+
+/// `> text` → `(body, depth)`; each leading `>` (with an optional single space) adds
+/// a level, so `> > x` is depth 2.
+fn quote(line: &str) -> Option<(&str, usize)> {
+    let mut rest = line;
+    let mut depth = 0;
+    while let Some(after) = rest.strip_prefix('>') {
+        depth += 1;
+        rest = after.strip_prefix(' ').unwrap_or(after);
+    }
+    (depth > 0).then_some((rest, depth))
+}
+
+/// `{GUTTER}` + 2·`level` spaces — the prefix/continuation base for indented content.
+fn indent_prefix(level: usize) -> String {
+    format!("{GUTTER}{}", " ".repeat(2 * level))
+}
+
+/// `(prefix, continuation)` for a blockquote at `level`/`depth`: one `│ ` per depth,
+/// with a matching run of spaces on wrapped continuations.
+fn quote_gutter(level: usize, depth: usize) -> (String, String) {
+    let base = indent_prefix(level);
+    (
+        format!("{base}{}", "│ ".repeat(depth)),
+        format!("{base}{}", "  ".repeat(depth)),
+    )
+}
+
+/// A blockquote body is muted; its `│ ` gutter is `dim()` via `line_with`.
+fn quote_style() -> Style {
+    theme::theme().muted
+}
 // --- tables -----------------------------------------------------------------
 
 /// A GFM table: a header row, an alignment row, and body rows.
@@ -332,6 +401,9 @@ fn inline(text: &str) -> Vec<(String, Style)> {
     let mut runs = Vec::new();
     let mut buf = String::new();
     let mut rest = text;
+    // The last character consumed — the left neighbour of `rest`, for the `_x_`
+    // word-boundary rule (`prev: Option<char>` avoids peeking an empty buffer).
+    let mut prev: Option<char> = None;
 
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix("**")
@@ -339,6 +411,7 @@ fn inline(text: &str) -> Vec<(String, Style)> {
         {
             flush(&mut runs, &mut buf);
             runs.push((after[..end].to_string(), plain.add_modifier(Modifier::BOLD)));
+            prev = Some('*');
             rest = &after[end + 2..];
             continue;
         }
@@ -351,6 +424,7 @@ fn inline(text: &str) -> Vec<(String, Style)> {
             // cannot follow a link, so the URL would only add noise).
             flush(&mut runs, &mut buf);
             runs.push((after[..close].to_string(), link_style()));
+            prev = Some(')');
             rest = &url[end + 1..];
             continue;
         }
@@ -359,15 +433,58 @@ fn inline(text: &str) -> Vec<(String, Style)> {
         {
             flush(&mut runs, &mut buf);
             runs.push((after[..end].to_string(), code_style()));
+            prev = Some('`');
             rest = &after[end + 1..];
             continue;
         }
+        // Italic is LAST, so bold/link/code above already claimed their markers.
+        // `*x*` needs non-space content edges; `_x_` also needs word boundaries so
+        // identifiers (`foo_bar_baz`) stay plain.
+        if let Some(after) = rest.strip_prefix('*')
+            && let Some(end) = after.find('*')
+        {
+            let content = &after[..end];
+            if has_italic_edges(content) {
+                flush(&mut runs, &mut buf);
+                runs.push((content.to_string(), plain.add_modifier(Modifier::ITALIC)));
+                prev = Some('*');
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix('_')
+            && let Some(end) = after.find('_')
+            && prev.is_none_or(|c| !c.is_alphanumeric())
+            && after[end + 1..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric())
+        {
+            let content = &after[..end];
+            if has_italic_edges(content) {
+                flush(&mut runs, &mut buf);
+                runs.push((content.to_string(), plain.add_modifier(Modifier::ITALIC)));
+                prev = Some('_');
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
         let ch = rest.chars().next().unwrap();
         buf.push(ch);
+        prev = Some(ch);
         rest = &rest[ch.len_utf8()..];
     }
     flush(&mut runs, &mut buf);
     runs
+}
+
+/// Italic content must be non-empty with non-whitespace first/last characters, so
+/// `a * b * c` stays plain.
+fn has_italic_edges(content: &str) -> bool {
+    match (content.chars().next(), content.chars().last()) {
+        (Some(first), Some(last)) => !first.is_whitespace() && !last.is_whitespace(),
+        _ => false,
+    }
 }
 
 fn flush(runs: &mut Vec<(String, Style)>, buf: &mut String) {
@@ -442,6 +559,134 @@ fn line_with(prefix: &str, spans: Vec<Span<'static>>, base: Style) -> Line<'stat
 mod tests {
     use super::*;
 
+    #[test]
+    fn heading_levels_differ() {
+        let lines = render("# h1\n## h2\n###### h6", 40);
+        assert_eq!(text_of(&lines), ["   h1", "   h2", "   h6"]);
+        let style_of = |line: &Line| line.spans.last().unwrap().style;
+        assert_ne!(
+            style_of(&lines[0]),
+            style_of(&lines[1]),
+            "a level-1 heading differs from a level-2"
+        );
+        assert_eq!(
+            style_of(&lines[1]),
+            style_of(&lines[2]),
+            "levels 2..=6 share the `heading_sub` tier"
+        );
+    }
+
+    #[test]
+    fn ordered_lists_keep_their_numbers() {
+        let text = text_of(&render("1. a\n2. b\n10. c", 40));
+        assert_eq!(text, ["   1. a", "   2. b", "   10. c"]);
+
+        // A wrapped item's continuation aligns under the text (real marker width).
+        let lines = render("10. one two three four five six", 20);
+        assert!(lines.len() >= 2, "the item wraps");
+        assert_eq!(lines[0].spans[0].content.as_ref(), "   10. ");
+        assert_eq!(
+            lines[1].spans[0].content.as_ref(),
+            format!("{GUTTER}{}", " ".repeat(4)),
+            "the continuation pads to the marker width"
+        );
+    }
+
+    #[test]
+    fn blockquotes_get_a_gutter() {
+        let lines = render("> quoted", 40);
+        assert_eq!(text_of(&lines), ["   │ quoted"]);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
+        assert_eq!(
+            lines[0].spans[1].style,
+            theme::theme().muted,
+            "the quote body is muted"
+        );
+
+        // Nesting: one `│ ` per `>` level.
+        assert_eq!(text_of(&render("> > deep", 40)), ["   │ │ deep"]);
+    }
+
+    #[test]
+    fn nested_bullets_indent_under_the_parent() {
+        let text = text_of(&render("- a\n  - b\n    - c", 40));
+        assert_eq!(text, ["   • a", "     • b", "       • c"]);
+    }
+
+    #[test]
+    fn italic_and_bold_disambiguate() {
+        let lines = render("*i* and **b**", 40);
+        let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref() == "i"
+                    && s.style.add_modifier.contains(Modifier::ITALIC)),
+            "`*i*` is italic: {spans:?}"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content.as_ref() == "b"
+                    && s.style.add_modifier.contains(Modifier::BOLD)),
+            "`**b**` is bold (matched before italic): {spans:?}"
+        );
+    }
+
+    #[test]
+    fn underscores_inside_identifiers_stay_plain() {
+        // C2: the `_x_` word-boundary rule keeps identifiers plain.
+        let lines = render("foo_bar_baz", 40);
+        assert_eq!(text_of(&lines), ["   foo_bar_baz"]);
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)),
+            "snake_case must not italicize: {lines:?}"
+        );
+
+        // A properly delimited `_x_` still italicizes.
+        let delimited = render("a _word_ b", 40);
+        assert!(
+            delimited
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.content.as_ref() == "word"
+                    && s.style.add_modifier.contains(Modifier::ITALIC)),
+            "`_word_` italicizes: {delimited:?}"
+        );
+    }
+
+    #[test]
+    fn spaced_asterisks_stay_plain() {
+        let lines = render("a * b * c", 40);
+        assert_eq!(text_of(&lines), ["   a * b * c"]);
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)),
+            "`a * b * c` must not italicize: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_quoted_bullet_is_not_reparsed() {
+        // The quoted body is emitted literally — a bullet-looking body stays text.
+        assert_eq!(text_of(&render("> - x", 40)), ["   │ - x"]);
+    }
+
+    #[test]
+    fn seven_hashes_are_not_a_heading() {
+        let lines = render("####### x", 40);
+        assert_eq!(text_of(&lines), ["   ####### x"]);
+        assert_ne!(
+            lines[0].spans.last().unwrap().style,
+            heading_level_style(1),
+            "7 hashes is a paragraph, not a heading"
+        );
+    }
     fn text_of(lines: &[Line]) -> Vec<String> {
         lines
             .iter()

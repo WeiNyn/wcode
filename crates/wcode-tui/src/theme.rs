@@ -40,6 +40,8 @@ pub(crate) struct Theme {
     pub code: Style,
     /// Markdown headings.
     pub heading: Style,
+    /// Deeper markdown headings (levels 2–6).
+    pub heading_sub: Style,
     /// Markdown links.
     pub link: Style,
     /// A tool's name in its `⚙` / `✓` header.
@@ -68,6 +70,7 @@ impl Theme {
             warn: Style::new().fg(Color::LightYellow),
             code: Style::new().fg(Color::Yellow),
             heading: Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            heading_sub: Style::new().fg(Color::Magenta),
             link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             tool_name: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             thinking: Style::new()
@@ -94,6 +97,7 @@ impl Theme {
             warn: bold,
             code: bold,
             heading: bold,
+            heading_sub: Style::new().add_modifier(Modifier::UNDERLINED),
             link: Style::new().add_modifier(Modifier::UNDERLINED),
             tool_name: bold,
             thinking: Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
@@ -210,6 +214,7 @@ impl ThemeSpec {
                 "warn" => &mut theme.warn,
                 "code" => &mut theme.code,
                 "heading" => &mut theme.heading,
+                "heading_sub" => &mut theme.heading_sub,
                 "link" => &mut theme.link,
                 "tool_name" => &mut theme.tool_name,
                 "thinking" => &mut theme.thinking,
@@ -223,8 +228,8 @@ impl ThemeSpec {
     }
 }
 
-/// The 16 role names a `[theme]` table may override.
-const ROLE_NAMES: [&str; 16] = [
+/// The 17 role names a `[theme]` table may override.
+const ROLE_NAMES: [&str; 17] = [
     "accent",
     "dim",
     "muted",
@@ -236,6 +241,7 @@ const ROLE_NAMES: [&str; 16] = [
     "warn",
     "code",
     "heading",
+    "heading_sub",
     "link",
     "tool_name",
     "thinking",
@@ -315,7 +321,7 @@ mod tests {
     use super::*;
 
     /// Every role, so a test can assert over all of them.
-    fn fields(theme: &Theme) -> [&Style; 16] {
+    fn fields(theme: &Theme) -> [&Style; 17] {
         [
             &theme.accent,
             &theme.dim,
@@ -328,6 +334,7 @@ mod tests {
             &theme.warn,
             &theme.code,
             &theme.heading,
+            &theme.heading_sub,
             &theme.link,
             &theme.tool_name,
             &theme.thinking,
