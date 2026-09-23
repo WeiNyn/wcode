@@ -1,6 +1,6 @@
 # wcode TUI — mouse support (plan)
 
-Status: **☐ planned.** Companion to [`tui-plan.md`](tui-plan.md) (the project),
+Status: **☑ shipped (P1 + P2).** Companion to [`tui-plan.md`](tui-plan.md) (the project),
 [`tui-design.md`](tui-design.md) (the visual spec) and
 [`tui-browse-plan.md`](tui-browse-plan.md) (the mode this extends). `wcode-tui`
 only; the kernel and the protocol are untouched.
@@ -136,9 +136,9 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
 
 ## Open questions
 
-- Should `Esc` clear a live text selection before it interrupts? **Proposed: no**
+- Should `Esc` clear a live text selection before it interrupts? **Settled: no**
   — `Esc` keeps its cancel/quit meaning; a new `Down` clears the selection.
-- Should the highlight survive a wheel scroll? **Proposed: yes** (it is global),
+- Should the highlight survive a wheel scroll? **Settled: yes** (it is global),
   but the *copy* is taken at release, so scrolling afterward cannot corrupt it.
 - Double-click to expand a tool? Parked (P3).
 
@@ -146,8 +146,8 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
 
 | phase | scope | status |
 |-------|-------|--------|
-| 1 | positioned mouse events + hit map + click-to-select block + click-to-focus surface | ☐ todo |
-| 2 | drag-to-select transcript text + highlight + copy | ☐ todo |
+| 1 | positioned mouse events + hit map + click-to-select block + click-to-focus surface | ☑ done |
+| 2 | drag-to-select transcript text + highlight + copy | ☑ done |
 | 3 | unlocks: edge autoscroll, double-click to expand, wide-char-exact mapping | ☐ todo |
 
 ## Commits
@@ -162,8 +162,8 @@ selection target ([`tui-browse-plan.md`](tui-browse-plan.md) invariant).
 
 | # | commit | status |
 |---|--------|--------|
-| 1 | plan + tracker | ☐ todo |
-| 2 | clicks (block + sidebar) | ☐ todo |
-| 3 | drag text selection | ☐ todo |
+| 1 | plan + tracker | ☑ done |
+| 2 | clicks (block + sidebar) | ☑ done |
+| 3 | drag text selection | ☑ done |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.

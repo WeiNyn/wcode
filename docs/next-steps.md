@@ -39,7 +39,7 @@ the boxes as each task completes and keep the status table current.
 | 31 | Review-driven cleanup: TUI status bugs, dead code, event visibility, tool dedup, `main()` split | ☑ done — `3b28eb5`/`563ed4c`/`61ebf66`/`8fa0b03`/`50b2dad`/`edc1782`; the second-layer review found one `main()`-split deviation, folded into `edc1782`; see [review-cleanup.md](review-cleanup.md) |
 | 32 | TUI info/UX: richer status, per-tool timing, docked sidebar | ☑ done — `7fea5c5` (harness tool duration), `08843bc` (tool timing), `c31fbf0` (elapsed + changes + todos chips), `5464318` (cwd + git branch), `fa88406` (docked sidebar, `Ctrl-B`); see [tui-design.md](tui-design.md) |
 | 33 | TUI layout redesign: bordered input box + session line + team above | ☑ done — `079c0b1`; chrome moved onto a rounded input box (project⎇branch / model·effort / context gauge ▰▱ / mode·state), session line on top, team region above the box (running only, ≤3, newest last) |
-| 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☐ planned — P1 (clicks) + P2 (drag text selection) |
+| 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -772,9 +772,10 @@ exists today.
 > mouse events, a hit map published by the draw pass, click-vs-drag), locked
 > decisions, open questions, phases.
 
-**Status.** Planned — P1 (positioned mouse events + hit map + click-a-block +
-click-a-surface) then P2 (drag-to-select text + copy). Pointer only, like items 3,
-6, 7, 8, 9, 10, and 13.
+**Status.** Done — P1 (positioned mouse events + hit map + click-a-block +
+click-a-surface) and P2 (drag-to-select text + copy) shipped. Pointer only, like
+items 3, 6, 7, 8, 9, 10, and 13; the P3 unlocks (edge autoscroll, double-click to
+expand, wide-char-exact mapping) remain parked in the plan.
 
 ---
 
