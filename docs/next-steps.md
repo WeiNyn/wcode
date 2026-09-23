@@ -35,6 +35,7 @@ the boxes as each task completes and keep the status table current.
 | 27 | Tier-1 gap sweep 2: `todo` tool + steer at the tool-free boundary (see [gap-analysis-jcode.md](gap-analysis-jcode.md) §2 rows 5/7) | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` (todo), `a3a5705` (steer point B) |
 | 28 | Plan mode: explore + plan, don't mutate until approved (see [plan-mode.md](plan-mode.md)) | ☑ P1–P3 complete (mode/prompt/hook/bash-gate/`/plan`/chip + todo persistence & seed + `/verify`) |
 | 29 | Stream truncation ends a turn silently (no terminal record) | ☑ done — see [stream-truncation-plan.md](stream-truncation-plan.md) |
+| 30 | TUI markdown maturity: per-block render cache + parser features (see [`tui-markdown-plan.md`](tui-markdown-plan.md)) | ☐ planned |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -734,6 +735,23 @@ silently stopping. Detail & status: [`stream-truncation-plan.md`](stream-truncat
 
 **Out of scope (follow-up).** A `Done` with empty **non-tool** content is a
 completed turn, not a truncation — left as-is.
+
+## 30. TUI markdown maturity
+
+**New.** The transcript re-parses every committed block every frame
+(`ui.rs::draw_transcript` → `markdown::render`), and the parser lacks ordered
+lists, blockquotes, nested indent, heading levels, italic, and syntax
+highlighting. Phase **1a** adds a per-block render cache keyed by
+`(revision, width)` — the design [`tui-design.md:147`](tui-design.md) already
+names — and phase **1b** matures the parser (+ `syntect`). Mermaid stays a gated
+stretch (TUI P4); the side panel is a separate later layer.
+
+> ➡️ **[`tui-markdown-plan.md`](tui-markdown-plan.md)** — problem, the cache
+> design (revision/width + the mutable-`Tool`-block crux), the parser features,
+> phases, open questions.
+
+**Status.** Planned — 1a (cache) then 1b (features). Pointer only, like items 3,
+6, 7, 8, 9, 10, and 13.
 
 ---
 
