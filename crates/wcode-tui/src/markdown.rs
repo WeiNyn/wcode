@@ -454,11 +454,13 @@ fn inline(text: &str) -> Vec<(String, Style)> {
         }
         if let Some(after) = rest.strip_prefix('_')
             && let Some(end) = after.find('_')
-            && prev.is_none_or(|c| !c.is_alphanumeric())
+            // A `prev`/closing guard keeps a `__` run (a dunder like `__init__`)
+            // from italicizing its inner word.
+            && prev.is_none_or(|c| !c.is_alphanumeric() && c != '_')
             && after[end + 1..]
                 .chars()
                 .next()
-                .is_none_or(|c| !c.is_alphanumeric())
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
         {
             let content = &after[..end];
             if has_italic_edges(content) {
@@ -645,6 +647,19 @@ mod tests {
                 .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)),
             "snake_case must not italicize: {lines:?}"
         );
+
+        // A `__` run (a dunder) must not italicize its inner word either.
+        for dunder in ["__init__", "__dunder__"] {
+            let lines = render(dunder, 40);
+            assert_eq!(text_of(&lines), [format!("   {dunder}")]);
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter())
+                    .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)),
+                "`{dunder}` must not italicize: {lines:?}"
+            );
+        }
 
         // A properly delimited `_x_` still italicizes.
         let delimited = render("a _word_ b", 40);
