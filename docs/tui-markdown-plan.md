@@ -54,6 +54,14 @@ A cache *above* `block_lines`, in `Surface` (the renderer already feeds back int
   copies pre-styled lines; 1a removes the markdown/wrap work, not the extend.
   Rendering *only* the visible window is a larger refactor — out of scope.
 
+**Ratified & shipped.** Cache **all `Block` variants** (not only the expensive
+ones); revisions live in a parallel `Vec<u64>` in `Surface` — `Block` stays a pure
+UI view type, no `rev` field; the inter-block separator is owned by
+`append_block_lines` (which returns the block's own pre-bar range); the hit/miss
+probe is a **per-`Surface`** counter (a global atomic would race the parallel
+render tests). `app.rs` now names one render-backend type (`ratatui::text::Line`)
+for the cache.
+
 ### Phase 1b — parser features
 
 Add to `markdown.rs`, in `render`'s dispatch loop: **heading levels** (1–6 styled
@@ -72,10 +80,10 @@ candidate for a follow-up, not this phase.
 
 ## 3. Phases & progress
 
-- [ ] **1a — per-block render cache.** `Surface` cache + per-block revision +
+- [x] **1a — per-block render cache.** `Surface` cache + per-block revision +
       the borrow-safe append; tests: identical `buffer_text` across frames, and a
       cache hit when a frame renders unchanged content/width (and a miss after a
-      tool-block mutation or a resize). `tui:` commit.
+      tool-block mutation or a resize). `tui:` `d585ebf`.
 - [ ] **1b — parser features** (heading levels, ordered lists, blockquotes, nested
       indent, italic, `syntect` highlighting). Tests in `markdown.rs` per feature;
       keep the existing `markdown.rs` tests intact (the cache sits *above* `render`).
@@ -85,12 +93,11 @@ candidate for a follow-up, not this phase.
 
 ## 4. Open questions
 
-- **Cache granularity** — one cache for all `Block` variants, or only the
-  expensive ones (`Assistant`/`Tool`/`Diff`)? `User`/`Notice`/`Error`/`Btw` are a
-  cheap `wrap` and may not be worth caching.
-- **Revision plumbing** — a `rev` field on `Block::Tool`, or a parallel
-  `Vec<u64>` in `Surface` bumped by the reducer? The parallel vec keeps `Block`
-  pure (it is a UI view type); the field is simpler at the mutation sites.
+- **Cache granularity — resolved (1a).** One cache for **all** `Block` variants;
+  the uniform path beats special-casing the cheap `User`/`Notice`/`Error`/`Btw`.
+- **Revision plumbing — resolved (1a).** A parallel `Vec<u64>` in `Surface`,
+  bumped by the reducer, rather than a `rev` field on `Block` — the view type
+  stays pure.
 - **`syntect` weight** — a `Theme`/`SyntaxSet` set is a sizeable dep + first-use
   load; confirm it is worth it vs a hand-rolled keyword highlighter for a few
   languages. Decide at 1b.
