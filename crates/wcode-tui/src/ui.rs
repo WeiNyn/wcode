@@ -1,7 +1,8 @@
 //! Immediate-mode rendering: compose the whole frame from [`App`] each draw.
 //!
-//! Bands (top → bottom): transcript · rule · [team strip] · input · status.
-//! The team strip is a one-row band that appears only when there is a team.
+//! Bands (top → bottom): session · transcript · [working-team region] · input
+//! box. The team region grows to at most three rows (running teammates only);
+//! the rounded input box carries the chrome in its four corners.
 //! See `docs/tui-design.md` for the visual spec.
 
 use std::ops::Range;
@@ -10,7 +11,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block as WidgetBlock, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block as WidgetBlock, BorderType, Borders, Clear, Paragraph};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
@@ -32,13 +33,11 @@ const TOOL_EXPANDED_LINES: usize = 200;
 /// Diff lines a collapsed tool shows before the hint.
 const TOOL_DIFF_PREVIEW_LINES: usize = 8;
 
-/// The team strip appears only when the terminal is at least this wide.
-const TEAM_STRIP_MIN_WIDTH: u16 = 50;
-/// … and at least this tall, so body + rule + strip + input + status leave
-/// the transcript something to show.
-const TEAM_STRIP_MIN_HEIGHT: u16 = 6;
-/// Slots shown before overflow folds the rest into a right-aligned `+N`.
-const MAX_TEAM_SLOTS: usize = 3;
+/// The working-team region appears only when the terminal is at least this wide.
+const TEAM_MIN_WIDTH: u16 = 50;
+/// … and at least this tall, so the session line, the transcript, the team
+/// region, and the input box all leave the transcript something to show.
+const TEAM_MIN_HEIGHT: u16 = 8;
 /// The docked left sidebar's fixed width in columns. Its content is clipped
 /// to fit; the bands to its right are NOT reflowed to compensate.
 const SIDEBAR_WIDTH: u16 = 30;
@@ -48,6 +47,12 @@ const SIDEBAR_WIDTH: u16 = 30;
 const SIDEBAR_MIN_WIDTH: u16 = 80;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
+///
+/// Bands (top → bottom), in the bands column to the right of the optional
+/// sidebar: a dim `session` line, the transcript, the working-team region
+/// (0..=3 rows), and the rounded input box whose four corners carry the chrome
+/// the old status band used to. The team region collapses to nothing when no
+/// teammate is running.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
     // PHASE 2 — the docked left SIDEBAR. When Ctrl-B has it open AND the
@@ -79,36 +84,58 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let (_, _, _, total_rows) = input_rows(&view.display, view.cursor_col, width);
     let input_height = total_rows.clamp(1, max_rows) as u16;
 
-    // The team strip is a one-row band between `rule` and `input`, present only
-    // when there is a team and the terminal is big enough. With no team the
-    // layout is byte-identical to the original four-band stack.
-    let team = !app.member_rows().is_empty()
-        && area.width >= TEAM_STRIP_MIN_WIDTH
-        && area.height >= TEAM_STRIP_MIN_HEIGHT;
-    let mut constraints = vec![Constraint::Min(1), Constraint::Length(1)];
-    if team {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Length(input_height));
-    constraints.push(Constraint::Length(1));
-    let areas = Layout::vertical(constraints).split(area);
-    let body = areas[0];
-    let rule = areas[1];
-    let (input, status) = if team {
-        (areas[3], areas[4])
+    // The working-team region sits ABOVE the input box: one row per RUNNING
+    // teammate (the accessor orders oldest→newest and caps at three). It
+    // collapses to nothing when none are running or the terminal cannot seat it
+    // without starving the transcript.
+    // Only the COUNT is needed for the layout; the rows themselves are fetched
+    // again below, after the transcript's `&mut` borrow ends.
+    let working_count = app.working_team_rows().len();
+    let mut team_h = if working_count == 0
+        || area.width < TEAM_MIN_WIDTH
+        || area.height < TEAM_MIN_HEIGHT
+    {
+        0
     } else {
-        (areas[2], areas[3])
+        working_count as u16
     };
 
+    // The session line (1 row) and at least one transcript row are reserved; the
+    // input box (two borders + the composer) then has priority over the team
+    // region, so a short terminal degrades gracefully instead of overflowing.
+    let session_h = u16::from(app.status().session.is_some());
+    let spare = area.height.saturating_sub(session_h + 1);
+    let box_h = (input_height + 2).min(spare).max(1);
+    team_h = team_h.min(spare.saturating_sub(box_h));
+
+    let areas = Layout::vertical([
+        Constraint::Length(session_h), // session id
+        Constraint::Min(1),         // transcript
+        Constraint::Length(team_h), // working-team region
+        Constraint::Length(box_h),  // input box
+    ])
+    .split(area);
+    let session = areas[0];
+    let body = areas[1];
+    let team = areas[2];
+    let editor = areas[3];
+
+    draw_session_line(frame, session, app);
     draw_transcript(frame, body, app);
-    draw_rule(frame, rule);
-    if team {
-        draw_team_strip(frame, areas[2], app);
+    if team_h > 0 {
+        let working = app.working_team_rows();
+        draw_working_team(frame, team, &working);
     }
-    draw_input(frame, input, &view);
-    draw_status(frame, status, app);
-    draw_completion(frame, area, rule, app);
-    draw_search_prompt(frame, area, rule, app);
+    draw_input_box(frame, editor, app, &view);
+    // The completion/search popups float just above the input box's TOP border,
+    // over the transcript interior — never over the composer.
+    let above = Rect {
+        y: editor.y,
+        height: 1,
+        ..area
+    };
+    draw_completion(frame, area, above, app);
+    draw_search_prompt(frame, area, above, app);
     // The modal, if any, is drawn last — over the WHOLE terminal (`full`), so
     // it covers the docked sidebar too; the popups above float over the bands.
     draw_overlay(frame, full, app);
@@ -118,6 +145,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// band like the command completion. Browse-owned and non-reflowing: it is
 /// `Clear`ed over the transcript only while the prompt is open, so an
 /// input-mode frame stays byte-identical.
+///
+/// The popup anchors on a 1-row `above` rect at the input box's TOP border, so
+/// it floats over the transcript interior and never covers the composer.
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let Some(query) = app.search_query() else {
         return;
@@ -342,6 +372,14 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
     ]
 }
 
+/// Draw the transcript into its band: the committed blocks (cached per width)
+/// plus the in-flight message. `area` is the plain transcript band — the wrap
+/// width is `area.width` and the viewport height is `area.height`, feeding
+/// `sync_scroll`; the selection bar paints column 0 in a second pass.
+///
+/// `Surface::cache` keys on width, so a reflow (e.g. toggling the sidebar,
+/// which changes the bands width by `SIDEBAR_WIDTH`) invalidates every cached
+/// block.
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width as usize;
     let mut lines: Vec<Line> = Vec::new();
@@ -802,11 +840,6 @@ fn input_rows(input: &str, cursor: usize, width: usize) -> (Vec<String>, usize, 
     (rows, cursor_row, cursor_col, total_rows)
 }
 
-fn draw_rule(frame: &mut Frame, area: Rect) {
-    let rule = "─".repeat(area.width as usize);
-    frame.render_widget(Paragraph::new(Line::from(Span::styled(rule, dim()))), area);
-}
-
 fn draw_input(frame: &mut Frame, area: Rect, view: &InputView) {
     let width = input_content_width(area);
     let (rows, cursor_row, cursor_col, _) = input_rows(&view.display, view.cursor_col, width);
@@ -899,92 +932,157 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
     });
 }
 
-fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let status = app.status();
+/// The dim `session <short id>` line above the transcript. Blank when no session
+/// id is known (an attached/remote session may not have one).
+fn draw_session_line(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(session) = &app.status().session else {
+        return;
+    };
+    let line = Line::from(Span::styled(format!(" session {}", short_id(session)), dim()));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Draw the input box: a ROUNDED bordered `Block` wrapping the composer, whose
+/// four corners carry the chrome the old status band used to (project/branch,
+/// model/effort, the context gauge, and the mode/state). The composer renders in
+/// the block's inner rect, so its wrap width is `area.width - 2`.
+fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
+    let (tl, tr, bl, br) = corner_titles(app, area);
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border())
+        .title_top(tl.left_aligned())
+        .title_top(tr.right_aligned())
+        .title_bottom(bl.left_aligned())
+        .title_bottom(br.right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    draw_input(frame, inner, view);
+}
+
+/// Assemble the input box's four corner titles, width-budgeted to `area` so the
+/// two titles on a row never overdraw the border.
+///
+/// Each row's two titles share the row: `area.width` minus the two border
+/// columns and a 1-col gap so they never touch. Fields are dropped
+/// least-important-first (top: ` · ⎇ branch` then ` · effort`; bottom: `↑ N`
+/// scroll, then the gauge, then `⏻ plan`/`▤ browse`), and a still-too-long title
+/// is truncated with a trailing `…`. The surviving minimum is the project
+/// (top-left) and the mode/state (bottom-right).
+fn corner_titles(
+    app: &App,
+    area: Rect,
+) -> (Line<'static>, Line<'static>, Line<'static>, Line<'static>) {
+    // Title columns available per row (the two border columns + a 1-col gap).
+    let avail = (area.width as usize).saturating_sub(3);
+
+    // --- top row: `{project} · ⎇ {branch}`   ·   `{model} · {effort}` --------
+    let project = app.cwd().unwrap_or("wcode").to_string();
+    let model = app.status().model.clone();
+    let branch = app.git().map(|git| format!("⎇ {git}"));
+    let effort = app.status().effort.clone();
+    let tl = |text: &str| -> Vec<Span<'static>> {
+        let (head, rest) = split_at_char(text, project.chars().count());
+        let mut spans = vec![Span::styled(head, accent())];
+        if !rest.is_empty() {
+            spans.push(Span::styled(rest, dim()));
+        }
+        spans
+    };
+    let tr = |text: String| -> Vec<Span<'static>> { vec![Span::styled(text, dim())] };
+    let top_levels = vec![
+        (
+            tl(&join_title(&project, branch.as_deref())),
+            tr(join_title(&model, effort.as_deref())),
+        ),
+        (tl(&project), tr(join_title(&model, effort.as_deref()))),
+        (tl(&project), tr(model.clone())),
+    ];
+    let (top_left, top_right) = pick_titles(&top_levels, avail);
+
+    // --- bottom row: the gauge   ·   `⏻ plan · ▤ browse · {state} · ↑ N` -----
     let state = match (app.running(), app.run_elapsed()) {
         (true, Some(d)) => format!("⠹ running {}", format_ms(d.as_millis() as u64)),
         (true, None) => "⠹ running".to_string(),
         (false, _) => "⏸ idle".to_string(),
     };
-    let width = area.width as usize;
-
-    // Fields are ordered most-important-first and dropped when space is tight:
-    // session first, then effort, then tokens.
-    let (mut show_tokens, mut show_effort, mut show_session) = (true, true, true);
-    let (mut show_cwd, mut show_todos, mut show_changes) = (true, true, true);
-    loop {
-        let mut spans: Vec<Span> = vec![
-            Span::raw(" "),
-            Span::styled(status.model.clone(), dim()),
-        ];
-        // The plan chip sits next to the model, ahead of the fields the loop
-        // drops when space is tight, so it does not vanish first (A2).
-        if status.plan {
-            spans.push(sep());
+    let br = |show_plan: bool, show_browse: bool, show_scroll: bool| -> Vec<Span<'static>> {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if show_plan && app.status().plan {
             spans.push(Span::styled("⏻ plan", accent()));
         }
-        if show_effort && let Some(effort) = &status.effort {
-            spans.push(sep());
-            spans.push(Span::styled(effort.clone(), dim()));
-        }
-        if show_tokens && let Some(tokens) = token_spans(app) {
-            spans.push(sep());
-            spans.extend(tokens);
-        }
-        if show_changes && let Some(chip) = changes_chip(app) {
-            spans.push(sep());
-            spans.extend(chip);
-        }
-        // todos chip (`☑ 2/5`). Data: `Surface::last_todos` via `App::last_todos()`.
-        if show_todos && let Some(chip) = todos_chip(app) {
-            spans.push(sep());
-            spans.extend(chip);
-        }
-        if show_session && let Some(session) = &status.session {
-            spans.push(sep());
-            spans.push(Span::styled(format!("session {}", short_id(session)), dim()));
-        }
-        if show_cwd {
-            if let Some(cwd) = app.cwd() {
+        if show_browse && app.mode() == Mode::Browse {
+            if !spans.is_empty() {
                 spans.push(sep());
-                spans.push(Span::styled(cwd.to_string(), dim()));
             }
-            if let Some(git) = app.git() {
-                spans.push(sep());
-                spans.push(Span::styled(format!("⎇ {git}"), dim()));
-            }
-        }
-        if app.mode() == Mode::Browse {
-            spans.push(sep());
             spans.push(Span::styled("▤ browse", accent()));
         }
-        spans.push(sep());
+        if !spans.is_empty() {
+            spans.push(sep());
+        }
         spans.push(Span::styled(state.clone(), dim()));
-        if app.scroll() > 0 {
+        if show_scroll && app.scroll() > 0 {
             spans.push(sep());
             spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
         }
-        spans.push(Span::raw(" "));
+        spans
+    };
+    let gauge = token_spans(app).unwrap_or_default();
+    let bottom_levels = vec![
+        (gauge.clone(), br(true, true, true)),
+        (gauge.clone(), br(true, true, false)),
+        (Vec::new(), br(true, true, false)),
+        (Vec::new(), br(false, false, false)),
+    ];
+    let (bottom_left, bottom_right) = pick_titles(&bottom_levels, avail);
 
-        let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if len <= width || !(show_tokens || show_effort || show_session || show_todos || show_changes || show_cwd) {
-            frame.render_widget(Paragraph::new(Line::from(spans)), area);
-            return;
-        }
-        if show_cwd {
-            show_cwd = false;
-        } else if show_todos {
-            show_todos = false;
-        } else if show_changes {
-            show_changes = false;
-        } else if show_session {
-            show_session = false;
-        } else if show_effort {
-            show_effort = false;
-        } else {
-            show_tokens = false;
+    (top_left, top_right, bottom_left, bottom_right)
+}
+
+/// Join a title's base with an optional extra using the ` · ` separator.
+fn join_title(base: &str, extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) => format!("{base} · {extra}"),
+        None => base.to_string(),
+    }
+}
+
+/// The first of `levels` (fullest → most-dropped) whose two titles fit `avail`
+/// columns; else the last level with each side truncated to fit. Titles are
+/// [`Span`] runs, so styling rides through the budget.
+fn pick_titles(
+    levels: &[(Vec<Span<'static>>, Vec<Span<'static>>)],
+    avail: usize,
+) -> (Line<'static>, Line<'static>) {
+    let width = |spans: &[Span<'static>]| -> usize {
+        spans.iter().map(|s| s.content.chars().count()).sum()
+    };
+    let (mut left, mut right) = levels.last().cloned().unwrap_or_default();
+    for (l, r) in levels {
+        if width(l) + width(r) <= avail {
+            left = l.clone();
+            right = r.clone();
+            break;
         }
     }
+    if width(&left) + width(&right) > avail {
+        // Last resort: split the row and truncate each side.
+        let left_room = (avail / 2).max(1);
+        left = truncate_spans(&left, left_room);
+        right = truncate_spans(&right, avail.saturating_sub(width(&left)));
+    }
+    (Line::from(left), Line::from(right))
+}
+
+/// Truncate a span run to at most `max` columns, keeping the first span's style.
+fn truncate_spans(spans: &[Span<'static>], max: usize) -> Vec<Span<'static>> {
+    let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.chars().count() <= max {
+        return spans.to_vec();
+    }
+    let style = spans.first().map_or_else(Style::default, |s| s.style);
+    vec![Span::styled(truncate(&text, max), style)]
 }
 
 /// The dim ` · ` separator between status fields.
@@ -1021,11 +1119,12 @@ fn token_spans(app: &App) -> Option<Vec<Span<'static>>> {
     })
 }
 
-/// An 8-cell gauge: `████░░░░`.
+/// A gauge of `cells` parallelograms: filled `▰`, empty `▱` (the caller colors
+/// it by fill: green → yellow → red). e.g. `▰▰▰▰▰▰▱▱`.
 fn bar(ratio: f64, cells: usize) -> String {
     let filled = ((ratio.clamp(0.0, 1.0) * cells as f64).round() as usize).min(cells);
-    let mut out = "█".repeat(filled);
-    out.push_str(&"░".repeat(cells - filled));
+    let mut out = "▰".repeat(filled);
+    out.push_str(&"▱".repeat(cells - filled));
     out
 }
 
@@ -1058,49 +1157,6 @@ fn format_ms(ms: u64) -> String {
     } else {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
     }
-}
-
-/// The status line's changes chip (`± N file(s) +a −r`), summing the run's
-/// changed files per path (a file edited twice counts once). `None` when the run
-/// changed nothing.
-fn changes_chip(app: &App) -> Option<Vec<Span<'static>>> {
-    let changes = app.changes();
-    if changes.is_empty() {
-        return None;
-    }
-    let mut paths: Vec<String> = Vec::new();
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for change in changes {
-        if !paths.contains(&change.path) {
-            paths.push(change.path.clone());
-        }
-        added += change.added;
-        removed += change.removed;
-    }
-    let files = paths.len();
-    let plural = if files == 1 { "" } else { "s" };
-    Some(vec![Span::styled(
-        format!("± {files} file{plural} +{added} −{removed}"),
-        accent(),
-    )])
-}
-
-/// The status line's todos chip (`☑ done/total`) from the latest `Todo` list.
-/// `None` when no list has been seen (or it is empty).
-fn todos_chip(app: &App) -> Option<Vec<Span<'static>>> {
-    let todos = app.last_todos()?;
-    if todos.is_empty() {
-        return None;
-    }
-    let done = todos
-        .iter()
-        .filter(|t| t.status == wcode_harness::event::TodoStatus::Completed)
-        .count();
-    Some(vec![Span::styled(
-        format!("☑ {done}/{}", todos.len()),
-        accent(),
-    )])
 }
 
 /// First 8 chars of a session id — enough to recognize, not enough to crowd.
@@ -1162,78 +1218,6 @@ fn state_style(state: TeamState) -> Style {
         TeamState::Done => muted(),
         TeamState::Failed => error_style(),
     }
-}
-
-/// The strip's slot layout for `n` members across `area_width` columns:
-/// `(shown, slot_width, overflow)` — up to [`MAX_TEAM_SLOTS`] equal-width
-/// slots, the members beyond them folded into a right-aligned `+N`. The width
-/// budget is the band minus the `+N` segment and the inter-slot gaps, shared
-/// evenly. `slot_width` is 0 when the band cannot seat even one slot; the
-/// renderer draws nothing then (never a divide-by-zero).
-fn slot_geometry(area_width: usize, n: usize) -> (usize, usize, usize) {
-    let shown = n.min(MAX_TEAM_SLOTS);
-    if area_width == 0 || shown == 0 {
-        return (shown, 0, 0);
-    }
-    let overflow = n.saturating_sub(shown);
-    // The right-aligned "+N": a separator space, the plus, and the digits.
-    let overflow_w = if overflow > 0 {
-        2 + overflow.to_string().chars().count()
-    } else {
-        0
-    };
-    let gaps = shown.saturating_sub(1);
-    let inner = area_width
-        .saturating_sub(overflow_w)
-        .saturating_sub(gaps);
-    (shown, inner / shown, overflow)
-}
-
-/// One slot's spans: a state-colored `glyph label` head plus a dim tail — the
-/// live action, or ` —` for idle/done/failed members with nothing running — clipped
-/// to `width` with a single trailing `…` when cut. The clip takes from the
-/// whole slot text up front (reserving the ellipsis), so a long label can
-/// never push past the slot into a neighbor's share.
-fn slot_span(
-    label: &str,
-    state: TeamState,
-    action: Option<&str>,
-    width: usize,
-) -> Vec<Span<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let head = format!("{} {label}", state.glyph());
-    let tail = match (state, action) {
-        (_, Some(action)) => format!(" {action}"),
-        (TeamState::Idle | TeamState::Done | TeamState::Failed, None) => " —".to_string(),
-        (TeamState::Running, None) => String::new(),
-    };
-    let head_len = head.chars().count();
-    let total = head_len + tail.chars().count();
-    // Reserve the ellipsis slot *before* taking, so a cut slot never exceeds
-    // `width` columns.
-    let take = if total <= width { total } else { width - 1 };
-    let head_take = take.min(head_len);
-    let tail_take = take.saturating_sub(head_take);
-    let cut = total > width;
-    let mut spans = Vec::new();
-    let mut head_text: String = head.chars().take(head_take).collect();
-    if cut && tail_take == 0 {
-        // The tail did not survive the clip; the ellipsis rides the head.
-        head_text.push('…');
-    }
-    if !head_text.is_empty() {
-        spans.push(Span::styled(head_text, state_style(state)));
-    }
-    if tail_take > 0 {
-        let mut tail_text: String = tail.chars().take(tail_take).collect();
-        if cut {
-            tail_text.push('…');
-        }
-        spans.push(Span::styled(tail_text, dim()));
-    }
-    spans
 }
 
 /// Draw the docked left sidebar: one fixed-width column stacking the “more
@@ -1372,7 +1356,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App) {
 
 /// One clipped sidebar row: concatenate the styled segments, and when the row
 /// overflows `width` columns drop the tail and ride a `…` on the last
-/// surviving span. Char-safe; mirrors `slot_span`'s reserve-the-ellipsis clip.
+/// surviving span. Char-safe; reserves the ellipsis column before taking.
 fn clipped_row(segs: Vec<(String, Style)>, width: usize) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     if width == 0 {
@@ -1408,68 +1392,28 @@ fn clipped_row(segs: Vec<(String, Style)>, width: usize) -> Line<'static> {
     }
     Line::from(spans)
 }
-/// Draw the active-team strip: one row between the rule and the input, up to
-/// [`MAX_TEAM_SLOTS`] equal-share member slots (`glyph label` + a dim action)
-/// with the rest folded into a right-aligned `+N`. Each share is filled out
-/// with dim background and separated from the next by a dim `│`, so the band
-/// reads edge-to-edge like the rule/status lines — a single member still spans
-/// the whole width. Consumes [`App::member_rows`] — already ordered active-first
-/// then by action recency. The model is not shown (§2).
-fn draw_team_strip(frame: &mut Frame, area: Rect, app: &App) {
-    if area.height == 0 {
-        return;
-    }
-    let rows = app.member_rows();
-    let n = rows.len();
-    let width = area.width as usize;
-    let (shown, share, overflow) = slot_geometry(width, n);
-    if shown == 0 || share == 0 {
-        return;
-    }
-    // The right-aligned "+N": a leading separator space, the plus, and the
-    // digits (mirrors `slot_geometry`'s budget) — but only when members
-    // overflow, so a no-overflow band reserves nothing on the right.
-    let seg = if overflow > 0 {
-        format!("+{overflow}")
-    } else {
-        String::new()
-    };
-    // The band minus the `+N` segment and the inter-share separators, shared
-    // evenly (`slot_geometry`'s `inner`). The columns left over after the
-    // equal shares fold into the last share, so shares + separators + `+N`
-    // always sum to exactly the width.
-    let inner = width
-        .saturating_sub(seg.chars().count() + usize::from(overflow > 0))
-        .saturating_sub(shown - 1);
-    let slack = inner.saturating_sub(share.saturating_mul(shown));
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, (label, state, _, action)) in rows.into_iter().take(shown).enumerate() {
-        let last = i == shown - 1;
-        // Each share is `share` columns of content (the last stretches over
-        // the `slack`); the dim `│` sits as a column BETWEEN shares, so shares
-        // + separators sum to exactly `inner` and the band ends flush.
-        let content_w = if last { share + slack } else { share };
-        let slot = slot_span(label, state, action, content_w);
-        let used: usize = slot.iter().map(|s| s.content.chars().count()).sum();
-        spans.extend(slot);
-        // Dim spaces fill the share's remainder: one continuous subtle band.
-        if let Some(fill) = content_w.checked_sub(used).filter(|&f| f > 0) {
-            spans.push(Span::styled(" ".repeat(fill), dim()));
+/// The working-team region ABOVE the input box: one row per RUNNING teammate,
+/// `glyph label  action`. `rows` is already filtered to running members, ordered
+/// oldest→newest (the LATEST event is the BOTTOM row), and capped to three by
+/// [`App::working_team_rows`]. The root is excluded there; idle/done/failed
+/// members never appear. No `+N` overflow and no equal-share `│` separators — a
+/// plain left-aligned row, clipped by the `Paragraph` at the band's right edge.
+fn draw_working_team(frame: &mut Frame, area: Rect, rows: &[(&str, TeamState, Option<&str>)]) {
+    for (i, (label, state, action)) in rows.iter().enumerate() {
+        let row = Rect {
+            y: area.y + i as u16,
+            height: 1,
+            ..area
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {} ", state.glyph()), state_style(*state)),
+            Span::styled((*label).to_string(), state_style(*state)),
+        ];
+        if let Some(action) = action {
+            spans.push(Span::styled(format!("  {action}"), dim()));
         }
-        if !last {
-            spans.push(Span::styled("│", dim()));
-        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
     }
-    if overflow > 0 {
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let pad = width.saturating_sub(used).saturating_sub(seg.chars().count());
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), dim()));
-        }
-        spans.push(Span::styled(seg, dim()));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub(crate) fn accent() -> Style {
@@ -1501,7 +1445,6 @@ mod tests {
     use crate::app::{App, AppEvent, Key};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::Modifier;
     use wcode_harness::protocol::SessionId;
 
     /// The default root surface's id (`App::new`'s single surface).
@@ -1690,131 +1633,6 @@ mod tests {
             "the shifted blocks re-cached, then hit"
         );
     }
-    /// The team strip's row: the first buffer row that names `label`.
-    fn strip_row(terminal: &Terminal<TestBackend>, label: &str) -> u16 {
-        buffer_text(terminal)
-            .lines()
-            .position(|line| line.contains(label))
-            .expect("the strip row") as u16
-    }
-
-    #[test]
-    fn running_status_shows_the_injected_elapsed() {
-        let mut app = App::new();
-        let id = root();
-        app.handle(AppEvent::Agent(id.clone(), wcode_harness::event::AgentEvent::AgentStart));
-        app.set_run_elapsed(&id, std::time::Duration::from_millis(3_100));
-        let text = buffer_text(&render(&mut app, 80, 3));
-        assert!(text.contains("running 3.1s"), "elapsed missing: {text}");
-    }
-
-    #[test]
-    fn status_shows_the_changes_and_todos_chips() {
-        let mut app = App::new();
-        // One changed file (a tool end carrying path+diff) and a 1/3 todo list.
-        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionStart {
-            call_id: "t1".into(), name: "edit".into(),
-        }));
-        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionEnd {
-            call_id: "t1".into(), name: "edit".into(),
-            output: "ok".into(), is_error: false,
-            diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
-            path: Some("src/a.rs".into()),
-            duration_ms: None,
-        }));
-        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::Todo {
-            todos: vec![
-                wcode_harness::event::TodoItem {
-                    content: "a".into(),
-                    status: wcode_harness::event::TodoStatus::Completed,
-                },
-                wcode_harness::event::TodoItem {
-                    content: "b".into(),
-                    status: wcode_harness::event::TodoStatus::Pending,
-                },
-                wcode_harness::event::TodoItem {
-                    content: "c".into(),
-                    status: wcode_harness::event::TodoStatus::Pending,
-                },
-            ],
-        }));
-        let text = buffer_text(&render(&mut app, 100, 3));
-        assert!(text.contains("1/3"), "todos chip missing: {text}");
-        assert!(text.contains("1 file"), "changes chip missing: {text}");
-        // Narrow: the drop chain sheds the chips (todos, then changes).
-        let narrow = buffer_text(&render(&mut app, 24, 3));
-        assert!(!narrow.contains("1/3"), "todos chip must drop when narrow: {narrow}");
-        assert!(!narrow.contains("1 file"), "changes chip must drop when narrow: {narrow}");
-    }
-
-    #[test]
-    fn status_shows_cwd_and_git_and_drops_cwd_first() {
-        let mut app = App::new();
-        app.set_status(crate::app::Status {
-            model: "m".into(),
-            effort: None,
-            session: None,
-            context_limit: None,
-            plan: false,
-        });
-        app.set_cwd(Some("myrepo".into()));
-        app.set_git(Some("main*".into()));
-        let text = buffer_text(&render(&mut app, 100, 3));
-        assert!(text.contains("myrepo"), "cwd missing: {text}");
-        assert!(text.contains("⎇ main*"), "branch/dirty missing: {text}");
-        // Narrow: cwd/git shed FIRST (least important).
-        let narrow = buffer_text(&render(&mut app, 20, 3));
-        assert!(!narrow.contains("myrepo"), "cwd must drop first: {narrow}");
-        assert!(!narrow.contains("main*"), "git must drop with cwd: {narrow}");
-    }
-
-    #[test]
-    fn status_compacts_tokens_and_shows_the_session() {
-        let mut app = App::new();
-        app.set_status(crate::app::Status {
-            model: "m".into(),
-            effort: Some("high".into()),
-            session: Some("abcdef0123456789".into()),
-            context_limit: Some(1_000_000),
-            plan: false,
-        });
-        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::TurnEnd {
-            message: AgentMessage::Assistant {
-                content: vec![ContentBlock::Text { text: "x".into() }],
-                stop_reason: wcode_harness::message::StopReason::Stop,
-                usage: Some(wcode_harness::message::Usage {
-                    input_tokens: 14_200,
-                    output_tokens: 1,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
-                }),
-                model: None,
-            },
-        }));
-        let text = buffer_text(&render(&mut app, 80, 3));
-        assert!(text.contains("14.2k / 1M"), "tokens missing: {text}");
-        assert!(text.contains("session abcdef01"), "session missing: {text}");
-    }
-
-    #[test]
-    fn status_line_shows_the_model_exactly_once() {
-        // Regression: `draw_status` pushed the model span twice, so the status
-        // line printed the model twice. Count the occurrences to pin it to one.
-        let mut app = App::new();
-        app.set_status(crate::app::Status {
-            model: "zephyr-9".into(),
-            effort: None,
-            session: None,
-            context_limit: None,
-            plan: false,
-        });
-        let text = buffer_text(&render(&mut app, 80, 3));
-        assert_eq!(
-            text.matches("zephyr-9").count(),
-            1,
-            "the model must appear exactly once: {text}"
-        );
-    }
 
     #[test]
     fn format_tokens_compacts() {
@@ -1827,10 +1645,10 @@ mod tests {
 
     #[test]
     fn bar_fills_proportionally() {
-        assert_eq!(bar(0.0, 8), "░░░░░░░░");
-        assert_eq!(bar(1.0, 8), "████████");
-        assert_eq!(bar(0.5, 8), "████░░░░");
-        assert_eq!(bar(2.0, 8), "████████"); // clamped
+        assert_eq!(bar(0.0, 8), "▱▱▱▱▱▱▱▱");
+        assert_eq!(bar(1.0, 8), "▰▰▰▰▰▰▰▰");
+        assert_eq!(bar(0.5, 8), "▰▰▰▰▱▱▱▱");
+        assert_eq!(bar(2.0, 8), "▰▰▰▰▰▰▰▰"); // clamped
     }
 
     #[test]
@@ -1846,17 +1664,6 @@ mod tests {
         let text = buffer_text(&render(&mut app, 40, 6));
         assert!(text.contains("one"), "first line missing: {text}");
         assert!(text.contains("two"), "second line missing: {text}");
-    }
-
-    #[test]
-    fn draws_input_and_status() {
-        let mut app = App::new();
-        for c in "hi".chars() {
-            app.handle(AppEvent::Key(Key::Char(c)));
-        }
-        let text = buffer_text(&render(&mut app, 40, 6));
-        assert!(text.contains("❯ hi"));
-        assert!(text.contains("idle"), "status line missing: {text}");
     }
 
     #[test]
@@ -2098,9 +1905,10 @@ mod tests {
     fn a_chip_at_a_narrow_width_still_renders_within_the_band() {
         let mut app = App::new();
         app.handle(AppEvent::Paste("x".repeat(500)));
-        // Content width is 17 here, so the chip wraps across rows.
+        // Content width is ~18 here, so the chip wraps across rows and the
+        // input scrolls to keep the cursor (after the chip) visible.
         let text = buffer_text(&render(&mut app, 20, 8));
-        assert!(text.contains("pasted"), "chip missing:\n{text}");
+        assert!(text.contains("chars"), "chip missing:\n{text}");
         assert!(text.contains("❱"), "chip tail missing:\n{text}");
         assert!(text.contains("▌"), "cursor missing:\n{text}");
     }
@@ -2160,486 +1968,6 @@ mod tests {
                 }
             })
             .unwrap();
-    }
-
-    #[test]
-    fn an_empty_roster_draws_no_strip() {
-        let mut app = App::new();
-        let text = buffer_text(&render(&mut app, 80, 20));
-        assert!(!text.contains("team"), "no strip without a team:\n{text}");
-    }
-
-    #[test]
-    fn the_team_strip_lists_members_and_hides_when_narrow() {
-        let mut app = App::new();
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("explorer"),
-                label: "explorer".into(),
-                model: "m1".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("reviewer"),
-                label: "reviewer".into(),
-                model: "m2".into(),
-                is_root: false,
-            },
-        ]);
-        app.handle(AppEvent::Agent(
-            SessionId::agent("explorer"),
-            wcode_harness::event::AgentEvent::AgentStart,
-        ));
-
-        // Wide enough: the strip shows each member with its status glyph — but
-        // never the model (§2).
-        let wide = buffer_text(&render(&mut app, 80, 20));
-        assert!(
-            wide.contains("● explorer"),
-            "running member missing:\n{wide}"
-        );
-        assert!(wide.contains("○ reviewer"), "idle member missing:\n{wide}");
-        assert!(
-            !wide.contains("m1") && !wide.contains("m2"),
-            "the model should be gone from the strip:\n{wide}"
-        );
-
-        // A failed run reads `✗`, and the failure survives `AgentEnd` (the loop
-        // emits `Error` before `AgentEnd`).
-        app.handle(AppEvent::Agent(
-            SessionId::agent("reviewer"),
-            wcode_harness::event::AgentEvent::AgentStart,
-        ));
-        app.handle(AppEvent::Agent(
-            SessionId::agent("reviewer"),
-            wcode_harness::event::AgentEvent::Error {
-                message: "boom".into(),
-            },
-        ));
-        app.handle(AppEvent::Agent(
-            SessionId::agent("reviewer"),
-            wcode_harness::event::AgentEvent::AgentEnd,
-        ));
-        let failed = buffer_text(&render(&mut app, 80, 20));
-        assert!(
-            failed.contains("✗ reviewer"),
-            "failed member missing:\n{failed}"
-        );
-
-        // Narrow (< 50 cols): the strip is hidden.
-        let narrow = buffer_text(&render(&mut app, 49, 20));
-        assert!(
-            !narrow.contains("explorer"),
-            "the strip should hide when narrow:\n{narrow}"
-        );
-    }
-
-    #[test]
-    fn the_strip_shows_only_at_the_width_threshold() {
-        let mut app = App::new();
-        with_member(&mut app, "explorer", "m");
-        // 49 cols: hidden. 50 (the threshold): shown.
-        assert!(!buffer_text(&render(&mut app, 49, 12)).contains("explorer"));
-        assert!(buffer_text(&render(&mut app, 50, 12)).contains("explorer"));
-    }
-
-    #[test]
-    fn a_short_terminal_draws_the_strip_without_panicking() {
-        let mut app = App::new();
-        with_member(&mut app, "explorer", "m");
-        // Tiny heights leave a degenerate `body` (even 0–1 rows): no panic. The
-        // strip itself is hidden below its minimum height (6 rows).
-        for height in [3u16, 4, 5] {
-            let text = buffer_text(&render(&mut app, 80, height));
-            assert!(
-                !text.contains("explorer"),
-                "the strip must hide below 6 rows ({height}):\n{text}"
-            );
-        }
-        // From the minimum height up, body + rule + strip + input + status all
-        // fit and the strip still renders on a short screen.
-        for height in [6u16, 7, 8] {
-            let text = buffer_text(&render(&mut app, 80, height));
-            assert!(
-                text.contains("explorer"),
-                "the strip should render at {height} rows:\n{text}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_completion_popup_does_not_overdraw_the_strip() {
-        let mut app = App::new();
-        with_member(&mut app, "explorer", "m");
-        for c in "/mo".chars() {
-            app.handle(AppEvent::Key(Key::Char(c)));
-        }
-        assert!(!app.completion_rows().is_empty(), "the popup should be open");
-
-        let terminal = render(&mut app, 80, 16);
-        let rows: Vec<String> = buffer_text(&terminal).lines().map(str::to_string).collect();
-        // The popup floats above the rule; the strip sits below it, so the two
-        // must never share a row.
-        let strip_row = rows
-            .iter()
-            .position(|row| row.contains("explorer"))
-            .expect("the strip row");
-        assert!(
-            !rows[strip_row].contains("commands"),
-            "the popup overdraws the strip:\n{}",
-            rows[strip_row]
-        );
-        // Sanity: the popup is still drawn elsewhere.
-        assert!(buffer_text(&terminal).contains("commands"));
-    }
-
-    #[test]
-    fn strip_slots_are_equal_shares_after_overflow_and_gaps() {
-        // 3 members, no overflow: three equal slots, two 1-char gaps.
-        // 100 cols → (100 − 2) / 3 = 32 each.
-        assert_eq!(slot_geometry(100, 3), (3, 32, 0));
-        // 5 members: three slots + a right-aligned "+2" (2 chars + a space).
-        // 100 → (100 − 3 − 2) / 3 = 31.
-        assert_eq!(slot_geometry(100, 5), (3, 31, 2));
-        // A band too narrow to seat a slot is guarded, never div-by-zero
-        // (slot_width 0 means the renderer draws nothing).
-        assert_eq!(slot_geometry(4, 5), (3, 0, 2));
-        assert_eq!(slot_geometry(0, 4), (3, 0, 0));
-        // No members: nothing to draw.
-        assert_eq!(slot_geometry(80, 0), (0, 0, 0));
-    }
-
-    #[test]
-    fn the_strip_band_sums_exactly_to_the_width() {
-        // The band's shares + separators (+ `+N`) must total the width exactly
-        // for every width and team size the strip can show — never a shortfall
-        // at the right edge, never an overflow onto the next band.
-        for width in [60usize, 80, 97, 120] {
-            for n in 1..=10usize {
-                let (shown, share, overflow) = slot_geometry(width, n);
-                if shown == 0 || share == 0 {
-                    continue; // guarded: the renderer draws nothing
-                }
-                // The `+N` segment, leading space included (as budgeted).
-                let seg_w = if overflow > 0 {
-                    overflow.to_string().chars().count() + 1
-                } else {
-                    0
-                };
-                let inner = width.saturating_sub(seg_w).saturating_sub(shown - 1);
-                let slack = inner.saturating_sub(share.saturating_mul(shown));
-                let total = share
-                    .saturating_mul(shown)
-                    .saturating_add(slack)
-                    .saturating_add(shown - 1)
-                    .saturating_add(seg_w);
-                assert_eq!(total, width, "width {width}, n {n}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_strip_folds_members_beyond_three_into_a_plus_count() {
-        let mut app = App::new();
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w1"),
-                label: "w1".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w2"),
-                label: "w2".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w3"),
-                label: "w3".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w4"),
-                label: "w4".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w5"),
-                label: "w5".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-        ]);
-        // Three equal slots share the band; the two remaining members fold into
-        // a right-aligned "+2" instead of a fourth slot.
-        let terminal = render(&mut app, 100, 12);
-        let text = buffer_text(&terminal);
-        assert!(text.contains("w1"), "slot w1 missing:\n{text}");
-        assert!(text.contains("w2"), "slot w2 missing:\n{text}");
-        assert!(text.contains("w3"), "slot w3 missing:\n{text}");
-        assert!(text.contains("+2"), "overflow count missing:\n{text}");
-        assert!(
-            !text.contains("w4") && !text.contains("w5"),
-            "members beyond the top three should fold into +N:\n{text}"
-        );
-        // "+2" is flush against the right edge, on the same dim band.
-        let y = strip_row(&terminal, "w1");
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf[(99, y)].symbol(), "2", "+N not right-aligned:\n{text}");
-        assert_eq!(buf[(98, y)].symbol(), "+");
-        // The seam before it is dim fill, never slot content.
-        assert_eq!(buf[(97, y)].symbol(), " ");
-        assert_ne!(buf[(97, y)].style(), Style::default());
-    }
-
-    #[test]
-    fn a_long_label_is_clipped_within_its_slot_without_hiding_neighbors() {
-        let mut app = App::new();
-        let long = "very-long-member-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("alpha"),
-                label: "alpha".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent(long),
-                label: long.into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("beta"),
-                label: "beta".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-        ]);
-        // Three slots at 80 cols → (80 − 2) / 3 = 26 each. The long label clips
-        // inside its own slot (a single …) and must not hide "alpha" or "beta".
-        let text = buffer_text(&render(&mut app, 80, 12));
-        assert!(
-            text.contains("alpha") && text.contains("beta"),
-            "a long label hides its neighbors:\n{text}"
-        );
-        assert!(text.contains("…"), "the long label should clip:\n{text}");
-        assert!(
-            !text.contains(long),
-            "the long label must be cut to its slot:\n{text}"
-        );
-        // The clip keeps the glyph + label prefix, only the tail is cut.
-        assert!(
-            text.contains("○ very-long-member"),
-            "the clip must cut the label tail, not the head:\n{text}"
-        );
-    }
-
-    #[test]
-    fn the_strip_fills_the_band_edge_to_edge_for_any_team_size() {
-        // 1, 2, or 3 members (no `+N`): the dim band reaches the right edge
-        // exactly, so a lone or part-filled strip still spans the screen.
-        for n in 1..=3 {
-            let mut app = App::new();
-            let mut surfaces = vec![crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            }];
-            for i in 1..=n {
-                surfaces.push(crate::SurfaceInfo {
-                    id: SessionId::agent(format!("w{i}")),
-                    label: format!("w{i}"),
-                    model: "m".into(),
-                    is_root: false,
-                });
-            }
-            app.set_surfaces(surfaces);
-            let terminal = render(&mut app, 80, 12);
-            let y = strip_row(&terminal, "w1");
-            let buf = terminal.backend().buffer();
-            // Content starts at the left edge; the band's last column is
-            // dim-filled, never empty chrome.
-            assert_ne!(buf[(0, y)].symbol(), " ", "n={n}: content at the left edge");
-            assert_eq!(buf[(79, y)].symbol(), " ", "n={n}: fill reaches the last col");
-            assert_ne!(
-                buf[(79, y)].style(),
-                Style::default(),
-                "n={n}: the fill is a dim band"
-            );
-            // `│` separators only between the n-1 shares, never at the edges.
-            let bars: Vec<u16> = (0..80).filter(|&x| buf[(x, y)].symbol() == "│").collect();
-            assert_eq!(bars.len(), n - 1, "n={n}: one separator per gap");
-            assert_ne!(buf[(0, y)].symbol(), "│");
-            assert_ne!(buf[(79, y)].symbol(), "│");
-        }
-    }
-
-    #[test]
-    fn the_running_member_reads_green() {
-        let mut app = App::new();
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("runner"),
-                label: "runner".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("idle"),
-                label: "idle".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-        ]);
-        app.handle(AppEvent::Agent(
-            SessionId::agent("runner"),
-            wcode_harness::event::AgentEvent::AgentStart,
-        ));
-        let terminal = render(&mut app, 80, 12);
-        let text = buffer_text(&terminal);
-        let y = strip_row(&terminal, "runner");
-        let buf = terminal.backend().buffer();
-        let row = text.lines().nth(y as usize).expect("the strip row");
-        // The running head is a green signal — not faint/white like accent.
-        let run_x = row[..row.find("runner").expect("running label")].chars().count() as u16;
-        assert_eq!(buf[(run_x - 2, y)].symbol(), "●", "running glyph");
-        assert_eq!(
-            buf[(run_x - 2, y)].style().fg,
-            success().fg,
-            "running must read green, like the ✓ marks"
-        );
-        // …and stays distinct from an idle member's dim head.
-        let idle_x = row[..row.find("idle").expect("idle label")].chars().count() as u16;
-        assert_ne!(buf[(idle_x - 2, y)].style().fg, success().fg);
-    }
-
-    #[test]
-    fn dim_bars_separate_the_shares() {
-        let mut app = App::new();
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w1"),
-                label: "w1".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w2"),
-                label: "w2".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("w3"),
-                label: "w3".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-        ]);
-        let terminal = render(&mut app, 80, 12);
-        let y = strip_row(&terminal, "w1");
-        let buf = terminal.backend().buffer();
-        // 80 cols, 3 shares: (80 − 2) / 3 = 26 each; the dim `│` is a
-        // column BETWEEN shares (cols 26 and 53) — equal columns spanning the
-        // screen, never at the outer edges, and the band ends flush at the edge.
-        let bars: Vec<u16> = (0..80).filter(|&x| buf[(x, y)].symbol() == "│").collect();
-        assert_eq!(bars, vec![26, 53], "bars between shares, not at the edges");
-        assert!(buf[(26, y)].style().add_modifier.contains(Modifier::DIM), "the bar is dim chrome");
-        assert!(buf[(53, y)].style().add_modifier.contains(Modifier::DIM));
-        assert_eq!(buf[(79, y)].symbol(), " ", "3-member fill reaches the right edge");
-        assert_ne!(buf[(79, y)].style(), Style::default());
-    }
-
-    #[test]
-    fn a_long_label_never_eats_the_plus_count() {
-        let mut app = App::new();
-        let long = "very-long-member-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        app.set_surfaces(vec![
-            crate::SurfaceInfo {
-                id: root(),
-                label: "root".into(),
-                model: "rm".into(),
-                is_root: true,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent(long),
-                label: long.into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("alpha"),
-                label: "alpha".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("beta"),
-                label: "beta".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-            crate::SurfaceInfo {
-                id: SessionId::agent("gamma"),
-                label: "gamma".into(),
-                model: "m".into(),
-                is_root: false,
-            },
-        ]);
-        // 80 cols, 4 members: three shares (25/25/25) + a right-aligned "+1".
-        let terminal = render(&mut app, 80, 12);
-        let text = buffer_text(&terminal);
-        let y = strip_row(&terminal, "very-long-member");
-        let buf = terminal.backend().buffer();
-        // The "+1" survives at the far right…
-        assert_eq!(buf[(78, y)].symbol(), "+");
-        assert_eq!(buf[(79, y)].symbol(), "1", "+N hidden:\n{text}");
-        // …while the long label clips inside its own share; its neighbors and
-        // the seam before "+1" stay intact.
-        assert!(text.contains("…"), "the long label should clip:\n{text}");
-        assert!(
-            text.contains("alpha") && text.contains("beta"),
-            "a long label hides its neighbors:\n{text}"
-        );
-        for x in 75..78 {
-            assert_eq!(buf[(x, y)].symbol(), " ", "dim seam before +N:\n{text}");
-            assert_ne!(buf[(x, y)].style(), Style::default());
-        }
     }
 
     /// Push one tool invocation (start → end) into the focused surface.
@@ -3409,5 +2737,102 @@ mod tests {
             !narrow.contains("Context"),
             "no panel under the width threshold:\n{narrow}"
         );
+    }
+
+    #[test]
+    fn the_input_box_carries_the_corner_titles() {
+        let mut app = App::new();
+        app.set_cwd(Some("myrepo".into()));
+        app.set_git(Some("main*".into()));
+        app.set_status(crate::app::Status {
+            model: "zephyr-9".into(),
+            effort: Some("high".into()),
+            session: Some("abcdef0123456789".into()),
+            context_limit: Some(1_000_000),
+            plan: false,
+        });
+        let text = buffer_text(&render(&mut app, 80, 14));
+        // The input box is rounded and carries the chrome in its four corners.
+        assert!(
+            text.contains('╭') && text.contains('╮'),
+            "no rounded box:\n{text}"
+        );
+        assert!(text.contains("myrepo"), "project (cwd) top-left:\n{text}");
+        assert!(text.contains("⎇ main*"), "branch missing:\n{text}");
+        assert!(text.contains("zephyr-9"), "model top-right:\n{text}");
+        assert!(text.contains("high"), "effort missing:\n{text}");
+        assert!(text.contains("⏸ idle"), "state bottom-right:\n{text}");
+    }
+
+    #[test]
+    fn the_session_line_is_the_top_row_above_the_transcript() {
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            session: Some("abcdef0123456789".into()),
+            ..Default::default()
+        });
+        let text = buffer_text(&render(&mut app, 80, 12));
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("abcdef01"),
+            "session id is not the top row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_model_appears_exactly_once_in_the_box() {
+        // Regression carried over from the old status line: the model must be
+        // named once, on the box's top-right.
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            model: "zephyr-9".into(),
+            ..Default::default()
+        });
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert_eq!(text.matches("zephyr-9").count(), 1, "model once:\n{text}");
+    }
+
+    #[test]
+    fn the_team_region_lists_only_running_members() {
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            crate::SurfaceInfo {
+                id: root(),
+                label: "root".into(),
+                model: "rm".into(),
+                is_root: true,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("explorer"),
+                label: "explorer".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            crate::SurfaceInfo {
+                id: SessionId::agent("reviewer"),
+                label: "reviewer".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        // Only explorer runs; reviewer stays idle and must not appear.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("explorer"),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        let text = buffer_text(&render(&mut app, 80, 16));
+        assert!(text.contains("explorer"), "running member missing:\n{text}");
+        assert!(
+            !text.contains("reviewer"),
+            "an idle member must not show in the team region:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_terminal_draws_the_input_box_without_panicking() {
+        let mut app = App::new();
+        for height in [2u16, 3, 4, 5, 6, 8] {
+            let _ = render(&mut app, 80, height); // must not panic
+        }
     }
 }

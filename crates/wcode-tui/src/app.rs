@@ -1708,6 +1708,42 @@ impl App {
         self.dirty = true;
     }
 
+    /// The RUNNING teammates as `(label, state, action)` — the rows the team
+    /// region above the input box shows. Ordered OLDEST→NEWEST by
+    /// `last_action_at`, so the LATEST event is the BOTTOM row, capped to the 3
+    /// MOST RECENT. The root is excluded (it is the orchestrator, not a
+    /// teammate); idle/done/failed members are dropped entirely.
+    ///
+    /// [`App::member_rows`] cannot serve this: it drops `last_action_at` at its
+    /// sort and keeps every state (active-first). The glyph comes from
+    /// `state.glyph()`. `last_action` is `Some("{tool} {target}")` while a run
+    /// has a live tool (§3), else `None`.
+    ///
+    /// RESISTANCE: [`App::run_elapsed`] is the FOCUSED surface only, so a
+    /// non-focused running teammate's row cannot show a per-member elapsed — the
+    /// same limitation `draw_sidebar` documents.
+    pub fn working_team_rows(&self) -> Vec<(&str, TeamState, Option<&str>)> {
+        let mut rows: Vec<_> = self
+            .surfaces
+            .iter()
+            .filter(|s| !s.is_root && s.state() == TeamState::Running)
+            .map(|s| {
+                (
+                    s.label.as_str(),
+                    s.state(),
+                    s.last_action.as_deref(),
+                    s.last_action_at,
+                )
+            })
+            .collect();
+        // oldest → newest (the BOTTOM row is the most recent); stable on ties.
+        rows.sort_by_key(|(_, _, _, at)| at.unwrap_or(0));
+        let keep = rows.len().saturating_sub(3); // drop all but the 3 MOST RECENT
+        rows.into_iter()
+            .skip(keep)
+            .map(|(label, state, action, _)| (label, state, action))
+            .collect()
+    }
     /// The non-root surfaces as `(label, state, focused, action)` — the team
     /// strip and `/team`. Ordered active-first, then by most recent action
     /// (stable: surface order breaks ties). The action is the current run's
@@ -4394,6 +4430,43 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn working_team_rows_keep_only_running_oldest_first_capped_at_three() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "a", "b", "c", "d"]);
+        let (a, b, c, d) = (
+            SessionId::agent("a"),
+            SessionId::agent("b"),
+            SessionId::agent("c"),
+            SessionId::agent("d"),
+        );
+
+        // Only running members appear; idle ones are dropped entirely.
+        app.handle(AppEvent::Agent(a.clone(), AgentEvent::AgentStart));
+        app.handle(AppEvent::Agent(b.clone(), AgentEvent::AgentStart));
+        let labels = |app: &App| -> Vec<String> {
+            app.working_team_rows()
+                .iter()
+                .map(|r| r.0.to_string())
+                .collect()
+        };
+        assert_eq!(labels(&app), vec!["a", "b"]);
+
+        // Recency stamps order oldest→newest (the LAST row is the most recent).
+        member_tool_start(&mut app, &b, "read"); // b's action is newer than a's
+        assert_eq!(labels(&app), vec!["a", "b"]);
+
+        // Cap: with four running members, only the 3 MOST RECENT survive.
+        app.handle(AppEvent::Agent(c.clone(), AgentEvent::AgentStart));
+        app.handle(AppEvent::Agent(d.clone(), AgentEvent::AgentStart));
+        member_tool_start(&mut app, &c, "edit");
+        member_tool_start(&mut app, &d, "bash");
+        assert_eq!(labels(&app).len(), 3);
+        assert_eq!(*labels(&app).last().unwrap(), "d", "newest is the bottom row");
+
+        // The live action rides the row (as member_rows does).
+        assert_eq!(app.working_team_rows().last().unwrap().2, Some("bash"));
+    }
     #[test]
     fn member_rows_order_active_first_then_by_action_recency() {
         let mut app = App::new();
