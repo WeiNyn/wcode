@@ -1955,6 +1955,45 @@ async fn the_diff_rides_the_event_but_not_the_model_context() {
     ));
 }
 
+/// Per-tool timing is UI-only: the measured wall clock rides `ToolExecutionEnd`
+/// (so the TUI can label the block) but never enters the model's `ToolResult`.
+#[tokio::test]
+async fn the_tool_duration_rides_the_event() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "hi" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let (tool, _seen) = echo_tool();
+    let TestSetup { cfg, .. } = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (_res, events) = run(cfg, &mut ctx).await;
+
+    let duration = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd { duration_ms, .. } => Some(*duration_ms),
+        _ => None,
+    });
+    assert!(
+        matches!(duration, Some(Some(_))),
+        "a tool that ran must carry a measured duration, got {duration:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stream truncation backstop: a turn must end on a terminal record
 // ---------------------------------------------------------------------------

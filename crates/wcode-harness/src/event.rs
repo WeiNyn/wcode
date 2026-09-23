@@ -92,6 +92,13 @@ pub enum AgentEvent {
         /// when the tool touched no file, or on an older peer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        /// Wall-clock duration of the tool call in milliseconds — `execute` plus
+        /// its `after_tool_call` hook. UI-only, like `diff`/`path`: it rides this
+        /// event but never enters `ToolOutput`/the model's context. `None` on an
+        /// older peer, or a call that never ran (blocked by a hook, or a dead
+        /// sink).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     TurnEnd {
         message: AgentMessage,
@@ -251,6 +258,7 @@ mod tests {
                 is_error: false,
                 diff: Some("@@ -1 +1 @@".into()),
                 path: Some("src/f.rs".into()),
+                duration_ms: Some(12),
             },
             "tool_execution_end",
         );

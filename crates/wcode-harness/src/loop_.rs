@@ -531,6 +531,7 @@ pub async fn run_loop(
                 let width = group.len();
                 let mut started = vec![false; width];
                 let mut results: Vec<Option<ToolOutput>> = (0..width).map(|_| None).collect();
+                let mut durations: Vec<Option<u64>> = (0..width).map(|_| None).collect();
 
                 // Start events first, in call order, so the display pairs each
                 // ✓ with the ⚙ marker above it.
@@ -590,17 +591,20 @@ pub async fn run_loop(
                     };
                     let hooks = cfg.hooks.clone();
                     running.push(async move {
+                        let started = std::time::Instant::now();
                         let mut out = tool.execute(arguments, tctx).await;
                         hooks.after_tool_call(&hook_call, &mut out).await;
-                        (i, out)
+                        let duration_ms = started.elapsed().as_millis() as u64;
+                        (i, out, duration_ms)
                     });
                 }
-                for (i, out) in futures::stream::iter(running)
+                for (i, out, duration_ms) in futures::stream::iter(running)
                     .buffer_unordered(MAX_PARALLEL_TOOLS)
                     .collect::<Vec<_>>()
                     .await
                 {
                     results[i] = Some(out);
+                    durations[i] = Some(duration_ms);
                 }
 
                 // End events, session records and ctx pushes in call order.
@@ -620,6 +624,7 @@ pub async fn run_loop(
                                 is_error: out.is_error,
                                 diff: out.diff.clone(),
                                 path: out.path.clone(),
+                                duration_ms: durations[i],
                             })
                             .is_ok();
                     // Push the result before honoring a dead sink so ctx never
@@ -773,6 +778,7 @@ fn synthesize_unexecuted(
             is_error: out.is_error,
             diff: out.diff.clone(),
             path: out.path.clone(),
+            duration_ms: None,
         });
         let result = AgentMessage::ToolResult {
             tool_call_id: rid,
