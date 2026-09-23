@@ -1346,14 +1346,17 @@ impl Surface {
                     self.record_usage(message);
                 }
                 AgentMessage::ToolResult {
+                    tool_call_id,
                     name,
                     output,
                     is_error,
-                    ..
                 } => {
+                    // Recover the call's target from the preceding assistant
+                    // block's `ToolCall` arguments, so a replayed block shows it.
+                    let target = call_target(&self.transcript, tool_call_id);
                     self.push_block(Block::Tool(Tool {
                         name: name.clone(),
-                        target: None,
+                        target,
                         output: output.clone(),
                         done: true,
                         is_error: *is_error,
