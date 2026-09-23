@@ -882,6 +882,10 @@ pub struct Surface {
     cache: Vec<CacheEntry>,
     /// Per-block revision, bumped at each `Block::Tool` mutation; `0` = append-only.
     block_revs: Vec<u64>,
+    /// Time since this surface's `AgentStart`, set by the loop on each tick
+    /// while the run is in flight; cleared on `AgentEnd`. `None` when idle, so
+    /// the status line shows the bare state glyph.
+    run_elapsed: Option<std::time::Duration>,
     /// Cache misses so far (a `block_lines` render). Test-only; the renderer never
     /// reads it.
     #[cfg(test)]
@@ -927,6 +931,7 @@ impl Surface {
             ranges: Vec::new(),
             cache: Vec::new(),
             block_revs: Vec::new(),
+            run_elapsed: None,
             #[cfg(test)]
             cache_misses: 0,
         }
@@ -2925,6 +2930,34 @@ impl App {
         self.should_quit = true;
     }
 
+    /// The run's changed files so far (view-owned changeset), for the status
+    /// chip — a thin accessor over `Surface::changes` (`changes_by_path` does the
+    /// summing). Empty when nothing changed this run.
+    pub fn changes(&self) -> &[Change] {
+        &self.focused().changes
+    }
+
+    /// The latest `Todo` list, for the status chip (`☑ done/total`) — an
+    /// accessor over `Surface::last_todos` (set in the `Todo` arm).
+    pub fn last_todos(&self) -> Option<&[TodoItem]> {
+        self.focused().last_todos.as_deref()
+    }
+
+    /// Time since this surface's run started — INJECTED by the loop (see
+    /// `Surface::run_elapsed`); NOT computed here (purity).
+    pub fn run_elapsed(&self) -> Option<std::time::Duration> {
+        self.focused().run_elapsed
+    }
+
+    /// Set the elapsed time for surface `id` — an injection setter (like
+    /// `set_models`), called by the event loop from its own clock, NOT the
+    /// reducer. Marks the app dirty so the status line repaints.
+    pub fn set_run_elapsed(&mut self, id: &SessionId, elapsed: std::time::Duration) {
+        if let Some(i) = self.surface_index(id) {
+            self.surfaces[i].run_elapsed = Some(elapsed);
+            self.dirty = true;
+        }
+    }
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;

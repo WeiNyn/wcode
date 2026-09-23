@@ -872,12 +872,17 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let status = app.status();
-    let state = if app.running() { "⠹ running" } else { "⏸ idle" };
+    let state = match (app.running(), app.run_elapsed()) {
+        (true, Some(d)) => format!("⠹ running {}", format_ms(d.as_millis() as u64)),
+        (true, None) => "⠹ running".to_string(),
+        (false, _) => "⏸ idle".to_string(),
+    };
     let width = area.width as usize;
 
     // Fields are ordered most-important-first and dropped when space is tight:
     // session first, then effort, then tokens.
     let (mut show_tokens, mut show_effort, mut show_session) = (true, true, true);
+    let (mut show_todos, mut show_changes) = (true, true);
     loop {
         let mut spans: Vec<Span> = vec![
             Span::raw(" "),
@@ -897,6 +902,15 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(sep());
             spans.extend(tokens);
         }
+        if show_changes && let Some(chip) = changes_chip(app) {
+            spans.push(sep());
+            spans.extend(chip);
+        }
+        // todos chip (`☑ 2/5`). Data: `Surface::last_todos` via `App::last_todos()`.
+        if show_todos && let Some(chip) = todos_chip(app) {
+            spans.push(sep());
+            spans.extend(chip);
+        }
         if show_session && let Some(session) = &status.session {
             spans.push(sep());
             spans.push(Span::styled(format!("session {}", short_id(session)), dim()));
@@ -906,7 +920,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled("▤ browse", accent()));
         }
         spans.push(sep());
-        spans.push(Span::styled(state, dim()));
+        spans.push(Span::styled(state.clone(), dim()));
         if app.scroll() > 0 {
             spans.push(sep());
             spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
@@ -914,11 +928,15 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw(" "));
 
         let len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        if len <= width || !(show_tokens || show_effort || show_session) {
+        if len <= width || !(show_tokens || show_effort || show_session || show_todos || show_changes) {
             frame.render_widget(Paragraph::new(Line::from(spans)), area);
             return;
         }
-        if show_session {
+        if show_todos {
+            show_todos = false;
+        } else if show_changes {
+            show_changes = false;
+        } else if show_session {
             show_session = false;
         } else if show_effort {
             show_effort = false;
@@ -999,6 +1017,49 @@ fn format_ms(ms: u64) -> String {
     } else {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
     }
+}
+
+/// The status line's changes chip (`± N file(s) +a −r`), summing the run's
+/// changed files per path (a file edited twice counts once). `None` when the run
+/// changed nothing.
+fn changes_chip(app: &App) -> Option<Vec<Span<'static>>> {
+    let changes = app.changes();
+    if changes.is_empty() {
+        return None;
+    }
+    let mut paths: Vec<String> = Vec::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in changes {
+        if !paths.contains(&change.path) {
+            paths.push(change.path.clone());
+        }
+        added += change.added;
+        removed += change.removed;
+    }
+    let files = paths.len();
+    let plural = if files == 1 { "" } else { "s" };
+    Some(vec![Span::styled(
+        format!("± {files} file{plural} +{added} −{removed}"),
+        accent(),
+    )])
+}
+
+/// The status line's todos chip (`☑ done/total`) from the latest `Todo` list.
+/// `None` when no list has been seen (or it is empty).
+fn todos_chip(app: &App) -> Option<Vec<Span<'static>>> {
+    let todos = app.last_todos()?;
+    if todos.is_empty() {
+        return None;
+    }
+    let done = todos
+        .iter()
+        .filter(|t| t.status == wcode_harness::event::TodoStatus::Completed)
+        .count();
+    Some(vec![Span::styled(
+        format!("☑ {done}/{}", todos.len()),
+        accent(),
+    )])
 }
 
 /// First 8 chars of a session id — enough to recognize, not enough to crowd.
@@ -1422,6 +1483,55 @@ mod tests {
             .lines()
             .position(|line| line.contains(label))
             .expect("the strip row") as u16
+    }
+
+    #[test]
+    fn running_status_shows_the_injected_elapsed() {
+        let mut app = App::new();
+        let id = root();
+        app.handle(AppEvent::Agent(id.clone(), wcode_harness::event::AgentEvent::AgentStart));
+        app.set_run_elapsed(&id, std::time::Duration::from_millis(3_100));
+        let text = buffer_text(&render(&mut app, 80, 3));
+        assert!(text.contains("running 3.1s"), "elapsed missing: {text}");
+    }
+
+    #[test]
+    fn status_shows_the_changes_and_todos_chips() {
+        let mut app = App::new();
+        // One changed file (a tool end carrying path+diff) and a 1/3 todo list.
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionStart {
+            call_id: "t1".into(), name: "edit".into(),
+        }));
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionEnd {
+            call_id: "t1".into(), name: "edit".into(),
+            output: "ok".into(), is_error: false,
+            diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+            path: Some("src/a.rs".into()),
+            duration_ms: None,
+        }));
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::Todo {
+            todos: vec![
+                wcode_harness::event::TodoItem {
+                    content: "a".into(),
+                    status: wcode_harness::event::TodoStatus::Completed,
+                },
+                wcode_harness::event::TodoItem {
+                    content: "b".into(),
+                    status: wcode_harness::event::TodoStatus::Pending,
+                },
+                wcode_harness::event::TodoItem {
+                    content: "c".into(),
+                    status: wcode_harness::event::TodoStatus::Pending,
+                },
+            ],
+        }));
+        let text = buffer_text(&render(&mut app, 100, 3));
+        assert!(text.contains("1/3"), "todos chip missing: {text}");
+        assert!(text.contains("1 file"), "changes chip missing: {text}");
+        // Narrow: the drop chain sheds the chips (todos, then changes).
+        let narrow = buffer_text(&render(&mut app, 24, 3));
+        assert!(!narrow.contains("1/3"), "todos chip must drop when narrow: {narrow}");
+        assert!(!narrow.contains("1 file"), "changes chip must drop when narrow: {narrow}");
     }
 
     #[test]

@@ -19,9 +19,10 @@ mod terminal;
 mod theme;
 mod ui;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
@@ -248,6 +249,10 @@ async fn event_loop(
 
     draw(terminal, app)?;
 
+    // The loop owns the clock (the reducer is pure): record each surface's run
+    // start off the forwarded lifecycle events, then inject the elapsed on tick.
+    let mut run_start: HashMap<SessionId, Instant> = HashMap::new();
+
     loop {
         tokio::select! {
             maybe = events.next() => match maybe {
@@ -259,7 +264,18 @@ async fn event_loop(
                 // Stream ended or errored: the terminal is gone; bail.
                 Some(Err(_)) | None => break,
             },
-            Some((id, event)) = agents.recv() => app.handle(AppEvent::Agent(id, event)),
+            Some((id, event)) = agents.recv() => {
+                match &event {
+                    AgentEvent::AgentStart => {
+                        run_start.insert(id.clone(), Instant::now());
+                    }
+                    AgentEvent::AgentEnd => {
+                        run_start.remove(&id);
+                    }
+                    _ => {}
+                }
+                app.handle(AppEvent::Agent(id, event));
+            }
             // A worker spawned at runtime: add its surface and forward its stream.
             Some(spec) = recv_opt(&mut new_surfaces) => {
                 spawn_forwarder(&agent_tx, &spec.id, &spec.backend);
@@ -271,7 +287,12 @@ async fn event_loop(
             Some(event) = replies.recv() => app.handle(event),
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
-            _ = tick.tick(), if app.running() => app.handle(AppEvent::Tick),
+            _ = tick.tick(), if app.running() => {
+                for (id, started) in &run_start {
+                    app.set_run_elapsed(id, started.elapsed());
+                }
+                app.handle(AppEvent::Tick);
+            }
         }
 
         // Actions target the focused surface's backend.
