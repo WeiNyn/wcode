@@ -102,6 +102,11 @@ pub enum Block {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tool {
     pub name: String,
+    /// The tool's INPUT target, from the call's arguments (the first of
+    /// [`ACTION_KEYS`]): the `command` for `bash`, the `path` for `read`/`edit`,
+    /// the `pattern` for `grep`. Rendered on the `⚙`/`✓` line. `None` when the
+    /// call carried no recognizable argument (or was reseeded from history).
+    pub target: Option<String>,
     pub output: String,
     pub done: bool,
     pub is_error: bool,
@@ -505,7 +510,7 @@ const ACTION_KEYS: [&str; 9] = [
 /// target is the first present string argument among [`ACTION_KEYS`] on the
 /// committed assistant block whose `ToolCall` id matches `call_id` (§3). No
 /// matching call, or no recognizable argument, falls back to just `"{name}"`.
-fn action_label(transcript: &[Block], call_id: &str, name: &str) -> String {
+fn call_target(transcript: &[Block], call_id: &str) -> Option<String> {
     // The arguments ride the committed assistant block; scan from the end, as a
     // call id is unique to the newest turn that carries it.
     for block in transcript.iter().rev() {
@@ -518,15 +523,21 @@ fn action_label(transcript: &[Block], call_id: &str, name: &str) -> String {
         let Some(ContentBlock::ToolCall { arguments, .. }) = call else {
             continue;
         };
-        let target = ACTION_KEYS
+        return ACTION_KEYS
             .iter()
-            .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()));
-        return match target {
-            Some(target) => clip_label(&format!("{name} {target}")),
-            None => name.to_string(),
-        };
+            .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()))
+            .map(str::to_string);
     }
-    name.to_string()
+    None
+}
+
+/// The team strip's action label for a tool call: `"{name} {target}"`, where the
+/// target is [`call_target`]. No target falls back to just `"{name}"`.
+fn action_label(transcript: &[Block], call_id: &str, name: &str) -> String {
+    match call_target(transcript, call_id) {
+        Some(target) => clip_label(&format!("{name} {target}")),
+        None => name.to_string(),
+    }
 }
 
 /// Truncate a team-strip action to `~18` columns, ending with `…` when cut.
@@ -1060,8 +1071,10 @@ impl Surface {
                 self.last_action = Some(action_label(&self.transcript, &call_id, &name));
                 self.last_action_at = Some(*action_seq);
                 *action_seq += 1;
+                let target = call_target(&self.transcript, &call_id);
                 self.push_block(Block::Tool(Tool {
                     name,
+                    target,
                     output: String::new(),
                     done: false,
                     is_error: false,
@@ -1340,6 +1353,7 @@ impl Surface {
                 } => {
                     self.push_block(Block::Tool(Tool {
                         name: name.clone(),
+                        target: None,
                         output: output.clone(),
                         done: true,
                         is_error: *is_error,

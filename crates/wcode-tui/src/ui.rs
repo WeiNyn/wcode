@@ -495,10 +495,19 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
 }
 
 /// The changed file (dim), appended to a tool's `⚙` header when it touched one.
-fn path_span(tool: &Tool) -> Option<Span<'static>> {
-    tool.path
-        .as_ref()
-        .map(|path| Span::styled(format!("  {path}"), dim()))
+/// The tool's INPUT target (`Tool::target`), falling back to the changed path —
+/// the `command`/`path`/`pattern` the call named, clipped to one line so a long
+/// command never floods the header.
+fn target_span(tool: &Tool) -> Option<Span<'static>> {
+    let target = tool.target.as_ref().or(tool.path.as_ref())?;
+    let first = target.lines().next().unwrap_or(target.as_str());
+    let clipped = if first.chars().count() > 60 {
+        let (cut, _) = split_at_char(first, 59);
+        format!("{cut}…")
+    } else {
+        first.to_string()
+    };
+    Some(Span::styled(format!("  {clipped}"), dim()))
 }
 
 fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
@@ -509,7 +518,7 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
             Span::styled("   ⚙ ", dim()),
             Span::styled(tool.name.clone(), tool_name()),
         ];
-        header.extend(path_span(tool));
+        header.extend(target_span(tool));
         let mut lines = vec![Line::from(header)];
         if tool.expanded {
             let body: Vec<&str> = tool.output.lines().collect();
@@ -541,7 +550,7 @@ fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         Span::styled(format!("   {mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
-    spans.extend(path_span(tool));
+    spans.extend(target_span(tool));
     if !expanded && !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
@@ -597,7 +606,7 @@ fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
         Span::styled("   ⚙ ", dim()),
         Span::styled(tool.name.clone(), tool_name()),
     ];
-    header.extend(path_span(tool));
+    header.extend(target_span(tool));
     let mut lines = vec![Line::from(header)];
 
     // Collapsed shows a preview; expanded (or a failure) shows the whole diff.
@@ -2568,6 +2577,7 @@ mod tests {
         let tool = |expanded, is_error, diff: Option<&str>| {
             Block::Tool(Tool {
                 name: "bash".into(),
+                target: None,
                 output: "a\nb\nc\nd\ne\nf".into(),
                 done: true,
                 is_error,
@@ -2818,5 +2828,42 @@ mod tests {
         for height in [2u16, 3, 4, 5, 6, 8] {
             let _ = render(&mut app, 80, height); // must not panic
         }
+    }
+
+    #[test]
+    fn a_tool_call_renders_its_input_target() {
+        // The tool's INPUT rides the committed assistant block's `ToolCall`
+        // arguments; a `bash` call must show its command on the tool line.
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: "{\"command\":\"cargo test -p wcode-cli\"}"
+                            .parse()
+                            .unwrap(),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "c1".into(),
+                name: "bash".into(),
+            },
+        ));
+        let text = buffer_text(&render(&mut app, 80, 14));
+        assert!(text.contains("bash"), "tool name missing:\n{text}");
+        assert!(
+            text.contains("cargo test -p wcode-cli"),
+            "the tool's input (command) must render:\n{text}"
+        );
     }
 }
