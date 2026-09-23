@@ -85,6 +85,16 @@ Ratified decisions:
 **1b-ii — syntax highlighting (open).** Language-tagged fences → `syntect`. A
 sizeable dep plus a first-use load; decide there.
 
+**1b-iii — spacing fidelity (shipped).** `wrap` flattened styled runs with
+`split_whitespace` and re-joined with one space, so *every* inline-run boundary
+became a space (`see `foo`.` → `see foo .`; `a**b**c` → `a b c`; `*i*,` → `i ,`).
+Fixed by modelling each atom as `(text, style, space_before)`: a style change
+splits the atom, `>=1` source spaces collapse to one `space_before`, and a
+separator is emitted only when the source had whitespace (and the line continues).
+The **signature is unchanged**; `hard_break`/`used`/`avail` accounting is
+untouched. Accepted: a glued oversized word (`a**verylongbold**c`) breaks
+mid-word between its atoms (no separators).
+
 ### Non-goals
 
 - **Mermaid** — deferred, gated stretch (TUI P4): a parser subset (flowchart /
@@ -102,6 +112,9 @@ sizeable dep plus a first-use load; decide there.
       nested indent, italic). Per-feature tests in `markdown.rs`; the 8 existing
       tests stay green. `tui:` `c9ceba1`.
 - [ ] **1b-ii — syntax highlighting** (`syntect`, language-tagged fences); a new dep.
+- [x] **1b-iii — preserve source spacing in `wrap`.** Inline-run boundaries no longer
+      become spaces; `wrap` carries a per-word "space-before" flag (signature
+      unchanged). Regression tests in `markdown.rs`. `tui:` `eb8427f`.
 - [ ] *(optional, alongside 1b)* **live theme reload** — `theme::THEME` is
       `OnceLock` install-once; an `RwLock` swap enables runtime recolor (gap §3, S).
 
