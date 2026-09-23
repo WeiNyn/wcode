@@ -1,6 +1,6 @@
 # TUI markdown — plan
 
-Status: **planned.** Motivation: `docs/gap-analysis-jcode.md` §3 ("markdown maturity")
+Status: **1a + 1b-i shipped; 1b-ii (syntax highlighting) open.** Motivation:
 and `docs/tui-design.md:147`, which already names the primary fix — *"A wrapped-line
 cache keyed by `(revision, width)` … do not re-wrap static history every frame."*
 Presentation-only, inside `crates/wcode-tui`.
@@ -64,12 +64,26 @@ for the cache.
 
 ### Phase 1b — parser features
 
-Add to `markdown.rs`, in `render`'s dispatch loop: **heading levels** (1–6 styled
-distinctly), **ordered lists** (`1.`/`2.` …), **blockquotes** (`>`), **nested
-indentation**, **italic** (`*x*`/`_x_`), and **syntax-highlighted code** (language
-tag on the fence → `syntect`). Keep the hand-rolled block model — do **not**
-migrate to `cmark` (gap-analysis §3). Real display width (`unicode-width`) is a
-candidate for a follow-up, not this phase.
+**1b-i — block features (shipped).** In `render`'s dispatch loop, in order:
+`leading_indent` → `quote` → `heading` → `ordered` → `bullet` → blank → paragraph.
+Ratified decisions:
+- **Indent split first**, **2 columns** per level (a tab is two; an odd space
+  floors), so `  - x` is a nested bullet. `indent_prefix(level) = {GUTTER} + 2·level
+  spaces`; deeper content just gains those spaces.
+- **Heading marker dropped** (`heading -> Option<(usize, &str)>`, level 1–6), styled
+  by `heading_level_style`: one new **`heading_sub`** role carries levels 2–6
+  (`theme.rs` grew one field — field, `colored`, `plain`, the `into_theme` match,
+  and `ROLE_NAMES` 16→17).
+- **Ordered lists** keep their real marker (`1. `, `2) `, `10. `) and pad the
+  continuation to the marker width.
+- **Blockquotes** get **one `│ ` per `>` level** (depth), with a matching space run
+  on continuations; the body is `theme.muted` (no new role).
+- **Italic** is matched **last** (after bold/link/code), supporting `*x*` and `_x_`:
+  non-empty, non-space content edges, and — for `_` — a word boundary on both sides
+  (tracked with `prev: Option<char>`), so `snake_case` stays plain.
+
+**1b-ii — syntax highlighting (open).** Language-tagged fences → `syntect`. A
+sizeable dep plus a first-use load; decide there.
 
 ### Non-goals
 
@@ -84,10 +98,10 @@ candidate for a follow-up, not this phase.
       the borrow-safe append; tests: identical `buffer_text` across frames, and a
       cache hit when a frame renders unchanged content/width (and a miss after a
       tool-block mutation or a resize). `tui:` `d585ebf`.
-- [ ] **1b — parser features** (heading levels, ordered lists, blockquotes, nested
-      indent, italic, `syntect` highlighting). Tests in `markdown.rs` per feature;
-      keep the existing `markdown.rs` tests intact (the cache sits *above* `render`).
-      `tui:` commit(s); a new `syntect` dep.
+- [x] **1b-i — parser block features** (heading levels, ordered lists, blockquotes,
+      nested indent, italic). Per-feature tests in `markdown.rs`; the 8 existing
+      tests stay green. `tui:` `c9ceba1`.
+- [ ] **1b-ii — syntax highlighting** (`syntect`, language-tagged fences); a new dep.
 - [ ] *(optional, alongside 1b)* **live theme reload** — `theme::THEME` is
       `OnceLock` install-once; an `RwLock` swap enables runtime recolor (gap §3, S).
 
@@ -98,9 +112,9 @@ candidate for a follow-up, not this phase.
 - **Revision plumbing — resolved (1a).** A parallel `Vec<u64>` in `Surface`,
   bumped by the reducer, rather than a `rev` field on `Block` — the view type
   stays pure.
-- **`syntect` weight** — a `Theme`/`SyntaxSet` set is a sizeable dep + first-use
-  load; confirm it is worth it vs a hand-rolled keyword highlighter for a few
-  languages. Decide at 1b.
+- **`syntect` weight — open (1b-ii).** A `Theme`/`SyntaxSet` set is a sizeable dep +
+  first-use load; confirm it is worth it vs a hand-rolled keyword highlighter for a
+  few languages. Decide at 1b-ii.
 
 ## 5. References
 
