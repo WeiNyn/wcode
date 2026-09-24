@@ -35,11 +35,13 @@ the boxes as each task completes and keep the status table current.
 | 27 | Tier-1 gap sweep 2: `todo` tool + steer at the tool-free boundary (see [gap-analysis-jcode.md](gap-analysis-jcode.md) §2 rows 5/7) | ☑ done — `cc6d5d6`/`59a2cd7`/`18bc454` (todo), `a3a5705` (steer point B) |
 | 28 | Plan mode: explore + plan, don't mutate until approved (see [plan-mode.md](plan-mode.md)) | ☑ P1–P3 complete (mode/prompt/hook/bash-gate/`/plan`/chip + todo persistence & seed + `/verify`) |
 | 29 | Stream truncation ends a turn silently (no terminal record) | ☑ done — see [stream-truncation-plan.md](stream-truncation-plan.md) |
-| 30 | TUI markdown maturity: per-block render cache + parser features (see [`tui-markdown-plan.md`](tui-markdown-plan.md)) | ☐ planned |
+| 30 | TUI markdown maturity: per-block render cache + parser features (see [`tui-markdown-plan.md`](tui-markdown-plan.md)) | ☐ planned — jcode Tier-2 batch (with items 35–36) |
 | 31 | Review-driven cleanup: TUI status bugs, dead code, event visibility, tool dedup, `main()` split | ☑ done — `3b28eb5`/`563ed4c`/`61ebf66`/`8fa0b03`/`50b2dad`/`edc1782`; the second-layer review found one `main()`-split deviation, folded into `edc1782`; see [review-cleanup.md](review-cleanup.md) |
 | 32 | TUI info/UX: richer status, per-tool timing, docked sidebar | ☑ done — `7fea5c5` (harness tool duration), `08843bc` (tool timing), `c31fbf0` (elapsed + changes + todos chips), `5464318` (cwd + git branch), `fa88406` (docked sidebar, `Ctrl-B`); see [tui-design.md](tui-design.md) |
 | 33 | TUI layout redesign: bordered input box + session line + team above | ☑ done — `079c0b1`; chrome moved onto a rounded input box (project⎇branch / model·effort / context gauge ▰▱ / mode·state), session line on top, team region above the box (running only, ≤3, newest last) |
 | 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
+| 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☐ planned — reviewed, ready to sketch |
+| 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ◐ in progress — code landed; live check + commit pending |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -784,6 +786,45 @@ amendments (all landed); the second-layer review APPROVED, and its two required
 follow-ups (the past-end WYSIWYG anchor; pinning the highlight and the rulings in
 tests) landed in `c3bf3ff`. Mouse is left-button-only and inert under a modal;
 real-terminal mouse behavior is untested (headless — `TestBackend` only).
+
+---
+
+## 35. `webfetch` tool
+
+**New.** wcode has no URL read path; `bash` + `curl` is unportable (the binary may
+be absent), has no timeout discipline for a slow host, and dumps a raw HTML page
+(often >150 KB) into the context unstripped and unbounded. A native one-GET tool
+reduces HTML to readable text and caps the output — closing the URL gap the way
+`read` closes the file gap. Part of the jcode Tier-2 batch (with items 30 and 36).
+
+> ➡️ **[`webfetch-plan.md`](webfetch-plan.md)** — why, ground truth, decisions
+> D1–D12 (locked), the interface, non-goals, Q1–Q5 resolved, sizing.
+
+**Status.** Reviewed — first-layer **BLOCK** folded (the `rustls` feature name, the
+format matrix, D9–D12); ready to sketch.
+
+---
+
+## 36. Tool backgrounding (`bg`)
+
+**New.** `bash` runs synchronously with a 30 s default timeout
+(`crates/wcode-cli/src/tools/bash.rs`), so a long build, test, or dev server either
+blocks the turn or gets killed. jcode's `bg` (`../jcode/crates/jcode-app-core/src/tool/bg.rs`)
+moves such a command to a background registry the model can list, wait on, and read
+output from — keeping the turn going. **Beyond jcode's polling**, a finished task
+**pushes** a completion event back through the existing peer-`message` seam
+(`Request::Wake`): it wakes an idle agent into a turn, or appends to a running
+agent's next-turn context. Part of the jcode Tier-2 batch (with items 30 and 35).
+
+> ➡️ **[`backgrounding-plan.md`](backgrounding-plan.md)** — why, ground truth,
+> decisions D1–D17 (locked), the interface, non-goals, Q1–Q6 resolved, sizing.
+
+**Status.** ◐ In progress — the sketch is filled in (all `SKETCH` markers gone):
+the supervisor owns the un-reaped child and records the terminal state before the
+bounded drain (BLOCK-1/BLOCK-2), `bash { background: true }` + the `bg` tool + the
+completion `Wake` push are wired, and the teardown seams (`exec_self`, the one-shot
+`flush_all` sites, both TUI `Quit` arms) call `shutdown_all()`. Live check + commit
+pending.
 
 ---
 
