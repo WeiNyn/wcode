@@ -209,13 +209,11 @@ pub async fn run(
         .map(|s| (s.id.clone(), s.backend.clone()))
         .collect();
 
-    // Attach-replay: the root may already have turns; show them, so the
-    // transcript is never mysteriously empty (`GetHistory` is the seam for it).
-    if let Some((id, backend)) = backends.first()
-        && let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await
-    {
-        app.seed_history(id, &messages);
-    }
+    // Attach-replay: any surface may already have turns — a resumed group's
+    // root *and* its members (D1) — so ask every backend for its history and
+    // seed it. Seeding only the root left a member surface blank after a team
+    // resume/reload even though its backend held the transcript.
+    replay_history(&backends, &mut app).await;
     if let Some(path) = &history {
         app.load_history(read_history(path));
     }
@@ -240,6 +238,19 @@ pub async fn run(
             None => Outcome::Quit,
         },
     })
+}
+
+/// Attach-replay: ask every surface's backend for its history and seed it, so a
+/// resumed group's root **and** its members show their prior turns instead of
+/// starting blank. `GetHistory` is the seam; the backend already holds the
+/// transcript (a rebuilt member is seeded with it, D1). A backend that replies
+/// with anything else — or errors — leaves its surface empty, as before.
+async fn replay_history(backends: &[(SessionId, Backend)], app: &mut App) {
+    for (id, backend) in backends {
+        if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
+            app.seed_history(id, &messages);
+        }
+    }
 }
 
 async fn event_loop(
@@ -448,10 +459,17 @@ mod tests {
     use wcode_harness::compaction::CompactionPolicy;
     use wcode_harness::hooks::HooksSet;
     use wcode_harness::loop_::DEFAULT_MAX_TURNS;
+    use wcode_harness::message::AgentMessage;
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 
     /// A live, never-streaming session backend — enough to answer `GetHistory`.
     fn backend() -> Backend {
+        backend_with(Vec::new())
+    }
+
+    /// A live, never-streaming backend seeded with `context`, so its
+    /// `GetHistory` reply carries prior turns (what a resumed member has, D1).
+    fn backend_with(context: Vec<AgentMessage>) -> Backend {
         let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
             Box::pin(futures::stream::empty()) as LlmStream
         });
@@ -462,7 +480,7 @@ mod tests {
             stream_fn,
             hooks: HooksSet::default(),
             session: None,
-            context: Vec::new(),
+            context,
             working_dir: std::env::temp_dir(),
             max_turns: DEFAULT_MAX_TURNS,
             parallel_tools: false,
@@ -470,6 +488,57 @@ mod tests {
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
         });
         Backend::from(SessionActor::spawn(agent))
+    }
+
+    /// Attach-replay seeds **every** surface, not just the root: a resumed
+    /// group's members show their prior turns instead of starting blank.
+    #[tokio::test]
+    async fn attach_replay_seeds_every_surface_not_just_the_root() {
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: SessionId::agent("root"),
+                label: "root".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("w1"),
+                label: "w1".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ]);
+        let backends = vec![
+            (
+                SessionId::agent("root"),
+                backend_with(vec![AgentMessage::user_text("root turn")]),
+            ),
+            (
+                SessionId::agent("w1"),
+                backend_with(vec![AgentMessage::user_text("member turn")]),
+            ),
+        ];
+
+        replay_history(&backends, &mut app).await;
+
+        // The root (index 0) is focused by default.
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::User(t) if t.as_str() == "root turn")),
+            "root surface was not seeded: {:?}",
+            app.transcript()
+        );
+        // Focus the member surface and confirm it, too, was seeded.
+        app.handle(AppEvent::Key(Key::Alt('2')));
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::User(t) if t.as_str() == "member turn")),
+            "member surface was not seeded: {:?}",
+            app.transcript()
+        );
     }
 
     /// A reply is tagged with the surface it was asked FROM — the id passed to
