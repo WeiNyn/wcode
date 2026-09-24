@@ -4,6 +4,9 @@ description = "Minimal, extensible agent harness kernel: event loop, tools, hook
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 rig = { workspace = true }

@@ -6,6 +6,9 @@ members = ["crates/wcode-harness", "crates/wcode-protocol", "crates/wcode-tui", 
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/WeiNyn/wcode"
+homepage = "https://github.com/WeiNyn/wcode"
+authors = ["Wei"]
 
 [workspace.dependencies]
 rig = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }

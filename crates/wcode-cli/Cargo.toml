@@ -4,6 +4,9 @@ description = "Minimal coding agent CLI over OpenAI-compatible endpoints"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "wcode"

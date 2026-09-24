@@ -4,6 +4,9 @@ description = "Full-screen TUI for wcode — a client of the wcode-protocol Back
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 wcode-harness = { path = "../wcode-harness" }
