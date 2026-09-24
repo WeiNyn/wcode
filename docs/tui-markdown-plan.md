@@ -1,7 +1,9 @@
 # TUI markdown — plan
 
-Status: **1a + 1b-i shipped; 1b-ii (syntax highlighting) open.** Motivation:
-and `docs/tui-design.md:147`, which already names the primary fix — *"A wrapped-line
+Status: **1a + 1b-i + 1b-ii + 1b-iii shipped.** Open (optional): live theme reload
+(`theme::THEME` is `OnceLock` install-once) and 256/16-color quantization for
+`Indexed`/`Named` fences. Motivation: the per-frame re-parse, and
+`docs/tui-design.md:147`, which already names the primary fix — *"A wrapped-line
 cache keyed by `(revision, width)` … do not re-wrap static history every frame."*
 Presentation-only, inside `crates/wcode-tui`.
 
@@ -16,12 +18,11 @@ Two independent defects in the transcript renderer.
 window. A long session re-parses (and re-allocates) the entire history at 60 Hz.
 `theme.rs` is the only memo in the crate; there is no render cache.
 
-**(b) The parser is thin.** `markdown.rs` supports fenced code, headings, bullets,
-GFM tables, and inline `code` / **bold** / `[label](url)`. Missing: **ordered
-lists**, **blockquotes**, **nested indentation**, **heading levels**, **italic**,
-**syntax-highlighted code** (fenced lines are styled uniformly; fences are not
-language-tagged), and true display width (wide glyphs count as one,
-`markdown.rs::disp`).
+**(b) The parser was thin.** `markdown.rs` supports fenced code, headings, bullets,
+GFM tables, and inline `code` / **bold** / `[label](url)`. **Shipped (1b-i/1b-ii):
+ordered lists, blockquotes, nested indentation, heading levels, italic, and
+syntax-highlighted code** (`syntect`, `Rgb`-gated). Remaining: true display width
+(wide glyphs count as one, `markdown.rs::disp`).
 
 ## 2. Design
 
