@@ -18,6 +18,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          # `gh release create --generate-notes` needs the git repo (and tags).
+          fetch-depth: 0
       - name: create or reuse the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
