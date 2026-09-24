@@ -159,8 +159,20 @@ is unchanged (the glue tests are invariants). **Q3** `SoftBreak` → a space;
 `HardBreak` → a wrapped break. Two event-walk rules added to D4: **(B1)** every
 block-level `Start` (`List`/`BlockQuote`/`CodeBlock`/`Table`/`Heading`/`Paragraph`)
 flushes the open leaf first; **(B2)** an ordered `List` recomputes its marker and
-continuation per `Item` (`ordered_next` seeded to `start - 1`). Q4–Q6 (Part B) remain
-open.
+continuation per `Item` (`ordered_next` seeded to `start - 1`).
+
+**Part B — settled (first-layer review, verdict BLOCK → folded).** Q4: 7 presets
+(`default` named-16 + `dark`/`light`/`gruvbox-dark`/`nord`/`solarized-dark`/
+`solarized-light` truecolor). Q5: **degrade** a preset's hex to palette-B per role
+under non-`Rgb` (the override of `tui-theming-plan.md` §3's authored-fallback
+preference is accepted). Q6: a **custom per-preset syntect theme**, subject to the
+blocker fix: `syntect::highlighting::Color` is RGBA-only, so add
+`to_syntect(ratatui::Color) -> Option<syntect::Color>` and build the custom theme
+**only when the palette is RGB** — otherwise `default_syntect_theme()`
+(`markdown.rs`, today's `base16-ocean.dark`). Caveats recorded: the 6 truecolor
+presets are no-ops on a non-truecolor terminal; a light preset needs a light
+terminal (the palette's `fg`/`bg` reach only the syntect theme — prose keeps the
+terminal default).
 
 ## 7. Non-goals
 
