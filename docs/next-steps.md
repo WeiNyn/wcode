@@ -46,6 +46,7 @@ the boxes as each task completes and keep the status table current.
 | 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☑ done — `ba8f462`; second-layer APPROVED |
 | 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ☑ done — `48dfbf3`; second-layer APPROVED |
 | 40 | Team controls: enforced read-only + per-worker effort (see [`team-controls-plan.md`](team-controls-plan.md)) | ☑ done — `a25c5e8`/`8eb018a` + nit-fold `bdf3edb`; second-layer APPROVED |
+| 41 | `/btw` gives no feedback while in flight (looks frozen) | ☑ done — `e128d8a`; a "btw…" status indicator (TUI) + a REPL pending line |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
