@@ -53,7 +53,7 @@ deliberately (recorded, since "minimalism is the point").
 - **Tests:** 29 in `markdown.rs` pin exact text + styles. The whitespace/glue group
   encodes wcode-specific behavior; a spec parser will change output → **rewrite them**.
 - **Dep:** `pulldown-cmark` is absent from the tree; latest `0.13.4`; its deps
-  (`bitflags`, `unicase`, `unicode-width`) are already in `Cargo.lock` → **purely
+  (`bitflags`, `memchr`, `unicase`) are already in `Cargo.lock` → **purely
   additive, no version bumps**.
 - **Doc drift:** `README.md:74` lists 16 roles and omits `heading_sub` (17 in code).
 
@@ -150,6 +150,17 @@ unchanged).
   authored fallback — §3 — but that's 6–8 × 17 colors.)
 - **Q6 — Syntect theme.** Custom-per-preset (coherent, more data) vs map to a
   shipped `ThemeSet` theme (quick, incoherent).
+
+**Part A — settled (first-layer review, verdict BLOCK → folded).** API shapes verified
+from the crate source (a scratch crate in `/tmp`; the wcode tree was not modified);
+`default-features = false` suffices. **Q1** tasklists → `[ ]`/`[x]`; footnotes →
+text-only; strikethrough → enabled but **no modifier**; HTML → dropped. **Q2** `wrap`
+is unchanged (the glue tests are invariants). **Q3** `SoftBreak` → a space;
+`HardBreak` → a wrapped break. Two event-walk rules added to D4: **(B1)** every
+block-level `Start` (`List`/`BlockQuote`/`CodeBlock`/`Table`/`Heading`/`Paragraph`)
+flushes the open leaf first; **(B2)** an ordered `List` recomputes its marker and
+continuation per `Item` (`ordered_next` seeded to `start - 1`). Q4–Q6 (Part B) remain
+open.
 
 ## 7. Non-goals
 
