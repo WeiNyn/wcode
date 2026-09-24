@@ -10,19 +10,24 @@ permissions:
 
 jobs:
   # taiki-e/upload-rust-binary-action only *uploads* to an existing release; it
-  # does not create one. So create the release from the tag first.
+  # does not create one. Create it here, idempotently (a prior failed run may
+  # have left a draft), then gate the uploads on this job.
   create-release:
     name: create release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/create-gh-release-action@v1
-        with:
-          # No CHANGELOG.md yet — create the release from the tag regardless.
-          allow-missing-changelog: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: create or reuse the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          fi
+          # A prior failed run may have left the release as a draft; publish it.
+          gh release edit "$tag" --draft=false
 
   upload-assets:
     name: ${{ matrix.target }}
