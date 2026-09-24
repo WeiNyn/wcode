@@ -205,7 +205,8 @@ pub enum Request {
     /// injected handler to build a session, replying [`AgentEvent::Spawned`] with
     /// its address (or a correlated [`AgentEvent::Error`]). Mirrors the CLI's
     /// worker spec, so a peer can customize the worker's model, role, tool set,
-    /// and provider. An in-process session has no factory, so the actor answers
+    /// `read_only`, `effort`, and provider. An in-process session has no
+    /// factory, so the actor answers
     /// it with [`AgentEvent::Error`].
     Define {
         /// The worker's address; auto-assigned (`w1`, `w2`, …) when absent.

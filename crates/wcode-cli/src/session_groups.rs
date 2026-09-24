@@ -370,7 +370,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// The serializable mirror of [`WorkerSpec`] — same six optional fields, no
+/// The serializable mirror of [`WorkerSpec`] — the same fields, no
 /// dependency on `WorkerSpec`'s own derives. [`Self::from_worker_spec`] /
 /// [`Self::to_worker_spec`] are the write/read seam.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

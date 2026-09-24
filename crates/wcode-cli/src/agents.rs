@@ -109,8 +109,8 @@ pub struct WorkerTemplate {
 
 /// How to build one worker. `Default` reproduces v1 behavior: inherit the
 /// orchestrator's model and tool set, with the identity blurb only. The optional
-/// slots are the per-worker customization seam (§10.1): the model, and — now
-/// that the per-agent provider has landed — the `base_url`/`api_key`, so a worker
+/// slots are the per-worker customization seam (§10.1): the model, `effort`,
+/// `read_only`, and — now that the per-agent provider has landed — the `base_url`/`api_key`, so a worker
 /// may run on its own provider. `stream_fn` stays shared: the rig keystore rekeys
 /// per `ClientKey(base_url, api_key, session_id)`, so one closure serves them all.
 #[derive(Clone, Default)]

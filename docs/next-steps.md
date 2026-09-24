@@ -45,6 +45,7 @@ the boxes as each task completes and keep the status table current.
 | 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☑ done — `377bf78`; second-layer APPROVED |
 | 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☑ done — `ba8f462`; second-layer APPROVED |
 | 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ☑ done — `48dfbf3`; second-layer APPROVED |
+| 40 | Team controls: enforced read-only + per-worker effort (see [`team-controls-plan.md`](team-controls-plan.md)) | ◐ design locked — sketch/build in progress |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 

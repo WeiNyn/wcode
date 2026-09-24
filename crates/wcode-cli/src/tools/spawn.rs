@@ -420,7 +420,7 @@ mod tests {
         let tool = erased(Spawn::new(factory.clone(), root.clone(), book.clone()));
         let out = tool
             .execute(
-                serde_json::json!({ "task": "DO THE THING", "to": "agent:r", "name": "reviewer" }),
+                serde_json::json!({ "task": "DO THE THING", "to": "agent:r", "name": "reviewer", "read_only": true, "effort": "high" }),
                 ctx(),
             )
             .await;
@@ -429,6 +429,14 @@ mod tests {
         // The `Define` crossed the socket with the requested name...
         let args = seen_rx.try_recv().expect("the peer saw a Define");
         assert_eq!(args.name.as_deref(), Some("reviewer"));
+        // ...and carried the read-only flag and effort override across the socket
+        // (AC3 — a peer-defined worker honors both).
+        assert!(args.read_only, "read_only crossed the socket");
+        assert_eq!(
+            args.effort.as_deref(),
+            Some("high"),
+            "effort crossed the socket"
+        );
 
         // (a) ...and the worker was woken with the task (B1): its
         // `MessageReceived` carries the exact task text.
