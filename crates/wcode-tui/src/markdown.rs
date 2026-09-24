@@ -332,7 +332,7 @@ impl Blocks {
                 self.push_run("\n", style);
             }
             Event::Rule => {
-                let line = Self::rule_line();
+                let line = Self::rule_line(self.width);
                 self.out.push(line);
             }
             Event::TaskListMarker(done) => {
@@ -459,8 +459,11 @@ impl Blocks {
     }
 
     /// `Event::Rule` → a dim thematic break.
-    fn rule_line() -> Line<'static> {
-        Line::from(Span::styled(format!("{GUTTER}{}", "─".repeat(24)), dim()))
+    fn rule_line(width: usize) -> Line<'static> {
+        // Clamp to the content budget so a narrow transcript still fits (a fixed
+        // 24 would overflow `render(text, width)`'s contract).
+        let n = width.saturating_sub(disp(GUTTER)).clamp(1, 24);
+        Line::from(Span::styled(format!("{GUTTER}{}", "─".repeat(n)), dim()))
     }
 }
 
@@ -1275,5 +1278,13 @@ mod tests {
         assert_eq!(text[0], "   a");
         assert!(text[1].starts_with("   ─"), "{text:?}");
         assert_eq!(text[2], "   b");
+    }
+
+    #[test]
+    fn a_thematic_break_clamps_to_a_narrow_width() {
+        // The rule must fit `render(text, width)`'s contract, not overflow it.
+        let text = text_of(&render("---", 10));
+        assert_eq!(disp(&text[0]), 10, "the rule fits the width: {text:?}");
+        assert!(text[0].starts_with("   ─"), "{text:?}");
     }
 }

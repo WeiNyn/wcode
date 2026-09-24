@@ -1,7 +1,7 @@
 # wcode — markdown parser (pulldown-cmark) + a theme catalog
 
-Status: **design — decisions D1–D14 drafted; open questions Q1–Q6 for the
-first-layer review.** Two coupled phases:
+Status: **Part A shipped** (`377bf78`; second-layer APPROVED). **Part B (the theme
+catalog) — design drafted, Q4–Q6 open.** Two coupled phases:
 **A** migrates the TUI markdown parser to `pulldown-cmark`; **B** adds a built-in
 **theme catalog** (a set of named themes + a per-theme syntect code theme).
 Companion to [`tui-markdown-plan.md`](tui-markdown-plan.md) and
