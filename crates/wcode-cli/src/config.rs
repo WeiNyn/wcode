@@ -517,7 +517,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     }
     // `[theme]` is presentation-only, but a bad role or color is a hard error —
     // the "unparseable overlay fails loudly" style (§4 T3b).
-    let theme = wcode_tui::parse_theme(&file.theme).map_err(ConfigError::Theme)?;
+    let theme = wcode_tui::parse_theme_table(&file.theme).map_err(ConfigError::Theme)?;
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),

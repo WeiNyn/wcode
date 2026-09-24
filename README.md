@@ -72,12 +72,17 @@ ttft_ms = 60000            # optional; time-to-first-token timeout (0 disables)
 idle_ms = 120000           # optional; inter-item idle timeout (0 disables)
 
 [theme]
-# TUI role colors, presentation-only. A value is a named ANSI color (`cyan`,
-# `light-yellow`, `dark-gray`, ...) or hex `#rrggbb`; absent roles inherit the
-# default palette (accent, dim, muted, border, user, body, error, success, warn,
-# code, heading, link, tool_name, thinking, diff_add, diff_del). Honored only
-# when NO_COLOR is unset.
-link = "light-cyan"        # optional; role = color
+# TUI theme, presentation-only. `name` selects a built-in preset —
+# default | dark | light | gruvbox-dark | nord | solarized-dark | solarized-light.
+# `default` is named-16 (safe on any terminal); the others are truecolor, so they
+# are a no-op on a non-truecolor terminal (a `light` preset also needs a light
+# terminal). A role value is a named ANSI color (`cyan`, `light-yellow`,
+# `dark-gray`, ...) or hex `#rrggbb`; absent roles inherit the palette. Roles:
+# accent, dim, muted, border, user, body, error, success, warn, code, heading,
+# heading_sub, link, tool_name, thinking, diff_add, diff_del. Hex is honored only
+# under truecolor; NO_COLOR wins over everything.
+name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
+link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
 
 # A preset team the orchestrator starts with (requires --agents). One [[team]]

@@ -33,7 +33,7 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::Backend;
 
 pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, TaskItem, Tool};
-pub use crate::theme::{ThemeSpec, parse_theme};
+pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 
 /// A surface's live state, shown in the team strip and by `/team`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

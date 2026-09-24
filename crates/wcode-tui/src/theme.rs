@@ -119,7 +119,14 @@ pub(crate) fn theme() -> &'static Theme {
 /// Install `spec` as the process theme (called once, before the first draw); a
 /// later call, or one after the theme was first read, is a no-op.
 pub(crate) fn install(spec: ThemeSpec) {
+    let palette = spec.preset.as_deref().and_then(preset);
     let _ = THEME.set(resolve(spec, no_color()));
+    // `syntect_theme` yields `Some` only for an all-RGB palette; else the
+    // shipped default (the named-16 `default` preset has no RGB to map).
+    let syntax = palette
+        .and_then(syntect_theme)
+        .unwrap_or_else(crate::markdown::default_syntect_theme);
+    crate::markdown::install_syntax_theme(syntax);
 }
 
 /// Honor `NO_COLOR` (<https://no-color.org>) — resolved once.
@@ -175,26 +182,291 @@ pub fn color_mode() -> ColorMode {
     })
 }
 
-/// A role→color overlay on the default palette (palette B). `Default` (empty) is
-/// palette B; overrides are built only through [`parse_theme`], which validates
-/// every role and color.
+/// A preset's SEMANTIC colors (D11) — the single source from which BOTH the 17 UI
+/// roles ([`Theme::from_palette`]) AND the syntect theme ([`syntect_theme`])
+/// derive, so code and prose cohere per theme.
+///
+/// ## Caveats
+/// - The six truecolor presets are **no-ops on a non-truecolor terminal** (their
+///   RGB roles degrade to palette B per role, Q5); `default` (named-16) is the
+///   safe everywhere-case. 256/16 quantization stays a follow-up.
+/// - A `light` preset is meaningful only on a **light** terminal: the UI has no
+///   `bg` role (prose background is the terminal's), and the palette's `fg`/`bg`
+///   reach **only** the syntect theme.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    /// Default code foreground (syntect `settings.foreground`); the UI `body`
+    /// stays `None` (prose = the terminal default).
+    fg: Color,
+    /// Code background (syntect `settings.background`); the UI has no bg role.
+    bg: Color,
+    /// Primary accent (→ `accent`, `user`).
+    accent: Color,
+    /// Quiet chrome (→ `muted`).
+    muted: Color,
+    /// Rules/borders (→ `border`).
+    border: Color,
+    /// The six hues, reused across the roles and the syntect scopes.
+    red: Color,
+    green: Color,
+    yellow: Color,
+    blue: Color,
+    magenta: Color,
+    cyan: Color,
+}
+
+/// A `const`-constructible truecolor helper, so the palette tables stay short.
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+/// `default` — palette B (named-16); the terminal-adaptive everywhere-case.
+const DEFAULT: Palette = Palette {
+    fg: Color::Reset,
+    bg: Color::Reset,
+    accent: Color::Cyan,
+    muted: Color::Gray,
+    border: Color::DarkGray,
+    red: Color::Red,
+    green: Color::Green,
+    yellow: Color::LightYellow,
+    blue: Color::Blue,
+    magenta: Color::Magenta,
+    cyan: Color::Cyan,
+};
+
+/// VS Code Dark+.
+const DARK: Palette = Palette {
+    fg: rgb(0xd4, 0xd4, 0xd4),
+    bg: rgb(0x1e, 0x1e, 0x1e),
+    accent: rgb(0x56, 0x9c, 0xd6),
+    muted: rgb(0x80, 0x80, 0x80),
+    border: rgb(0x40, 0x40, 0x40),
+    red: rgb(0xf4, 0x47, 0x47),
+    green: rgb(0x6a, 0x99, 0x55),
+    yellow: rgb(0xdc, 0xdc, 0xaa),
+    blue: rgb(0x56, 0x9c, 0xd6),
+    magenta: rgb(0xc5, 0x86, 0xc0),
+    cyan: rgb(0x4e, 0xc9, 0xb0),
+};
+
+/// VS Code Light+.
+const LIGHT: Palette = Palette {
+    fg: rgb(0x1f, 0x1f, 0x1f),
+    bg: rgb(0xff, 0xff, 0xff),
+    accent: rgb(0x00, 0x00, 0xff),
+    muted: rgb(0x76, 0x76, 0x76),
+    border: rgb(0xd0, 0xd0, 0xd0),
+    red: rgb(0xcd, 0x31, 0x31),
+    green: rgb(0x00, 0xbc, 0x00),
+    yellow: rgb(0x94, 0x98, 0x00),
+    blue: rgb(0x04, 0x51, 0xa5),
+    magenta: rgb(0xbc, 0x05, 0xbc),
+    cyan: rgb(0x05, 0x98, 0xbc),
+};
+
+/// gruvbox dark.
+const GRUVBOX_DARK: Palette = Palette {
+    fg: rgb(0xeb, 0xdb, 0xb2),
+    bg: rgb(0x28, 0x28, 0x28),
+    accent: rgb(0xfa, 0xbd, 0x2f),
+    muted: rgb(0x92, 0x83, 0x74),
+    border: rgb(0x50, 0x49, 0x45),
+    red: rgb(0xfb, 0x49, 0x34),
+    green: rgb(0xb8, 0xbb, 0x26),
+    yellow: rgb(0xfa, 0xbd, 0x2f),
+    blue: rgb(0x83, 0xa5, 0x98),
+    magenta: rgb(0xd3, 0x86, 0x9b),
+    cyan: rgb(0x8e, 0xc0, 0x7c),
+};
+
+/// Nord.
+const NORD: Palette = Palette {
+    fg: rgb(0xd8, 0xde, 0xe9),
+    bg: rgb(0x2e, 0x34, 0x40),
+    accent: rgb(0x88, 0xc0, 0xd0),
+    muted: rgb(0x4c, 0x56, 0x6a),
+    border: rgb(0x43, 0x4c, 0x5e),
+    red: rgb(0xbf, 0x61, 0x6a),
+    green: rgb(0xa3, 0xbe, 0x8c),
+    yellow: rgb(0xeb, 0xcb, 0x8b),
+    blue: rgb(0x81, 0xa1, 0xc1),
+    magenta: rgb(0xb4, 0x8e, 0xad),
+    cyan: rgb(0x88, 0xc0, 0xd0),
+};
+
+/// Solarized dark.
+const SOLARIZED_DARK: Palette = Palette {
+    fg: rgb(0x83, 0x94, 0x96),
+    bg: rgb(0x00, 0x2b, 0x36),
+    accent: rgb(0xb5, 0x89, 0x00),
+    muted: rgb(0x58, 0x6e, 0x75),
+    border: rgb(0x07, 0x36, 0x42),
+    red: rgb(0xdc, 0x32, 0x2f),
+    green: rgb(0x85, 0x99, 0x00),
+    yellow: rgb(0xb5, 0x89, 0x00),
+    blue: rgb(0x26, 0x8b, 0xd2),
+    magenta: rgb(0xd3, 0x36, 0x82),
+    cyan: rgb(0x2a, 0xa1, 0x98),
+};
+
+/// Solarized light.
+const SOLARIZED_LIGHT: Palette = Palette {
+    fg: rgb(0x65, 0x7b, 0x83),
+    bg: rgb(0xfd, 0xf6, 0xe3),
+    accent: rgb(0xb5, 0x89, 0x00),
+    muted: rgb(0x93, 0xa1, 0xa1),
+    border: rgb(0xee, 0xe8, 0xd5),
+    red: rgb(0xdc, 0x32, 0x2f),
+    green: rgb(0x85, 0x99, 0x00),
+    yellow: rgb(0xb5, 0x89, 0x00),
+    blue: rgb(0x26, 0x8b, 0xd2),
+    magenta: rgb(0xd3, 0x36, 0x82),
+    cyan: rgb(0x2a, 0xa1, 0x98),
+};
+
+/// The built-in catalog (Q4: 7 presets).
+const CATALOG: &[(&str, Palette)] = &[
+    ("default", DEFAULT),
+    ("dark", DARK),
+    ("light", LIGHT),
+    ("gruvbox-dark", GRUVBOX_DARK),
+    ("nord", NORD),
+    ("solarized-dark", SOLARIZED_DARK),
+    ("solarized-light", SOLARIZED_LIGHT),
+];
+
+/// The palette for a preset `name`, if the catalog knows it.
+pub fn preset(name: &str) -> Option<&'static Palette> {
+    CATALOG.iter().find(|(n, _)| *n == name).map(|(_, p)| p)
+}
+
+/// The catalog's preset names, in order (for an error message / `--list-themes`).
+pub fn names() -> Vec<&'static str> {
+    CATALOG.iter().map(|(n, _)| *n).collect()
+}
+
+impl Theme {
+    /// ALL 17 roles from a palette (NOT an overlay). Starts from the palette-B
+    /// MODIFIER skeleton (`Theme::colored()`) so only `fg` varies per role; the
+    /// `body`/`dim` fg stay `None` (prose = the terminal default; `dim` = DIM).
+    ///
+    /// Per-role Rgb gating, EXPLICIT — the per-`Color` mirror of
+    /// [`ThemeSpec::into_theme`]'s per-string rule (Q5): an `Rgb` palette color
+    /// under a non-`Rgb` mode keeps that role's palette-B default.
+    fn from_palette(p: &Palette, mode: ColorMode) -> Theme {
+        let mut theme = Theme::colored();
+        let set = |slot: &mut Style, color: Color| {
+            if matches!(color, Color::Rgb(..)) && mode != ColorMode::Rgb {
+                return;
+            }
+            slot.fg = Some(color);
+        };
+        set(&mut theme.accent, p.accent);
+        set(&mut theme.user, p.accent);
+        set(&mut theme.muted, p.muted);
+        set(&mut theme.border, p.border);
+        set(&mut theme.error, p.red);
+        set(&mut theme.diff_del, p.red);
+        set(&mut theme.success, p.green);
+        set(&mut theme.diff_add, p.green);
+        set(&mut theme.warn, p.yellow);
+        set(&mut theme.code, p.yellow);
+        set(&mut theme.heading, p.magenta);
+        set(&mut theme.heading_sub, p.magenta);
+        set(&mut theme.thinking, p.magenta);
+        set(&mut theme.link, p.blue);
+        set(&mut theme.tool_name, p.blue);
+        theme
+    }
+}
+
+/// Map a ratatui color to syntect: ONLY an `Rgb` maps; `Reset`/named → `None`
+/// (`syntect::highlighting::Color` is RGBA-only — no named/Reset concept).
+fn to_syntect(c: Color) -> Option<syntect::highlighting::Color> {
+    match c {
+        Color::Rgb(r, g, b) => Some(syntect::highlighting::Color { r, g, b, a: 0xff }),
+        _ => None,
+    }
+}
+
+/// A syntect theme from the palette — built ONLY when EVERY palette color is
+/// `to_syntect`-able (an all-RGB palette); `None` otherwise, so the caller
+/// falls back to [`crate::markdown::default_syntect_theme`]. So the `default`
+/// preset (named-16/Reset) uses `base16-ocean.dark`; the six truecolor presets
+/// get a custom theme whose scopes match the UI hues (D11/D14).
+fn syntect_theme(p: &Palette) -> Option<syntect::highlighting::Theme> {
+    use syntect::highlighting::{ScopeSelectors, ThemeItem, ThemeSettings};
+
+    // EVERY palette color must be RGB (the named-16 `default` palette is not).
+    let fg = to_syntect(p.fg)?;
+    let bg = to_syntect(p.bg)?;
+    let muted = to_syntect(p.muted)?;
+    let green = to_syntect(p.green)?;
+    let yellow = to_syntect(p.yellow)?;
+    let blue = to_syntect(p.blue)?;
+    let magenta = to_syntect(p.magenta)?;
+    let cyan = to_syntect(p.cyan)?;
+    // In the palette but not mapped to a scope; still must be RGB.
+    to_syntect(p.accent)?;
+    to_syntect(p.border)?;
+    to_syntect(p.red)?;
+
+    let item = |scope: &str, foreground: syntect::highlighting::Color| ThemeItem {
+        scope: scope.parse::<ScopeSelectors>().expect("valid scope selector"),
+        style: syntect::highlighting::StyleModifier {
+            foreground: Some(foreground),
+            ..Default::default()
+        },
+    };
+
+    Some(syntect::highlighting::Theme {
+        name: None,
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(fg),
+            background: Some(bg),
+            ..Default::default()
+        },
+        scopes: vec![
+            item("keyword", magenta),
+            item("string", green),
+            item("comment", muted),
+            item("entity.name.function", blue),
+            item("entity.name.type", cyan),
+            item("constant", yellow),
+            item("variable", fg),
+        ],
+    })
+}
+
+/// A preset selector plus a role→color overlay. `Default` (empty) is palette B;
+/// a `preset` name (D10) selects a catalog palette and the `roles` overlay sits
+/// on top. Built only through [`parse_theme_table`]/[`parse_theme`], which
+/// validate every name, role, and color.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSpec {
+    /// A catalog preset name (D10); `None` = palette B. Resolved in `into_theme`.
+    preset: Option<String>,
     roles: BTreeMap<String, String>,
 }
 
 impl ThemeSpec {
-    /// The default palette with this spec's overrides applied. For each named
-    /// role only the `fg` changes — its modifiers stay (`link` underlined,
-    /// `tool_name` and `accent` bold, `thinking` dim+italic). A hex
+    /// The theme for this spec: the preset palette (if any) with the role
+    /// overrides applied. A preset seeds ALL 17 roles ([`Theme::from_palette`]);
+    /// then each named role changes only its `fg` — its modifiers stay (`link`
+    /// underlined, `tool_name` and `accent` bold, `thinking` dim+italic). A hex
     /// (`#rrggbb` → [`Color::Rgb`]) override is honored only when the terminal
     /// is truecolor ([`ColorMode::Rgb`]): under Plain / Named / Indexed it
     /// degrades to that role's palette-B default rather than emit an `Rgb` a
     /// non-truecolor terminal renders wrong. Named colors are honored in every
-    /// color mode. [`parse_theme`] validated the values; a stray one cannot
-    /// reach here.
+    /// color mode. [`parse_theme_table`] validated the values; a stray one
+    /// cannot reach here.
     fn into_theme(self, mode: ColorMode) -> Theme {
-        let mut theme = Theme::colored();
+        let mut theme = match self.preset.as_deref().and_then(preset) {
+            Some(p) => Theme::from_palette(p, mode),
+            None => Theme::colored(),
+        };
         for (role, value) in &self.roles {
             let Ok(color) = parse_color(value) else {
                 continue;
@@ -248,6 +520,21 @@ const ROLE_NAMES: [&str; 17] = [
     "diff_add",
     "diff_del",
 ];
+
+/// Pull `name` out, resolve the preset, then validate/overlay the role keys.
+/// An unknown `name` (or role/color) is a hard `Err` (the existing style).
+pub fn parse_theme_table(table: &BTreeMap<String, String>) -> Result<ThemeSpec, String> {
+    let mut roles = table.clone();
+    let name = roles.remove("name");
+    if let Some(n) = &name
+        && preset(n).is_none()
+    {
+        return Err(format!("unknown theme `{n}`; known: {}", names().join(", ")));
+    }
+    let mut spec = parse_theme(&roles)?; // role/color validation, unchanged
+    spec.preset = name;
+    Ok(spec)
+}
 
 /// Validate a `[theme]` table (role → color) into a [`ThemeSpec`]. An unknown
 /// role or an unparseable color is a hard error — the caller surfaces it.
@@ -508,5 +795,114 @@ mod tests {
         for style in fields(&plain) {
             assert_eq!(style.fg, None, "NO_COLOR must not set an fg: {style:?}");
         }
+    }
+
+    // ---- Part B: the catalog, the `name` selector, and the syntect theme ----
+
+    #[test]
+    fn the_default_preset_is_palette_b() {
+        let theme = Theme::from_palette(preset("default").unwrap(), ColorMode::Named);
+        assert_eq!(theme.error.fg, Some(Color::Red));
+        assert_eq!(theme.muted.fg, Some(Color::Gray));
+        assert_eq!(theme.border.fg, Some(Color::DarkGray));
+        assert_eq!(theme.body.fg, None, "prose stays the terminal default");
+        assert_eq!(theme.dim.fg, None, "dim stays a modifier-only role");
+    }
+
+    #[test]
+    fn a_truecolor_preset_sets_rgb_roles() {
+        let p = preset("gruvbox-dark").unwrap();
+        let theme = Theme::from_palette(p, ColorMode::Rgb);
+        assert_eq!(theme.accent.fg, Some(Color::Rgb(0xfa, 0xbd, 0x2f)));
+        assert_eq!(theme.error.fg, Some(Color::Rgb(0xfb, 0x49, 0x34)));
+        assert_eq!(theme.link.fg, Some(Color::Rgb(0x83, 0xa5, 0x98)));
+        // The intentional aliases: accent == user; heading/heading_sub/thinking.
+        assert_eq!(theme.user.fg, theme.accent.fg);
+        assert_eq!(theme.heading_sub.fg, theme.thinking.fg);
+    }
+
+    #[test]
+    fn a_truecolor_preset_degrades_under_a_non_rgb_mode() {
+        let p = preset("nord").unwrap();
+        let base = Theme::colored();
+        for mode in [ColorMode::Plain, ColorMode::Named, ColorMode::Indexed] {
+            let theme = Theme::from_palette(p, mode);
+            assert_eq!(theme.accent.fg, base.accent.fg, "{mode:?}");
+            assert_eq!(theme.error.fg, base.error.fg, "{mode:?}");
+            assert_eq!(theme.link.fg, base.link.fg, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn parse_theme_table_resolves_a_preset_and_rejects_an_unknown_name() {
+        let table = BTreeMap::from([("name".to_string(), "nord".to_string())]);
+        let spec = parse_theme_table(&table).expect("a known preset");
+        assert_eq!(spec.preset.as_deref(), Some("nord"));
+
+        let bad = BTreeMap::from([("name".to_string(), "chartreuse".to_string())]);
+        let err = parse_theme_table(&bad).unwrap_err();
+        assert!(err.contains("unknown theme"), "{err}");
+        assert!(err.contains("nord"), "the error lists known names: {err}");
+    }
+
+    #[test]
+    fn role_overrides_apply_on_top_of_a_preset() {
+        let table = BTreeMap::from([
+            ("name".to_string(), "nord".to_string()),
+            ("warn".to_string(), "light-cyan".to_string()),
+        ]);
+        let theme = parse_theme_table(&table).unwrap().into_theme(ColorMode::Rgb);
+        // The override wins for its role...
+        assert_eq!(theme.warn.fg, Some(Color::LightCyan));
+        // ...while the preset still seeds the others.
+        assert_eq!(theme.error.fg, Some(Color::Rgb(0xbf, 0x61, 0x6a)));
+        assert_eq!(theme.accent.fg, Some(Color::Rgb(0x88, 0xc0, 0xd0)));
+    }
+
+    #[test]
+    fn no_color_wins_over_a_preset() {
+        let table = BTreeMap::from([("name".to_string(), "nord".to_string())]);
+        let spec = parse_theme_table(&table).unwrap();
+        let plain = resolve(spec, true);
+        for style in fields(&plain) {
+            assert_eq!(style.fg, None, "NO_COLOR must not set an fg: {style:?}");
+        }
+    }
+
+    #[test]
+    fn to_syntect_maps_only_rgb() {
+        assert_eq!(
+            to_syntect(Color::Rgb(1, 2, 3)),
+            Some(syntect::highlighting::Color {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 0xff
+            })
+        );
+        assert_eq!(to_syntect(Color::Red), None);
+        assert_eq!(to_syntect(Color::Reset), None);
+    }
+
+    #[test]
+    fn syntect_theme_is_built_only_for_an_all_rgb_palette() {
+        assert!(
+            syntect_theme(preset("default").unwrap()).is_none(),
+            "a named-16 palette has no RGB to map"
+        );
+
+        let p = preset("nord").unwrap();
+        let theme = syntect_theme(p).expect("an all-RGB palette yields Some");
+        assert_eq!(theme.settings.foreground, to_syntect(p.fg));
+        assert_eq!(theme.settings.background, to_syntect(p.bg));
+        assert_eq!(theme.scopes.len(), 7);
+        let fg = |i: usize| theme.scopes[i].style.foreground;
+        assert_eq!(fg(0), to_syntect(p.magenta), "keyword");
+        assert_eq!(fg(1), to_syntect(p.green), "string");
+        assert_eq!(fg(2), to_syntect(p.muted), "comment");
+        assert_eq!(fg(3), to_syntect(p.blue), "entity.name.function");
+        assert_eq!(fg(4), to_syntect(p.cyan), "entity.name.type");
+        assert_eq!(fg(5), to_syntect(p.yellow), "constant");
+        assert_eq!(fg(6), to_syntect(p.fg), "variable");
     }
 }

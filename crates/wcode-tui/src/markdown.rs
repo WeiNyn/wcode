@@ -500,6 +500,21 @@ fn syntaxes() -> &'static SyntaxSet {
 
 /// The syntax theme, resolved once. B3: a TOTAL lookup — a missing/changed key
 /// falls back to an empty theme, never panics in a render path.
+/// Install the process syntax theme (called once by `theme::install`); a later
+/// call is a no-op.
+pub(crate) fn install_syntax_theme(theme: syntect::highlighting::Theme) {
+    let _ = SYNTAX_THEME.set(theme);
+}
+
+/// The shipped fallback syntax theme — today's `base16-ocean.dark`. Used when no
+/// preset supplies an all-RGB palette; B3: total, never panics.
+pub(crate) fn default_syntect_theme() -> syntect::highlighting::Theme {
+    ThemeSet::load_defaults()
+        .themes
+        .get("base16-ocean.dark")
+        .cloned()
+        .unwrap_or_default()
+}
 fn syntax_theme() -> &'static Theme {
     SYNTAX_THEME.get_or_init(|| {
         ThemeSet::load_defaults()

@@ -43,7 +43,7 @@ the boxes as each task completes and keep the status table current.
 | 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☑ done — `ed4dde9`; second-layer APPROVED; live-verified |
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 | 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☑ done — `377bf78`; second-layer APPROVED |
-| 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☐ todo |
+| 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ◐ Part B done — catalog + `name` selector + per-theme syntect code theme |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -875,7 +875,7 @@ overrides on top.
 > ➡️ **[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5** — the `Palette`
 > model, the starting set, decisions D10–D14, open questions Q4–Q6.
 
-**Status.** Planned — design drafted; awaiting the first-layer review, then a sketch.
+**Status.** ◐ Part B done — a `[theme] name = "…"` preset selector over a 7-theme catalog (`default`/`dark`/`light`/`gruvbox-dark`/`nord`/`solarized-dark`/`solarized-light`); each palette derives both the 17 UI roles and a matching custom syntect code theme, per-role overrides sit on top, and `NO_COLOR` wins.
 
 ---
 
