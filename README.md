@@ -9,6 +9,11 @@ chat-completions endpoint.
 
 ## Install
 
+Prebuilt binaries for Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon)
+are attached to each [release](https://github.com/WeiNyn/wcode/releases).
+
+From source (a Rust toolchain is required):
+
 ```
 cargo install --path crates/wcode-cli
 ```
