@@ -144,6 +144,11 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
     (`PickerKind::Theme`, mirroring `open_model_picker`, seeded from `theme::names()`).
     A theme change is **client-local** — no `Request`/backend round-trip.
     `--list-themes` prints the names and exits.
+  - **The base spec (so a runtime `/theme` keeps the config role keys).** `Options.theme`
+    is consumed by `install`, so `theme.rs` retains the base spec (a `OnceLock<ThemeSpec>`,
+    set by `install`); a runtime switch composes `base.clone().with_preset(name)?` —
+    `with_preset(self, &str) -> Result<ThemeSpec, String>` (an unknown name is an error,
+    not a silent palette-B). One composition path, no second spelling.
 
 ## 5. Non-goals
 
