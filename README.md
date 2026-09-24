@@ -80,7 +80,9 @@ idle_ms = 120000           # optional; inter-item idle timeout (0 disables)
 # `dark-gray`, ...) or hex `#rrggbb`; absent roles inherit the palette. Roles:
 # accent, dim, muted, border, user, body, error, success, warn, code, heading,
 # heading_sub, link, tool_name, thinking, diff_add, diff_del. Hex is honored only
-# under truecolor; NO_COLOR wins over everything.
+# under truecolor; NO_COLOR wins over everything. Select a preset live with the
+# TUI's `/theme [name]` (bare `/theme` opens a picker) or start with `--theme <name>`;
+# `--list-themes` prints the catalog. Explicit role keys survive a preset switch.
 name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
 link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
@@ -157,6 +159,8 @@ wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
+wcode --list-themes          # print the built-in theme names, exit
+wcode --theme nord           # select a theme preset (or `[theme] name` in config)
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --no-skills            # run without discovering skills
@@ -181,7 +185,8 @@ it, `Esc`/`q`/`Ctrl-G` leave). `F1` (or `/help`) opens the full keymap. The inpu
 box wraps and grows (capped at 8 rows, or half the screen, then scrolls to the
 cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
-[level]`, `/compact [text]`, `/usage`, `/copy`, `/team`, `/surface`, `/help` — the
+[level]`, `/theme [name]` (bare `/theme` opens a picker), `/compact [text]`, `/usage`, `/copy`, `/team`,
+`/surface`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), and `/reload [--no-session]` (rebuild + re-exec into the

@@ -134,8 +134,6 @@ pub enum Command {
     /// `/skill <name> [args]` — force-load a skill's body as a turn, for when
     /// the model does not pick it up from the prompt section on its own.
     Skill(Option<String>),
-    /// `/theme <name>` selects a preset live; bare `/theme` lists the names.
-    Theme(Option<String>),
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -153,7 +151,6 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "model" => Some(Command::Model(arg)),
         "models" => Some(Command::Models(arg)),
         "effort" => Some(Command::Effort(arg)),
-        "theme" => Some(Command::Theme(arg)),
         "resume" => Some(Command::Resume(arg)),
         "sessions" if arg.is_none() => Some(Command::Sessions),
         "reload" => match arg.as_deref() {
@@ -847,15 +844,6 @@ pub async fn run(
                     Err(e) => eprintln!("create session: {e}"),
                 }
             }
-            Some(Command::Theme(Some(name))) => {
-                if wcode_tui::theme_names().iter().any(|n| n == &name) {
-                    let _ = wcode_tui::set_theme(&name); // the ONE runtime entry
-                    println!("theme: {name}");
-                } else {
-                    println!("unknown theme: {name}");
-                }
-            }
-            Some(Command::Theme(None)) => println!("{}", wcode_tui::theme_names().join(", ")),
             Some(Command::Model(arg)) => match arg {
                 Some(id) => match backend.ask(Request::SetModel { model: id.clone() }).await {
                     Ok(AgentEvent::Ack) => {

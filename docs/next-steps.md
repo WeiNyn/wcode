@@ -44,7 +44,7 @@ the boxes as each task completes and keep the status table current.
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 | 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☑ done — `377bf78`; second-layer APPROVED |
 | 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☑ done — `ba8f462`; second-layer APPROVED |
-| 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ◐ done — RwLock store + generation-driven cache invalidation; `/theme`, `--theme`, picker |
+| 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ☑ done — `48dfbf3`; second-layer APPROVED |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -897,11 +897,14 @@ Make the theme store mutable (an `RwLock` swap) and add runtime selection.
 > **transcript-cache invalidation** it requires, the syntect leak-on-swap, and the
 > `--theme` / `/theme` / picker selection.
 
-**Status.** ◐ Done — the theme store is a `RwLock<Theme>` with a process-global
-generation the transcript cache watches (`sync_theme`); the syntect theme swaps via
-a leaked `'static` pointer; and `/theme [name]`, `--theme`, `--list-themes`, and a
-`Theme` picker all route through the one `set_preset` runtime entry (client-local;
-`NO_COLOR` wins). Review pending.
+**Status.** ☑ done — `48dfbf3`; second-layer **APPROVED** + the two follow-ups landed.
+The theme store is a `RwLock<Theme>` with a process-global generation the transcript
+cache watches (`App::sync_theme` — cache invalidation, live-verified); the syntect
+theme swaps via a leaked `'static` pointer; `/theme [name]` (bare `/theme` opens a
+`Theme` picker), `--theme <name>`, and `--list-themes` all route through the one
+`set_preset` entry (client-local; a config role override survives a switch;
+`NO_COLOR` wins). The **REPL `/theme` was dropped** (the REPL printer is unthemed, so
+it was inert) and the README documents the flags/command.
 
 ---
 
