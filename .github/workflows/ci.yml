@@ -27,4 +27,18 @@ jobs:
       # The repo convention: clippy must be clean.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - run: cargo test --workspace
+      - name: cargo test
+        run: |
+          set -o pipefail
+          if cargo test --workspace --no-fail-fast 2>&1 | tee test.log; then
+            exit 0
+          fi
+          # Surface the failures as check annotations so they are visible in the
+          # API/UI without downloading logs.
+          grep -E '^---- |panicked at|assertion|left:|right:|^test result: FAILED' test.log \
+            | head -12 | while IFS= read -r line; do
+              line="${line//$'\r'/}"
+              line="${line//'%'/'%25'}"
+              echo "::error title=cargo-test::${line}"
+            done
+          exit 1

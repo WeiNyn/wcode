@@ -4,16 +4,32 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+*"
-  # Allow a manual dry run from the Actions tab (builds, but only publishes on a tag).
-  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # taiki-e/upload-rust-binary-action only *uploads* to an existing release; it
+  # does not create one. So create the release from the tag first.
+  create-release:
+    name: create release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # No CHANGELOG.md yet — create the release from the tag regardless.
+          allow-missing-changelog: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   upload-assets:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -35,9 +51,8 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      # Builds `wcode`, packages it (`.tar.gz`, plus `.zip` on Windows), and
-      # uploads it to the GitHub Release for the pushed tag — creating the
-      # release if it does not exist yet.
+      # Builds `wcode`, packages it (`.tar.gz`), and uploads it with a sha256
+      # to the release created above.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: wcode
