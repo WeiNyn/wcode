@@ -43,7 +43,7 @@ the boxes as each task completes and keep the status table current.
 | 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☑ done — `ed4dde9`; second-layer APPROVED; live-verified |
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 | 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☑ done — `377bf78`; second-layer APPROVED |
-| 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ◐ Part B done — catalog + `name` selector + per-theme syntect code theme |
+| 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☑ done — `ba8f462`; second-layer APPROVED |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -875,7 +875,13 @@ overrides on top.
 > ➡️ **[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5** — the `Palette`
 > model, the starting set, decisions D10–D14, open questions Q4–Q6.
 
-**Status.** ◐ Part B done — a `[theme] name = "…"` preset selector over a 7-theme catalog (`default`/`dark`/`light`/`gruvbox-dark`/`nord`/`solarized-dark`/`solarized-light`); each palette derives both the 17 UI roles and a matching custom syntect code theme, per-role overrides sit on top, and `NO_COLOR` wins.
+**Status.** ☑ done — `ba8f462`; second-layer **APPROVED**. A `[theme] name = "…"`
+preset selector over a 7-theme catalog (`default`/`dark`/`light`/`gruvbox-dark`/
+`nord`/`solarized-dark`/`solarized-light`); each palette derives both the 17 UI roles
+and a matching custom syntect code theme, per-role overrides sit on top, and
+`NO_COLOR` wins. `default` is exactly palette B (named-16); a truecolor preset
+degrades to palette B under a non-`Rgb` terminal (256/16 quantization is a
+follow-up).
 
 ---
 

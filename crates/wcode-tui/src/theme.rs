@@ -210,6 +210,8 @@ pub struct Palette {
     red: Color,
     green: Color,
     yellow: Color,
+    /// Code foreground (→ `code`); palette B keeps it distinct from `warn`.
+    code: Color,
     blue: Color,
     magenta: Color,
     cyan: Color,
@@ -227,6 +229,7 @@ const DEFAULT: Palette = Palette {
     accent: Color::Cyan,
     muted: Color::Gray,
     border: Color::DarkGray,
+    code: Color::Yellow,
     red: Color::Red,
     green: Color::Green,
     yellow: Color::LightYellow,
@@ -242,6 +245,7 @@ const DARK: Palette = Palette {
     accent: rgb(0x56, 0x9c, 0xd6),
     muted: rgb(0x80, 0x80, 0x80),
     border: rgb(0x40, 0x40, 0x40),
+    code: rgb(0xdc, 0xdc, 0xaa),
     red: rgb(0xf4, 0x47, 0x47),
     green: rgb(0x6a, 0x99, 0x55),
     yellow: rgb(0xdc, 0xdc, 0xaa),
@@ -257,6 +261,7 @@ const LIGHT: Palette = Palette {
     accent: rgb(0x00, 0x00, 0xff),
     muted: rgb(0x76, 0x76, 0x76),
     border: rgb(0xd0, 0xd0, 0xd0),
+    code: rgb(0x94, 0x98, 0x00),
     red: rgb(0xcd, 0x31, 0x31),
     green: rgb(0x00, 0xbc, 0x00),
     yellow: rgb(0x94, 0x98, 0x00),
@@ -272,6 +277,7 @@ const GRUVBOX_DARK: Palette = Palette {
     accent: rgb(0xfa, 0xbd, 0x2f),
     muted: rgb(0x92, 0x83, 0x74),
     border: rgb(0x50, 0x49, 0x45),
+    code: rgb(0xfa, 0xbd, 0x2f),
     red: rgb(0xfb, 0x49, 0x34),
     green: rgb(0xb8, 0xbb, 0x26),
     yellow: rgb(0xfa, 0xbd, 0x2f),
@@ -287,6 +293,7 @@ const NORD: Palette = Palette {
     accent: rgb(0x88, 0xc0, 0xd0),
     muted: rgb(0x4c, 0x56, 0x6a),
     border: rgb(0x43, 0x4c, 0x5e),
+    code: rgb(0xeb, 0xcb, 0x8b),
     red: rgb(0xbf, 0x61, 0x6a),
     green: rgb(0xa3, 0xbe, 0x8c),
     yellow: rgb(0xeb, 0xcb, 0x8b),
@@ -302,6 +309,7 @@ const SOLARIZED_DARK: Palette = Palette {
     accent: rgb(0xb5, 0x89, 0x00),
     muted: rgb(0x58, 0x6e, 0x75),
     border: rgb(0x07, 0x36, 0x42),
+    code: rgb(0xb5, 0x89, 0x00),
     red: rgb(0xdc, 0x32, 0x2f),
     green: rgb(0x85, 0x99, 0x00),
     yellow: rgb(0xb5, 0x89, 0x00),
@@ -317,6 +325,7 @@ const SOLARIZED_LIGHT: Palette = Palette {
     accent: rgb(0xb5, 0x89, 0x00),
     muted: rgb(0x93, 0xa1, 0xa1),
     border: rgb(0xee, 0xe8, 0xd5),
+    code: rgb(0xb5, 0x89, 0x00),
     red: rgb(0xdc, 0x32, 0x2f),
     green: rgb(0x85, 0x99, 0x00),
     yellow: rgb(0xb5, 0x89, 0x00),
@@ -371,7 +380,7 @@ impl Theme {
         set(&mut theme.success, p.green);
         set(&mut theme.diff_add, p.green);
         set(&mut theme.warn, p.yellow);
-        set(&mut theme.code, p.yellow);
+        set(&mut theme.code, p.code);
         set(&mut theme.heading, p.magenta);
         set(&mut theme.heading_sub, p.magenta);
         set(&mut theme.thinking, p.magenta);
@@ -805,6 +814,12 @@ mod tests {
         assert_eq!(theme.error.fg, Some(Color::Red));
         assert_eq!(theme.muted.fg, Some(Color::Gray));
         assert_eq!(theme.border.fg, Some(Color::DarkGray));
+        assert_eq!(theme.warn.fg, Some(Color::LightYellow));
+        assert_eq!(
+            theme.code.fg,
+            Some(Color::Yellow),
+            "code stays distinct from warn (palette B)"
+        );
         assert_eq!(theme.body.fg, None, "prose stays the terminal default");
         assert_eq!(theme.dim.fg, None, "dim stays a modifier-only role");
     }
