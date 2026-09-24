@@ -42,6 +42,8 @@ the boxes as each task completes and keep the status table current.
 | 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
 | 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☑ done — `ed4dde9`; second-layer APPROVED; live-verified |
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
+| 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☐ todo |
+| 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -842,6 +844,34 @@ idle-wake turn (`repl.rs::print_events` breaks on `AgentEnd`; the TUI's persiste
 subscriber does) → follow-up. (2) the `build_agent_for` over-indent and (4) the
 missing `shutdown_all()` at the remote one-shot `flush_all` site (`main.rs`) are
 fixed in a follow-up commit.
+
+---
+
+## 37. Markdown parser → `pulldown-cmark`
+
+**New.** The transcript's markdown parser (`crates/wcode-tui/src/markdown.rs`) is
+hand-rolled and line-based — spec-incomplete and fragile. Replace it with
+`pulldown-cmark` (spec-complete CommonMark+GFM), keeping `render`'s signature (the
+phase-1a cache depends on it), the `wrap` primitive, and the syntect path.
+
+> ➡️ **[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)** — why, ground truth,
+> decisions D1–D9, the Event→Line interface, non-goals, open questions Q1–Q3.
+
+**Status.** Planned — design drafted; awaiting the first-layer review, then a sketch.
+
+---
+
+## 38. Built-in theme catalog
+
+**New.** `[theme]` overrides 17 roles but there is no preset selector and no catalog.
+Add `[theme] name = "…"` selecting from a built-in set (each a palette that derives
+both the UI roles and a matching **syntect** code theme), with the existing per-role
+overrides on top.
+
+> ➡️ **[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5** — the `Palette`
+> model, the starting set, decisions D10–D14, open questions Q4–Q6.
+
+**Status.** Planned — design drafted; awaiting the first-layer review, then a sketch.
 
 ---
 
