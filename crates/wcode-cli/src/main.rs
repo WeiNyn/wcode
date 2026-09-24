@@ -909,6 +909,8 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
                 tools: member.tools.clone(),
                 base_url: member.base_url.clone(),
                 api_key: member.api_key.clone(),
+                read_only: member.read_only,
+                effort: member.effort.clone(),
             };
             if let Err(e) = o.spawn_worker(spec) {
                 eprintln!("error: team member `{}`: {e}", member.name);
@@ -1052,6 +1054,8 @@ async fn serve(
                     tools: args.tools,
                     base_url: args.base_url,
                     api_key: args.api_key,
+                    read_only: args.read_only,
+                    effort: args.effort.clone(),
                 })
                 .map(|worker| worker.id)
             }) as wcode_protocol::DefineHandler

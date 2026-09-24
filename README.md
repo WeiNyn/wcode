@@ -88,14 +88,25 @@ link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
 
 # A preset team the orchestrator starts with (requires --agents). One [[team]]
-# entry per member; names are unique (a duplicate fails the load loudly).
+# entry per member; names are unique (a duplicate fails the load loudly). Keys:
+#   name      (required) the member's address, unique
+#   role      extra system-prompt text (`# Role`) appended to the worker blurb
+#   model     model id override (default: the orchestrator's)
+#   tools     tool allow-list (`message` is always kept; unknown names rejected)
+#   read_only enforce read-only: refuse the mutating tools and mutating bash/bg
+#   effort    reasoning-effort override (`-`/`none`/`off` clears; default: inherit)
+#   base_url  provider base URL override (default: the orchestrator's)
+#   api_key   provider API key override (default: the orchestrator's)
 [[team]]
-name  = "explorer"
-role  = "recon only; never edit; cite file:line"
+name      = "explorer"
+role      = "recon only; never edit; cite file:line"
+tools     = ["read", "grep", "find"]
+read_only = true
 
 [[team]]
-name  = "reviewer"
-role  = "verify diffs; PASS / NITS / FAIL"
+name   = "reviewer"
+role   = "verify diffs; PASS / NITS / FAIL"
+effort = "high"
 
 [orchestrator]
 # Root-only workflow guidance (requires --agents), folded into the system prompt

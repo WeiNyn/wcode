@@ -336,7 +336,7 @@ pub fn group_dir_of(p: &Path) -> Option<PathBuf> {
 ///   "group": "1768570000000_a1b2c3d4",
 ///   "members": [
 ///     { "name": "w1", "model": null, "role": null, "tools": null,
-///       "base_url": "http://…", "api_key": "…" }
+///       "base_url": "http://…", "api_key": "…", "effort": null, "read_only": true }
 ///   ]
 /// }
 /// ```
@@ -366,6 +366,10 @@ impl Manifest {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// The serializable mirror of [`WorkerSpec`] — same six optional fields, no
 /// dependency on `WorkerSpec`'s own derives. [`Self::from_worker_spec`] /
 /// [`Self::to_worker_spec`] are the write/read seam.
@@ -385,6 +389,12 @@ pub struct MemberRecord {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Enforce read-only on resume (D1/D2); omitted from JSON when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    /// Reasoning-effort override (D3); `None` inherits, synonyms clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 impl MemberRecord {
@@ -397,6 +407,8 @@ impl MemberRecord {
             tools: spec.tools.clone(),
             base_url: spec.base_url.clone(),
             api_key: spec.api_key.clone(),
+            read_only: spec.read_only,
+            effort: spec.effort.clone(),
         })
     }
 
@@ -410,6 +422,8 @@ impl MemberRecord {
             tools: self.tools.clone(),
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
+            read_only: self.read_only,
+            effort: self.effort.clone(),
         }
     }
 }
@@ -950,6 +964,8 @@ mod tests {
             tools: Some(vec!["read".into()]),
             base_url: Some("http://x".into()),
             api_key: Some("k".into()),
+            read_only: true,
+            effort: Some("high".into()),
         };
         let record = MemberRecord::from_worker_spec(&full).unwrap();
         assert_eq!(record.role.as_deref(), Some("role text"), "system → role");
@@ -967,6 +983,8 @@ mod tests {
         assert_eq!(back.tools, full.tools);
         assert_eq!(back.base_url, full.base_url);
         assert_eq!(back.api_key, full.api_key);
+        assert!(back.read_only, "read_only survives the manifest");
+        assert_eq!(back.effort, full.effort);
 
         // A nameless spec cannot be recorded (a record is always named).
         assert!(MemberRecord::from_worker_spec(&WorkerSpec::default()).is_none());

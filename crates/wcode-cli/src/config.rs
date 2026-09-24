@@ -224,6 +224,14 @@ pub struct TeamMember {
     pub base_url: Option<String>,
     /// Provider API key override; `None` inherits the orchestrator's.
     pub api_key: Option<String>,
+    /// Enforce read-only for this member (D1/D2); default false.
+    #[serde(default)]
+    pub read_only: bool,
+
+    /// Reasoning-effort override (D3). `None` inherits; `"-"`/`"none"`/`"off"`
+    /// clears; any other value sets it. `#[serde(default)]` = None.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// The `[orchestrator]` table (F3b): guidance for the root orchestrator. An
@@ -879,6 +887,8 @@ role = "recon"
 tools = ["read"]
 base_url = "http://w/v1"
 api_key = "wk"
+read_only = true
+effort = "high"
 [[team]]
 name = "reviewer"
 "#,
@@ -891,9 +901,13 @@ name = "reviewer"
         assert_eq!(file.team[0].tools, Some(vec!["read".to_string()]));
         assert_eq!(file.team[0].base_url.as_deref(), Some("http://w/v1"));
         assert_eq!(file.team[0].api_key.as_deref(), Some("wk"));
+        assert!(file.team[0].read_only);
+        assert_eq!(file.team[0].effort.as_deref(), Some("high"));
         assert_eq!(file.team[1].name, "reviewer");
         assert_eq!(file.team[1].model, None);
         assert_eq!(file.team[1].base_url, None);
+        assert!(!file.team[1].read_only, "absent read_only defaults false");
+        assert_eq!(file.team[1].effort, None, "absent effort inherits");
     }
 
     #[test]

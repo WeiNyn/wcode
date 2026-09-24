@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::hooks::{Hooks, HooksSet};
+use wcode_harness::hooks::{Hooks, HooksSet, ReadOnlyHooks};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
@@ -128,6 +128,16 @@ pub struct WorkerSpec {
     pub base_url: Option<String>,
     /// Override the provider API key; `None` inherits the orchestrator's.
     pub api_key: Option<String>,
+    /// Reasoning-effort override (D3). `None` inherits the orchestrator's;
+    /// `"-"`/`"none"`/`"off"` clears it (`llm.effort = None`); any other value
+    /// sets `llm.effort = Some(level)` — mirrors the CLI's `--effort` synonyms
+    /// (main.rs:JiYTF). Applied in `worker_config_with` (agents.rs:shZkc region).
+    pub effort: Option<String>,
+
+    /// Enforce read-only (D1/D2): push `ReadOnlyHooks` so the mutating tools and
+    /// mutating `bash`/`bg` are refused. Orthogonal to `tools` (which governs
+    /// what is *offered*); a `read_only` worker offered `edit` is refused it.
+    pub read_only: bool,
 }
 
 /// A freshly spawned, registered worker.
@@ -385,6 +395,11 @@ impl SessionFactory {
         if let Some(api_key) = &spec.api_key {
             llm.api_key = Some(api_key.clone());
         }
+        match spec.effort.as_deref() {
+            None => {}
+            Some("-" | "none" | "off") => llm.effort = None,
+            Some(level) => llm.effort = Some(level.to_string()),
+        }
         // The worker is its own conversation, so give it its own routing id
         // rather than inheriting the root's `x-opencode-session` (D15).
         llm.session_id = Some(id.as_str().to_string());
@@ -403,6 +418,9 @@ impl SessionFactory {
                 hooks.push(Arc::new(crate::workspace::WorkspaceHooks::new(
                     t.digest_cas,
                 )));
+                if spec.read_only {
+                    hooks.push(Arc::new(ReadOnlyHooks::new()));
+                }
                 hooks
             },
             session,
@@ -1107,6 +1125,69 @@ mod tests {
             cfg.system
         );
         assert!(cfg.system.contains("# Role\nrole text"), "{}", cfg.system);
+    }
+
+    #[test]
+    fn a_worker_effort_override_sets_clears_or_inherits() {
+        // The template carries an effort; a worker with `None` inherits it.
+        let llm = LlmOpts {
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let id = SessionId::agent("w1");
+        let owner = SessionId::agent("orch");
+
+        let inherited = factory.worker_config(&id, &owner, &WorkerSpec::default());
+        assert_eq!(inherited.llm.effort.as_deref(), Some("low"), "None inherits");
+
+        let raised = factory.worker_config(
+            &id,
+            &owner,
+            &WorkerSpec {
+                effort: Some("high".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(raised.llm.effort.as_deref(), Some("high"));
+
+        for clear in ["-", "none", "off"] {
+            let cleared = factory.worker_config(
+                &id,
+                &owner,
+                &WorkerSpec {
+                    effort: Some(clear.into()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(cleared.llm.effort, None, "`{clear}` clears");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_only_worker_installs_a_hook_that_refuses_edit() {
+        // A real config built through the factory (not a hand-built `HooksSet`).
+        let cfg = config_for(&WorkerSpec {
+            read_only: true,
+            ..Default::default()
+        });
+        let edit = wcode_harness::hooks::ToolCall {
+            id: "1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({}),
+        };
+        let reason = cfg.hooks.before_tool_call(&edit).await;
+        assert!(
+            reason.as_deref().is_some_and(|r| r.starts_with("read-only worker: ")),
+            "the read-only hook refuses `edit`: {reason:?}"
+        );
+
+        // A worker without the flag has no such hook.
+        let plain = config_for(&WorkerSpec::default());
+        assert!(plain.hooks.before_tool_call(&edit).await.is_none());
     }
 
     /// C1: the worker blurb tells the model *how* to report. The text is

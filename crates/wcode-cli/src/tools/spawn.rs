@@ -40,6 +40,14 @@ pub struct SpawnArgs {
     /// Optional provider API key for the worker (default: the orchestrator's).
     #[serde(default)]
     api_key: Option<String>,
+    /// Enforce read-only for the worker (D1/D2); default false.
+    #[serde(default)]
+    read_only: bool,
+
+    /// Reasoning-effort override (D3). `None` inherits; `"-"`/`"none"`/`"off"`
+    /// clears; any other value sets it.
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 impl SpawnArgs {
@@ -53,6 +61,8 @@ impl SpawnArgs {
             tools: self.tools.clone(),
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
+            read_only: self.read_only,
+            effort: self.effort.clone(),
         }
     }
 }
@@ -159,6 +169,8 @@ impl Spawn {
                 tools: args.tools,
                 base_url: args.base_url,
                 api_key: args.api_key,
+                read_only: args.read_only,
+                effort: args.effort.clone(),
             })
             .await
         {
@@ -221,7 +233,9 @@ impl TypedTool for Spawn {
          overrides the worker's model, `role` appends a role section to its \
          system prompt, `tools` restricts it to the named tools (`message` is \
          always kept; an unknown tool name is rejected), `base_url`/`api_key` \
-         put it on its own provider, and `to` defines it on a served peer \
+         put it on its own provider, `read_only` refuses the mutating tools and \
+         mutating `bash`/`bg`, `effort` overrides its reasoning effort (`-`/ \
+         `none`/`off` clears it), and `to` defines it on a served peer \
          (a `--peer`/`[peers]` name or `agent:<id>`) instead of in-process."
     }
 
@@ -344,6 +358,8 @@ mod tests {
             tools: Some(vec!["read".into()]),
             base_url: Some("http://w/v1".into()),
             api_key: Some("wk".into()),
+            read_only: true,
+            effort: Some("high".into()),
         };
         let spec = args.to_worker_spec();
         assert_eq!(spec.name.as_deref(), Some("w9"));
@@ -353,6 +369,8 @@ mod tests {
         assert_eq!(spec.tools, Some(vec!["read".to_string()]));
         assert_eq!(spec.base_url.as_deref(), Some("http://w/v1"));
         assert_eq!(spec.api_key.as_deref(), Some("wk"));
+        assert!(spec.read_only);
+        assert_eq!(spec.effort.as_deref(), Some("high"));
     }
 
     /// R2: `spawn { to }` defines a worker on a served peer, registers it as a

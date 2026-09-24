@@ -49,6 +49,8 @@ docs/next-steps.md; a task is not done until the second-layer review approves.
 [[team]]
 name  = "explorer"
 role  = "Reconnaissance for the wcode repo. Read-only: inspect with read/grep/find and non-mutating bash; never edit, write, or run mutating commands. Report findings concisely as file:anchor evidence; say plainly when you did not verify something."
+tools = ["read", "grep", "find"]
+read_only = true
 
 [[team]]
 name  = "sketcher"
