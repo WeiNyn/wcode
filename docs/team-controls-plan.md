@@ -1,6 +1,11 @@
 # Team controls: enforced read-only + per-worker effort
 
-**Status:** design locked; sketch → first-layer review → build → second-layer review.
+**Status:** ☑ done — `a25c5e8` (harness: `ReadOnlyHooks` + `Request::Define`
+fields) + `8eb018a` (cli: thread `read_only`/`effort` through spec/team/spawn/
+persistence) + `bdf3edb` (review nit-fold). First-layer review APPROVED (A1–A4);
+second-layer review APPROVED with nits N1–N4 (all folded). Gates: `cargo test
+--workspace` 888 passed / 3 ignored; `cargo clippy --workspace --all-targets`
+clean.
 
 ## Why
 
