@@ -119,10 +119,35 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
     `Options` literals. README + config example.
 
   Commits (landed): `010e7ab` `tui: a configurable [theme] spec (P4)`, `6f7053f`
+  Commits (landed): `010e7ab` `tui: a configurable [theme] spec (P4)`, `6f7053f`
   `cli: load the [theme] table into the TUI`.
+
+- **T4 — live reload + runtime selection.** *Design.* Today `THEME` is a `OnceLock`
+  (`theme.rs:112`), `theme() -> &'static Theme`, and `install` is a documented no-op
+  after the first draw — so the TUI cannot recolor mid-run, and there is no
+  `--theme` flag or `/theme` command.
+  - **Live reload:** `#[derive(Clone, Copy)]` on `Theme` (17 `Style`s); `static
+    THEME: RwLock<Theme>`; `theme() -> Theme` (a copy). `install` → a re-callable
+    `set(spec)` that rewrites the lock. Every call site is a bare `.field` chain, so
+    the by-value change is transparent.
+  - **Cache invalidation (required):** `ui::block_lines` bakes `Style`s into the
+    cached `Line`s (`Surface.cache`, keyed `(rev, width)`). A theme `set` bumps a
+    process-global **generation** (`AtomicU64`); `Surface`/`App` tracks the last-seen
+    generation and, on a change, bumps every `block_revs` entry — else cached blocks
+    keep the old colors.
+  - **Syntect swap:** `SYNTAX_THEME` (`markdown.rs:498`) → `RwLock<&'static Theme>`;
+    `syntax_theme() -> &'static Theme` (unchanged shape); `install_syntax_theme`
+    `Box::leak`s the new theme and swaps the pointer (a `HighlightLines<'static>`
+    needs the `'static` borrow; the leak is bounded by the switch count).
+  - **Selection:** `--theme <name>` (CLI, overrides the config preset);
+    `/theme [name]` in the TUI *and* the REPL; a bare `/theme` opens a **picker**
+    (`PickerKind::Theme`, mirroring `open_model_picker`, seeded from `theme::names()`).
+    A theme change is **client-local** — no `Request`/backend round-trip.
+    `--list-themes` prints the names and exits.
 
 ## 5. Non-goals
 
-Not a theme registry or built-in theme catalog; not behavior config (see the
-repo's "minimalism is the point"); not a change to the kernel — the palette lives
-entirely in `crates/wcode-tui`.
+Not behavior config beyond the theme selector; not a change to the kernel — the
+palette lives entirely in `crates/wcode-tui`. (The "not a theme registry or built-in
+theme catalog" non-goal was deliberately overridden — see items 30/35/36/37/38 and
+[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5.)

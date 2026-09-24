@@ -44,6 +44,7 @@ the boxes as each task completes and keep the status table current.
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 | 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☑ done — `377bf78`; second-layer APPROVED |
 | 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☑ done — `ba8f462`; second-layer APPROVED |
+| 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -882,6 +883,21 @@ and a matching custom syntect code theme, per-role overrides sit on top, and
 `NO_COLOR` wins. `default` is exactly palette B (named-16); a truecolor preset
 degrades to palette B under a non-`Rgb` terminal (256/16 quantization is a
 follow-up).
+
+---
+
+## 39. Live theme reload + runtime selection
+
+**New.** `theme::THEME` is a `OnceLock` — installed once before the first draw, and a
+later `install` is a no-op — so the TUI cannot recolor mid-run; and there is no
+`--theme` flag or `/theme` command (the `[theme] name` selector is startup-only).
+Make the theme store mutable (an `RwLock` swap) and add runtime selection.
+
+> ➡️ **[`tui-theming-plan.md`](tui-theming-plan.md) T4** — the `RwLock` swap, the
+> **transcript-cache invalidation** it requires, the syntect leak-on-swap, and the
+> `--theme` / `/theme` / picker selection.
+
+**Status.** Planned — design drafted; awaiting a sketch + first-layer review.
 
 ---
 
