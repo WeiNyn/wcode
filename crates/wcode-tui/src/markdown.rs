@@ -1,6 +1,7 @@
-//! A small markdown renderer for assistant messages: fenced code blocks,
-//! headings, bullets, tables, and inline `code` / **bold**. Deliberately small —
-//! the transcript needs readable prose and code, not a spec-complete parser.
+//! Markdown → transcript lines via `pulldown-cmark` (CommonMark + GFM tables,
+//! strikethrough, task lists, footnotes). Fenced code is highlighted with
+//! `syntect`; the wrap/table renderers are unchanged from the earlier
+//! hand-rolled version — only tokenization moved to the event stream.
 
 use std::sync::OnceLock;
 
@@ -9,6 +10,8 @@ use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
+
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use crate::theme::{self, ColorMode};
 use crate::ui::{code_style, dim};
@@ -33,6 +36,434 @@ fn body_style() -> Style {
 
 /// Render markdown `text` to transcript lines wrapped to `width`, under the
 /// process color mode.
+/// The pulldown-cmark options: CommonMark + GFM tables/strikethrough/task
+/// lists/footnotes, with the source text preserved (no smart-punctuation) — D2.
+fn options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+}
+
+/// One open list/quote level's gutter contribution (D4).
+struct Gutter {
+    /// Prefix on the level's first emitted line: `"• "` (bullet) or `"│ "`
+    /// (quote). An ORDERED level RECOMPUTES it per item (`format!("{n}. ")`) —
+    /// no literal number is stored (B2).
+    first: String,
+    /// Prefix on the level's other lines (marker-width pad): `"  "`, or a
+    /// matching run of spaces for a recomputed ordered marker (B2).
+    cont: String,
+    /// The style this level imposes on its leaf content (quote → `quote_style()`).
+    base: Style,
+    /// Whether `first` has been consumed (its marker is already on a line).
+    emitted: bool,
+    /// For an ordered list: the NEXT item number (`Some`, seeded to `start - 1`
+    /// by `list_level(Some(start))` so the first `Item`'s `+= 1` yields `start`);
+    /// `None` for bullet/quote (B2).
+    ordered_next: Option<u64>,
+}
+
+/// Which leaf block is being accumulated (D4).
+#[derive(Clone, Copy)]
+enum LeafKind {
+    Paragraph,
+    Heading,
+    ItemText,
+}
+
+/// An open inline span (D5).
+enum Inline {
+    Emphasis,
+    Strong,
+    Link,
+}
+
+/// A fenced/indented code block in progress (D6).
+struct CodeBlock {
+    fence: Fenced,
+    text: String,
+}
+
+impl CodeBlock {
+    fn new(info: &str, mode: ColorMode) -> Self {
+        Self {
+            fence: Fenced::new(info, mode),
+            text: String::new(),
+        }
+    }
+
+    /// Render the collected code: one `Fenced::line` per source line (no `wrap`).
+    fn render(self) -> Vec<Line<'static>> {
+        let mut fence = self.fence;
+        let body = self.text.strip_suffix('\n').unwrap_or(&self.text);
+        body.split('\n').map(|line| fence.line(line)).collect()
+    }
+}
+
+/// A table in progress (D7); `build()` yields the existing `Table`.
+struct TableBuild {
+    aligns: Vec<Align>,
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+    cur_row: Vec<String>,
+    cur_cell: String,
+}
+
+impl TableBuild {
+    fn new(aligns: Vec<Alignment>) -> Self {
+        Self {
+            aligns: aligns
+                .into_iter()
+                .map(|a| match a {
+                    Alignment::Center => Align::Center,
+                    Alignment::Right => Align::Right,
+                    // `Alignment::None` → `Align::Left` (pin #4).
+                    Alignment::None | Alignment::Left => Align::Left,
+                })
+                .collect(),
+            header: Vec::new(),
+            rows: Vec::new(),
+            cur_row: Vec::new(),
+            cur_cell: String::new(),
+        }
+    }
+
+    fn begin_row(&mut self) {
+        self.cur_row.clear();
+    }
+
+    fn begin_cell(&mut self) {
+        self.cur_cell.clear();
+    }
+
+    fn end_cell(&mut self) {
+        self.cur_row.push(std::mem::take(&mut self.cur_cell));
+    }
+
+    /// `TableHead` is itself the header row (its cells are its direct children).
+    fn end_head(&mut self) {
+        self.header = std::mem::take(&mut self.cur_row);
+    }
+
+    fn end_row(&mut self) {
+        self.rows.push(std::mem::take(&mut self.cur_row));
+    }
+
+    fn build(self) -> Table {
+        Table {
+            header: self.header,
+            aligns: self.aligns,
+            rows: self.rows,
+        }
+    }
+}
+
+/// The event walk (D4): accumulates the current leaf block's styled runs, a
+/// gutter stack of open list/quote levels, and the completed output.
+struct Blocks {
+    /// Styled inline runs of the current leaf block (D4/D5).
+    runs: Vec<(String, Style)>,
+    /// Open inline spans, outermost first (D5).
+    inline: Vec<Inline>,
+    /// Open list/quote levels, outermost first (D4).
+    stack: Vec<Gutter>,
+    /// The current leaf's kind + base style, set on its `Start`.
+    leaf: Option<(LeafKind, Style)>,
+    /// A code block in progress (D6); `Some` swallows Text/SoftBreak.
+    code: Option<CodeBlock>,
+    /// A table in progress (D7); `Some` swallows Text into cells.
+    table: Option<TableBuild>,
+    /// Completed output.
+    out: Vec<Line<'static>>,
+    /// The wrap width — needed to FLUSH an open leaf on a block-level `Start`
+    /// (B1), so the walk holds it rather than threading it through `on_start`.
+    width: usize,
+}
+
+impl Blocks {
+    fn new(width: usize) -> Self {
+        Self {
+            runs: Vec::new(),
+            inline: Vec::new(),
+            stack: Vec::new(),
+            leaf: None,
+            code: None,
+            table: None,
+            out: Vec::new(),
+            width,
+        }
+    }
+
+    /// `Event::Start` → FLUSH the open leaf (B1), then open a level
+    /// (List/BlockQuote), begin a leaf (Paragraph/Heading), or enter code/table
+    /// mode. `mode` is needed ONLY for the `Fenced` highlighter (D6).
+    fn on_start(&mut self, tag: Tag, mode: ColorMode) {
+        match tag {
+            Tag::Heading { level, .. } => {
+                self.flush_leaf();
+                self.leaf = Some((LeafKind::Heading, heading_level_style(level as usize)));
+            }
+            Tag::Paragraph => {
+                self.flush_leaf();
+                let base = self.leaf_base();
+                self.leaf = Some((LeafKind::Paragraph, base));
+            }
+            Tag::List(start) => {
+                self.flush_leaf();
+                self.stack.push(Self::list_level(start));
+            }
+            Tag::BlockQuote(_) => {
+                self.flush_leaf();
+                self.stack.push(Self::quote_level());
+            }
+            Tag::CodeBlock(kind) => {
+                self.flush_leaf();
+                let info = match &kind {
+                    CodeBlockKind::Fenced(info) => info.as_ref(),
+                    CodeBlockKind::Indented => "",
+                };
+                self.code = Some(CodeBlock::new(info, mode));
+            }
+            Tag::Table(aligns) => {
+                self.flush_leaf();
+                self.table = Some(TableBuild::new(aligns));
+            }
+            Tag::TableHead | Tag::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.begin_row();
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.begin_cell();
+                }
+            }
+            Tag::Item => {
+                // B2: an ordered level recomputes its marker per item.
+                if let Some(top) = self.stack.last_mut() {
+                    if let Some(next) = top.ordered_next {
+                        let n = next + 1;
+                        top.ordered_next = Some(n);
+                        top.first = format!("{n}. ");
+                        top.cont = " ".repeat(top.first.len());
+                    }
+                    top.emitted = false;
+                }
+            }
+            Tag::Emphasis => self.inline.push(Inline::Emphasis),
+            Tag::Strong => self.inline.push(Inline::Strong),
+            Tag::Link { .. } | Tag::Image { .. } => self.inline.push(Inline::Link),
+            _ => {}
+        }
+    }
+
+    /// `Event::End` → close a level, FLUSH a leaf (`wrap` to the width), or emit
+    /// a code block / table.
+    fn on_end(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => self.flush_leaf(),
+            TagEnd::List(_) | TagEnd::BlockQuote(_) => {
+                self.stack.pop();
+            }
+            TagEnd::CodeBlock => {
+                if let Some(code) = self.code.take() {
+                    self.out.extend(code.render());
+                }
+            }
+            TagEnd::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.end_cell();
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some(table) = self.table.as_mut() {
+                    table.end_head();
+                }
+            }
+            TagEnd::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.end_row();
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    let width = self.width;
+                    self.out.extend(table_lines(&table.build(), width));
+                }
+            }
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Link | TagEnd::Image => {
+                self.inline.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// The remaining events: Text/Code/SoftBreak/HardBreak/Rule/
+    /// TaskListMarker/FootnoteReference (D5). Code/table text is swallowed
+    /// first (D6/D7).
+    fn on_event(&mut self, ev: Event) {
+        if self.code.is_some() || self.table.is_some() {
+            let text = match &ev {
+                Event::Text(t) | Event::Code(t) => t.as_ref(),
+                Event::SoftBreak => " ",
+                Event::HardBreak => "\n",
+                _ => return,
+            };
+            if let Some(code) = self.code.as_mut() {
+                code.text.push_str(text);
+            } else if let Some(table) = self.table.as_mut() {
+                table.cur_cell.push_str(text);
+            }
+            return;
+        }
+        match ev {
+            Event::Text(t) => {
+                let style = self.inline_style();
+                self.push_run(&t, style);
+            }
+            Event::Code(t) => self.push_run(&t, code_style()),
+            Event::SoftBreak => {
+                let style = self.inline_style();
+                self.push_run(" ", style);
+            }
+            Event::HardBreak => {
+                let style = self.inline_style();
+                self.push_run("\n", style);
+            }
+            Event::Rule => {
+                let line = Self::rule_line();
+                self.out.push(line);
+            }
+            Event::TaskListMarker(done) => {
+                let style = self.inline_style();
+                self.push_run(if done { "[x] " } else { "[ ] " }, style);
+            }
+            // Footnotes render their text only (Q1); HTML is a non-goal (§7).
+            Event::FootnoteReference(_) | Event::Html(_) | Event::InlineHtml(_) => {}
+            _ => {}
+        }
+    }
+
+    /// Flush any trailing leaf and return the lines (defensive; the parser
+    /// always closes its blocks).
+    fn finish(mut self) -> Vec<Line<'static>> {
+        self.flush_leaf();
+        self.out
+    }
+
+    // ---- helpers ----
+
+    /// Compose `(first, cont)` from the stack, CONSUMING each level's
+    /// un-emitted `first` (so a marker appears once). `GUTTER` is prepended once.
+    fn prefixes(&mut self) -> (String, String) {
+        let mut first = String::new();
+        let mut cont = String::new();
+        for level in &mut self.stack {
+            first.push_str(if level.emitted { &level.cont } else { &level.first });
+            cont.push_str(&level.cont);
+            level.emitted = true;
+        }
+        (format!("{GUTTER}{first}"), format!("{GUTTER}{cont}"))
+    }
+
+    /// The current leaf's base: its stored style, else the innermost level's
+    /// `base`, else `body_style()`.
+    fn leaf_base(&self) -> Style {
+        if let Some((_, style)) = &self.leaf {
+            return *style;
+        }
+        self.stack.last().map(|g| g.base).unwrap_or_else(body_style)
+    }
+
+    /// The style for the current inline context: body + Emphasis/Strong/Link.
+    fn inline_style(&self) -> Style {
+        let mut style = self.leaf_base();
+        for span in &self.inline {
+            match span {
+                Inline::Emphasis => style = style.add_modifier(Modifier::ITALIC),
+                Inline::Strong => style = style.add_modifier(Modifier::BOLD),
+                Inline::Link => style = link_style(),
+            }
+        }
+        style
+    }
+
+    /// Append a run, opening an implicit `ItemText` leaf if none is open
+    /// (tight-list text arrives with no `Paragraph`).
+    fn push_run(&mut self, text: &str, style: Style) {
+        if self.leaf.is_none() {
+            let base = self.leaf_base();
+            self.leaf = Some((LeafKind::ItemText, base));
+        }
+        self.runs.push((text.to_string(), style));
+    }
+
+    /// Split `runs` on the `"\n"` hard-break sentinel and `wrap` each segment
+    /// (first segment with `first`, the rest with `cont`) into `out`.
+    fn flush_leaf(&mut self) {
+        if self.runs.is_empty() {
+            self.leaf = None;
+            return;
+        }
+        let base = self.leaf_base();
+        let (first, cont) = self.prefixes();
+        let width = self.width;
+        let mut segment: Vec<(String, Style)> = Vec::new();
+        for (text, style) in std::mem::take(&mut self.runs) {
+            if text == "\n" {
+                if !segment.is_empty() {
+                    self.out
+                        .extend(wrap(std::mem::take(&mut segment), width, &first, &cont, base));
+                }
+            } else {
+                segment.push((text, style));
+            }
+        }
+        if !segment.is_empty() {
+            self.out.extend(wrap(segment, width, &first, &cont, base));
+        }
+        self.leaf = None;
+    }
+
+    /// Build a list level. `Some(start)` seeds `ordered_next = start - 1`
+    /// (so the first `Item` yields `start`); `None` is a bullet (B2/D8).
+    fn list_level(start: Option<u64>) -> Gutter {
+        match start {
+            Some(n) => Gutter {
+                first: format!("{n}. "),
+                cont: " ".repeat(format!("{n}. ").len()),
+                base: body_style(),
+                emitted: false,
+                ordered_next: Some(n.saturating_sub(1)),
+            },
+            None => Gutter {
+                first: "• ".to_string(),
+                cont: "  ".to_string(),
+                base: body_style(),
+                emitted: false,
+                ordered_next: None,
+            },
+        }
+    }
+
+    /// Build a quote level (`first = "│ "`, `cont = "  "`, `base = quote_style()`).
+    fn quote_level() -> Gutter {
+        Gutter {
+            first: "│ ".to_string(),
+            cont: "  ".to_string(),
+            base: quote_style(),
+            emitted: false,
+            ordered_next: None,
+        }
+    }
+
+    /// `Event::Rule` → a dim thematic break.
+    fn rule_line() -> Line<'static> {
+        Line::from(Span::styled(format!("{GUTTER}{}", "─".repeat(24)), dim()))
+    }
+}
+
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     render_mode(text, width, theme::color_mode())
 }
@@ -40,69 +471,15 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
 /// The color-mode seam: `render` delegates here so tests can pin a mode (the
 /// process-wide `color_mode()` is a `OnceLock`, not settable per test).
 pub(crate) fn render_mode(text: &str, width: usize, mode: ColorMode) -> Vec<Line<'static>> {
-    let raw: Vec<&str> = text.split('\n').collect();
-    let mut lines = Vec::new();
-    // The stateful highlighter lives for exactly one fence (B1: always `Some`
-    // inside a fence; only its highlighter is optional).
-    let mut fence: Option<Fenced> = None;
-    let mut i = 0;
-
-    while i < raw.len() {
-        let line = raw[i].trim_end();
-
-        if let Some(f) = fence.as_mut() {
-            if is_fence(line) {
-                fence = None; // close: drop the highlighter
-            } else {
-                lines.push(f.line(line)); // stateful: feeds THIS fenced line
-            }
-            i += 1;
-            continue;
+    let mut blocks = Blocks::new(width);
+    for ev in Parser::new_ext(text, options()) {
+        match ev {
+            Event::Start(tag) => blocks.on_start(tag, mode),
+            Event::End(tag) => blocks.on_end(tag),
+            other => blocks.on_event(other),
         }
-        if is_fence(line) {
-            // B2: a bare ``` still opens a fence; `Fenced::new` is infallible (B1).
-            fence = Some(Fenced::new(fence_info(line).unwrap_or(""), mode));
-            i += 1;
-            continue;
-        }
-        if let Some((table, next)) = table_at(&raw, i) {
-            lines.extend(table_lines(&table, width));
-            i = next;
-            continue;
-        }
-        // Order: indentation first (so `  - x` is a nested bullet), then quote
-        // (wins over heading/bullet), heading, ordered, bullet, blank, paragraph.
-        let (level, rest) = leading_indent(line);
-        if let Some((body, depth)) = quote(rest) {
-            let (first, cont) = quote_gutter(level, depth);
-            lines.extend(wrap(inline(body), width, &first, &cont, quote_style()));
-        } else if let Some((lvl, text)) = heading(rest) {
-            let gutter = indent_prefix(level);
-            lines.extend(wrap(
-                inline(text),
-                width,
-                &gutter,
-                &gutter,
-                heading_level_style(lvl),
-            ));
-        } else if let Some((marker, body)) = ordered(rest) {
-            let pad = " ".repeat(marker.chars().count());
-            let first = format!("{}{marker}", indent_prefix(level));
-            let cont = format!("{}{pad}", indent_prefix(level));
-            lines.extend(wrap(inline(body), width, &first, &cont, body_style()));
-        } else if let Some(item) = bullet(rest) {
-            let first = format!("{}• ", indent_prefix(level));
-            let cont = format!("{}  ", indent_prefix(level));
-            lines.extend(wrap(inline(item), width, &first, &cont, body_style()));
-        } else if rest.is_empty() {
-            lines.push(Line::default());
-        } else {
-            let gutter = indent_prefix(level);
-            lines.extend(wrap(inline(rest), width, &gutter, &gutter, body_style()));
-        }
-        i += 1;
     }
-    lines
+    blocks.finish()
 }
 
 /// The bundled syntax definitions, loaded once (match `theme.rs`'s install-once
@@ -156,25 +533,8 @@ impl Fenced {
     }
 }
 
-/// True for any ```` ``` ```` line (open or close), bare or tagged.
-fn is_fence(line: &str) -> bool {
-    line.trim_start().starts_with("```")
-}
-
-/// The token after the backticks, trimmed: ```` ```rust ```` → `Some("rust")`,
-/// ```` ``` ```` → `None`. Takes the FIRST whitespace/comma-delimited word, so
-/// ```` ```rust,no_run ```` / ```` ```rust ignore ```` still resolve.
-fn fence_info(line: &str) -> Option<&str> {
-    let after = line.trim_start().strip_prefix("```")?;
-    let token = after
-        .trim_start()
-        .split([' ', '\t', ','])
-        .next()
-        .unwrap_or("");
-    (!token.is_empty()).then_some(token)
-}
-
 /// B3: TOTAL. `find_syntax_by_token` then `find_syntax_by_extension`; `None` for a
+/// bare or unknown info string (the caller renders uniformly).
 /// bare or unknown info string (the caller renders uniformly).
 fn fence_syntax(info: &str) -> Option<&'static SyntaxReference> {
     let ss = syntaxes();
@@ -228,85 +588,14 @@ fn code_line(line: &str) -> Line<'static> {
     ])
 }
 
-/// `- item` / `* item` / `+ item` → `item`.
-fn bullet(line: &str) -> Option<&str> {
-    let text = line.trim_start();
-    ["- ", "* ", "+ "]
-        .iter()
-        .find_map(|marker| text.strip_prefix(marker))
-}
-
-/// Split leading indentation: `(level, remainder)`. Each 2 columns — a space, or a
-/// tab counted as two — is one level; an odd trailing space floors. `remainder`
-/// carries no leading whitespace.
-fn leading_indent(line: &str) -> (usize, &str) {
-    let rest = line.trim_start_matches([' ', '\t']);
-    let cols = line[..line.len() - rest.len()]
-        .chars()
-        .map(|c| if c == '\t' { 2 } else { 1 })
-        .sum::<usize>();
-    (cols / 2, rest)
-}
-
-/// `# Title` (one to six `#`) → `(level, "Title")`; the `#` marker is dropped.
-/// Seven-or-more hashes are not a heading.
-fn heading(line: &str) -> Option<(usize, &str)> {
-    let text = line.trim_start();
-    let hashes = text.chars().take_while(|c| *c == '#').count();
-    if (1..=6).contains(&hashes) && text[hashes..].starts_with(' ') {
-        Some((hashes, text[hashes..].trim_start()))
-    } else {
-        None
-    }
-}
-
 /// The style for a heading `level`: level 1 is the primary heading, deeper levels
+/// step down to the quieter `heading_sub`.
 /// step down to the quieter `heading_sub`.
 fn heading_level_style(level: usize) -> Style {
     match level {
         1 => heading_style(),
         _ => theme::theme().heading_sub,
     }
-}
-
-/// `1. ` / `2) ` / `10. ` (1+ digits, then `. ` or `) `) → `(marker, body)`. The
-/// `marker` keeps its number and trailing space so a wrapped continuation aligns
-/// under the item text.
-fn ordered(line: &str) -> Option<(&str, &str)> {
-    let text = line.trim_start();
-    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
-    let after = &text[digits..];
-    if digits == 0 || !(after.starts_with(". ") || after.starts_with(") ")) {
-        return None;
-    }
-    Some((&text[..digits + 2], &text[digits + 2..]))
-}
-
-/// `> text` → `(body, depth)`; each leading `>` (with an optional single space) adds
-/// a level, so `> > x` is depth 2.
-fn quote(line: &str) -> Option<(&str, usize)> {
-    let mut rest = line;
-    let mut depth = 0;
-    while let Some(after) = rest.strip_prefix('>') {
-        depth += 1;
-        rest = after.strip_prefix(' ').unwrap_or(after);
-    }
-    (depth > 0).then_some((rest, depth))
-}
-
-/// `{GUTTER}` + 2·`level` spaces — the prefix/continuation base for indented content.
-fn indent_prefix(level: usize) -> String {
-    format!("{GUTTER}{}", " ".repeat(2 * level))
-}
-
-/// `(prefix, continuation)` for a blockquote at `level`/`depth`: one `│ ` per depth,
-/// with a matching run of spaces on wrapped continuations.
-fn quote_gutter(level: usize, depth: usize) -> (String, String) {
-    let base = indent_prefix(level);
-    (
-        format!("{base}{}", "│ ".repeat(depth)),
-        format!("{base}{}", "  ".repeat(depth)),
-    )
 }
 
 /// A blockquote body is muted; its `│ ` gutter is `dim()` via `line_with`.
@@ -327,54 +616,6 @@ enum Align {
     Left,
     Right,
     Center,
-}
-
-/// A table starting at `lines[start]` (`header` + `|---|` delimiter), returning
-/// it and the index just past its last row.
-fn table_at(lines: &[&str], start: usize) -> Option<(Table, usize)> {
-    let header = *lines.get(start)?;
-    let delimiter = *lines.get(start + 1)?;
-    if !header.contains('|') || !is_delimiter(delimiter) {
-        return None;
-    }
-    let (header, aligns) = (split_row(header), parse_aligns(delimiter));
-
-    let mut rows = Vec::new();
-    let mut i = start + 2;
-    while let Some(row) = lines.get(i) {
-        if !row.contains('|') || row.trim().is_empty() {
-            break;
-        }
-        rows.push(split_row(row));
-        i += 1;
-    }
-    Some((Table { header, aligns, rows }, i))
-}
-
-/// A delimiter row is made only of `-`, `:`, `|`, and spaces, with a dash.
-fn is_delimiter(line: &str) -> bool {
-    let t = line.trim();
-    !t.is_empty()
-        && t.contains('-')
-        && t.contains('|')
-        && t.chars().all(|c| matches!(c, '-' | ':' | '|' | ' ' | '\t'))
-}
-
-/// Split `| a | b |` into `["a", "b"]` (leading/trailing pipes ignored).
-fn split_row(line: &str) -> Vec<String> {
-    let t = line.trim().trim_matches('|');
-    t.split('|').map(|cell| cell.trim().to_string()).collect()
-}
-
-fn parse_aligns(delimiter: &str) -> Vec<Align> {
-    split_row(delimiter)
-        .iter()
-        .map(|cell| match (cell.starts_with(':'), cell.ends_with(':')) {
-            (true, true) => Align::Center,
-            (false, true) => Align::Right,
-            _ => Align::Left,
-        })
-        .collect()
 }
 
 fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
@@ -524,109 +765,8 @@ fn disp(text: &str) -> usize {
     text.chars().count()
 }
 
-// --- inline spans -----------------------------------------------------------
-
-/// Split a line into styled runs for inline `` `code` `` and `**bold**`.
-fn inline(text: &str) -> Vec<(String, Style)> {
-    let plain = body_style();
-    let mut runs = Vec::new();
-    let mut buf = String::new();
-    let mut rest = text;
-    // The last character consumed — the left neighbour of `rest`, for the `_x_`
-    // word-boundary rule (`prev: Option<char>` avoids peeking an empty buffer).
-    let mut prev: Option<char> = None;
-
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("**")
-            && let Some(end) = after.find("**")
-        {
-            flush(&mut runs, &mut buf);
-            runs.push((after[..end].to_string(), plain.add_modifier(Modifier::BOLD)));
-            prev = Some('*');
-            rest = &after[end + 2..];
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix('[')
-            && let Some(close) = after.find(']')
-            && let Some(url) = after[close + 1..].strip_prefix('(')
-            && let Some(end) = url.find(')')
-        {
-            // `[label](url)` renders the label alone, in the link style (the TUI
-            // cannot follow a link, so the URL would only add noise).
-            flush(&mut runs, &mut buf);
-            runs.push((after[..close].to_string(), link_style()));
-            prev = Some(')');
-            rest = &url[end + 1..];
-            continue;
-        }
-        if let Some(after) = rest.strip_prefix('`')
-            && let Some(end) = after.find('`')
-        {
-            flush(&mut runs, &mut buf);
-            runs.push((after[..end].to_string(), code_style()));
-            prev = Some('`');
-            rest = &after[end + 1..];
-            continue;
-        }
-        // Italic is LAST, so bold/link/code above already claimed their markers.
-        // `*x*` needs non-space content edges; `_x_` also needs word boundaries so
-        // identifiers (`foo_bar_baz`) stay plain.
-        if let Some(after) = rest.strip_prefix('*')
-            && let Some(end) = after.find('*')
-        {
-            let content = &after[..end];
-            if has_italic_edges(content) {
-                flush(&mut runs, &mut buf);
-                runs.push((content.to_string(), plain.add_modifier(Modifier::ITALIC)));
-                prev = Some('*');
-                rest = &after[end + 1..];
-                continue;
-            }
-        }
-        if let Some(after) = rest.strip_prefix('_')
-            && let Some(end) = after.find('_')
-            // A `prev`/closing guard keeps a `__` run (a dunder like `__init__`)
-            // from italicizing its inner word.
-            && prev.is_none_or(|c| !c.is_alphanumeric() && c != '_')
-            && after[end + 1..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
-        {
-            let content = &after[..end];
-            if has_italic_edges(content) {
-                flush(&mut runs, &mut buf);
-                runs.push((content.to_string(), plain.add_modifier(Modifier::ITALIC)));
-                prev = Some('_');
-                rest = &after[end + 1..];
-                continue;
-            }
-        }
-        let ch = rest.chars().next().unwrap();
-        buf.push(ch);
-        prev = Some(ch);
-        rest = &rest[ch.len_utf8()..];
-    }
-    flush(&mut runs, &mut buf);
-    runs
-}
-
-/// Italic content must be non-empty with non-whitespace first/last characters, so
-/// `a * b * c` stays plain.
-fn has_italic_edges(content: &str) -> bool {
-    match (content.chars().next(), content.chars().last()) {
-        (Some(first), Some(last)) => !first.is_whitespace() && !last.is_whitespace(),
-        _ => false,
-    }
-}
-
-fn flush(runs: &mut Vec<(String, Style)>, buf: &mut String) {
-    if !buf.is_empty() {
-        runs.push((std::mem::take(buf), body_style()));
-    }
-}
-
 /// Greedy word-wrap styled runs, prefixing the first line with `first` and
+/// continuations with `cont`. `base` styles the prefix.
 /// continuations with `cont`. `base` styles the prefix.
 fn wrap(
     runs: Vec<(String, Style)>,
@@ -724,6 +864,7 @@ fn line_with(prefix: &str, spans: Vec<Span<'static>>, base: Style) -> Line<'stat
 mod tests {
     use super::*;
 
+
     #[test]
     fn heading_levels_differ() {
         let lines = render("# h1\n## h2\n###### h6", 40);
@@ -742,9 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn ordered_lists_keep_their_numbers() {
+    fn ordered_lists_renumber_and_align_continuations() {
+        // CommonMark renumbers from the list's start (1, 2, 3 …), not the literals.
         let text = text_of(&render("1. a\n2. b\n10. c", 40));
-        assert_eq!(text, ["   1. a", "   2. b", "   10. c"]);
+        assert_eq!(text, ["   1. a", "   2. b", "   3. c"]);
 
         // A wrapped item's continuation aligns under the text (real marker width).
         let lines = render("10. one two three four five six", 20);
@@ -811,16 +953,22 @@ mod tests {
             "snake_case must not italicize: {lines:?}"
         );
 
-        // A `__` run (a dunder) must not italicize its inner word either.
-        for dunder in ["__init__", "__dunder__"] {
+        // A `__` run (a dunder) is STRONG (CommonMark), never italic.
+        for (dunder, inner) in [("__init__", "init"), ("__dunder__", "dunder")] {
             let lines = render(dunder, 40);
-            assert_eq!(text_of(&lines), [format!("   {dunder}")]);
+            assert_eq!(text_of(&lines), [format!("   {inner}")]);
+            let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
             assert!(
-                lines
+                spans
                     .iter()
-                    .flat_map(|l| l.spans.iter())
                     .all(|s| !s.style.add_modifier.contains(Modifier::ITALIC)),
                 "`{dunder}` must not italicize: {lines:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+                "`{dunder}` is strong: {lines:?}"
             );
         }
 
@@ -849,11 +997,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_quoted_bullet_is_not_reparsed() {
-        // The quoted body is emitted literally — a bullet-looking body stays text.
-        assert_eq!(text_of(&render("> - x", 40)), ["   │ - x"]);
-    }
 
     #[test]
     fn seven_hashes_are_not_a_heading() {
@@ -1115,5 +1258,22 @@ mod tests {
                 .any(|s| s.style == link && s.content.as_ref() == "docs"),
             "the label is not in the link style: {lines:?}"
         );
+    }
+
+    #[test]
+    fn task_lists_render_a_checkbox() {
+        let text = text_of(&render("- [ ] todo\n- [x] done", 40));
+        assert_eq!(text.len(), 2, "{text:?}");
+        assert!(text[0].contains("[ ] todo"), "{text:?}");
+        assert!(text[1].contains("[x] done"), "{text:?}");
+    }
+
+    #[test]
+    fn thematic_break_renders_a_rule() {
+        let text = text_of(&render("a\n\n---\n\nb", 40));
+        assert_eq!(text.len(), 3, "{text:?}");
+        assert_eq!(text[0], "   a");
+        assert!(text[1].starts_with("   ─"), "{text:?}");
+        assert_eq!(text[2], "   b");
     }
 }

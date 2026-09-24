@@ -42,7 +42,7 @@ the boxes as each task completes and keep the status table current.
 | 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
 | 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☑ done — `ed4dde9`; second-layer APPROVED; live-verified |
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
-| 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ☐ todo |
+| 37 | Markdown parser → `pulldown-cmark` (spec-complete CommonMark+GFM) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)) | ◐ Part A done — parser migrated; Part B (themes) separate |
 | 38 | Built-in theme catalog (`[theme] name = …` + a per-theme syntect code theme) (see [`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5) | ☐ todo |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
@@ -857,7 +857,7 @@ phase-1a cache depends on it), the `wrap` primitive, and the syntect path.
 > ➡️ **[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md)** — why, ground truth,
 > decisions D1–D9, the Event→Line interface, non-goals, open questions Q1–Q3.
 
-**Status.** Planned — design drafted; awaiting the first-layer review, then a sketch.
+**Status.** ◐ Part A done — the TUI markdown parser now runs on `pulldown-cmark` (CommonMark + GFM tables/strikethrough/task lists/footnotes) via an event walk; `render`'s signature, `wrap`, and the syntect path are unchanged. Part B (themes) is separate.
 
 ---
 
