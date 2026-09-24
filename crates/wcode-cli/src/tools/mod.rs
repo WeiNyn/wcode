@@ -17,6 +17,7 @@ pub mod spawn;
 pub mod task;
 pub mod session_search;
 pub mod todo;
+pub mod webfetch;
 pub mod write;
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,9 @@ pub fn default_tools(
     let lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut tools = vec![
         erased(read::Read),
+        // A core read-only capability (like `read`, D6): always on, not behind
+        // the mutation `lock`; `WebFetch::new()` builds its client once (D10).
+        erased(webfetch::WebFetch::new()),
         erased(bash::Bash::new(bg.clone())),
         // Always registered, beside `bash` (D14): `bash { background: true }`
         // starts a task and `bg` manages it.
@@ -215,6 +219,7 @@ mod tests {
             "read",
             "bash",
             "bg",
+            "webfetch",
             "edit",
             "edits",
             "replace",

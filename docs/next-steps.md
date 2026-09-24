@@ -40,7 +40,7 @@ the boxes as each task completes and keep the status table current.
 | 32 | TUI info/UX: richer status, per-tool timing, docked sidebar | ☑ done — `7fea5c5` (harness tool duration), `08843bc` (tool timing), `c31fbf0` (elapsed + changes + todos chips), `5464318` (cwd + git branch), `fa88406` (docked sidebar, `Ctrl-B`); see [tui-design.md](tui-design.md) |
 | 33 | TUI layout redesign: bordered input box + session line + team above | ☑ done — `079c0b1`; chrome moved onto a rounded input box (project⎇branch / model·effort / context gauge ▰▱ / mode·state), session line on top, team region above the box (running only, ≤3, newest last) |
 | 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
-| 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☐ planned — reviewed, ready to sketch |
+| 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ◐ in progress — implemented; review pending |
 | 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
@@ -800,8 +800,9 @@ reduces HTML to readable text and caps the output — closing the URL gap the wa
 > ➡️ **[`webfetch-plan.md`](webfetch-plan.md)** — why, ground truth, decisions
 > D1–D12 (locked), the interface, non-goals, Q1–Q5 resolved, sizing.
 
-**Status.** Reviewed — first-layer **BLOCK** folded (the `rustls` feature name, the
-format matrix, D9–D12); ready to sketch.
+**Status.** ◐ In progress — implemented: a new always-on `webfetch` tool (GET only;
+HTML→text/markdown via a regex converter; 5 MiB body cap + 40k-char output cap;
+cancel races `ctx.cancel`) plus the `reqwest` 0.13 `rustls` dependency. Review pending.
 
 ---
 

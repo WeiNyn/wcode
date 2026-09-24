@@ -219,6 +219,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 
 | tool | behavior |
 |---|---|
+| `webfetch` | GET a URL over http(s); HTML reduced to readable text. `format` = `text`/`markdown`/`html` (default `markdown`); `timeout` seconds (default 30, max 120). Body capped at 5 MiB, output at 40k chars. Read-only, always registered |
 | `read` | file contents as `ANCHOR│line` — the 5-char anchor is the line's content address and the `edit` target (no line numbers; `plain:true` restores `cat -n`). Anchors survive inserts/deletes above; they hash the line's raw content, so indentation is semantically meaningful (a nested `}` is a different anchor from a top-level one) — but a formatter that reindents moves an indented line's anchor (re-read after formatting). `offset`/`limit` page |
 | `grep` | regex search; results carry anchors so a hit feeds straight into `edit` (`path:line  ANCHOR│line  <--`). **Respects `.gitignore`** (plus `.git`/`target`/`node_modules` as a built-in floor) and skips binaries; `no_ignore:true` searches ignored files too. Glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
 | `find` | glob-based file/dir listing, one path per line. **Respects `.gitignore`**; `no_ignore:true` lists ignored entries too. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
@@ -235,7 +236,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 rename, so concurrent file mutation can't interleave or truncate.
 
 When the model issues several tool calls in one message, the independent ones run
-**concurrently** — `read`/`grep`/`find`/`ast_search` are read-only and opt in;
+**concurrently** — `read`/`grep`/`find`/`ast_search`/`webfetch` are read-only and opt in;
 mutating tools and `bash` are barriers, so no read can race a write inside a
 batch. Results are still appended in call order. `--sequential` (or
 `[tools] parallel = false`) restores strictly one-at-a-time execution.
