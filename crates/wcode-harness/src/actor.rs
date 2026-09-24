@@ -843,6 +843,8 @@ mod tests {
                 tools: None,
                 base_url: None,
                 api_key: None,
+                read_only: false,
+                effort: None,
             })
             .await
             .unwrap();

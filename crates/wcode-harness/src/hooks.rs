@@ -217,6 +217,48 @@ fn mutating_build_command(lead: &str, rest: &[&str]) -> bool {
 // (`None`); block only on a clear match. Over-blocking is the lesser evil here,
 // but keep the subset tight.
 
+/// Enforced read-only (D1): while installed, refuse the workspace-mutating tools
+/// and mutating `bash`/`bg`. A guardrail, NOT a sandbox (the same FP/FN budget as
+/// plan mode's bash gate — docs/plan-mode.md §2.4). Stateless: a unit struct.
+pub struct ReadOnlyHooks;
+
+impl ReadOnlyHooks {
+    /// Kept for symmetry with `BashRiskHooks::new` (hooks.rs:zmKr5), so the CLI
+    /// wiring reads `Arc::new(ReadOnlyHooks::new())` like every other built-in.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ReadOnlyHooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Hooks for ReadOnlyHooks {
+    /// `Some(reason)` — the loop shows `blocked: {reason}`, so the reason starts
+    /// `read-only worker: ` — for: any `MUTATING_TOOLS` name (hooks.rs:osi4C);
+    /// `bg` (background `bash` can mutate); `bash` whose `command` satisfies the
+    /// private `looks_mutating` (hooks.rs:SsKd8). Everything else passes.
+    async fn before_tool_call(&self, call: &ToolCall) -> Option<String> {
+        if MUTATING_TOOLS.contains(&call.name.as_str()) {
+            return Some(format!("read-only worker: `{}` is disabled", call.name));
+        }
+        if call.name == "bg" {
+            return Some("read-only worker: `bg` can run a mutating command".into());
+        }
+        if call.name == "bash" {
+            // Extraction mirrors plan_bash_reason (hooks.rs:cVnkO).
+            let cmd = call.arguments.get("command").and_then(|c| c.as_str())?;
+            if looks_mutating(cmd) {
+                return Some("read-only worker: `bash` mutation refused".into());
+            }
+        }
+        None
+    }
+}
 /// Always-on catastrophic-shell guard. Stateless — a unit struct is the entire
 /// type.
 pub struct BashRiskHooks;
@@ -722,6 +764,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn read_only_blocks_every_mutating_tool_and_bg() {
+        let hooks = ReadOnlyHooks::new();
+        for name in MUTATING_TOOLS.iter().copied().chain(std::iter::once("bg")) {
+            let reason = hooks.before_tool_call(&tool_call(name)).await;
+            assert!(
+                reason.is_some_and(|r| r.starts_with("read-only worker: ")),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_blocks_mutating_bash() {
+        let hooks = ReadOnlyHooks::new();
+        for cmd in [
+            "rm -rf build",
+            "mv a b",
+            "echo hi > f",
+            "git commit -m x",
+            "cargo fmt",
+        ] {
+            assert!(
+                hooks.before_tool_call(&bash_call(cmd)).await.is_some(),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_allows_read_tools_todo_message_and_benign_bash() {
+        let hooks = ReadOnlyHooks::new();
+        for name in [
+            "read",
+            "grep",
+            "find",
+            "ast_search",
+            "session_search",
+            "webfetch",
+            "todo",
+            "message",
+            "peers",
+            "task",
+        ] {
+            assert!(
+                hooks.before_tool_call(&tool_call(name)).await.is_none(),
+                "{name}"
+            );
+        }
+        for cmd in ["ls -la", "git status", "cat x", "cargo build"] {
+            assert!(
+                hooks.before_tool_call(&bash_call(cmd)).await.is_none(),
+                "{cmd}"
+            );
+        }
+    }
     // The gate is plan-mode-INDEPENDENT: no handle/flag is set up; a bare
     // `BashRiskHooks::new()` drives it (`bash_call` (ucUhO) / `tool_call`
     // (JHwEE) are the helpers above).

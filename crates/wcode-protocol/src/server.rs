@@ -55,6 +55,10 @@ pub struct DefineArgs {
     pub base_url: Option<String>,
     /// Provider API key override; `None` inherits the server's.
     pub api_key: Option<String>,
+    /// Enforce read-only for the defined worker (D1/D2).
+    pub read_only: bool,
+    /// Reasoning-effort override (D3); `None` inherits, synonyms clear.
+    pub effort: Option<String>,
 }
 
 /// Builds a worker from [`DefineArgs`] and returns its address. A socket server
@@ -229,6 +233,8 @@ async fn connection(
             tools,
             base_url,
             api_key,
+            read_only,
+            effort,
         } = &body
         {
             let reply = match &define {
@@ -239,6 +245,8 @@ async fn connection(
                     tools: tools.clone(),
                     base_url: base_url.clone(),
                     api_key: api_key.clone(),
+                    read_only: *read_only,
+                    effort: effort.clone(),
                 }) {
                     Ok(id) => AgentEvent::Spawned { worker: id },
                     Err(message) => AgentEvent::Error { message },

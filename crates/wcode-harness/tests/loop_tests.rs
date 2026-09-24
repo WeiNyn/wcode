@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
-use wcode_harness::hooks::{BashRiskHooks, Hooks, HooksSet, ToolCall as HookToolCall};
+use wcode_harness::hooks::{BashRiskHooks, Hooks, HooksSet, ReadOnlyHooks, ToolCall as HookToolCall};
 use wcode_harness::loop_::{LoopConfig, LoopError, run_loop};
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
@@ -870,6 +870,67 @@ async fn bash_risk_gate_blocks_rm_rf_root_through_the_loop() {
         &ctx[2],
         AgentMessage::ToolResult { output, is_error: true, .. }
             if output.starts_with("blocked: catastrophic shell command")
+    ));
+    assert_eq!(rec.calls().len(), 2, "loop continues after a blocked call");
+}
+
+/// D1's read-only gate is a real seam, not just a `before_tool_call` unit: an
+/// `edit` call must reach the model as a `blocked: read-only worker: …` error
+/// `ToolResult`, and the loop must continue. No `edit` tool is registered, so
+/// the block is provably the hook's (not a missing-tool error, not a real edit).
+#[tokio::test]
+async fn read_only_gate_blocks_edit_through_the_loop() {
+    let rec = Recorder::default();
+    // Turn 1: the model proposes a workspace mutation.
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({ "path": "x", "old_string": "a", "new_string": "b" }),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    // Turn 2: it recovers and finishes.
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let TestSetup { cfg, .. } = setup(
+        fake_stream_fn(&rec),
+        vec![],
+        HooksSet::one(Arc::new(ReadOnlyHooks::new())),
+    );
+
+    let mut ctx = vec![AgentMessage::user_text("edit a file")];
+    let (res, events) = run(cfg, &mut ctx).await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let end = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                output, is_error, ..
+            } => Some((output, *is_error)),
+            _ => None,
+        })
+        .expect("ToolExecutionEnd emitted");
+    assert!(end.1, "blocked output must be an error");
+    assert!(
+        end.0.starts_with("blocked: read-only worker: "),
+        "unexpected output: {}",
+        end.0
+    );
+    assert!(matches!(
+        &ctx[2],
+        AgentMessage::ToolResult { output, is_error: true, .. }
+            if output.starts_with("blocked: read-only worker: ")
     ));
     assert_eq!(rec.calls().len(), 2, "loop continues after a blocked call");
 }

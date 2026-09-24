@@ -220,6 +220,12 @@ pub enum Request {
         base_url: Option<String>,
         /// Provider API key override; `None` inherits the server's.
         api_key: Option<String>,
+        /// Enforce read-only for the defined worker (D1/D2); default false.
+        #[serde(default)]
+        read_only: bool,
+        /// Reasoning-effort override (D3); `None` inherits, synonyms clear.
+        #[serde(default)]
+        effort: Option<String>,
     },
 
     /// Forward-compatibility catch-all: an older peer must skip a request it
@@ -325,6 +331,8 @@ mod tests {
                 tools: Some(vec!["read".into()]),
                 base_url: Some("http://w/v1".into()),
                 api_key: Some("k".into()),
+                read_only: true,
+                effort: Some("high".into()),
             },
             "define",
         );
@@ -336,6 +344,8 @@ mod tests {
                 tools: None,
                 base_url: None,
                 api_key: None,
+                read_only: false,
+                effort: None,
             },
             "define",
         );
@@ -373,6 +383,8 @@ mod tests {
             tools: None,
             base_url: None,
             api_key: None,
+            read_only: false,
+            effort: None,
         }));
     }
 

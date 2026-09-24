@@ -849,6 +849,8 @@ async fn a_define_request_spawns_on_a_served_peer() {
             tools: None,
             base_url: None,
             api_key: None,
+            read_only: false,
+            effort: None,
         })
         .await
         .unwrap();
@@ -897,6 +899,8 @@ async fn define_without_a_handler_is_a_correlated_error() {
             tools: None,
             base_url: None,
             api_key: None,
+            read_only: false,
+            effort: None,
         })
         .await
         .unwrap();
