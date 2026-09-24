@@ -405,7 +405,7 @@ pub fn scan_all(
 
     // Score desc; `list_groups` is newest-first and `sort_by` is stable, so
     // equal scores keep newest-first (the recency tiebreak, D2).
-    hits.sort_by(|a, b| b.score.cmp(&a.score));
+    hits.sort_by_key(|h| std::cmp::Reverse(h.score));
     hits.truncate(limit);
     Ok(Report::Sessions(hits))
 }

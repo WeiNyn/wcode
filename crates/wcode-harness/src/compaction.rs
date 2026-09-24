@@ -78,10 +78,10 @@ fn absorb<'a>(
                 }
             }
         }
-        AgentMessage::ToolResult { tool_call_id, .. } => {
-            if !available.contains(tool_call_id.as_str()) {
-                missing.insert(tool_call_id.as_str());
-            }
+        AgentMessage::ToolResult { tool_call_id, .. }
+            if !available.contains(tool_call_id.as_str()) =>
+        {
+            missing.insert(tool_call_id.as_str());
         }
         _ => {}
     }

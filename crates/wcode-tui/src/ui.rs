@@ -1342,12 +1342,12 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(Span::styled("  —", dim())));
     }
     let bottom = area.y.saturating_add(area.height);
-    let mut y = area.y + 1; // the "Team" header owns area.y
-    for (idx, label, state, focused, action) in indexed {
+    // The "Team" header owns area.y.
+    for (n, (idx, label, state, focused, action)) in indexed.into_iter().enumerate() {
+        let y = area.y + 1 + n as u16;
         if y < bottom {
             members.push((idx, y));
         }
-        y += 1;
         // `  ● explorer *  read a.rs` — glyph colored by state, the live
         // action dim, `*` marks the focused surface. A per-member elapsed is
         // not exposed, so the focused row carries the run elapsed instead.
