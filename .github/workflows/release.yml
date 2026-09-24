@@ -23,11 +23,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          esc() { printf '%s' "${1//$'\n'/'%0A'}"; }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            out=$(gh release edit "$tag" --draft=false 2>&1) || {
+              echo "::error title=release-edit::$(esc "$out")"; exit 1; }
+            echo "release $tag already existed; ensured published"
+          else
+            out=$(gh release create "$tag" --title "$tag" --generate-notes --verify-tag 2>&1) || {
+              echo "::error title=release-create::$(esc "$out")"; exit 1; }
+            echo "created release $tag"
           fi
-          # A prior failed run may have left the release as a draft; publish it.
-          gh release edit "$tag" --draft=false
 
   upload-assets:
     name: ${{ matrix.target }}
