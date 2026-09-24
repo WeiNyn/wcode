@@ -1,11 +1,14 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
+
+use super::background::{self, Background, State};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -15,23 +18,95 @@ pub struct BashArgs {
     pub command: String,
     /// Kill the command after this many seconds (default 30).
     pub timeout_secs: Option<u64>,
+    /// Run the command in the background and return a task handle (`bg3`)
+    /// instead of waiting. `timeout_secs` is IGNORED when this is `true` —
+    /// the task runs until it exits or `bg kill` (D12).
+    pub background: Option<bool>,
 }
 
-pub struct Bash;
+pub struct Bash {
+    bg: Arc<Background>,
+}
+
+impl Bash {
+    pub fn new(bg: Arc<Background>) -> Self {
+        Self { bg }
+    }
+
+    /// `bash { background: true }` — spawn the command in its own process group
+    /// and hand the un-reaped child to a supervisor, returning a `bg<N>` handle
+    /// at once (D3). `timeout_secs` is deliberately NOT read here (D12).
+    async fn spawn_background(&self, args: BashArgs, ctx: &ToolContext) -> ToolOutput {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&args.command)
+            .current_dir(&ctx.working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        background::spawn_group(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return ToolOutput {
+                    output: format!("sh spawn: {e}"),
+                    is_error: true,
+                    diff: None,
+                    path: None,
+                };
+            }
+        };
+        let pid = child.id();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        // Register (state Running) and hand the CHILD + kill_rx to the supervisor.
+        let (id, kill_rx) = self.bg.register(&args.command, &ctx.working_dir, pid);
+        background::spawn_supervisor(self.bg.clone(), id.clone(), child, stdout, stderr, kill_rx);
+        // The task may already have finished (`true`): the supervisor flips the
+        // state under the lock, so this peek is racy-but-safe — either a handle
+        // line or an immediate terminal line, never a wrong state.
+        match self.bg.peek_state(&id) {
+            Some(State::Running) => ToolOutput {
+                output: format!("started {id}: {}", args.command),
+                ..ToolOutput::default()
+            },
+            Some(state) => {
+                let preview = self
+                    .bg
+                    .tail_of(&id, 10)
+                    .map(|(text, _)| text)
+                    .unwrap_or_default();
+                let suffix = if preview.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {preview}")
+                };
+                ToolOutput {
+                    output: format!("{id} {}{suffix}", state.label()),
+                    ..ToolOutput::default()
+                }
+            }
+            None => ToolOutput {
+                output: format!("{id} vanished"),
+                is_error: true,
+                ..ToolOutput::default()
+            },
+        }
+    }
+}
 
 /// Buffered bytes above this spill to a file instead of growing unbounded.
-const MAX_INLINE_BYTES: usize = 24_000;
+pub(crate) const MAX_INLINE_BYTES: usize = 24_000;
 /// Chars of a spilled stream kept inline — the first and the last, so both the
 /// command's opening output and its error tail stay visible in the result.
-const PREVIEW_HEAD_CHARS: usize = 12_000;
-const PREVIEW_TAIL_CHARS: usize = 6_000;
+pub(crate) const PREVIEW_HEAD_CHARS: usize = 12_000;
+pub(crate) const PREVIEW_TAIL_CHARS: usize = 6_000;
 /// Live `ToolExecutionUpdate` lines per stream before we stop streaming (a
 /// flooding command shouldn't spam the UI; the file still holds everything).
 const LIVE_LINE_CAP: usize = 200;
 /// Bytes per pseudo-line when a no-newline stream overflows the line buffer —
 /// a legit JSON blob fits; a megabyte of log noise is chunked. See
 /// [`drain_lines`].
-const MAX_LINE_BYTES: usize = 64_000;
+pub(crate) const MAX_LINE_BYTES: usize = 64_000;
 
 /// Per-process counter so repeated/concurrent bash calls get distinct spill
 /// files even within the same millisecond.
@@ -291,9 +366,12 @@ impl TypedTool for Bash {
         "bash"
     }
     fn description(&self) -> &str {
-        "Run a shell command (`sh -c`) in the working directory. Returns stdout, labeled stderr and the exit code. Non-zero exit marks the result as an error. Output beyond ~24K is elided inline and the full output is saved to a file whose path is shown — read it (offset/limit, or from) to page the rest."
+        "Run a shell command (`sh -c`) in the working directory. Returns stdout, labeled stderr and the exit code. Non-zero exit marks the result as an error. Output beyond ~24K is elided inline and the full output is saved to a file whose path is shown — read it (offset/limit, or from) to page the rest. Set `background: true` to run it as a background task and get a `bg<N>` handle; `timeout_secs` is then ignored and the task runs until it exits or you kill it with the `bg` tool."
     }
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
+        if args.background == Some(true) {
+            return self.spawn_background(args, ctx).await;
+        }
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c")
@@ -499,11 +577,12 @@ mod tests {
     async fn echo_reports_exit_code_zero() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "echo hello".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -517,11 +596,12 @@ mod tests {
     async fn non_zero_exit_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "echo oops >&2; exit 3".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -537,11 +617,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         let started = Instant::now();
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "sleep 5".into(),
                     timeout_secs: Some(1),
+                    background: None,
                 },
                 &ctx,
             )
@@ -563,11 +644,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             cancel.cancel();
         });
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "sleep 5".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -584,11 +666,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("bg.pid");
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()),
                     timeout_secs: Some(1),
+                    background: None,
                 },
                 &ctx,
             )
@@ -621,11 +704,12 @@ mod tests {
     async fn streams_partial_output_updates() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "echo a; sleep 0.05; echo b".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -645,11 +729,12 @@ mod tests {
     async fn streams_stderr_lines_with_live_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "printf 'oops\\n' >&2".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -671,11 +756,12 @@ mod tests {
     async fn small_output_stays_inline_without_spilling() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "echo hello".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -694,11 +780,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         // ~100 KiB, well over MAX_INLINE_BYTES.
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "seq 1 20000".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -732,11 +819,12 @@ mod tests {
     async fn stderr_spills_independently_of_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "seq 1 20000 >&2".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -762,11 +850,12 @@ mod tests {
     async fn live_updates_are_capped() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "seq 1 1000".into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )
@@ -788,12 +877,13 @@ mod tests {
         // 200 KiB of 'a' with no newline: `read_until` would otherwise grow one
         // line to the full 200 KiB; the chunker turns it into MAX_LINE_BYTES
         // pseudo-lines so the live updates and the memory stay bounded.
-        let out = Bash
+        let out = Bash::new(Background::new())
             .execute(
                 BashArgs {
                     command: "dd if=/dev/zero bs=200000 count=1 2>/dev/null | tr '\\0' 'a'"
                         .into(),
                     timeout_secs: None,
+                    background: None,
                 },
                 &ctx,
             )

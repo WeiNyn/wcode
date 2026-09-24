@@ -32,6 +32,7 @@ use wcode_tui::SurfaceSpec;
 use crate::config::ToolsConfig;
 use crate::session_groups::{self, SessionGroup};
 use crate::tasks::TaskList;
+use crate::tools::background::Background;
 use crate::tools::default_tools;
 use crate::tools::message::Message;
 use crate::tools::spawn::Spawn;
@@ -170,7 +171,7 @@ impl SessionFactory {
     /// set. `spawn` is absent by construction (a worker cannot spawn); `message`
     /// is also always kept. Use [`Self::validate_tools`] as the allow-list gate.
     pub fn default_tool_names(&self) -> Vec<String> {
-        default_tools(&self.template.tools, &self.template.sessions_dir)
+        default_tools(&self.template.tools, &self.template.sessions_dir, Background::new())
             .iter()
             .map(|tool| tool.name().to_string())
             .collect()
@@ -311,16 +312,18 @@ impl SessionFactory {
         session: Option<Session>,
         context: Vec<AgentMessage>,
     ) -> SessionHandle {
-        SessionActor::spawn(Agent::new(
-            self.worker_config_with(id, owner, spec, session, context),
-        ))
+        let bg = Background::new();
+        let config = self.worker_config_with(id, owner, spec, session, context, bg.clone());
+        let handle = SessionActor::spawn(Agent::new(config));
+        bg.bind(handle.clone());
+        handle
     }
 
     /// The pure worker config — no actor, no persisted session; a test-only
     /// convenience over [`Self::worker_config_with`].
     #[cfg(test)]
     fn worker_config(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> AgentConfig {
-        self.worker_config_with(id, owner, spec, None, Vec::new())
+        self.worker_config_with(id, owner, spec, None, Vec::new(), Background::new())
     }
 
     /// The full worker config: like [`Self::worker_config`], but the worker is
@@ -332,6 +335,7 @@ impl SessionFactory {
         spec: &WorkerSpec,
         session: Option<Session>,
         context: Vec<AgentMessage>,
+        bg: Arc<Background>,
     ) -> AgentConfig {
         let t = &self.template;
         // A worker is told who it is; its result is forwarded to the orchestrator
@@ -355,9 +359,14 @@ impl SessionFactory {
         }
         // `None` = the whole default set; `Some(list)` = only the named tools.
         // `message` is always kept — the worker's only way to report (D3).
-        let mut tools = default_tools(&t.tools, &t.sessions_dir);
+        let mut tools = default_tools(&t.tools, &t.sessions_dir, bg);
         if let Some(allow) = &spec.tools {
-            tools.retain(|tool| allow.iter().any(|name| name == tool.name()));
+            tools.retain(|tool| {
+                let name = tool.name();
+                // `bg` rides with `bash` (D2): never startable without its manager.
+                allow.iter().any(|n| n == name)
+                    || (name == "bg" && allow.iter().any(|n| n == "bash"))
+            });
         }
         tools.push(erased(Message::new(
             self.registry.clone(),
@@ -1121,7 +1130,7 @@ mod tests {
             tools: Some(vec!["read".into(), "bash".into()]),
             ..Default::default()
         });
-        assert_eq!(tool_names(&cfg), vec!["read", "bash", "message"]);
+        assert_eq!(tool_names(&cfg), vec!["read", "bash", "bg", "message"]);
         assert!(!tool_names(&cfg).contains(&"spawn".to_string()));
     }
 
@@ -1188,7 +1197,8 @@ mod tests {
         let owner = SessionId::agent("orch");
         let cfg = factory.worker_config(&id, &owner, &WorkerSpec::default());
 
-        let mut expected: Vec<String> = default_tools(&factory.template.tools, &factory.template.sessions_dir)
+        let mut expected: Vec<String> =
+            default_tools(&factory.template.tools, &factory.template.sessions_dir, Background::new())
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -1256,7 +1266,8 @@ mod tests {
         let root: Vec<String> = o.tools().iter().map(|t| t.name().to_string()).collect();
         assert!(root.contains(&"task".to_string()), "root tools: {root:?}");
 
-        let defaults: Vec<String> = default_tools(&ToolsConfig::default(), &std::env::temp_dir())
+        let defaults: Vec<String> =
+            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new())
             .iter()
             .map(|t| t.name().to_string())
             .collect();

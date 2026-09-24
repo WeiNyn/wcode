@@ -28,6 +28,7 @@ use crate::config::{HooksConfig, TeamMember, ToolsConfig};
 use crate::instructions::InstructionSet;
 use crate::skills::SkillSet;
 use crate::rtk::RtkHooks;
+use crate::tools::background::Background;
 use crate::tools::default_tools;
 
 const DIM: &str = "\x1b[2m";
@@ -340,9 +341,10 @@ pub fn build_agent(
     context: Vec<AgentMessage>,
     extra_tools: Vec<Tool>,
     digest_cas: bool,
-) -> Agent {
+) -> (Agent, Arc<Background>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut tools = default_tools(spec.tools, &session_dir());
+    let bg = Background::new();
+    let mut tools = default_tools(spec.tools, &session_dir(), bg.clone());
     tools.extend(extra_tools);
     // One handle shared by the `PlanModeHooks` and the agent, so `set_plan_mode`
     // flips both. Created here (per build) — see the doc's toggle flag.
@@ -356,7 +358,7 @@ pub fn build_agent(
         digest_cas,
     )));
     hooks.push(std::sync::Arc::new(PlanModeHooks::new(plan_mode.clone())));
-    Agent::new(AgentConfig {
+    let agent = Agent::new(AgentConfig {
         system: system_prompt(
             spec.tools,
             spec.instructions,
@@ -376,7 +378,8 @@ pub fn build_agent(
         parallel_tools: spec.tools.parallel.unwrap_or(true),
         compaction: spec.compaction,
         plan_mode,
-    })
+    });
+    (agent, bg)
 }
 
 /// Re-exec argv for `/reload`: resume the session (or `--no-session`) and
@@ -533,6 +536,9 @@ pub async fn reload(
 /// `/reload` and `/resume` handoff. Returns only if the exec failed; the caller
 /// decides what to do then.
 pub fn exec_self(args: &[String]) {
+    // `exec` replaces the process image — no destructors run — so every live
+    // background group must be signalled HERE first (D8).
+    Background::shutdown_all();
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
@@ -656,7 +662,7 @@ async fn unless_idle_ctrl_c<F: std::future::Future>(
 /// client already connected to a session served elsewhere.
 pub enum SessionSource {
     /// Boxed: the enum is small when a `Client` (an `Arc`) is the variant.
-    Local(Box<Agent>),
+    Local(Box<Agent>, Arc<Background>),
     #[cfg(unix)]
     Remote(Client),
 }
@@ -688,10 +694,15 @@ pub async fn run(
     let in_flight = Arc::new(AtomicBool::new(false));
     let mut session_path;
     let mut backend;
+    // The Local agent's background registry+notifier, kept for the `/new`/
+    // `/resume` rebuild arms (a `Remote` source has none).
+    let mut bg: Option<Arc<Background>> = None;
     match source {
-        SessionSource::Local(agent) => {
+        SessionSource::Local(agent, background) => {
             session_path = agent.session_path().map(Path::to_path_buf);
             let handle = SessionActor::spawn(*agent);
+            background.bind(handle.clone());
+            bg = Some(background);
             if let Some(o) = &orchestrator {
                 o.register_root(handle.clone());
             }
@@ -783,6 +794,10 @@ pub async fn run(
                 )
             }
             Some(Command::New) => {
+                // A session boundary: signal the outgoing agent's groups (D8).
+                if let Some(old) = &bg {
+                    old.shutdown();
+                }
                 let session = session_path
                     .is_some()
                     .then(|| Session::create(&session_dir()))
@@ -792,7 +807,7 @@ pub async fn run(
                         let path = session
                             .as_ref()
                             .and_then(|s| s.path().map(Path::to_path_buf));
-                        let new_agent = build_agent(
+                        let (new_agent, new_bg) = build_agent(
                             AgentSpec {
                                 llm: llm.clone(),
                                 hooks: hooks.clone(),
@@ -812,6 +827,8 @@ pub async fn run(
                             digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
+                        new_bg.bind(handle.clone());
+                        bg = Some(new_bg);
                         if let Some(o) = &orchestrator {
                             o.register_root(handle.clone());
                         }
@@ -882,6 +899,10 @@ pub async fn run(
                 )
             }
             Some(Command::Resume(arg)) => {
+                // A session boundary: signal the outgoing agent's groups (D8).
+                if let Some(old) = &bg {
+                    old.shutdown();
+                }
                 let path = match arg {
                     Some(a) => resolve_session_path(&a),
                     None => match list_sessions(&session_dir()) {
@@ -942,7 +963,7 @@ pub async fn run(
                                     }
                                 }
                                 let n = messages.len();
-                                let new_agent = build_agent(
+                                let (new_agent, new_bg) = build_agent(
                                     AgentSpec {
                                         llm: llm.clone(),
                                         hooks: hooks.clone(),
@@ -962,6 +983,8 @@ pub async fn run(
                                     digest_cas,
                                 );
                                 let handle = SessionActor::spawn(new_agent);
+                                new_bg.bind(handle.clone());
+                                bg = Some(new_bg);
                                 if let Some(o) = &orchestrator {
                                     o.register_root(handle.clone());
                                 }
@@ -989,7 +1012,7 @@ pub async fn run(
                             llm.effort = e;
                         }
                         let n = messages.len();
-                        let new_agent = build_agent(
+                        let (new_agent, new_bg) = build_agent(
                             AgentSpec {
                                 llm: llm.clone(),
                                 hooks: hooks.clone(),
@@ -1009,6 +1032,8 @@ pub async fn run(
                             digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
+                        new_bg.bind(handle.clone());
+                        bg = Some(new_bg);
                         if let Some(o) = &orchestrator {
                             o.register_root(handle.clone());
                         }
@@ -1435,7 +1460,7 @@ mod tests {
         // per-session digest cache — the policy is rebuilt with every agent.
         let shared = HooksSet::default();
         assert!(shared.is_empty());
-        let agent = build_agent(
+        let (agent, _bg) = build_agent(
             AgentSpec {
                 llm: LlmOpts::default(),
                 hooks: shared.clone(),

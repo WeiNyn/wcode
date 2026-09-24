@@ -2,6 +2,7 @@
 
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::Agent;
@@ -32,6 +33,7 @@ use crate::repl::{
     system_prompt,
 };
 use crate::skills::{SkillSet, discover as discover_skills};
+use crate::tools::background::Background;
 
 const USAGE: &str = "\
 wcode — minimal coding agent
@@ -558,7 +560,12 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     // plan, and the client holds no `TaskList`.
                     let new_tasks = None;
                     match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
-                        Ok(wcode_tui::Outcome::Quit) => std::process::exit(0),
+                        Ok(wcode_tui::Outcome::Quit) => {
+                            // A socket client owns no local Background, but the
+                            // seam is shared: signal any live group before exit (D8).
+                            Background::shutdown_all();
+                            std::process::exit(0)
+                        }
                         Ok(wcode_tui::Outcome::Reload { .. }) => {
                             eprintln!("tui: cannot reload over a socket");
                             std::process::exit(1);
@@ -913,7 +920,7 @@ struct RootCtx<'a> {
 /// worker tools (`--owner` without `--agents` → `exit(2)`). `root_team` /
 /// `root_guidelines` are computed in `main` (not here) because `dispatch`
 /// (P8) also needs them.
-fn build_agent_for(
+    fn build_agent_for(
     args: &Args,
     cfg: &Config,
     llm: &LlmOpts,
@@ -921,7 +928,7 @@ fn build_agent_for(
     root: RootCtx<'_>,
     session: Option<Session>,
     context: Vec<AgentMessage>,
-) -> Agent {
+) -> (Agent, Arc<Background>) {
     // A session with `--owner` is a **served worker** (S4-4 reply): it gets a
     // `message` tool bound to its owner and a `ReportBack` hook, and the
     // ownership edge is recorded so its report is permitted.
@@ -965,6 +972,7 @@ async fn serve(
     args: &Args,
     llm: &LlmOpts,
     agent: Agent,
+    bg: Arc<Background>,
     orchestrator: &Option<crate::agents::Orchestrator>,
 ) -> ! {
     #[cfg(unix)]
@@ -976,6 +984,7 @@ async fn serve(
             .map(PathBuf::from)
             .unwrap_or_else(default_socket_path);
         let handle = SessionActor::spawn(agent);
+        bg.bind(handle.clone());
         if let Some(o) = orchestrator {
             o.register_root(handle.clone());
         }
@@ -1046,6 +1055,7 @@ async fn serve(
 /// REPL. `root_team`/`root_guidelines` borrow `cfg`; `llm`, `rt` and `agent` are
 /// moved into `repl::run`. The one-shot and TUI branches diverge; the line REPL
 /// falls through and returns, exactly as before the split.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     args: &Args,
     cfg: &Config,
@@ -1054,10 +1064,12 @@ async fn dispatch(
     root: RootCtx<'_>,
     setup: &SessionSetup,
     agent: Agent,
+    bg: Arc<Background>,
 ) -> () {
     match &args.prompt {
         Some(prompt) => {
             let handle = SessionActor::spawn(agent);
+            bg.bind(handle.clone());
             if let Some(o) = &rt.orchestrator {
                 o.register_root(handle.clone());
             }
@@ -1067,6 +1079,7 @@ async fn dispatch(
             // the runtime is dropped.
             #[cfg(unix)]
             wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+            Background::shutdown_all();
             std::process::exit(code)
         }
         None => {
@@ -1101,6 +1114,7 @@ async fn dispatch(
                 };
                 let session_path = agent.session_path().map(Path::to_path_buf);
                 let handle = SessionActor::spawn(agent);
+                bg.bind(handle.clone());
                 if let Some(o) = &rt.orchestrator {
                     o.register_root(handle.clone());
                 }
@@ -1210,6 +1224,7 @@ async fn dispatch(
                             args.owner.as_deref(),
                             args.name.as_deref(),
                         );
+                        Background::shutdown_all();
                         std::process::exit(0)
                     }
                     Ok(wcode_tui::Outcome::Reload { no_session }) => {
@@ -1255,7 +1270,7 @@ async fn dispatch(
                 orchestrator,
             } = rt;
             repl::run(
-                repl::SessionSource::Local(Box::new(agent)),
+                repl::SessionSource::Local(Box::new(agent), bg),
                 llm,
                 hooks,
                 cfg.tools,
@@ -1306,7 +1321,7 @@ async fn main() {
     };
     // Phase 6: build the root agent (moving the session/context out of `setup`
     // without partially moving the struct, so `dispatch` can still borrow it).
-    let agent = build_agent_for(
+    let (agent, bg) = build_agent_for(
         &args,
         &cfg,
         &llm,
@@ -1317,7 +1332,7 @@ async fn main() {
     );
     // Phase 7: `serve` owns the session; it diverges when taken.
     if args.serve {
-        serve(&args, &llm, agent, &rt.orchestrator).await;
+        serve(&args, &llm, agent, bg.clone(), &rt.orchestrator).await;
     }
     // Phase 8: one-shot / TUI / line REPL. Diverges.
     dispatch(
@@ -1328,6 +1343,7 @@ async fn main() {
         root,
         &setup,
         agent,
+        bg,
     )
     .await;
 }

@@ -3,6 +3,7 @@ pub mod ast;
 pub mod ast_edit;
 pub mod ast_search;
 pub mod bash;
+pub mod background;
 pub mod diff;
 pub mod edit;
 pub mod edits;
@@ -25,14 +26,21 @@ use wcode_harness::tool::{Tool, ToolOutput, erased};
 
 use crate::config::ToolsConfig;
 
-pub fn default_tools(cfg: &ToolsConfig, sessions_dir: &Path) -> Vec<Tool> {
+pub fn default_tools(
+    cfg: &ToolsConfig,
+    sessions_dir: &Path,
+    bg: Arc<background::Background>,
+) -> Vec<Tool> {
     // Mutating tools share one lock: read-only tools may run concurrently with
     // each other (see `TypedTool::parallel_safe`), but no two mutations and no
     // read-vs-mutation interleave inside a batch.
     let lock = Arc::new(tokio::sync::Mutex::new(()));
     let mut tools = vec![
         erased(read::Read),
-        erased(bash::Bash),
+        erased(bash::Bash::new(bg.clone())),
+        // Always registered, beside `bash` (D14): `bash { background: true }`
+        // starts a task and `bg` manages it.
+        erased(background::Bg::new(bg.clone())),
         erased(edit::Edit::new(lock.clone())),
         erased(edits::Edits::new(lock.clone())),
         erased(replace::Replace::new(lock.clone())),
@@ -176,7 +184,7 @@ mod tests {
     use super::*;
 
     fn names(cfg: &ToolsConfig) -> Vec<String> {
-        default_tools(cfg, &std::env::temp_dir())
+        default_tools(cfg, &std::env::temp_dir(), background::Background::new())
             .iter()
             .map(|t| t.name().to_string())
             .collect()
@@ -206,6 +214,7 @@ mod tests {
         for core in [
             "read",
             "bash",
+            "bg",
             "edit",
             "edits",
             "replace",
@@ -231,7 +240,11 @@ mod tests {
     #[test]
     #[ignore = "diagnostic: print tool definition sizes"]
     fn print_tool_definition_sizes() {
-        let tools = default_tools(&ToolsConfig::default(), &std::env::temp_dir());
+        let tools = default_tools(
+            &ToolsConfig::default(),
+            &std::env::temp_dir(),
+            background::Background::new(),
+        );
         let mut total = 0usize;
         for t in &tools {
             let d = t.definition();
@@ -262,7 +275,7 @@ mod tests {
             find: true,
             ..ToolsConfig::default()
         };
-        for tool in default_tools(&cfg, &std::env::temp_dir()) {
+        for tool in default_tools(&cfg, &std::env::temp_dir(), background::Background::new()) {
             if tool.mutating() {
                 assert!(
                     wcode_harness::hooks::MUTATING_TOOLS.contains(&tool.name()),
