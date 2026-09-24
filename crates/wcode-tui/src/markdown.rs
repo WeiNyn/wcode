@@ -3,7 +3,7 @@
 //! `syntect`; the wrap/table renderers are unchanged from the earlier
 //! hand-rolled version — only tokenization moved to the event stream.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock, PoisonError, RwLock};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -489,8 +489,10 @@ pub(crate) fn render_mode(text: &str, width: usize, mode: ColorMode) -> Vec<Line
 /// style).
 static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
 
-/// The bundled dark syntax theme, loaded once.
-static SYNTAX_THEME: OnceLock<Theme> = OnceLock::new();
+/// The active syntax theme. `LazyLock` (not a plain `RwLock`) because the seed is
+/// a heap leak, not const: `Box::leak` runs at first access.
+static SYNTAX_THEME: LazyLock<RwLock<&'static Theme>> =
+    LazyLock::new(|| RwLock::new(Box::leak(Box::new(default_syntect_theme()))));
 
 /// The bundled syntax set, loaded once — no-newline variants, since `render`
 /// feeds one trimmed line at a time.
@@ -498,12 +500,12 @@ fn syntaxes() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(SyntaxSet::load_defaults_nonewlines)
 }
 
-/// The syntax theme, resolved once. B3: a TOTAL lookup — a missing/changed key
-/// falls back to an empty theme, never panics in a render path.
-/// Install the process syntax theme (called once by `theme::install`); a later
-/// call is a no-op.
+/// Install/REPLACE the process syntax theme: `Box::leak` the new theme (for the
+/// `'static` borrow `HighlightLines` needs) and swap the pointer. The leak is
+/// bounded by the number of `set`s (a handful of `/theme` switches).
 pub(crate) fn install_syntax_theme(theme: syntect::highlighting::Theme) {
-    let _ = SYNTAX_THEME.set(theme);
+    *SYNTAX_THEME.write().unwrap_or_else(PoisonError::into_inner) =
+        Box::leak(Box::new(theme));
 }
 
 /// The shipped fallback syntax theme — today's `base16-ocean.dark`. Used when no
@@ -515,14 +517,9 @@ pub(crate) fn default_syntect_theme() -> syntect::highlighting::Theme {
         .cloned()
         .unwrap_or_default()
 }
+/// The active syntax theme — the `'static` borrow `HighlightLines` needs.
 fn syntax_theme() -> &'static Theme {
-    SYNTAX_THEME.get_or_init(|| {
-        ThemeSet::load_defaults()
-            .themes
-            .get("base16-ocean.dark")
-            .cloned()
-            .unwrap_or_default()
-    })
+    *SYNTAX_THEME.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A fence's state for one ```` ``` ```` block: always present inside a fence;
@@ -1301,5 +1298,29 @@ mod tests {
         let text = text_of(&render("---", 10));
         assert_eq!(disp(&text[0]), 10, "the rule fits the width: {text:?}");
         assert!(text[0].starts_with("   ─"), "{text:?}");
+    }
+
+    #[test]
+    fn install_syntax_theme_swaps_the_process_theme() {
+        // The `LazyLock<RwLock<&'static Theme>>` swap: a `set` is visible to a
+        // later `syntax_theme()`. Restored immediately (process-global).
+        let mut custom = default_syntect_theme();
+        custom.settings.foreground = Some(syntect::highlighting::Color {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        });
+        install_syntax_theme(custom);
+        assert_eq!(
+            syntax_theme().settings.foreground,
+            Some(syntect::highlighting::Color {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 255
+            })
+        );
+        install_syntax_theme(default_syntect_theme());
     }
 }

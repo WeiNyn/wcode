@@ -102,6 +102,10 @@ struct Args {
     resume: Option<Option<String>>,
     no_session: bool,
     model: Option<String>,
+    /// `--theme <name>`: select a catalog preset (overrides the config preset).
+    theme: Option<String>,
+    /// `--list-themes`: print the catalog names and exit.
+    list_themes: bool,
     base_url: Option<String>,
     /// `--config <path>`: an overlay config file, deep-merged over the global one.
     config: Option<String>,
@@ -163,6 +167,11 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 a.resume = Some(path);
             }
             "--no-session" => a.no_session = true,
+            "--theme" => {
+                a.theme = Some(args.get(i).ok_or("--theme requires a name")?.clone());
+                i += 1;
+            }
+            "--list-themes" => a.list_themes = true,
             "--model" => {
                 a.model = Some(args.get(i).ok_or("--model requires an id")?.clone());
                 i += 1;
@@ -356,6 +365,17 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
     // `--sequential` wins over `[tools] parallel`.
     if args.sequential {
         cfg.tools.parallel = Some(false);
+    }
+    // `--theme <name>` overrides the config PRESET but keeps the config's role
+    // keys (mirrors the runtime `/theme` composition).
+    if let Some(name) = &args.theme {
+        cfg.theme = match cfg.theme.clone().with_preset(name) {
+            Ok(spec) => spec,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
+        };
     }
     let llm = cfg.to_llm_opts();
     (cfg, llm)
@@ -1305,6 +1325,12 @@ async fn main() {
     if args.list_models {
         list_models_and_exit(&llm).await;
     }
+    if args.list_themes {
+        for name in wcode_tui::theme_names() {
+            println!("{name}");
+        }
+        std::process::exit(0);
+    }
     // Phase 3c: a `--socket` client (no local session). Falls through otherwise.
     if run_socket_client(&args, &cfg, &llm).await {
         unreachable!("run_socket_client only returns when it handled nothing");
@@ -1727,6 +1753,21 @@ mod tests {
         };
         assert!(a.list_models);
         assert!(!Args::default().list_models);
+    }
+
+    #[test]
+    fn parse_theme_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--theme", "nord"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.theme.as_deref(), Some("nord"));
+        assert!(parse_args(&args(&["--theme"])).is_err());
+
+        let Parsed::Args(a) = parse_args(&args(&["--list-themes"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.list_themes);
+        assert!(!Args::default().list_themes);
     }
 
     #[test]

@@ -278,6 +278,8 @@ pub enum PickerKind {
     Resume,
     /// A surface (`/surface`); selecting focuses it.
     Surface,
+    /// A catalog theme (`/theme`); selecting applies it LIVE (client-local).
+    Theme,
 }
 
 impl Picker {
@@ -371,6 +373,12 @@ const COMMANDS: &[Command] = &[
         aliases: &[],
         args: Some("<id>"),
         summary: "switch model (no arg: pick)",
+    },
+    Command {
+        name: "theme",
+        aliases: &[],
+        args: Some("[name]"),
+        summary: "switch theme (no arg: pick)",
     },
     Command {
         name: "effort",
@@ -1561,6 +1569,8 @@ pub struct App {
     /// every buffer edit; non-modal (it never owns the keyboard — see [`Completion`]).
     completion: Option<Completion>,
     dirty: bool,
+    /// Last-seen `theme::generation()`; `sync_theme` bumps `block_revs` on a change.
+    theme_gen: u64,
     should_quit: bool,
     actions: Vec<Action>,
     /// Monotonic clock stamping the last action of each member, so the team
@@ -1627,6 +1637,7 @@ impl App {
             overlay: None,
             completion: None,
             dirty: true,
+            theme_gen: 0,
             should_quit: false,
             actions: Vec::new(),
             action_seq: 0,
@@ -2658,6 +2669,18 @@ impl App {
                 })),
                 None => self.open_model_picker(),
             },
+            "theme" => match arg {
+                Some(name) => {
+                    if crate::theme::names().iter().any(|n| n == &name) {
+                        let _ = crate::theme::set_preset(name);
+                        self.notice(format!("theme: {name}"));
+                    } else {
+                        self.notice(format!("unknown theme: {name}"));
+                    }
+                    self.dirty = true; // CLIENT-LOCAL: no Request
+                }
+                None => self.open_theme_picker(),
+            },
             "effort" => match arg {
                 Some(level) => {
                     let effort = match level {
@@ -3158,6 +3181,13 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open the `/theme` picker over the catalog names.
+    fn open_theme_picker(&mut self) {
+        let items = crate::theme::names().iter().map(|n| n.to_string()).collect();
+        self.overlay = Some(Overlay::Pick(Picker::new(PickerKind::Theme, "theme", items)));
+        self.dirty = true;
+    }
+
     /// Open the model picker over the injected model list.
     fn open_model_picker(&mut self) {
         if self.models.is_empty() {
@@ -3255,12 +3285,33 @@ impl App {
                 self.pending_resume = Some(PathBuf::from(selected));
                 self.should_quit = true;
             }
+            PickerKind::Theme => {
+                crate::theme::set_preset(&selected).expect("picker rows are catalog names");
+                self.notice(format!("theme: {selected}"));
+                self.dirty = true;
+            }
         }
     }
 
     /// The open modal, if any (read by the renderer).
     pub fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// A per-frame cache-invalidation pass: when the process theme generation
+    /// moved since the last frame, bump every surface's `block_revs` so cached
+    /// `Line`s (which bake `Style`s) re-render in the new palette.
+    pub(crate) fn sync_theme(&mut self) {
+        let generation = crate::theme::generation();
+        if generation == self.theme_gen {
+            return;
+        }
+        self.theme_gen = generation;
+        for surface in &mut self.surfaces {
+            for rev in &mut surface.block_revs {
+                *rev = rev.wrapping_add(1);
+            }
+        }
     }
 
     /// Seed the session list the `/resume` picker offers.
@@ -5065,6 +5116,23 @@ mod tests {
         assert!(help_text().contains("/reload [--no-session]"));
     }
 
+    #[test]
+    fn sync_theme_bumps_block_revs_on_a_generation_change() {
+        let mut app = App::new();
+        app.surfaces[0].block_revs.push(0);
+        // Make the app lag the current generation.
+        app.theme_gen = crate::theme::generation().wrapping_sub(1);
+        app.sync_theme();
+        assert_eq!(
+            app.surfaces[0].block_revs,
+            vec![1],
+            "a generation change bumps every block rev"
+        );
+        // A second call is a no-op once caught up.
+        app.sync_theme();
+        assert_eq!(app.surfaces[0].block_revs, vec![1]);
+    }
+
     fn completion_labels(app: &App) -> Vec<String> {
         app.completion_rows().into_iter().map(|r| r.label).collect()
     }
@@ -5078,15 +5146,15 @@ mod tests {
         };
         assert!(
             text.starts_with(
-                "commands: /exit /model <id> /effort [level] /compact [text] /changes \
-                 /resume /reload [--no-session] /btw <question> /plan [on|off] /verify \
-                 /usage /copy /surface /team /tasks /help"
+                "commands: /exit /model <id> /theme [name] /effort [level] /compact [text] \
+                 /changes /resume /reload [--no-session] /btw <question> /plan [on|off] \
+                 /verify /usage /copy /surface /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
-            "exit", "model", "effort", "compact", "changes", "resume", "reload", "btw", "plan",
-            "verify", "usage", "copy", "surface", "team", "tasks", "help",
+            "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload", "btw",
+            "plan", "verify", "usage", "copy", "surface", "team", "tasks", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),

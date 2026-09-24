@@ -35,6 +35,16 @@ use wcode_protocol::Backend;
 pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, TaskItem, Tool};
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 
+/// The catalog's theme names (for `--list-themes`, the `/theme` picker).
+pub fn theme_names() -> Vec<&'static str> {
+    theme::names()
+}
+
+/// Apply a catalog preset at runtime (the `/theme` / `--theme` entry).
+pub fn set_theme(name: &str) -> Result<(), String> {
+    theme::set_preset(name)
+}
+
 /// A surface's live state, shown in the team strip and by `/team`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamState {
@@ -421,6 +431,8 @@ fn write_history(path: &Path, lines: &[String]) {
 }
 
 fn draw(terminal: &mut terminal::Tui, app: &mut App) -> io::Result<()> {
+    // A theme `set` bumped the process generation; invalidate the baked caches.
+    app.sync_theme();
     terminal.draw(|frame| ui::draw(frame, app))?;
     app.clear_dirty();
     Ok(())

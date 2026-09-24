@@ -11,11 +11,13 @@
 //! 256-color) remains open (`tui-plan.md` P2).
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, PoisonError, RwLock};
 
 use ratatui::style::{Color, Modifier, Style};
 
 /// The TUI's color roles. Add a field only when a real call site needs one.
+#[derive(Clone, Copy)]
 pub(crate) struct Theme {
     /// The user prompt, the live cursor, and running state.
     pub accent: Style,
@@ -57,14 +59,14 @@ pub(crate) struct Theme {
 impl Theme {
     /// The default palette — a handful of named ANSI colors. Assistant prose
     /// stays default and dim stays the workhorse (`tui-design.md` §1.3).
-    fn colored() -> Self {
+    const fn colored() -> Self {
         Theme {
             accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().add_modifier(Modifier::DIM),
             muted: Style::new().fg(Color::Gray),
             border: Style::new().fg(Color::DarkGray),
             user: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            body: Style::default(),
+            body: Style::new(),
             error: Style::new().fg(Color::Red),
             success: Style::new().fg(Color::Green),
             warn: Style::new().fg(Color::LightYellow),
@@ -75,14 +77,14 @@ impl Theme {
             tool_name: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             thinking: Style::new()
                 .fg(Color::Magenta)
-                .add_modifier(Modifier::DIM | Modifier::ITALIC),
+                .add_modifier(Modifier::DIM.union(Modifier::ITALIC)),
             diff_add: Style::new().fg(Color::Green),
             diff_del: Style::new().fg(Color::Red),
         }
     }
 
     /// The `NO_COLOR` palette: no foreground anywhere, only bold/italic/dim.
-    fn plain() -> Self {
+    const fn plain() -> Self {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let dim = Style::new().add_modifier(Modifier::DIM);
         Theme {
@@ -91,7 +93,7 @@ impl Theme {
             muted: dim,
             border: dim,
             user: bold,
-            body: Style::default(),
+            body: Style::new(),
             error: bold,
             success: bold,
             warn: bold,
@@ -100,33 +102,68 @@ impl Theme {
             heading_sub: Style::new().add_modifier(Modifier::UNDERLINED),
             link: Style::new().add_modifier(Modifier::UNDERLINED),
             tool_name: bold,
-            thinking: Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
+            thinking: Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC)),
             diff_add: bold,
             diff_del: bold,
         }
     }
 }
 
-/// The active theme — an installed [`ThemeSpec`] overlay on palette B, or
-/// `plain()` under `NO_COLOR`. Resolved once, before the first draw.
-static THEME: OnceLock<Theme> = OnceLock::new();
+/// The active theme. A `RwLock` (not `OnceLock`) so [`set`] can rewrite it. The
+/// seed is const (`Theme::colored()`); the `NO_COLOR`/`plain` choice is applied
+/// by the always-run [`install`] before the first draw.
+static THEME: RwLock<Theme> = RwLock::new(Theme::colored());
 
-/// The active theme, resolved once from [`THEME`].
-pub(crate) fn theme() -> &'static Theme {
-    THEME.get_or_init(|| if no_color() { Theme::plain() } else { Theme::colored() })
+/// Bumped by every [`set`]; the TUI cache-invalidation watches it (`app.rs`).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current theme generation — the cache-invalidation signal.
+pub(crate) fn generation() -> u64 {
+    GENERATION.load(Ordering::Relaxed)
 }
 
-/// Install `spec` as the process theme (called once, before the first draw); a
-/// later call, or one after the theme was first read, is a no-op.
-pub(crate) fn install(spec: ThemeSpec) {
+/// The active theme — a COPY (the lock scope is one deref-copy).
+///
+/// POISONING POLICY: only [`set`] takes the write lock and it assigns plain data,
+/// so a poison is practically impossible — but both here and in `set` we recover
+/// via `unwrap_or_else(PoisonError::into_inner)` so a poisoned theme can never
+/// abort a draw.
+pub(crate) fn theme() -> Theme {
+    *THEME.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Install/REPLACE the process theme — the re-callable form of the old one-shot
+/// `install`. Rewrites the UI lock, swaps the syntect theme, and bumps the
+/// generation so caches invalidate.
+pub(crate) fn set(spec: ThemeSpec) {
     let palette = spec.preset.as_deref().and_then(preset);
-    let _ = THEME.set(resolve(spec, no_color()));
-    // `syntect_theme` yields `Some` only for an all-RGB palette; else the
-    // shipped default (the named-16 `default` preset has no RGB to map).
+    *THEME.write().unwrap_or_else(PoisonError::into_inner) = resolve(spec, no_color());
     let syntax = palette
         .and_then(syntect_theme)
         .unwrap_or_else(crate::markdown::default_syntect_theme);
     crate::markdown::install_syntax_theme(syntax);
+    GENERATION.fetch_add(1, Ordering::Relaxed); // cache-invalidation signal
+}
+
+/// The BASE spec — the config `[theme]` spec — retained so a runtime switch can
+/// compose on it. `OnceLock`, set once by [`install`]; the ONE place a runtime
+/// switch reads its base.
+static BASE_SPEC: OnceLock<ThemeSpec> = OnceLock::new();
+
+/// The one-shot startup entry: retain the base spec, then apply it.
+pub(crate) fn install(spec: ThemeSpec) {
+    let _ = BASE_SPEC.set(spec.clone());
+    set(spec);
+}
+
+/// The SINGLE runtime-switch entry — the TUI `/theme` and the REPL/CLI
+/// `set_theme` both route through it. Composes the retained base with the chosen
+/// preset (so a `[theme]` role override survives the switch), applies it, and
+/// surfaces an unknown name as `Err`.
+pub(crate) fn set_preset(name: &str) -> Result<(), String> {
+    let base = BASE_SPEC.get().cloned().unwrap_or_default();
+    set(base.with_preset(name)?);
+    Ok(())
 }
 
 /// Honor `NO_COLOR` (<https://no-color.org>) — resolved once.
@@ -461,6 +498,15 @@ pub struct ThemeSpec {
 }
 
 impl ThemeSpec {
+    /// This spec with its preset replaced by `name`; the role overrides are KEPT.
+    /// An unknown name is an `Err` — never a silent palette B (B2).
+    pub fn with_preset(mut self, name: &str) -> Result<ThemeSpec, String> {
+        if preset(name).is_none() {
+            return Err(format!("unknown theme `{name}`; known: {}", names().join(", ")));
+        }
+        self.preset = Some(name.to_string());
+        Ok(self)
+    }
     /// The theme for this spec: the preset palette (if any) with the role
     /// overrides applied. A preset seeds ALL 17 roles ([`Theme::from_palette`]);
     /// then each named role changes only its `fg` — its modifiers stay (`link`
@@ -919,5 +965,45 @@ mod tests {
         assert_eq!(fg(4), to_syntect(p.cyan), "entity.name.type");
         assert_eq!(fg(5), to_syntect(p.yellow), "constant");
         assert_eq!(fg(6), to_syntect(p.fg), "variable");
+    }
+
+    // ---- T4: the mutable store, the runtime switch, the syntect swap ----
+
+    #[test]
+    fn a_set_rewrites_the_process_theme() {
+        // The `RwLock` store: a `set` is visible to a later `theme()` copy. The
+        // global is restored immediately (it is process-wide).
+        if no_color() {
+            return; // NO_COLOR forces `plain`; a role override is ignored by design
+        }
+        let spec =
+            parse_theme(&BTreeMap::from([("accent".to_string(), "red".to_string())])).unwrap();
+        set(spec);
+        assert_eq!(theme().accent.fg, Some(Color::Red));
+        set(ThemeSpec::default());
+    }
+
+    #[test]
+    fn with_preset_rejects_an_unknown_name() {
+        let base = ThemeSpec::default();
+        let err = base.with_preset("chartreuse").unwrap_err();
+        assert!(err.contains("unknown theme"), "{err}");
+        assert!(err.contains("nord"), "lists the known names: {err}");
+    }
+
+    #[test]
+    fn with_preset_keeps_the_role_overrides() {
+        // The base-spec guarantee: a `[theme]` role override survives a switch.
+        let base =
+            parse_theme(&BTreeMap::from([("warn".to_string(), "light-cyan".to_string())])).unwrap();
+        let switched = base.with_preset("nord").expect("a known preset");
+        assert_eq!(switched.preset.as_deref(), Some("nord"));
+        let theme = switched.into_theme(ColorMode::Rgb);
+        assert_eq!(theme.warn.fg, Some(Color::LightCyan), "the override survived");
+        assert_eq!(
+            theme.accent.fg,
+            Some(Color::Rgb(0x88, 0xc0, 0xd0)),
+            "the preset applied"
+        );
     }
 }
