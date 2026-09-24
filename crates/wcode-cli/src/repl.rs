@@ -1082,6 +1082,9 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
                 if q.trim().is_empty() {
                     println!("usage: /btw <question>");
                 } else {
+                    // The side ask streams nothing until the answer, so print a
+                    // dim pending line rather than block the prompt silently.
+                    println!("{DIM}btw: …{RESET}");
                     match backend.ask(Request::SideAsk { text: q }).await {
                         Ok(AgentEvent::SideAnswer { text, usage: _ }) => {
                             println!("{DIM}btw: {text}{RESET}");

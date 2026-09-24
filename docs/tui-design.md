@@ -182,7 +182,7 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 1. a dim **session line** (`session a1b2c3d4`) — collapses to zero rows when there is no session;
 2. the **transcript** (flex, plain, scrollable; committed assistant messages render as markdown — headings, bullets, fenced code, aligned tables, inline `code`/`**bold**`). Each tool line shows its **input target** (`⚙ bash  cargo test -p wcode-cli`, `✓ read  src/app.rs · 128 lines · 12ms`) — the first of `command`/`path`/`pattern`/… on the call's arguments, clipped to one line;
 3. the **team region** — 0..=3 rows, only `Running` teammates (the root is the orchestrator, excluded), ordered oldest→newest so the **latest event is the bottom row**;
-4. the **input box** — a rounded border whose four corners carry the chrome: `project ⎇ branch` top-left, `model · effort` top-right, the context gauge bottom-left, and `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s` · `[↑ N]` bottom-right.
+4. the **input box** — a rounded border whose four corners carry the chrome: `project ⎇ branch` top-left, `model · effort` top-right, the context gauge bottom-left, and `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` bottom-right (the `btw…` state while a `/btw` side ask is in flight).
 The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored green→yellow→red by fill, then `used / limit`. Corner titles clip with `…` then drop least-important-first (top: branch; bottom: the gauge). The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is

@@ -899,6 +899,9 @@ pub struct Surface {
     /// The pre-toggle value of `status.plan` while a `/plan` `SetPlanMode` is in
     /// flight; restored if the reply is an `AgentEvent::Error` (amendment 8).
     plan_pending: Option<bool>,
+    /// A `/btw` side ask is in flight; the status line shows `⠹ btw…`. Set on
+    /// submit, cleared on the reply.
+    btw_pending: bool,
     /// The latest `AgentEvent::Todo` list, cached for `/verify` (a client-side
     /// render of the event — never `Session::todo()`, whose own-session write the
     /// agent's in-memory entries never see).
@@ -965,6 +968,7 @@ impl Surface {
             cancelled: false,
             context_used: None,
             plan_pending: None,
+            btw_pending: false,
             last_todos: None,
             scroll: 0,
             max_scroll: 0,
@@ -1194,6 +1198,7 @@ impl Surface {
             }
             AgentEvent::Error { message } => {
                 self.flush_live();
+                self.btw_pending = false; // a /btw reply that errored is no longer pending
                 // A run failure (the loop emits `Error` before `AgentEnd`) marks the
                 // member failed; an idle reply error (SetModel/Compact/…) does not.
                 // `failed` is never cleared here — only `AgentStart` clears it.
@@ -1241,6 +1246,7 @@ impl Surface {
             }
             AgentEvent::TurnEnd { message } => self.record_usage(&message),
             AgentEvent::SideAnswer { text, .. } => {
+                self.btw_pending = false;
                 self.push_block(Block::Btw(text)); // display-only; no ctx/session
                 true
             }
@@ -2695,9 +2701,11 @@ impl App {
                 instructions: arg.map(str::to_string),
             })),
             "btw" => match arg {
-                Some(q) => self
-                    .actions
-                    .push(Action::Ask(Request::SideAsk { text: q.to_string() })),
+                Some(q) => {
+                    self.focused_mut().btw_pending = true;
+                    self.actions
+                        .push(Action::Ask(Request::SideAsk { text: q.to_string() }));
+                }
                 None => self.notice("usage: /btw <question>"),
             },
             "plan" => {
@@ -3437,6 +3445,12 @@ impl App {
         self.focused().running
     }
 
+    /// A `/btw` side ask is in flight for the focused surface (the status corner
+    /// shows `⠹ btw…`). Cleared when the reply (answer or error) arrives.
+    pub fn asking(&self) -> bool {
+        self.focused().btw_pending
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }
@@ -4127,6 +4141,17 @@ mod tests {
     #[test]
     fn a_side_answer_pushes_a_btw_block() {
         let mut app = App::new();
+        // Submitting `/btw` marks the side ask in flight (the status corner).
+        submit(&mut app, "/btw why the sky?");
+        assert!(app.asking(), "a submitted /btw is pending");
+        assert!(
+            matches!(
+                app.take_actions().as_slice(),
+                [Action::Ask(Request::SideAsk { .. })]
+            ),
+            "the side ask was dispatched"
+        );
+
         app.handle(AppEvent::Agent(
             root(),
             AgentEvent::SideAnswer {
@@ -4134,10 +4159,25 @@ mod tests {
                 usage: None,
             },
         ));
+        assert!(!app.asking(), "the reply clears the pending flag");
         assert!(matches!(
             app.transcript().last(),
             Some(Block::Btw(t)) if t == "42"
         ));
+    }
+
+    #[test]
+    fn a_btw_error_reply_clears_the_pending_flag() {
+        let mut app = App::new();
+        submit(&mut app, "/btw why?");
+        assert!(app.asking(), "a submitted /btw is pending");
+        let _ = app.take_actions();
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Error { message: "x".into() },
+        ));
+        assert!(!app.asking(), "an error reply clears the pending flag");
     }
 
     #[test]

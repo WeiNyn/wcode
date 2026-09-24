@@ -1090,6 +1090,7 @@ fn corner_titles(
     let state = match (app.running(), app.run_elapsed()) {
         (true, Some(d)) => format!("⠹ running {}", format_ms(d.as_millis() as u64)),
         (true, None) => "⠹ running".to_string(),
+        (false, _) if app.asking() => "⠹ btw…".to_string(),
         (false, _) => "⏸ idle".to_string(),
     };
     let br = |show_plan: bool, show_browse: bool, show_scroll: bool| -> Vec<Span<'static>> {
@@ -3060,6 +3061,22 @@ mod tests {
         assert!(text.contains("zephyr-9"), "model top-right:\n{text}");
         assert!(text.contains("high"), "effort missing:\n{text}");
         assert!(text.contains("⏸ idle"), "state bottom-right:\n{text}");
+    }
+
+    #[test]
+    fn an_in_flight_btw_shows_in_the_corner() {
+        let mut app = App::new();
+        // Submit `/btw` — the side ask stays in flight until the reply arrives.
+        typed(&mut app, "/btw why?");
+        app.handle(AppEvent::Key(Key::Enter));
+        let _ = app.take_actions();
+
+        let text = buffer_text(&render(&mut app, 80, 14));
+        assert!(text.contains("btw…"), "the corner shows the pending btw:\n{text}");
+        assert!(
+            !text.contains("⏸ idle"),
+            "the idle state is replaced while asking:\n{text}"
+        );
     }
 
     #[test]
