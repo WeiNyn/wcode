@@ -354,3 +354,7 @@ variant you want instead of configuring one.
 - **Providers** — implement `StreamFn`: context + system prompt + tool defs
   in, stream of `LlmStreamEvent` out. `rig_stream_fn()` is the built-in
   OpenAI-compatible adapter.
+
+## License
+
+[MIT](LICENSE) © 2026 Wei
