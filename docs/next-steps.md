@@ -536,6 +536,10 @@ landed (`3342073`, `b58a6f4`, `ef5e65b`, `5d272c9`) and passed second-layer revi
 - [ ] One real `/reload` in a group session (full exec re-invocation) — **manual
       final sign-off**, not automatable.
 - [x] Drop the unused `WorkerSpec` serde derive (kept `Clone, Default`).
+- [x] TUI attach-replay seeded only the root (`backends.first()`), so a resumed/
+      reloaded group's **members** rendered blank though their backends held the
+      transcript (D1). It now loops over every backend; regression test
+      `attach_replay_seeds_every_surface_not_just_the_root` (fails first-only).
 
 ## 19. Digest-CAS follow-ups (item 18 review debt)
 
