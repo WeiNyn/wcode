@@ -458,6 +458,9 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                 // Write any queued fire-and-forget frames (a `message`/`spawn`
                 // sent during the turn) before the runtime is dropped.
                 wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+                // A socket client owns no local Background, but the seam is
+                // shared: signal any live group before exit (D8).
+                Background::shutdown_all();
                 std::process::exit(code)
             }
             None => {
@@ -920,7 +923,7 @@ struct RootCtx<'a> {
 /// worker tools (`--owner` without `--agents` → `exit(2)`). `root_team` /
 /// `root_guidelines` are computed in `main` (not here) because `dispatch`
 /// (P8) also needs them.
-    fn build_agent_for(
+fn build_agent_for(
     args: &Args,
     cfg: &Config,
     llm: &LlmOpts,

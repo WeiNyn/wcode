@@ -41,7 +41,7 @@ the boxes as each task completes and keep the status table current.
 | 33 | TUI layout redesign: bordered input box + session line + team above | ☑ done — `079c0b1`; chrome moved onto a rounded input box (project⎇branch / model·effort / context gauge ▰▱ / mode·state), session line on top, team region above the box (running only, ≤3, newest last) |
 | 34 | TUI mouse support: select text, click a block, click a team member (see [`tui-mouse-plan.md`](tui-mouse-plan.md)) | ☑ done — P1 (clicks) + P2 (drag text selection) |
 | 35 | `webfetch` tool: one-shot URL fetch (see [`webfetch-plan.md`](webfetch-plan.md)) | ☐ planned — reviewed, ready to sketch |
-| 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ◐ in progress — code landed; live check + commit pending |
+| 36 | Tool backgrounding (`bg`): move a long `bash` off the turn + push completion back to the agent (see [`backgrounding-plan.md`](backgrounding-plan.md)) | ☑ done — `a8ec77c`/`6dcd29b`; second-layer APPROVED; live-verified |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -819,12 +819,19 @@ agent's next-turn context. Part of the jcode Tier-2 batch (with items 30 and 35)
 > ➡️ **[`backgrounding-plan.md`](backgrounding-plan.md)** — why, ground truth,
 > decisions D1–D17 (locked), the interface, non-goals, Q1–Q6 resolved, sizing.
 
-**Status.** ◐ In progress — the sketch is filled in (all `SKETCH` markers gone):
-the supervisor owns the un-reaped child and records the terminal state before the
-bounded drain (BLOCK-1/BLOCK-2), `bash { background: true }` + the `bg` tool + the
-completion `Wake` push are wired, and the teardown seams (`exec_self`, the one-shot
-`flush_all` sites, both TUI `Quit` arms) call `shutdown_all()`. Live check + commit
-pending.
+**Status.** ☑ done — commits `a8ec77c` (feature) + `6dcd29b` (plans); second-layer
+review **APPROVED**. `bash { background: true }` + the `bg` tool (`list`/`status`/
+`output`/`wait`/`kill`) + the completion `Wake` push (idle → a turn, running →
+next-turn context); the supervisor owns the un-reaped child and clears `pid` before
+the bounded drain (BLOCK-1/BLOCK-2); teardown at `exec_self`, the one-shot
+`flush_all` sites, and both TUI `Quit` arms. Live-verified end-to-end against Ollama
+(start → list → wait, and an idle-wake push).
+
+**Review findings (non-blocking).** (1) *Open* — the line REPL does not render an
+idle-wake turn (`repl.rs::print_events` breaks on `AgentEnd`; the TUI's persistent
+subscriber does) → follow-up. (2) the `build_agent_for` over-indent and (4) the
+missing `shutdown_all()` at the remote one-shot `flush_all` site (`main.rs`) are
+fixed in a follow-up commit.
 
 ---
 
