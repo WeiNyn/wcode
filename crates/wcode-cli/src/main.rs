@@ -954,7 +954,8 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // resolve) and BEFORE the scheduler spawn. Nodes are created in TOPOLOGICAL
     // order (Blocker 1), mapping each id to its numeric Task id before resolving
     // the deps.
-    if let Some(o) = &orchestrator
+    if should_instantiate_workflow(setup.resuming_group, cfg.workflow.is_some())
+        && let Some(o) = &orchestrator
         && let Some(workflow) = &cfg.workflow
     {
         let n = instantiate_workflow(o.tasks(), workflow);
@@ -1652,6 +1653,13 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
+/// Whether to instantiate a `[workflow]` template at boot: a fresh (non-resumed)
+/// session with a workflow configured. A resume loads the persisted plan (P4) and
+/// must NOT re-seed it (else the plan grows 2N after N resumes).
+fn should_instantiate_workflow(resuming_group: bool, has_workflow: bool) -> bool {
+    !resuming_group && has_workflow
+}
+
 /// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so a
 /// `depends_on` may name a later-authored sibling — Blocker 1), mapping each
 /// string id to its numeric task id before resolving deps. Returns the count.
@@ -1735,6 +1743,22 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn workflow_is_not_instantiated_on_resume() {
+        assert!(
+            should_instantiate_workflow(false, true),
+            "a fresh session with a [workflow] instantiates it"
+        );
+        assert!(
+            !should_instantiate_workflow(true, true),
+            "a resume must use the loaded plan, never re-seed it"
+        );
+        assert!(
+            !should_instantiate_workflow(false, false),
+            "no [workflow] → nothing to instantiate"
+        );
     }
 
     #[test]
