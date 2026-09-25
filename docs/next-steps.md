@@ -47,6 +47,7 @@ the boxes as each task completes and keep the status table current.
 | 39 | Live theme reload + runtime selection (`/theme`, `--theme`, a picker) (see [`tui-theming-plan.md`](tui-theming-plan.md) T4) | ☑ done — `48dfbf3`; second-layer APPROVED |
 | 40 | Team controls: enforced read-only + per-worker effort (see [`team-controls-plan.md`](team-controls-plan.md)) | ☑ done — `a25c5e8`/`8eb018a` + nit-fold `bdf3edb`; second-layer APPROVED |
 | 41 | `/btw` gives no feedback while in flight (looks frozen) | ☑ done — `e128d8a`; second-layer APPROVED. Residual (out of scope): a hung-but-open backend leaves a stuck `⠹ btw…` — the fix is an `ask` timeout at the protocol layer (all `Action::Ask` paths) |
+| 42 | Task DAG — Option A (root-as-scheduler) — C3 (see [`task-dag-plan.md`](task-dag-plan.md)) | ◐ planned — design doc written & locked; P0–P5 not started |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
@@ -635,7 +636,7 @@ worktree managers / coordinator entity / ACLs.
 auto-forward is tested. `cli:` `d99ab65`.
 - [x] C2 — shared task list: root-owned list + `task` tool + TUI `/tasks`.
       `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
-- [ ] C3 — task DAG + scheduler (decision gate; needs its own plan doc).
+- [ ] C3 — task DAG + scheduler (Option A locked; plan doc [\`task-dag-plan.md\`](task-dag-plan.md) written; implementation P0–P5 not started).
 - [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
 - [ ] C5 — lifecycle footer (partial: `failed` shipped, `5911eab`; `blocked`/`waiting-on-detail` deferred).
 
