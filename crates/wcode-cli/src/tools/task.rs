@@ -455,6 +455,83 @@ mod tests {
         assert_eq!(list.snapshot()[0].artifact.as_deref(), Some("the report"));
     }
 
+    /// The cap path of the tool's `reject` (`fmt_ids`'s `ReachedCap` arm + the
+    /// trailing note): the dep renders `#<n> FAILED (cap)` and the model is warned.
+    #[tokio::test]
+    async fn reject_cap_renders_failed_and_the_note() {
+        let (tool, list) = tool();
+        // work (1) and a GATE (2) that depends on it — created via `gate`.
+        tool.execute(serde_json::json!({ "op": "create", "title": "work" }), ctx())
+            .await;
+        tool.execute(
+            serde_json::json!({ "op": "create", "title": "verify", "deps": [1], "gate": true }),
+            ctx(),
+        )
+        .await;
+        list.complete(1, Some("A".into())).unwrap();
+
+        // Drive the dep to the cap: each `reject` re-opens it, the last caps it.
+        let mut out = None;
+        for _ in 0..4 {
+            out = Some(
+                tool.execute(
+                    serde_json::json!({ "op": "reject", "id": 2, "reason": "nope" }),
+                    ctx(),
+                )
+                .await,
+            );
+        }
+        let out = out.unwrap();
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(list.snapshot()[0].state, TaskState::Failed);
+        assert_eq!(
+            out.output,
+            "rejected #2; reopened #1 FAILED (cap)\n\
+             (a node hit the rework cap and is now Failed — reset it or accept)"
+        );
+    }
+
+    /// The tool's `reset` op: a `Failed` node returns to a fresh `Todo`; an
+    /// unknown id is an error, not a panic.
+    #[tokio::test]
+    async fn reset_op_clears_a_failed_node() {
+        let (tool, list) = tool();
+        tool.execute(serde_json::json!({ "op": "create", "title": "work" }), ctx())
+            .await;
+        tool.execute(
+            serde_json::json!({ "op": "create", "title": "verify", "deps": [1], "gate": true }),
+            ctx(),
+        )
+        .await;
+        list.complete(1, Some("A".into())).unwrap();
+        for _ in 0..4 {
+            tool.execute(
+                serde_json::json!({ "op": "reject", "id": 2, "reason": "nope" }),
+                ctx(),
+            )
+            .await;
+        }
+        assert_eq!(list.snapshot()[0].state, TaskState::Failed);
+
+        let out = tool
+            .execute(serde_json::json!({ "op": "reset", "id": 1 }), ctx())
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(out.output, "reset #1");
+        let got = &list.snapshot()[0];
+        assert_eq!(got.state, TaskState::Todo);
+        assert_eq!(got.attempts, 0);
+        assert_eq!(got.feedback, None);
+        assert_eq!(got.artifact, None);
+
+        // An unknown id is an error.
+        let out = tool
+            .execute(serde_json::json!({ "op": "reset", "id": 9 }), ctx())
+            .await;
+        assert!(out.is_error, "{out:?}");
+        assert!(out.output.contains("9"), "{}", out.output);
+    }
+
     /// `render` appends `← #deps` and `×attempts` only when set: a dep-less,
     /// 0-attempt node renders exactly as before.
     #[test]
