@@ -22,9 +22,13 @@
 //! — a "go back" is the runtime control action `reopen`, which resets a node and
 //! its whole downstream cone, bounded by the attempt cap (§6).
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use tokio::sync::watch;
 use wcode_harness::protocol::SessionId;
@@ -35,7 +39,8 @@ use wcode_harness::protocol::SessionId;
 /// set it instead of looping (§6). P0 never resets it — a dependent seeing a
 /// `Failed` (not `Done`) dep stays blocked, deliberately (§3: there is no
 /// `Stale` state; stall detection + escalation + a reset land in P2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskState {
     /// Planned, not started.
     Todo,
@@ -64,7 +69,8 @@ impl TaskState {
 
 /// The outcome of a [`TaskList::reopen`] — so a caller can journal `reopened`
 /// vs. `failed` per node (§7).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReopenOutcome {
     /// The node (and its cone) was reset to `Todo` for another attempt.
     Reopened,
@@ -81,12 +87,16 @@ pub enum ReopenOutcome {
 /// P5-deferred: inline worker overrides (model / role / tools / read_only /
 /// effort / provider) reuse the `WorkerSpec` fields (`agents.rs`). They are
 /// deliberately NOT modelled yet — `Session` carries only `member` for now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunSpec {
     /// A model/team node: a spawned worker session produces the outcome.
     /// `member` is the `Phonebook`/`[team]` name (`agents.rs`); `None` = the
     /// root itself / a role-less node (validated at dispatch, P1).
-    Session { member: Option<String> },
+    Session {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
+    },
     /// A physical node: a definable action; the exit code IS the verdict (§5, P3).
     // P3's scheduler MATCHES this variant, but only tests CONSTRUCT it — matching
     // is not construction, and derived impls don't count, so the dead-code
@@ -97,27 +107,33 @@ pub enum RunSpec {
 }
 
 /// One planned task — a node in the root's DAG.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     /// Monotonic id (`1, 2, 3, …`), assigned by [`TaskList::create`].
     pub id: u32,
     /// The one-line description the orchestrator planned.
     pub title: String,
     /// The worker this task is assigned to, if any (`SessionId`, e.g. `agent:w1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<SessionId>,
     /// Current state (a new task starts [`TaskState::Todo`]).
     pub state: TaskState,
     /// Blocked-by edge set: run only after every id here is `Done`. Empty = no
     /// deps (ready at once). The static graph is acyclic (see [`TaskList::depends`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<u32>,
     /// Rework rounds; `reopen` bumps it, the cap compares it (§6).
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub attempts: u32,
     /// The latest reject reason — the next run's extra input (§4 hydration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
     /// This node's output. Hydrates dependents; dropped on `reopen` (§4/§6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<String>,
     /// A gate (judgment or physical): its `reject` re-opens `deps`, not itself
     /// (§5).
+    #[serde(default, skip_serializing_if = "is_false")]
     pub gate: bool,
     /// How the node runs (Session vs. Script, §3).
     pub run: RunSpec,
@@ -133,6 +149,67 @@ pub struct TaskList {
     inner: Arc<Inner>,
 }
 
+/// Local `skip_serializing_if` helpers (the private `session_groups::is_false`
+/// is not visible here).
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// One journaled line per PUBLIC mutation (§7). Tagged like `SessionEntry`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub(crate) enum PlanOp {
+    Create {
+        id: u32,
+        title: String,
+        deps: Vec<u32>,
+        gate: bool,
+    },
+    Depends {
+        id: u32,
+        on: u32,
+    },
+    Assign {
+        id: u32,
+        owner: SessionId,
+    },
+    Configure {
+        id: u32,
+        run: RunSpec,
+        gate: bool,
+    },
+    Start {
+        id: u32,
+    },
+    Complete {
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<String>,
+    },
+    Reopen {
+        id: u32,
+        reason: String,
+    },
+    Reject {
+        gate: u32,
+        reason: String,
+    },
+    Reset {
+        id: u32,
+    },
+    Fail {
+        id: u32,
+        reason: String,
+    },
+}
+
+/// The append-only journal sink. P4/B adds the compaction counter.
+struct Journal {
+    path: PathBuf,
+}
 struct Inner {
     tasks: Mutex<Vec<Task>>,
     /// The next id to hand out (`fetch_add`); starts at 1.
@@ -143,6 +220,10 @@ struct Inner {
     /// The rework cap: `reopen` refuses at `attempts > max_attempts` → `Failed`.
     /// Fixed at 3 for now (§11.6); `[workflow] max_attempts` (P5) will plumb it.
     max_attempts: u32,
+    /// `Some` while live (`<groupdir>/plan.ndjson`); `None` in memory.
+    journal: Option<Mutex<Journal>>,
+    /// True while replaying, so `record` is a no-op (Ruling 2).
+    replaying: AtomicBool,
 }
 
 impl Default for Inner {
@@ -155,7 +236,32 @@ impl Default for Inner {
             next_id: AtomicU32::new(1),
             updates: watch::channel(Vec::new()).0,
             max_attempts: 3,
+            journal: None,
+            replaying: AtomicBool::new(false),
         }
+    }
+}
+
+impl Inner {
+    /// Append one op line (Ruling 1). No-op while replaying or un-journaled.
+    fn record(&self, op: &PlanOp) -> Result<(), String> {
+        if self.replaying.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        let line = serde_json::to_string(op).map_err(|e| format!("plan encode: {e}"))?;
+        let journal = journal.lock().unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal.path)
+            .map_err(|e| format!("plan journal {}: {e}", journal.path.display()))?;
+        file.write_all(format!("{line}\n").as_bytes())
+            .map_err(|e| format!("plan write: {e}"))?;
+        file.flush().map_err(|e| format!("plan flush: {e}"))?;
+        Ok(())
     }
 }
 
@@ -179,6 +285,34 @@ fn cone(tasks: &[Task], id: u32) -> Vec<u32> {
 
 impl TaskList {
     /// An empty list.
+    // ==== SKETCH (review-only, not real code) — P4 (4): load + reconcile ====
+    // A journaled list, and a loader (mirrors `Session::{open,create}` shape).
+    //
+    //     /// An empty list that journals every mutation to `path`; the parent dir
+    //     /// is created, the file appears on the first mutation.
+    //     pub fn with_journal(path: PathBuf) -> Self { … }   // journal: Some(Mutex::new(path))
+    //
+    //     /// Load `path`: replay each NDJSON `PlanOp` into a list built with the sink
+    //     /// set but a `replaying` flag ON (so `record` is suppressed — Ruling 2),
+    //     /// then CLEAR the flag and RECONCILE. A missing file ⇒ an empty journaled
+    //     /// list. A parse error is tolerated ONLY on the last non-empty line (a torn
+    //     /// tail — mirrors `Session::open`'s `last_non_empty` guard, `session.rs:118`);
+    //     /// an earlier bad line is an `Err`. A `Snapshot` op REPLACES the task set.
+    //     pub fn load(path: &Path) -> Result<Self, String> { … }
+    //
+    //     /// Apply one op via the PUBLIC methods. `Snapshot` clears + rebuilds;
+    //     /// `Reject` re-runs the whole cone reset (its internal reopens don't journal).
+    //     fn apply(&self, op: PlanOp) { … }
+    //
+    //     /// Crash reconcile (§7): every `Doing` -> `Todo` WITHOUT bumping `attempts`
+    //     /// (a crash is not the node's fault), journaling one `Restart{id}` per flip.
+    //     /// MUST run BEFORE the scheduler subscribes — else a `Doing` node never
+    //     /// re-enters `ready_ids()` and the plan stalls forever.
+    //     fn reconcile(&self) { … }
+    //
+    // Note the sink ordering: replay runs with `record` OFF, then reconcile runs
+    // with it ON (so the `Restart` lines persist).
+    // ==== /SKETCH ====
     pub fn new() -> Self {
         Self::default()
     }
@@ -203,6 +337,7 @@ impl TaskList {
         deps: Vec<u32>,
         gate: bool,
     ) -> Result<Task, String> {
+        let title = title.into();
         let task = {
             let mut tasks = self.inner.tasks.lock().unwrap();
             for &d in &deps {
@@ -213,16 +348,22 @@ impl TaskList {
             let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
             let task = Task {
                 id,
-                title: title.into(),
+                title: title.clone(),
                 owner: None,
                 state: TaskState::Todo,
-                deps,
+                deps: deps.clone(),
                 attempts: 0,
                 feedback: None,
                 artifact: None,
                 gate,
                 run: RunSpec::Session { member: None },
             };
+            self.inner.record(&PlanOp::Create {
+                id,
+                title,
+                deps,
+                gate,
+            })?;
             tasks.push(task.clone());
             task
         };
@@ -242,6 +383,10 @@ impl TaskList {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner.record(&PlanOp::Assign {
+                id,
+                owner: owner.clone(),
+            })?;
             task.owner = Some(owner);
         }
         self.publish();
@@ -279,6 +424,7 @@ impl TaskList {
             if cone(&tasks, id).contains(&on) {
                 return Err(format!("dependency cycle: #{id} → … → #{on}"));
             }
+            self.inner.record(&PlanOp::Depends { id, on })?;
             tasks
                 .iter_mut()
                 .find(|t| t.id == id)
@@ -306,6 +452,12 @@ impl TaskList {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner
+                .record(&PlanOp::Configure {
+                    id,
+                    run: run.clone(),
+                    gate,
+                })?;
             task.run = run;
             task.gate = gate;
         }
@@ -326,6 +478,7 @@ impl TaskList {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner.record(&PlanOp::Start { id })?;
             task.state = TaskState::Doing;
         }
         self.publish();
@@ -355,6 +508,10 @@ impl TaskList {
                     return Err(format!("#{id} is blocked by #{d}"));
                 }
             }
+            self.inner.record(&PlanOp::Complete {
+                id,
+                artifact: artifact.clone(),
+            })?;
             tasks[idx].state = TaskState::Done;
             tasks[idx].artifact = artifact;
         }
@@ -373,10 +530,9 @@ impl TaskList {
     /// reopen — set `id = Failed` (terminal), leave the cone untouched, and
     /// return [`ReopenOutcome::ReachedCap`] (the scheduler escalates, P2). Err
     /// `"no task #<id>"`. Publishes on Ok.
-    pub fn reopen(&self, id: u32, reason: impl Into<String>) -> Result<ReopenOutcome, String> {
+    fn reopen_inner(&self, id: u32, reason: &str) -> Result<ReopenOutcome, String> {
         // The downstream cone is read before taking the lock (`descendants`
-        // acquires it); the root owns the list single-threaded, so nothing
-        // mutates the graph between the read and the reset below.
+        // acquires it); the root owns the list single-threaded.
         let cone_ids = self.descendants(id);
         let outcome;
         {
@@ -390,7 +546,7 @@ impl TaskList {
                 tasks[idx].state = TaskState::Failed;
                 outcome = ReopenOutcome::ReachedCap;
             } else {
-                tasks[idx].feedback = Some(reason.into());
+                tasks[idx].feedback = Some(reason.to_string());
                 tasks[idx].state = TaskState::Todo;
                 tasks[idx].artifact = None;
                 for cid in cone_ids {
@@ -404,6 +560,20 @@ impl TaskList {
         }
         self.publish();
         Ok(outcome)
+    }
+
+    /// Journal one `Reopen`, then delegate to [`TaskList::reopen_inner`]. A cap
+    /// `Reopen` is journaled too — replay recomputes the `Failed` state.
+    // The public rework seam: used by tests and a future explicit `task` op.
+    // `reject` intentionally calls `reopen_inner` so it journals ONE line.
+    #[allow(dead_code)]
+    pub fn reopen(&self, id: u32, reason: impl Into<String>) -> Result<ReopenOutcome, String> {
+        let reason = reason.into();
+        self.inner.record(&PlanOp::Reopen {
+            id,
+            reason: reason.clone(),
+        })?;
+        self.reopen_inner(id, &reason)
     }
 
     /// Manually clear a terminal `Failed` node so it can run again — the
@@ -421,6 +591,7 @@ impl TaskList {
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner.record(&PlanOp::Reset { id })?;
             task.state = TaskState::Todo;
             task.attempts = 0;
             task.feedback = None;
@@ -437,14 +608,19 @@ impl TaskList {
     /// invalidates dependents — they stay blocked, §3). Err `"no task #<id>"`.
     /// Publishes on Ok.
     pub fn fail(&self, id: u32, reason: impl Into<String>) -> Result<(), String> {
+        let reason = reason.into();
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
             let task = tasks
                 .iter_mut()
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner.record(&PlanOp::Fail {
+                id,
+                reason: reason.clone(),
+            })?;
             task.state = TaskState::Failed;
-            task.feedback = Some(reason.into());
+            task.feedback = Some(reason);
         }
         self.publish();
         Ok(())
@@ -473,22 +649,21 @@ impl TaskList {
             }
             gate.deps.clone()
         };
-        // A gate with no deps re-opens nothing: rejecting it would loop forever
-        // (the gate is returned to `Todo`, never gated by anything). Refuse loudly.
         if deps.is_empty() {
             return Err(format!("task #{gate_id} is a gate with no deps to re-open"));
         }
         let reason = reason.into();
+        // ONE line per reject (Ruling 1); replay re-runs the cone via `reopen_inner`.
+        self.inner.record(&PlanOp::Reject {
+            gate: gate_id,
+            reason: reason.clone(),
+        })?;
         let mut reopened = Vec::with_capacity(deps.len());
         for dep in deps {
-            let outcome = self.reopen(dep, reason.clone())?;
+            let outcome = self.reopen_inner(dep, &reason)?;
             reopened.push((dep, outcome));
         }
-        // §6: a gate does not "finish" when it rejects — return it to `Todo` so it
-        // re-runs once its deps are `Done` again. On the success path this is
-        // redundant with `reopen`'s cone reset (the gate is in the cone); on the
-        // cap path, where `reopen` correctly leaves the cone alone, it is the only
-        // thing that returns the gate to `Todo` (else it stays `Doing` forever).
+        // §6: a gate does not "finish" when it rejects — return it to `Todo`.
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
             if let Some(gate) = tasks.iter_mut().find(|t| t.id == gate_id) {
@@ -540,6 +715,24 @@ impl TaskList {
     /// Recompute the snapshot and publish it to every subscriber. Uses
     /// `send_replace` so the value survives with no receiver yet (mirrors
     /// `Registry`'s roster channel).
+    // ==== SKETCH (review-only, not real code) — P4 (5): snapshot / compaction ====
+    // A `Snapshot { tasks }` op replaces the whole set on replay (honored on load).
+    //
+    //   TRIGGER: when the journal exceeds `COMPACT_AFTER = 512` lines, rewrite the
+    //   file as a SINGLE `Snapshot` line. A rewrite is temp-file + `rename` (atomic)
+    //   — NOT append — so a crash mid-rewrite leaves the old file intact (the
+    //   `rename` is the atomic step; the torn-tail risk is gone).
+    //
+    //   REUSE: `crate::tools::temp_path` already names a same-dir
+    //   `*.tmp-wcode-<pid>` sibling — the same helper the mutating tools use.
+    //
+    //   COUNTER: a `lines: AtomicU64` on `Inner` (bumped in `record`); the rewrite
+    //   happens under the `journal` lock so a concurrent append cannot interleave.
+    //
+    // DEFER-ALTERNATIVE: honor `Snapshot` on load only (never emit one in P4) and
+    // compact on a later load — cheaper, but the file grows unbounded within a
+    // session. Recommend the 512-line atomic rewrite.
+    // ==== /SKETCH ====
     fn publish(&self) {
         self.inner.updates.send_replace(self.snapshot());
     }
@@ -861,12 +1054,71 @@ mod tests {
         assert!(err.contains("99"), "{err}");
     }
 
-    /// `reject` refuses a gate with no deps to re-open — it would loop forever.
+/// `PlanOp`/`Task` survive a serde round-trip (the journal's encoding).
+#[test]
+fn plan_op_and_task_serde_round_trip() {
+    let list = TaskList::new();
+    let t = list.create("work", vec![], true).unwrap();
+    let s = serde_json::to_string(&t).unwrap();
+    assert_eq!(serde_json::from_str::<Task>(&s).unwrap(), t);
+
+    let op = PlanOp::Create {
+        id: 1,
+        title: "t".into(),
+        deps: vec![],
+        gate: false,
+    };
+    let s = serde_json::to_string(&op).unwrap();
+    assert_eq!(serde_json::from_str::<PlanOp>(&s).unwrap(), op);
+}
+
+/// `reject` refuses a gate with no deps to re-open — it would loop forever.
     #[test]
     fn reject_refuses_a_dep_less_gate() {
         let list = TaskList::new();
         let gate = list.create("check", vec![], true).unwrap();
         let err = list.reject(gate.id, "nope").unwrap_err();
         assert!(err.contains("no deps to re-open"), "{err}");
+        // ==== SKETCH (review-only, not real code) — P4 test skeletons ====
+        // (`tempfile` is already a dev-dep — used by `tools/bash.rs`'s tests.)
+        //
+        // /// Round-trip: a journaled list reloads to an identical snapshot.
+        // #[test]
+        // fn journal_round_trips() {
+        //     let dir = tempfile::tempdir().unwrap();
+        //     let path = dir.path().join("plan.ndjson");
+        //     todo!("P4: l = TaskList::with_journal(path.clone()); \
+        //            create->depends->assign->complete->reject->reset->fail; \
+        //            let r = TaskList::load(&path).unwrap(); \
+        //            assert_eq!(r.snapshot(), l.snapshot());")
+        // }
+        //
+        // /// A torn trailing line is dropped (mirrors `Session::open`).
+        // #[test]
+        // fn a_torn_tail_is_dropped() {
+        //     todo!("P4: write two ops + a truncated third line; load => the first two apply")
+        // }
+        //
+        // /// Reconcile: a journal ending with a `Doing` node reloads as `Todo`,
+        // /// `attempts` unchanged, a `Restart` op present.
+        // #[test]
+        // fn reload_reconciles_a_doing_node() {
+        //     todo!("P4: create+assign+start (Doing); load => state Todo, attempts 0; \
+        //            the file ends with a restart line")
+        // }
+        //
+        // /// A `reject` writes exactly ONE line (no nested `reopen` lines).
+        // #[test]
+        // fn reject_journals_one_line() {
+        //     todo!("P4: create work+gate, complete work; reject; count lines with op == reject \
+        //            => 1, and NO op == reopen from the internal reopens")
+        // }
+        //
+        // /// A `Snapshot` line replaces the set; later ops apply on top.
+        // #[test]
+        // fn snapshot_replaces_the_task_set() {
+        //     todo!("P4: write a snapshot of two tasks then a Reopen op; load => those two tasks with the reopen applied")
+        // }
+        // ==== /SKETCH ====
     }
 }
