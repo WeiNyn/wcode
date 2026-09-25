@@ -194,32 +194,40 @@ home is that same group dir.
 **Design: an append-only NDJSON journal, event-sourced** — the shape of wcode's
 session JSONL and the protocol's frames.
 
-`<groupdir>/plan.ndjson`, one op per line, written on every mutation:
+`<groupdir>/plan.ndjson`, **one op per line**, recorded on every public mutation:
 
 ```
-{"op":"create","id":2,"title":"implement","member":"builder","deps":[1]}
+{"op":"create","id":2,"title":"implement","deps":[1],"gate":true}
 {"op":"assign","id":2,"owner":"agent:builder"}
 {"op":"start","id":2}
 {"op":"complete","id":2,"artifact":"…A₂…"}
-{"op":"reject","id":3,"reason":"missing edge case X"}
-{"op":"reopen","id":2,"attempt":1,"feedback":"missing edge case X"}
-{"op":"invalidate","id":3}
+{"op":"reject","gate":3,"reason":"missing edge case X"}
+{"op":"reopen","id":2,"reason":"missing edge case X"}
 ```
 
 Why a journal, not a snapshot: crash-safe by append+flush (no
 read-modify-write race), idiomatic (mirrors `Session`), and it yields the
 **rework history for free** — every `reject`/`reopen` is on the tape. A periodic
-`{"op":"snapshot",…}` line bounds replay cost.
+`{"op":"snapshot","tasks":…}` line bounds replay cost; past a line threshold the
+file is rewritten as one `snapshot` (atomic temp+rename).
 
-**The atomic unit is the invalidation batch.** `reject → reopen →
-invalidate(cone)` is written as one contiguous run *before* the cone is reset,
-so a crash mid-rework cannot leave a half-invalidated graph. A truncated
-trailing line is dropped on reload (line-oriented, tolerant), so a crash
-*during* the write is benign.
+**One op per public mutation.** Each mutation records exactly one line — a whole
+`reject` is a single `{"op":"reject",…}` that **recomputes the cone on replay**,
+*not* a fine-grained `reject`/`reopen`/`invalidate` batch (a partial batch on a
+crash would replay a *prefix* → a half-invalidated graph; a single line is
+atomic). `invalidate` is derived, not an op. Recording happens **before** the
+mutation is applied (durable-or-nothing): the journal never lags the in-memory
+state.
 
-`TaskList` gains an optional journal sink; `create` / `assign` / `start` /
-`complete` / `reject` / `reopen` / `invalidate` each append. The in-memory API
-and the TUI `watch` are unchanged.
+Replay runs with recording **suppressed** (a `replaying` flag on the sink), so
+applying ops through the public methods never re-journals. A `create`'s id is
+authoritative from the op — replay inserts it and advances `next_id`, so a
+`snapshot` … `create` sequence cannot collide. A truncated trailing line is
+dropped on reload (line-oriented, tolerant); a bad line *earlier* in the file is
+an error.
+
+The in-memory API and the TUI `watch` are unchanged; the sink is `None` when
+there is no group.
 
 **Resume** (`--resume <groupdir>/root.jsonl`, the existing path):
 
@@ -348,8 +356,9 @@ names the shape, never the behavior.
 6. **Cap:** at most `max_attempts = 3` reworks, then `Failed` + escalate
    (`attempts > max_attempts` — the retry idiom, like `WCODE_RETRY_MAX`).
 7. **Persistence:** append-only `<groupdir>/plan.ndjson`, artifacts inline,
-   `reject → reopen → invalidate` written as one atomic run; resume rebuilds the
-   list, `Doing → Todo` without bumping attempts.
+   **one op per public mutation** (a `reject` is a single line that recomputes the
+   cone on replay), recorded before apply; resume rebuilds the list, `Doing → Todo`
+   without bumping attempts.
 8. **Group-only**; a `[[workflow]]` without a team is refused.
 9. **Config:** `[[workflow]]` is plan *data*; gate *policy* stays in `Hooks`.
 
