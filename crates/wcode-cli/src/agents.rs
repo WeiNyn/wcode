@@ -628,6 +628,23 @@ impl Orchestrator {
     }
 
     /// Register the root's mailbox so a worker can report back to it.
+    /// Start the DAG scheduler as a detached task over this orchestrator's plan.
+    ///
+    /// `tokio::spawn`s [`crate::scheduler::Scheduler::run`] with clones of the
+    /// registry, the root id, and the shared [`TaskList`] — the same handle the
+    /// `task` tool and the TUI feed use, so each dispatch publish is seen live.
+    /// MUST be called inside a Tokio runtime (it is: from `build_runtime`, run
+    /// by `#[tokio::main]`).
+    pub fn spawn_scheduler(&self) {
+        tokio::spawn(
+            crate::scheduler::Scheduler::new(
+                self.registry.clone(),
+                self.id.clone(),
+                self.tasks.clone(),
+            )
+            .run(),
+        );
+    }
     pub fn register_root(&self, handle: SessionHandle) {
         self.registry.register(self.id.clone(), handle);
     }

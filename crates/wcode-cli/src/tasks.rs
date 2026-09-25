@@ -221,8 +221,11 @@ impl TaskList {
         Ok(task)
     }
 
-    /// Assign `id` to a worker and mark it [`TaskState::Doing`] (the three-state
-    /// machine: an assigned task is being worked). `Err` names an unknown id.
+    /// Assign `id` to a worker, recording the **owner only** — `state` is left
+    /// untouched. The `Doing` transition belongs to [`TaskList::start`], which
+    /// the scheduler calls on dispatch (§4): an assigned node must stay `Todo`
+    /// so it remains in the scheduler's ready frontier. `Err` names an unknown
+    /// id.
     pub fn assign(&self, id: u32, owner: SessionId) -> Result<(), String> {
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
@@ -231,7 +234,6 @@ impl TaskList {
                 .find(|t| t.id == id)
                 .ok_or_else(|| format!("no task #{id}"))?;
             task.owner = Some(owner);
-            task.state = TaskState::Doing;
         }
         self.publish();
         Ok(())
@@ -496,8 +498,9 @@ mod tests {
         assert!(list.snapshot().is_empty(), "nothing is created");
     }
 
-    /// `assign` records the owner and moves the task to `Doing`; an unknown id
-    /// is an error (and leaves the list untouched).
+    /// `assign` records the owner and leaves the state `Todo` (the `Doing`
+    /// transition is `start`'s); an unknown id is an error (and leaves the list
+    /// untouched).
     #[test]
     fn assign_sets_the_owner() {
         let list = TaskList::new();
@@ -506,7 +509,7 @@ mod tests {
 
         let got = &list.snapshot()[0];
         assert_eq!(got.owner, Some(SessionId::agent("w1")));
-        assert_eq!(got.state, TaskState::Doing, "an assigned task is doing");
+        assert_eq!(got.state, TaskState::Todo, "assign only records the owner");
 
         let err = list.assign(99, SessionId::agent("w2")).unwrap_err();
         assert!(err.contains("99"), "names the unknown id: {err}");

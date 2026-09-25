@@ -18,6 +18,7 @@ mod config;
 mod instructions;
 mod repl;
 mod rtk;
+mod scheduler;
 mod session_groups;
 mod skills;
 mod tasks;
@@ -921,6 +922,17 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     if args.owner.is_none() && !cfg.team.is_empty() && !setup.resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
         println!("team: {}", names.join(", "));
+    }
+    // Spawn the DAG scheduler here — after the `[team]` loop and before
+    // `Runtime { .. }`, so it is live for one-shot / REPL / TUI alike. The
+    // `[team]` members are registered+owned by now, so their ownership edges
+    // exist; `Registry::resolve` needs no registered root, so an early spawn is
+    // safe (a dispatch simply stays `Todo` if nothing can be delivered). A sync
+    // call inside `build_runtime`, itself run under `#[tokio::main]`, so a
+    // runtime is present. A served `--owner` worker (no orchestrator) spawns
+    // nothing.
+    if let Some(o) = &orchestrator {
+        o.spawn_scheduler();
     }
     Runtime {
         instructions,
