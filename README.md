@@ -113,6 +113,37 @@ name   = "reviewer"
 role   = "verify diffs; PASS / NITS / FAIL"
 effort = "high"
 
+### `[workflow]` — a plan template (requires `--agents`)
+
+A single `[workflow]` table seeds the task DAG at boot. Each `[[workflow.node]]`
+becomes a node, instantiated in **topological order** (so a `depends_on` may name
+a later-authored sibling):
+
+```toml
+[workflow]
+max_attempts = 3            # optional; the rework cap (default 3)
+
+[[workflow.node]]
+id = "explore"              # required; a unique label
+member = "explorer"         # EXACTLY ONE of member | script
+
+[[workflow.node]]
+id = "implement"
+member = "builder"
+depends_on = ["explore"]    # sibling ids; resolved to Task ids at boot
+
+[[workflow.node]]
+id = "verify"
+depends_on = ["implement"]
+gate = true
+script = "cargo test --workspace"   # a physical gate (exit code = verdict)
+```
+
+A node is a `member` (a `[team]` name) OR a `script` (`sh -c`, run under the bash
+automation policy); `gate = true` makes its reject re-open its deps, and a gate
+needs at least one `depends_on`. The graph is validated acyclic at load. The plan
+shows in the TUI's `/tasks` listing as
+`#id [state] title (owner) ← #deps ×attempts`.
 [orchestrator]
 # Root-only workflow guidance (requires --agents), folded into the system prompt
 # as a `# Orchestrator workflow` section after the team roster.

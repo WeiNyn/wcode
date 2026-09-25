@@ -520,9 +520,24 @@ fn tasks_text(tasks: &[TaskItem]) -> String {
     }
     tasks
         .iter()
-        .map(|t| match &t.owner {
-            Some(owner) => format!("#{} [{}] {} ({owner})", t.id, t.state, t.title),
-            None => format!("#{} [{}] {} (unassigned)", t.id, t.state, t.title),
+        .map(|t| {
+            let mut line = match &t.owner {
+                Some(owner) => format!("#{} [{}] {} ({owner})", t.id, t.state, t.title),
+                None => format!("#{} [{}] {} (unassigned)", t.id, t.state, t.title),
+            };
+            if !t.deps.is_empty() {
+                let ids = t
+                    .deps
+                    .iter()
+                    .map(|d| format!("#{d}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                line.push_str(&format!(" ← {ids}"));
+            }
+            if t.attempts > 0 {
+                line.push_str(&format!(" ×{}", t.attempts));
+            }
+            line
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -727,6 +742,10 @@ pub struct TaskItem {
     pub owner: Option<String>,
     /// The display state (`todo`/`doing`/`done`).
     pub state: String,
+    /// Blocked-by ids (rendered `← #a,#b`), empty when none.
+    pub deps: Vec<u32>,
+    /// Rework rounds (rendered `×n`), 0 when idle.
+    pub attempts: u32,
 }
 
 /// Status-line fields.
@@ -4682,12 +4701,16 @@ mod tests {
                 title: "explore".into(),
                 owner: None,
                 state: "todo".into(),
+                deps: vec![],
+                attempts: 0,
             },
             TaskItem {
                 id: 2,
                 title: "fix it".into(),
                 owner: Some("w1".into()),
                 state: "doing".into(),
+                deps: vec![],
+                attempts: 0,
             },
         ]);
         submit(&mut app, "/tasks");
@@ -4707,8 +4730,27 @@ mod tests {
             title: "verify".into(),
             owner: Some("reviewer".into()),
             state: "done".into(),
+            deps: vec![],
+            attempts: 0,
         }];
         assert_eq!(tasks_text(&items), "#3 [done] verify (reviewer)");
+    }
+
+    /// `tasks_text` appends the dep/rework suffixes only when set.
+    #[test]
+    fn tasks_text_appends_the_suffixes_when_set() {
+        let items = vec![TaskItem {
+            id: 3,
+            title: "verify".into(),
+            owner: Some("reviewer".into()),
+            state: "done".into(),
+            deps: vec![1, 2],
+            attempts: 1,
+        }];
+        assert_eq!(
+            tasks_text(&items),
+            "#3 [done] verify (reviewer) ← #1,#2 ×1"
+        );
     }
 
     /// `set_tasks` replaces the plan and requests a redraw.
@@ -4722,6 +4764,8 @@ mod tests {
             title: "t".into(),
             owner: None,
             state: "todo".into(),
+            deps: vec![],
+            attempts: 0,
         }]);
         assert_eq!(app.tasks.len(), 1);
         assert_eq!(app.tasks[0].id, 7);

@@ -817,19 +817,22 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         // constraint, BEFORE `spawn_scheduler`: `load`'s reconcile turns every
         // `Doing` → `Todo` while the sink is active — start the scheduler first and
         // a `Doing` node never re-enters `ready_ids()`.
+        // `[workflow] max_attempts` (else 3) reaches the journaled list BEFORE any
+        // mutation — both the fresh and the reloaded path.
+        let cap = cfg.workflow.as_ref().and_then(|w| w.max_attempts).unwrap_or(3);
         let tasks = match &setup.active_group {
             Some(group) => {
                 let path = group.plan_path();
                 if path.exists() {
-                    TaskList::load(&path).unwrap_or_else(|e| {
+                    TaskList::load_at(&path, cap).unwrap_or_else(|e| {
                         eprintln!("warning: plan not loaded: {e}");
-                        TaskList::with_journal(path)
+                        TaskList::with_journal_at(path, cap)
                     })
                 } else {
-                    TaskList::with_journal(path)
+                    TaskList::with_journal_at(path, cap)
                 }
             }
-            None => TaskList::new(),
+            None => TaskList::with_sink(None, false, cap),
         };
         crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
     });
@@ -837,6 +840,10 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // addressable A2A peer reachable over its socket (S4-4).
     if !args.peers.is_empty() && orchestrator.is_none() {
         eprintln!("error: --peer requires --agents");
+        std::process::exit(2);
+    }
+    if cfg.workflow.is_some() && orchestrator.is_none() {
+        eprintln!("error: [workflow] requires --agents");
         std::process::exit(2);
     }
     if !cfg.team.is_empty() && orchestrator.is_none() {
@@ -942,6 +949,16 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     if args.owner.is_none() && !cfg.team.is_empty() && !setup.resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
         println!("team: {}", names.join(", "));
+    }
+    // Instantiate a `[workflow]` template AFTER the `[team]` loop (so member names
+    // resolve) and BEFORE the scheduler spawn. Nodes are created in TOPOLOGICAL
+    // order (Blocker 1), mapping each id to its numeric Task id before resolving
+    // the deps.
+    if let Some(o) = &orchestrator
+        && let Some(workflow) = &cfg.workflow
+    {
+        let n = instantiate_workflow(o.tasks(), workflow);
+        println!("workflow: {n} nodes");
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
     // `Runtime { .. }`, so it is live for one-shot / REPL / TUI alike. The
@@ -1635,6 +1652,48 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
+/// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so a
+/// `depends_on` may name a later-authored sibling — Blocker 1), mapping each
+/// string id to its numeric task id before resolving deps. Returns the count.
+fn instantiate_workflow(tasks: &crate::tasks::TaskList, workflow: &crate::config::Workflow) -> usize {
+    use std::collections::HashMap;
+    let order = crate::config::topo_order(workflow).unwrap_or_else(|e| {
+        eprintln!("warning: [workflow] {e}");
+        Vec::new()
+    });
+    let n = order.len();
+    let mut ids: HashMap<&str, u32> = HashMap::new();
+    for node in order {
+        let deps: Vec<u32> = node
+            .depends_on
+            .iter()
+            .filter_map(|d| ids.get(d.as_str()).copied())
+            .collect();
+        match tasks.create(node.id.as_str(), deps, node.gate) {
+            Ok(t) => {
+                ids.insert(node.id.as_str(), t.id);
+                match (&node.member, &node.script) {
+                    (Some(m), None) => {
+                        let _ = tasks.assign(t.id, crate::tools::message::address(m));
+                    }
+                    (None, Some(cmd)) => {
+                        let _ = tasks.configure(
+                            t.id,
+                            crate::tasks::RunSpec::Script {
+                                command: cmd.clone(),
+                            },
+                            node.gate,
+                        );
+                    }
+                    _ => {} // validated at load (exactly one of member|script)
+                }
+            }
+            Err(e) => eprintln!("warning: workflow node `{}`: {e}", node.id),
+        }
+    }
+    n
+}
+
 /// Map a task-list entry to the TUI's view type (owner shortened to `w1`).
 fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
     wcode_tui::TaskItem {
@@ -1642,6 +1701,8 @@ fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
         title: task.title.clone(),
         owner: task.owner.as_ref().map(crate::agents::short_name),
         state: task.state.label().to_string(),
+        deps: task.deps.clone(),
+        attempts: task.attempts,
     }
 }
 
@@ -1661,6 +1722,39 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn instantiate_workflow_handles_a_later_authored_dependency() {
+        use crate::config::{Workflow, WorkflowNode};
+        // `b` (authored first) depends on `a` (authored second) — author order is
+        // NOT topological, so a naive `ids[d]` would panic (Blocker 1).
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![
+                WorkflowNode {
+                    id: "b".into(),
+                    member: Some("w1".into()),
+                    script: None,
+                    depends_on: vec!["a".into()],
+                    gate: false,
+                },
+                WorkflowNode {
+                    id: "a".into(),
+                    member: Some("w1".into()),
+                    script: None,
+                    depends_on: vec![],
+                    gate: false,
+                },
+            ],
+        };
+        let tasks = crate::tasks::TaskList::new();
+        assert_eq!(instantiate_workflow(&tasks, &w), 2);
+        let snap = tasks.snapshot();
+        assert_eq!(snap.len(), 2);
+        let b = snap.iter().find(|t| t.title == "b").unwrap();
+        assert_eq!(b.deps, vec![1], "b depends on a's assigned (numeric) id");
+        assert_eq!(b.owner.as_ref().map(|o| o.as_str()), Some("agent:w1"));
     }
 
     #[test]

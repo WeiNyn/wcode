@@ -244,6 +244,34 @@ pub struct OrchestratorConfig {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct Workflow {
+    /// Rework cap; `None` keeps the built-in 3 (`tasks.rs`, P2).
+    pub max_attempts: Option<u32>,
+    /// Nodes in author order; `depends_on` names refer to sibling `id`s. TOML
+    /// spells this `[[workflow.node]]`.
+    #[serde(rename = "node", default)]
+    pub nodes: Vec<WorkflowNode>,
+}
+
+/// One node in a `[workflow]` template.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct WorkflowNode {
+    /// A string label, unique within the workflow (resolved to a numeric task id).
+    pub id: String,
+    /// Exactly one of `member` | `script` (validated at load).
+    #[serde(default)]
+    pub member: Option<String>,
+    #[serde(default)]
+    pub script: Option<String>,
+    /// Sibling node ids this node runs after; resolved to task ids at boot.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// A gate (judgment or physical): its `reject` re-opens its deps (§5).
+    #[serde(default)]
+    pub gate: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -281,6 +309,10 @@ pub struct FileConfig {
     /// (`wcode_tui::parse_theme`); absent roles keep the default palette.
     #[serde(default)]
     pub theme: std::collections::BTreeMap<String, String>,
+    /// `[workflow]`: a plan template instantiated at boot (P5). `None` = no
+    /// template (the model authors the DAG at runtime, as today).
+    #[serde(default)]
+    pub workflow: Option<Workflow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +338,8 @@ pub struct Config {
     pub orchestrator: OrchestratorConfig,
     /// Resolved `[theme]`: a validated overlay on the default TUI palette.
     pub theme: wcode_tui::ThemeSpec,
+    /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
+    pub workflow: Option<Workflow>,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -371,6 +405,9 @@ pub enum ConfigError {
     DuplicateTeamMember(String),
     /// An invalid `[theme]` overlay: an unknown role or an unparseable color.
     Theme(String),
+    /// An invalid `[workflow]`: an unknown member, a cycle, missing-or-both of
+    /// `member`|`script`, a duplicate/unknown id, or an empty script.
+    Workflow(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -386,6 +423,7 @@ impl std::fmt::Display for ConfigError {
                 "duplicate [team] member `{name}`: names must be unique"
             ),
             ConfigError::Theme(msg) => write!(f, "invalid [theme]: {msg}"),
+            ConfigError::Workflow(msg) => write!(f, "invalid [workflow]: {msg}"),
         }
     }
 }
@@ -523,6 +561,12 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             }
         }
     }
+    // `[workflow]` validation — after the team block, so member names are known.
+    if let Some(workflow) = &file.workflow {
+        let team_names: Vec<String> = file.team.iter().map(|m| m.name.clone()).collect();
+        validate_workflow(workflow, &team_names)?;
+    }
+
     // `[theme]` is presentation-only, but a bad role or color is a hard error —
     // the "unparseable overlay fails loudly" style (§4 T3b).
     let theme = wcode_tui::parse_theme_table(&file.theme).map_err(ConfigError::Theme)?;
@@ -543,7 +587,110 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         team: file.team,
         orchestrator: file.orchestrator,
         theme,
+        workflow: file.workflow,
     })
+}
+
+/// Reject a malformed `[workflow]` at load time (D14 style): unique node ids;
+/// every `depends_on` names a sibling id; exactly one of `member`|`script`; a
+/// `member` names a `[team]` member; a `script` is non-empty; a `gate` has
+/// deps; and the graph is ACYCLIC. `Err(ConfigError::Workflow(msg))`.
+fn validate_workflow(w: &Workflow, team_names: &[String]) -> Result<(), ConfigError> {
+    let bad = ConfigError::Workflow;
+    let mut ids = std::collections::HashSet::new();
+    for node in &w.nodes {
+        if !ids.insert(node.id.as_str()) {
+            return Err(bad(format!("duplicate node id `{}`", node.id)));
+        }
+    }
+    for node in &w.nodes {
+        match (&node.member, &node.script) {
+            (Some(_), Some(_)) => {
+                return Err(bad(format!(
+                    "node `{}`: exactly one of `member`|`script`",
+                    node.id
+                )));
+            }
+            (None, None) => {
+                return Err(bad(format!(
+                    "node `{}`: needs one of `member`|`script`",
+                    node.id
+                )));
+            }
+            (Some(m), None) => {
+                if !team_names.iter().any(|n| n == m) {
+                    return Err(bad(format!(
+                        "node `{}`: member `{m}` is not a [team] member",
+                        node.id
+                    )));
+                }
+            }
+            (None, Some(cmd)) => {
+                if cmd.trim().is_empty() {
+                    return Err(bad(format!("node `{}`: empty script", node.id)));
+                }
+            }
+        }
+        for dep in &node.depends_on {
+            if !ids.contains(dep.as_str()) {
+                return Err(bad(format!(
+                    "node `{}`: depends_on `{dep}` is not a node id",
+                    node.id
+                )));
+            }
+        }
+        if node.gate && node.depends_on.is_empty() {
+            return Err(bad(format!(
+                "node `{}`: a gate needs at least one depends_on",
+                node.id
+            )));
+        }
+    }
+    topo_order(w)?;
+    Ok(())
+}
+
+/// A topological order of `[workflow]` nodes (Kahn's algorithm), so boot
+/// instantiation creates each dependency before its dependents regardless of
+/// author order. `Err` on a cycle — including a self-edge. Shared by
+/// [`validate_workflow`] and `main.rs::instantiate_workflow`.
+pub(crate) fn topo_order(w: &Workflow) -> Result<Vec<&WorkflowNode>, ConfigError> {
+    use std::collections::{HashMap, VecDeque};
+    let pos: HashMap<&str, usize> = w
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    let mut indeg = vec![0usize; w.nodes.len()];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); w.nodes.len()];
+    for (i, node) in w.nodes.iter().enumerate() {
+        for dep in &node.depends_on {
+            let Some(&d) = pos.get(dep.as_str()) else {
+                return Err(ConfigError::Workflow(format!(
+                    "node `{}`: depends_on `{dep}` is not a node id",
+                    node.id
+                )));
+            };
+            adj[d].push(i);
+            indeg[i] += 1;
+        }
+    }
+    let mut queue: VecDeque<usize> = (0..w.nodes.len()).filter(|&i| indeg[i] == 0).collect();
+    let mut out = Vec::with_capacity(w.nodes.len());
+    while let Some(i) = queue.pop_front() {
+        out.push(&w.nodes[i]);
+        for &j in &adj[i] {
+            indeg[j] -= 1;
+            if indeg[j] == 0 {
+                queue.push_back(j);
+            }
+        }
+    }
+    if out.len() != w.nodes.len() {
+        return Err(ConfigError::Workflow("the graph is not acyclic".into()));
+    }
+    Ok(out)
 }
 
 pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
@@ -971,6 +1118,80 @@ name = "reviewer"
         let err = toml::from_str::<FileConfig>("model = \"m\"\n[[team]]\nrole = \"no name\"\n")
             .unwrap_err();
         assert!(err.to_string().contains("name"), "names the field: {err}");
+    }
+
+    #[test]
+    fn toml_workflow_parses_nodes() {
+        let file: FileConfig = toml::from_str(
+            "model = \"m\"\n[workflow]\nmax_attempts = 5\n\
+             [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\ndepends_on = [\"a\"]\ngate = true\nscript = \"true\"\n",
+        )
+        .unwrap();
+        let w = file.workflow.unwrap();
+        assert_eq!(w.max_attempts, Some(5));
+        assert_eq!(w.nodes.len(), 2);
+        assert_eq!(w.nodes[1].depends_on, vec!["a"]);
+        assert!(w.nodes[1].gate);
+        assert_eq!(w.nodes[1].script.as_deref(), Some("true"));
+    }
+
+    /// Merge a `model` + one `w1` team + `toml`, expecting a config error.
+    fn merge_workflow(toml: &str) -> ConfigError {
+        let file: FileConfig =
+            toml::from_str(&format!("model = \"m\"\n[[team]]\nname = \"w1\"\n{toml}")).unwrap();
+        merge(EnvLike::default(), file).unwrap_err()
+    }
+
+    #[test]
+    fn workflow_rejects_a_bad_graph() {
+        let dup = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n",
+        );
+        assert!(matches!(dup, ConfigError::Workflow(m) if m.contains("duplicate")));
+        let unknown =
+            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"ghost\"]\n");
+        assert!(matches!(unknown, ConfigError::Workflow(m) if m.contains("not a node id")));
+        let cycle = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"b\"]\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\ndepends_on = [\"a\"]\n",
+        );
+        assert!(matches!(cycle, ConfigError::Workflow(m) if m.contains("acyclic")));
+        let self_edge =
+            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"a\"]\n");
+        assert!(matches!(self_edge, ConfigError::Workflow(m) if m.contains("acyclic")));
+    }
+
+    #[test]
+    fn workflow_rejects_a_bad_node() {
+        let both = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\nscript = \"true\"\n",
+        );
+        assert!(matches!(both, ConfigError::Workflow(m) if m.contains("exactly one")));
+        let neither = merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\n");
+        assert!(matches!(neither, ConfigError::Workflow(m) if m.contains("needs one")));
+        let bad_member =
+            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"ghost\"\n");
+        assert!(matches!(bad_member, ConfigError::Workflow(m) if m.contains("not a [team] member")));
+        let empty_script =
+            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nscript = \"  \"\n");
+        assert!(matches!(empty_script, ConfigError::Workflow(m) if m.contains("empty script")));
+        let dep_less_gate =
+            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ngate = true\n");
+        assert!(matches!(dep_less_gate, ConfigError::Workflow(m) if m.contains("gate needs")));
+    }
+
+    /// A valid workflow passes merge and is carried into the resolved `Config`.
+    #[test]
+    fn a_valid_workflow_is_carried_through() {
+        let file: FileConfig = toml::from_str(
+            "model = \"m\"\n[[team]]\nname = \"w1\"\n\
+             [workflow]\nmax_attempts = 5\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n",
+        )
+        .unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.workflow.unwrap().max_attempts, Some(5));
     }
 
     #[test]

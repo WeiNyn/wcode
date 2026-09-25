@@ -592,6 +592,8 @@ mod tests {
             title: "do it".into(),
             owner: Some("w1".into()),
             state: "doing".into(),
+            deps: vec![],
+            attempts: 0,
         }])
         .unwrap();
 

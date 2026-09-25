@@ -334,13 +334,24 @@ impl TaskList {
     /// An empty list.
     /// An empty list that journals every mutation to `path` (the parent dir is
     /// created; the file appears on the first mutation).
+    // Default-cap convenience ctor; the composition root threads an explicit cap.
+    #[allow(dead_code)]
     pub fn with_journal(path: PathBuf) -> Self {
-        Self::with_sink(Some(path), false)
+        Self::with_journal_at(path, 3)
+    }
+
+    /// Like [`TaskList::with_journal`], but with an explicit rework cap (P5).
+    pub fn with_journal_at(path: PathBuf, max_attempts: u32) -> Self {
+        Self::with_sink(Some(path), false, max_attempts)
     }
 
     /// A list with an optional sink and the `replaying` flag (Ruling 2). The flag
     /// — not `journal: None` — suppresses writes during replay; it is resettable.
-    fn with_sink(journal: Option<PathBuf>, replaying: bool) -> Self {
+    pub(crate) fn with_sink(
+        journal: Option<PathBuf>,
+        replaying: bool,
+        max_attempts: u32,
+    ) -> Self {
         let journal = journal.map(|path| {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -352,7 +363,7 @@ impl TaskList {
                 tasks: Mutex::new(Vec::new()),
                 next_id: AtomicU32::new(1),
                 updates: watch::channel(Vec::new()).0,
-                max_attempts: 3,
+                max_attempts,
                 journal,
                 replaying: AtomicBool::new(replaying),
                 lines: AtomicU64::new(0),
@@ -365,8 +376,15 @@ impl TaskList {
     /// the flag and RECONCILE. A missing file ⇒ an empty journaled list. A parse
     /// error is tolerated only on the last non-empty line (a torn tail — mirrors
     /// `Session::open`).
+    // Default-cap convenience ctor; the composition root threads an explicit cap.
+    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, String> {
-        let list = Self::with_sink(Some(path.to_path_buf()), true);
+        Self::load_at(path, 3)
+    }
+
+    /// Like [`TaskList::load`], but with an explicit rework cap (P5).
+    pub fn load_at(path: &Path, max_attempts: u32) -> Result<Self, String> {
+        let list = Self::with_sink(Some(path.to_path_buf()), true, max_attempts);
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1262,6 +1280,23 @@ fn plan_op_and_task_serde_round_trip() {
             gate: false,
             run: RunSpec::Session { member: None },
         }
+    }
+
+    /// A configured `max_attempts` reaches `reopen`'s cap — on both the journaled
+    /// and the no-group (`with_sink(None, …)`) path (Blocker 2).
+    #[test]
+    fn a_configured_cap_reaches_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal_at(path.clone(), 1);
+        assert_eq!(l.max_attempts(), 1);
+        let t = l.create("t", vec![], false).unwrap();
+        assert_eq!(l.reopen(t.id, "x").unwrap(), ReopenOutcome::Reopened); // attempts 1
+        assert_eq!(l.reopen(t.id, "x").unwrap(), ReopenOutcome::ReachedCap); // 2 > 1
+        // The cap survives a reload too.
+        assert_eq!(TaskList::load_at(&path, 1).unwrap().max_attempts(), 1);
+        // The no-group path honors it (Blocker 2).
+        assert_eq!(TaskList::with_sink(None, false, 7).max_attempts(), 7);
     }
 
     /// Round-trip: a journaled list reloads to an identical snapshot.
