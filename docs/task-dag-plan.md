@@ -247,9 +247,12 @@ is restored by the existing group resume — which is *why* a reworked node
 **reuses its session**: the worker keeps its context, and the graph keeps its
 node state, and both survive the crash independently.
 
-**Group-only.** A DAG needs members, so a `[[workflow]]` without a team is
-refused (the same shape as the existing `[team] requires --agents` guard), which
-keeps `<groupdir>/plan.ndjson` the single, unambiguous home.
+**Orchestrator-only.** A `[workflow]` requires an orchestrator (`--agents`); its
+plan lives on that root's `TaskList` and journals to the session group's
+`<groupdir>/plan.ndjson` (a fresh root always has a group). A `member` node
+additionally requires its `[team]` entry. This keeps the journal's home
+unambiguous (there is nothing to journal for a socket client or a served
+`--owner` worker — neither has an orchestrator).
 
 ## 8. Creating & customizing a graph
 
@@ -258,7 +261,7 @@ Three paths, primary first.
 **(a) Dynamic — model-authored at runtime (primary).** The root model builds the
 DAG with the `task` tool, exactly as it builds the flat list today
 (`tools/task.rs`). New ops: `depends`, `reject` (+reason); `create` gains
-`deps`; `list` shows deps/attempts; `instantiate` (below). This is the
+`deps`; `list` shows deps/attempts. This is the
 doctrine-native path — the plan is authored in the loop, not configured.
 
 **(b) Declarative — a reusable workflow template (the `[team]` precedent).**
@@ -266,10 +269,8 @@ doctrine-native path — the plan is authored in the loop, not configured.
 `DDmnB`); a graph template is the same kind of thing — a plan skeleton:
 
 ```toml
-[[workflow]]
-name = "review-loop"
+[workflow]
 max_attempts = 3            # rework cap (default 3)
-on_cap = "escalate"         # escalate | (future) fix-node
 
 [[workflow.node]]
 id = "explore"
@@ -286,9 +287,11 @@ script = "cargo test --workspace"   # physical gate (or `member = "reviewer"`)
 ```
 
 Instantiated at boot (the `[team]` startup loop is the model — `main.rs`, anchor
-`KQsCE`), or on demand via `task op: instantiate name=…`. **Validated acyclic at
-load** (topological sort; a back-edge is a loud D18-style error), ids unique,
-deps exist, exactly one of `member`/`script` per node.
+`KQsCE`), after the team and before the scheduler. **Validated at load** — ids
+unique, every `depends_on` names a sibling, **acyclic** (a topological sort; a
+back-edge or self-edge is a loud `ConfigError`), exactly one of `member`/`script`
+per node, `member` names a `[team]` member, and a `gate` has at least one dep.
+Instantiation creates nodes in topological order, so author order is free.
 
 **(c) Programmatic — a code seam.** For compiled variants (the doctrine answer:
 *build the variant instead of configuring one*), a workflow can be a Rust
@@ -303,7 +306,8 @@ builder / `Hooks`. The config is sugar over this.
 | gate vs. work | `gate: bool` | work |
 | judgment vs. physical | `member` xor `script` | `member` |
 | rework cap | `max_attempts` | 3 |
-| on-cap policy | `on_cap` | escalate |
+| reject scope | cone (only cone, for now) | cone |
+<!-- on_cap dropped: only `escalate` exists; add when a second policy lands. -->
 | reject scope | cone (only cone, for now) | cone |
 
 **Doctrine note.** A workflow *template* is plan **data**, like `[team]` —
@@ -359,8 +363,9 @@ names the shape, never the behavior.
    **one op per public mutation** (a `reject` is a single line that recomputes the
    cone on replay), recorded before apply; resume rebuilds the list, `Doing → Todo`
    without bumping attempts.
-8. **Group-only**; a `[[workflow]]` without a team is refused.
-9. **Config:** `[[workflow]]` is plan *data*; gate *policy* stays in `Hooks`.
+8. **Orchestrator-only**; a `[workflow]` requires `--agents` (a `member` node, its
+   `[team]` entry).
+9. **Config:** `[workflow]` is plan *data*; gate *policy* stays in `Hooks`.
 
 ## 12. Open questions
 
