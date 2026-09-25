@@ -597,6 +597,11 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
 /// deps; and the graph is ACYCLIC. `Err(ConfigError::Workflow(msg))`.
 fn validate_workflow(w: &Workflow, team_names: &[String]) -> Result<(), ConfigError> {
     let bad = ConfigError::Workflow;
+    if w.nodes.is_empty() {
+        return Err(bad(
+            "a [workflow] needs at least one [[workflow.node]]".into(),
+        ));
+    }
     let mut ids = std::collections::HashSet::new();
     for node in &w.nodes {
         if !ids.insert(node.id.as_str()) {
@@ -1180,6 +1185,16 @@ name = "reviewer"
         let dep_less_gate =
             merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ngate = true\n");
         assert!(matches!(dep_less_gate, ConfigError::Workflow(m) if m.contains("gate needs")));
+    }
+
+    /// An empty (or `[[workflow.nodes]]`-typo'd) `[workflow]` is a loud error, not
+    /// a silent no-op with an empty plan.
+    #[test]
+    fn workflow_rejects_an_empty_workflow() {
+        let typo = merge_workflow("[workflow]\n[[workflow.nodes]]\nid = \"a\"\nmember = \"w1\"\n");
+        assert!(matches!(typo, ConfigError::Workflow(m) if m.contains("at least one")));
+        let bare = merge_workflow("[workflow]\n");
+        assert!(matches!(bare, ConfigError::Workflow(m) if m.contains("at least one")));
     }
 
     /// A valid workflow passes merge and is carried into the resolved `Config`.

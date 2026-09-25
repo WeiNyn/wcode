@@ -1657,41 +1657,54 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
 /// string id to its numeric task id before resolving deps. Returns the count.
 fn instantiate_workflow(tasks: &crate::tasks::TaskList, workflow: &crate::config::Workflow) -> usize {
     use std::collections::HashMap;
-    let order = crate::config::topo_order(workflow).unwrap_or_else(|e| {
-        eprintln!("warning: [workflow] {e}");
-        Vec::new()
-    });
+    let order = crate::config::topo_order(workflow)
+        .unwrap_or_else(|e| workflow_fail(&e.to_string()));
     let n = order.len();
     let mut ids: HashMap<&str, u32> = HashMap::new();
     for node in order {
-        let deps: Vec<u32> = node
-            .depends_on
-            .iter()
-            .filter_map(|d| ids.get(d.as_str()).copied())
-            .collect();
-        match tasks.create(node.id.as_str(), deps, node.gate) {
-            Ok(t) => {
-                ids.insert(node.id.as_str(), t.id);
-                match (&node.member, &node.script) {
-                    (Some(m), None) => {
-                        let _ = tasks.assign(t.id, crate::tools::message::address(m));
-                    }
-                    (None, Some(cmd)) => {
-                        let _ = tasks.configure(
-                            t.id,
-                            crate::tasks::RunSpec::Script {
-                                command: cmd.clone(),
-                            },
-                            node.gate,
-                        );
-                    }
-                    _ => {} // validated at load (exactly one of member|script)
+        let mut deps: Vec<u32> = Vec::with_capacity(node.depends_on.len());
+        for d in &node.depends_on {
+            match ids.get(d.as_str()) {
+                Some(&id) => deps.push(id),
+                None => workflow_fail(&format!(
+                    "node `{}`: depends_on `{d}` was not created",
+                    node.id
+                )),
+            }
+        }
+        let t = match tasks.create(node.id.as_str(), deps, node.gate) {
+            Ok(t) => t,
+            Err(e) => workflow_fail(&format!("node `{}`: {e}", node.id)),
+        };
+        ids.insert(node.id.as_str(), t.id);
+        match (&node.member, &node.script) {
+            (Some(m), None) => {
+                if let Err(e) = tasks.assign(t.id, crate::tools::message::address(m)) {
+                    workflow_fail(&format!("node `{}`: {e}", node.id));
                 }
             }
-            Err(e) => eprintln!("warning: workflow node `{}`: {e}", node.id),
+            (None, Some(cmd)) => {
+                if let Err(e) = tasks.configure(
+                    t.id,
+                    crate::tasks::RunSpec::Script {
+                        command: cmd.clone(),
+                    },
+                    node.gate,
+                ) {
+                    workflow_fail(&format!("node `{}`: {e}", node.id));
+                }
+            }
+            _ => {} // validated at load (exactly one of member|script)
         }
     }
     n
+}
+
+/// Print a `[workflow]` instantiation error and exit 2, on the same path as the
+/// `[team]` loop. Unreachable after load validation — belt and suspenders.
+fn workflow_fail(msg: &str) -> ! {
+    eprintln!("error: workflow: {msg}");
+    std::process::exit(2);
 }
 
 /// Map a task-list entry to the TUI's view type (owner shortened to `w1`).
