@@ -636,11 +636,18 @@ impl Orchestrator {
     /// MUST be called inside a Tokio runtime (it is: from `build_runtime`, run
     /// by `#[tokio::main]`).
     pub fn spawn_scheduler(&self) {
+        let self_addr = SessionId::agent("scheduler");
+        // Permit the scheduler → root escalation `Wake`: the root owns
+        // `self_addr`, so `permitted(self_addr, root)` holds. The root need not
+        // be `register`ed yet (`permitted` reads only `owners`); an escalation
+        // before it is just a `deliver` → `Unknown`, which `escalate` ignores.
+        self.registry.set_owner(self_addr.clone(), self.id.clone());
         tokio::spawn(
             crate::scheduler::Scheduler::new(
                 self.registry.clone(),
                 self.id.clone(),
                 self.tasks.clone(),
+                self_addr,
             )
             .run(),
         );
