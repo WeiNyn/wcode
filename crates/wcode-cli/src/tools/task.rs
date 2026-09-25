@@ -376,6 +376,48 @@ mod tests {
         assert!(out.output.contains("not a gate"), "{}", out.output);
     }
 
+    /// The tool's `reject` success arm (and `fmt_ids`'s non-empty join) plus
+    /// `complete` carrying a real artifact — seams the unit tests left open.
+    #[tokio::test]
+    async fn reject_and_complete_carry_payloads() {
+        let (tool, list) = tool();
+        // work (1) and a gate (2) that depends on it.
+        tool.execute(serde_json::json!({ "op": "create", "title": "work" }), ctx())
+            .await;
+        tool.execute(
+            serde_json::json!({ "op": "create", "title": "verify", "deps": [1] }),
+            ctx(),
+        )
+        .await;
+        list.configure(2, RunSpec::Session { member: None }, true)
+            .unwrap();
+        list.complete(1, Some("A₁".into())).unwrap();
+
+        // `reject` on the gate re-opens its dep; the output names it.
+        let out = tool
+            .execute(
+                serde_json::json!({ "op": "reject", "id": 2, "reason": "redo" }),
+                ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert!(
+            out.output.contains("#1"),
+            "names the reopened dep: {}",
+            out.output
+        );
+
+        // `complete` stores the artifact on the node.
+        let out = tool
+            .execute(
+                serde_json::json!({ "op": "complete", "id": 1, "artifact": "the report" }),
+                ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(list.snapshot()[0].artifact.as_deref(), Some("the report"));
+    }
+
     /// `render` appends `← #deps` and `×attempts` only when set: a dep-less,
     /// 0-attempt node renders exactly as before.
     #[test]

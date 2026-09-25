@@ -641,21 +641,44 @@ mod tests {
         assert_eq!(list.descendants(t2.id), vec![t3.id]);
     }
 
-    /// `reopen` past the cap sets `Failed` (terminal) and leaves the cone alone.
+    /// `reopen` past the cap sets `Failed` (terminal) and — the regression guard
+    /// — leaves the downstream cone untouched: a capped node does not invalidate
+    /// its dependents. (P2 reworks this branch.)
     #[test]
     fn reopen_hits_the_cap_and_fails_terminal() {
         let list = TaskList::new();
         assert_eq!(list.max_attempts(), 3);
         let t = list.create("t", vec![]).unwrap();
+        let child = list.create("child", vec![t.id]).unwrap();
+
+        // Three successful reopens, each invalidating the cone (child → Todo).
         for _ in 0..3 {
             assert_eq!(list.reopen(t.id, "again").unwrap(), ReopenOutcome::Reopened);
+            assert_eq!(
+                list.snapshot()[1].state,
+                TaskState::Todo,
+                "a successful reopen resets the cone"
+            );
         }
-        // The 4th reopen exceeds the cap.
+
+        // Re-establish the cone as Done, each with an artifact.
+        list.complete(t.id, Some("a1".into())).unwrap();
+        list.complete(child.id, Some("a2".into())).unwrap();
+
+        // The 4th reopen exceeds the cap: node 1 → Failed, cone NOT touched.
+        assert_eq!(list.reopen(t.id, "again").unwrap(), ReopenOutcome::ReachedCap);
+        let snap = list.snapshot();
+        assert_eq!(snap[0].state, TaskState::Failed);
         assert_eq!(
-            list.reopen(t.id, "again").unwrap(),
-            ReopenOutcome::ReachedCap
+            snap[1].state,
+            TaskState::Done,
+            "the cone is not reset when the cap is hit"
         );
-        assert_eq!(list.snapshot()[0].state, TaskState::Failed);
+        assert_eq!(
+            snap[1].artifact.as_deref(),
+            Some("a2"),
+            "the descendant's artifact survives a cap hit"
+        );
         assert_eq!(TaskState::Failed.label(), "failed");
     }
 
