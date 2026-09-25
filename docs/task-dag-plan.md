@@ -177,7 +177,8 @@ Two invariants make it correct:
   Anything derived from `A₂` is stale; shipping it is a silent wrong answer.
   `descendants(2)` is reset.
 
-**The cap.** `if attempts(n) >= max_attempts (= 3)` → do **not** reopen: set
+**The cap.** `attempts` counts reworks, so `if attempts(n) > max_attempts`
+(= 3) → do **not** reopen: set `n = Failed` and escalate (a `Wake` to the
 `n = Failed` and escalate (a `Wake` to the root/human: *"node 2 failed after 3
 reworks"*). This is the escape hatch to judgment and the guarantee of
 termination. (Option B's forward `fix` node may later merge here as the
@@ -344,7 +345,8 @@ names the shape, never the behavior.
 4. **Model proposes, scheduler disposes**; acceptance is the model's, dispatch /
    invalidation are the scheduler's.
 5. **Reuse** the worker session on rework.
-6. **Cap:** `max_attempts = 3`, then `Failed` + escalate.
+6. **Cap:** at most `max_attempts = 3` reworks, then `Failed` + escalate
+   (`attempts > max_attempts` — the retry idiom, like `WCODE_RETRY_MAX`).
 7. **Persistence:** append-only `<groupdir>/plan.ndjson`, artifacts inline,
    `reject → reopen → invalidate` written as one atomic run; resume rebuilds the
    list, `Doing → Todo` without bumping attempts.
