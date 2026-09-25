@@ -22,10 +22,20 @@
 //! cannot be delivered is left `Todo` (visibly un-started in `task list`); stall
 //! notice + escalation is P2, through a proper seam.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
+use wcode_harness::hooks::{HooksSet, ToolCall};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::Registry;
 
-use crate::tasks::{Task, TaskList, TaskState};
+use crate::tasks::{RunSpec, Task, TaskList, TaskState};
+use crate::tools::bash::{PREVIEW_TAIL_CHARS, run_command, tail_chars};
+
+/// The wall-clock cap for a `Script` node: a build/test can run far longer than
+/// the `bash` tool's 30 s default. P5 makes it configurable.
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The root's DAG executor: watches the plan and wakes the ready frontier.
 ///
@@ -50,6 +60,15 @@ pub struct Scheduler {
     /// this address an owner edge to the root (`Orchestrator::spawn_scheduler`),
     /// so `self_addr → root` is permitted.
     self_addr: SessionId,
+    /// The directory a `Script` node runs in — the root's cwd, so a physical
+    /// gate sees the same tree the workers do.
+    working_dir: PathBuf,
+    /// The root's hooks — `BashRiskHooks` (and any other policy) applies to a
+    /// `Script` command exactly as it does to the `bash` tool.
+    hooks: HooksSet,
+    /// Cancels an in-flight `Script` run. A fresh, never-cancelled token is fine
+    /// for P3 (the script timeout bounds a runaway).
+    cancel: CancellationToken,
 }
 
 impl Scheduler {
@@ -59,12 +78,18 @@ impl Scheduler {
         root: SessionId,
         tasks: TaskList,
         self_addr: SessionId,
+        working_dir: PathBuf,
+        hooks: HooksSet,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             registry,
             root,
             tasks,
             self_addr,
+            working_dir,
+            hooks,
+            cancel,
         }
     }
 
@@ -96,7 +121,7 @@ impl Scheduler {
         let mut last_escalated: Vec<u32> = Vec::new();
         loop {
             let _ = updates.borrow_and_update();
-            self.dispatch(&self.frontier());
+            self.dispatch(&self.frontier()).await;
             // Escalate ONCE per Failed set: a real stall (something terminal and
             // nothing ready). An empty plan, an owner-less Todo plan, and a Doing
             // node mid-turn all leave `failed` empty → no escalation. (A Doing
@@ -122,20 +147,26 @@ impl Scheduler {
     }
 
     /// The ids to dispatch now: [`TaskList::ready_ids`] (`Todo` ∧ every dep
-    /// `Done`), kept only where the node has an `owner`. An owner-less node is
-    /// never dispatched — it is the root's/human's to drive. Creation order.
+    /// `Done`), kept where the node has an `owner` OR runs a `Script` (a `Script`
+    /// node is worker-less). A `Session` node with no owner is never dispatched.
     ///
     /// Ownership is enforced again downstream: [`Registry::deliver`] → `resolve`
     /// checks the permitted set, so a node assigned to a `[peers]` alias or an
     /// unregistered id yields `NotPermitted`/`Unknown` and never dispatches —
     /// acceptable for P1, since the scheduler drives the root's own `[team]`,
     /// each member `register`ed and `set_owner`ed at spawn.
+    // A `Script` node is worker-less, so the owner filter must not drop it.
     fn frontier(&self) -> Vec<u32> {
         let snapshot = self.tasks.snapshot();
         self.tasks
             .ready_ids()
             .into_iter()
-            .filter(|id| snapshot.iter().any(|t| t.id == *id && t.owner.is_some()))
+            .filter(|id| {
+                snapshot.iter().any(|t| {
+                    t.id == *id
+                        && (t.owner.is_some() || matches!(t.run, RunSpec::Script { .. }))
+                })
+            })
             .collect()
     }
 
@@ -162,44 +193,88 @@ impl Scheduler {
             .filter(|t| t.state == TaskState::Failed)
             .collect()
     }
-    /// Wake each frontier node: hydrate a [`Request::Wake`], [`Registry::deliver`]
-    /// it from the root, and — only on `Ok` — flip the node `Doing` via
-    /// [`TaskList::start`].
-    ///
-    /// A `deliver` error (`Unknown` / `NotPermitted` / `Closed`) does **not**
-    /// `start` the node: it stays `Todo`, so the next `TaskList` mutation retries
-    /// it (no tight spin — a failed delivery publishes nothing). P1 prints
-    /// nothing on failure: it holds no UI channel, and `eprintln!` under the TUI
-    /// alt-screen corrupts the display; stall notice + escalation are P2.
-    ///
-    /// `run` is ignored here (P1): dispatch sends an unconditional
-    /// `Request::Wake`. P3 branches on `RunSpec::Script` (§5 — the exit code is
-    /// the verdict); `Script` nodes are unreachable at runtime until P5.
-    ///
-    /// The snapshot is recomputed here rather than trusting the caller's
-    /// frontier; [`TaskList::start`] ignores unknown ids, so drift between the
-    /// two reads is harmless in this single-threaded loop.
-    fn dispatch(&self, frontier: &[u32]) {
+    /// Wake each frontier node. A `Session` node gets a hydrated
+    /// [`Request::Wake`] (delivered only if it has an owner) and — on success —
+    /// flips `Doing`. A `Script` node (worker-less) runs its command detached:
+    /// `before_tool_call` first (a refusal `fail`s it *without running*), then
+    /// `run_command`, whose exit code is the verdict (§5).
+    async fn dispatch(&self, frontier: &[u32]) {
         let snapshot = self.tasks.snapshot();
         for &id in frontier {
             let Some(task) = snapshot.iter().find(|t| t.id == id) else {
                 continue;
             };
-            let Some(owner) = task.owner.as_ref() else {
-                continue;
-            };
-            let deps: Vec<Task> = task
-                .deps
-                .iter()
-                .filter_map(|d| snapshot.iter().find(|t| t.id == *d).cloned())
-                .collect();
-            let content = dispatch_content(task, &deps);
-            if self
-                .registry
-                .deliver(&self.root, owner, Request::Wake { content })
-                .is_ok()
-            {
-                let _ = self.tasks.start(id);
+            match &task.run {
+                RunSpec::Session { .. } => {
+                    let Some(owner) = task.owner.as_ref() else {
+                        continue;
+                    };
+                    let deps: Vec<Task> = task
+                        .deps
+                        .iter()
+                        .filter_map(|d| snapshot.iter().find(|t| t.id == *d).cloned())
+                        .collect();
+                    let content = dispatch_content(task, &deps);
+                    if self
+                        .registry
+                        .deliver(&self.root, owner, Request::Wake { content })
+                        .is_ok()
+                    {
+                        let _ = self.tasks.start(id);
+                    }
+                }
+                RunSpec::Script { command } => {
+                    // (a) policy first — the SAME gate the `bash` tool runs under.
+                    let call = ToolCall {
+                        id: format!("script-{id}"),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({ "command": command }),
+                    };
+                    if let Some(reason) = self.hooks.before_tool_call(&call).await {
+                        let _ = self.tasks.fail(id, reason); // the command NEVER runs
+                        continue;
+                    }
+                    // (b) leave the frontier SYNCHRONOUSLY, then run detached: a
+                    // `Script` can outlast the loop's turn, so blocking here would
+                    // stall every other ready node. The task holds only clones.
+                    let _ = self.tasks.start(id);
+                    let (tasks, dir, cancel, gate, command) = (
+                        self.tasks.clone(),
+                        self.working_dir.clone(),
+                        self.cancel.clone(),
+                        task.gate,
+                        command.clone(),
+                    );
+                    tokio::spawn(async move {
+                        let (code, output) = run_command(
+                            &command,
+                            &dir,
+                            SCRIPT_TIMEOUT,
+                            &cancel,
+                            None,
+                            &format!("script-{id}"),
+                        )
+                        .await;
+                        let tail = tail_chars(&output, PREVIEW_TAIL_CHARS);
+                        match (code, gate) {
+                            (Some(0), false) => {
+                                let _ = tasks.complete(id, Some(output));
+                            }
+                            (Some(0), true) => {
+                                let _ = tasks.complete(id, None);
+                            }
+                            (_, false) => {
+                                let _ = tasks.fail(id, tail);
+                            }
+                            (_, true) => {
+                                // A misconfigured gate must not get stuck `Doing`.
+                                if let Err(e) = tasks.reject(id, tail) {
+                                    let _ = tasks.fail(id, e);
+                                }
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -208,21 +283,28 @@ impl Scheduler {
 /// The escalation `Wake` content (P2 §6). Exact shape:
 ///
 /// ```text
-/// scheduler: <N> node(s) hit the rework cap — the plan is stalled.
-/// #<id> <title> — failed after <max_attempts> reworks; reset it (task op: reset id:<id>) or accept it.
+/// scheduler: <N> node(s) failed — the plan is stalled.
+/// #<id> <title> — <failed after <max_attempts> reworks | failed>; reset it (task op: reset id:<id>) or accept it.
 /// ```
 ///
 /// The number of reworks is `max_attempts` (the cap), NOT `task.attempts`
 /// (which is cap+1 once the cap is hit).
 fn escalation_content(failed: &[Task], max_attempts: u32) -> String {
     let mut out = format!(
-        "scheduler: {} node(s) hit the rework cap — the plan is stalled.",
+        "scheduler: {} node(s) failed — the plan is stalled.",
         failed.len()
     );
     for t in failed {
+        // A capped node was reworked (attempts = cap+1); a `fail()`-ed one was not
+        // — say which, so the escalation never overstates the cause.
+        let why = if t.attempts > max_attempts {
+            format!("failed after {max_attempts} reworks")
+        } else {
+            "failed".to_string()
+        };
         out.push_str(&format!(
-            "\n#{} {} — failed after {} reworks; reset it (task op: reset id:{}) or accept it.",
-            t.id, t.title, max_attempts, t.id
+            "\n#{} {} — {}; reset it (task op: reset id:{}) or accept it.",
+            t.id, t.title, why, t.id
         ));
     }
     out
@@ -279,7 +361,7 @@ mod tests {
     use wcode_harness::agent::{Agent, AgentConfig};
     use wcode_harness::compaction::CompactionPolicy;
     use wcode_harness::event::AgentEvent;
-    use wcode_harness::hooks::HooksSet;
+    use wcode_harness::hooks::{Hooks, HooksSet};
     use wcode_harness::loop_::DEFAULT_MAX_TURNS;
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 
@@ -371,6 +453,9 @@ mod tests {
                 root.clone(),
                 tasks.clone(),
                 SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .run(),
         );
@@ -439,6 +524,9 @@ mod tests {
                 root.clone(),
                 tasks.clone(),
                 SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .run(),
         );
@@ -509,8 +597,18 @@ mod tests {
         t.attempts = 4; // cap+1 at a cap hit — must NOT be rendered
         assert_eq!(
             escalation_content(&[t], 3),
-            "scheduler: 1 node(s) hit the rework cap — the plan is stalled.\n\
+            "scheduler: 1 node(s) failed — the plan is stalled.\n\
              #2 implement — failed after 3 reworks; reset it (task op: reset id:2) or accept it."
+        );
+
+        // A `fail()`-ed node (no rework) renders a plain `failed`.
+        let mut f = node(3, "build");
+        f.state = TaskState::Failed;
+        f.attempts = 0;
+        assert_eq!(
+            escalation_content(&[f], 3),
+            "scheduler: 1 node(s) failed — the plan is stalled.\n\
+             #3 build — failed; reset it (task op: reset id:3) or accept it."
         );
     }
 
@@ -533,6 +631,9 @@ mod tests {
                 root.clone(),
                 tasks.clone(),
                 SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .run(),
         );
@@ -577,6 +678,9 @@ mod tests {
                 root.clone(),
                 tasks.clone(),
                 SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .run(),
         );
@@ -624,7 +728,18 @@ mod tests {
         tasks.assign(gate.id, worker_id.clone()).unwrap();
 
         let mut root_rx = root_handle.subscribe();
-        tokio::spawn(Scheduler::new(registry, root.clone(), tasks.clone(), self_addr).run());
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root.clone(),
+                tasks.clone(),
+                self_addr,
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .run(),
+        );
 
         for _ in 0..4 {
             tasks.reject(gate.id, "nope").unwrap();
@@ -632,7 +747,7 @@ mod tests {
         assert_eq!(tasks.snapshot()[0].state, TaskState::Failed);
 
         let content = next_message(&mut root_rx).await;
-        assert!(content.contains("hit the rework cap"), "{content}");
+        assert!(content.contains("node(s) failed"), "{content}");
         assert!(
             content.contains(&format!("failed after {} reworks", tasks.max_attempts())),
             "{content}"
@@ -648,6 +763,189 @@ mod tests {
         );
     }
 
+    /// Spawn a scheduler over `tasks` (an empty registry — `Script` nodes need no
+    /// peers) with `hooks`.
+    fn spawn_scheduler(tasks: &TaskList, hooks: HooksSet) {
+        tokio::spawn(
+            Scheduler::new(
+                Registry::new(),
+                SessionId::agent("orchestrator"),
+                tasks.clone(),
+                SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                hooks,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .run(),
+        );
+    }
+
+    /// Wait (via the plan's watch) until `id` is `want`.
+    async fn wait_for(tasks: &TaskList, id: u32, want: TaskState) {
+        let mut updates = tasks.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if tasks
+                    .snapshot()
+                    .iter()
+                    .any(|t| t.id == id && t.state == want)
+                {
+                    return;
+                }
+                updates.changed().await.expect("watch open");
+            }
+        })
+        .await
+        .expect("node reaches the expected state");
+    }
+
+    /// A test hook refusing any `bash` call whose command contains `BLOCK` — lets
+    /// a `Script` be blocked safely (no dangerous command is ever executed).
+    struct BlockMarker;
+    #[async_trait::async_trait]
+    impl Hooks for BlockMarker {
+        async fn before_tool_call(&self, call: &ToolCall) -> Option<String> {
+            let cmd = call.arguments.get("command").and_then(|c| c.as_str())?;
+            cmd.contains("BLOCK")
+                .then(|| "blocked by test policy".to_string())
+        }
+    }
+
+    /// A `Script` work node runs detached and lands `Done` (its output as the
+    /// artifact) on exit 0.
+    #[tokio::test]
+    async fn a_script_work_node_completes_on_zero() {
+        let tasks = TaskList::new();
+        let id = tasks.create("build", vec![], false).unwrap().id;
+        tasks
+            .configure(id, RunSpec::Script { command: "echo ok".into() }, false)
+            .unwrap();
+        spawn_scheduler(&tasks, HooksSet::default());
+        wait_for(&tasks, id, TaskState::Done).await;
+        let t = &tasks.snapshot()[0];
+        assert_eq!(t.state, TaskState::Done);
+        assert!(
+            t.artifact.as_deref().unwrap_or_default().contains("ok"),
+            "{:?}",
+            t.artifact
+        );
+    }
+
+    /// A non-zero `Script` work node lands `Failed` with `attempts == 0` — a
+    /// direct `fail`, NOT a rework (this fails a `reopen`-based impl).
+    #[tokio::test]
+    async fn a_script_work_node_fails_on_nonzero() {
+        let tasks = TaskList::new();
+        let id = tasks.create("build", vec![], false).unwrap().id;
+        tasks
+            .configure(id, RunSpec::Script { command: "false".into() }, false)
+            .unwrap();
+        spawn_scheduler(&tasks, HooksSet::default());
+        wait_for(&tasks, id, TaskState::Failed).await;
+        assert_eq!(tasks.snapshot()[0].attempts, 0, "a fail is not a rework");
+    }
+
+    /// A `Script` GATE with a failing command `reject`s (re-opens the gated dep +
+    /// cone); a passing command completes the gate.
+    #[tokio::test]
+    async fn a_script_gate_rejects_then_passes() {
+        let tasks = TaskList::new();
+        let work = tasks.create("work", vec![], false).unwrap().id;
+        let gate = tasks.create("verify", vec![work], true).unwrap().id;
+        tasks
+            .configure(gate, RunSpec::Script { command: "false".into() }, true)
+            .unwrap();
+        spawn_scheduler(&tasks, HooksSet::default());
+
+        // The work node is a Session node with no owner — complete it by hand.
+        tasks.complete(work, Some("A".into())).unwrap();
+        wait_for(&tasks, work, TaskState::Todo).await; // rejected → re-opened
+        assert_eq!(
+            tasks
+                .snapshot()
+                .iter()
+                .find(|t| t.id == gate)
+                .unwrap()
+                .state,
+            TaskState::Todo
+        );
+
+        // A passing gate completes.
+        tasks
+            .configure(gate, RunSpec::Script { command: "true".into() }, true)
+            .unwrap();
+        tasks.complete(work, Some("A2".into())).unwrap();
+        wait_for(&tasks, gate, TaskState::Done).await;
+    }
+
+    /// A blocked `Script` command `fail`s the node with the policy reason and the
+    /// command NEVER runs.
+    #[tokio::test]
+    async fn a_blocked_script_fails_without_running() {
+        let tasks = TaskList::new();
+        let id = tasks.create("danger", vec![], false).unwrap().id;
+        let marker = std::env::temp_dir().join(format!("wcode-p3-blocked-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        // `BLOCK` trips the hook; the `touch` after the `;` must never run.
+        tasks
+            .configure(
+                id,
+                RunSpec::Script {
+                    command: format!("echo BLOCK; touch {}", marker.display()),
+                },
+                false,
+            )
+            .unwrap();
+        spawn_scheduler(&tasks, HooksSet::one(Arc::new(BlockMarker)));
+        wait_for(&tasks, id, TaskState::Failed).await;
+        let t = &tasks.snapshot()[0];
+        assert_eq!(t.attempts, 0);
+        assert!(
+            t.feedback
+                .as_deref()
+                .unwrap_or_default()
+                .contains("blocked by test policy"),
+            "{:?}",
+            t.feedback
+        );
+        assert!(!marker.exists(), "a blocked command must never run");
+    }
+
+    /// `BashRiskHooks` refuses a catastrophic `Script` command (checked through
+    /// the hook directly — the command is never executed).
+    #[tokio::test]
+    async fn bash_risk_hooks_refuse_a_catastrophic_script() {
+        use wcode_harness::hooks::BashRiskHooks;
+        let hooks = HooksSet::one(Arc::new(BashRiskHooks::new()));
+        let call = ToolCall {
+            id: "script-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "rm -rf /" }),
+        };
+        assert!(hooks.before_tool_call(&call).await.is_some());
+    }
+
+    /// `frontier` includes a `Script` node with no owner, but not an owner-less
+    /// `Session` node.
+    #[test]
+    fn frontier_includes_a_script_node_but_not_an_ownerless_session() {
+        let tasks = TaskList::new();
+        let script = tasks.create("build", vec![], false).unwrap().id;
+        tasks
+            .configure(script, RunSpec::Script { command: "true".into() }, false)
+            .unwrap();
+        let _orphan = tasks.create("orphan", vec![], false).unwrap();
+        let scheduler = Scheduler::new(
+            Registry::new(),
+            SessionId::agent("orchestrator"),
+            tasks.clone(),
+            SessionId::agent("scheduler"),
+            std::env::temp_dir(),
+            HooksSet::default(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        assert_eq!(scheduler.frontier(), vec![script]);
+    }
     /// No false stall: an empty plan and an owner-less Todo plan emit nothing.
     #[tokio::test]
     async fn empty_and_ownerless_plans_do_not_stall() {
@@ -662,6 +960,9 @@ mod tests {
                 root.clone(),
                 empty.clone(),
                 self_addr.clone(),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
             )
             .run(),
         );
@@ -670,7 +971,18 @@ mod tests {
 
         let orphaned = TaskList::new();
         orphaned.create("orphan", vec![], false).unwrap();
-        tokio::spawn(Scheduler::new(registry, root.clone(), orphaned.clone(), self_addr).run());
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root.clone(),
+                orphaned.clone(),
+                self_addr,
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .run(),
+        );
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(
             !has_pending(&mut root_rx),

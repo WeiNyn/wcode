@@ -932,7 +932,11 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // runtime is present. A served `--owner` worker (no orchestrator) spawns
     // nothing.
     if let Some(o) = &orchestrator {
-        o.spawn_scheduler();
+        o.spawn_scheduler(
+            cwd.clone(),
+            hooks.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
     }
     Runtime {
         instructions,

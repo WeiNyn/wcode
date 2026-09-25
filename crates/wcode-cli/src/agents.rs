@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use wcode_harness::actor::{SessionActor, SessionHandle};
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
@@ -635,7 +636,12 @@ impl Orchestrator {
     /// `task` tool and the TUI feed use, so each dispatch publish is seen live.
     /// MUST be called inside a Tokio runtime (it is: from `build_runtime`, run
     /// by `#[tokio::main]`).
-    pub fn spawn_scheduler(&self) {
+    pub fn spawn_scheduler(
+        &self,
+        working_dir: PathBuf,
+        hooks: HooksSet,
+        cancel: CancellationToken,
+    ) {
         let self_addr = SessionId::agent("scheduler");
         // Permit the scheduler → root escalation `Wake`: the root owns
         // `self_addr`, so `permitted(self_addr, root)` holds. The root need not
@@ -648,6 +654,9 @@ impl Orchestrator {
                 self.id.clone(),
                 self.tasks.clone(),
                 self_addr,
+                working_dir,
+                hooks,
+                cancel,
             )
             .run(),
         );

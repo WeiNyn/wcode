@@ -88,7 +88,10 @@ pub enum RunSpec {
     /// root itself / a role-less node (validated at dispatch, P1).
     Session { member: Option<String> },
     /// A physical node: a definable action; the exit code IS the verdict (§5, P3).
-    // P3 (physical gates) constructs this; unused in P0.
+    // P3's scheduler MATCHES this variant, but only tests CONSTRUCT it — matching
+    // is not construction, and derived impls don't count, so the dead-code
+    // attribute stays until P5's `[workflow]` loader builds a `Script` in
+    // non-test code.
     #[allow(dead_code)]
     Script { command: String },
 }
@@ -427,6 +430,25 @@ impl TaskList {
         Ok(())
     }
 
+    /// Fail `id` terminally with `reason` — a deterministic verdict (a `Script`'s
+    /// non-zero exit, §5), NOT a rework. Sets `state = Failed` and
+    /// `feedback = Some(reason)` (so `task list` / the escalation show why);
+    /// `attempts` is untouched and the cone is untouched (a failed node never
+    /// invalidates dependents — they stay blocked, §3). Err `"no task #<id>"`.
+    /// Publishes on Ok.
+    pub fn fail(&self, id: u32, reason: impl Into<String>) -> Result<(), String> {
+        {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task #{id}"))?;
+            task.state = TaskState::Failed;
+            task.feedback = Some(reason.into());
+        }
+        self.publish();
+        Ok(())
+    }
     /// A gate's rejection (§5): `gate_id` must be a gate; re-open each of its
     /// `deps` (via [`TaskList::reopen`]) and return `(dep_id, outcome)` per dep —
     /// so the caller can journal `reopen` vs. `fail` (§7). A dep that hit the cap
@@ -451,6 +473,11 @@ impl TaskList {
             }
             gate.deps.clone()
         };
+        // A gate with no deps re-opens nothing: rejecting it would loop forever
+        // (the gate is returned to `Todo`, never gated by anything). Refuse loudly.
+        if deps.is_empty() {
+            return Err(format!("task #{gate_id} is a gate with no deps to re-open"));
+        }
         let reason = reason.into();
         let mut reopened = Vec::with_capacity(deps.len());
         for dep in deps {
@@ -815,5 +842,31 @@ mod tests {
             TaskState::Todo,
             "reject returns the gate to Todo even on a cap"
         );
+    }
+
+    /// `fail` sets a terminal `Failed` with the reason, leaving `attempts` at 0
+    /// (a deterministic `Script` verdict, NOT a rework — so not via `reopen`).
+    #[test]
+    fn fail_sets_terminal_state_without_a_rework() {
+        let list = TaskList::new();
+        let t = list.create("build", vec![], false).unwrap();
+        list.fail(t.id, "exit 1").unwrap();
+
+        let got = &list.snapshot()[0];
+        assert_eq!(got.state, TaskState::Failed);
+        assert_eq!(got.attempts, 0, "a fail is not a rework");
+        assert_eq!(got.feedback.as_deref(), Some("exit 1"));
+
+        let err = list.fail(99, "x").unwrap_err();
+        assert!(err.contains("99"), "{err}");
+    }
+
+    /// `reject` refuses a gate with no deps to re-open — it would loop forever.
+    #[test]
+    fn reject_refuses_a_dep_less_gate() {
+        let list = TaskList::new();
+        let gate = list.create("check", vec![], true).unwrap();
+        let err = list.reject(gate.id, "nope").unwrap_err();
+        assert!(err.contains("no deps to re-open"), "{err}");
     }
 }
