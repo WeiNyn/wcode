@@ -306,8 +306,7 @@ impl TaskList {
     ///
     /// Err `"no task #<id>"`. Contrast [`TaskList::assign`], which also records
     /// the owner; `start` is the owner-less "work has begun" move.
-    // The P1 scheduler's owner-less dispatch move; unused in P0.
-    #[allow(dead_code)]
+    // Called by the scheduler's `dispatch` on a successful deliver (P1).
     pub fn start(&self, id: u32) -> Result<(), String> {
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
@@ -428,8 +427,7 @@ impl TaskList {
 
     /// The ready frontier, in creation order: every `Todo` node all of whose
     /// deps are `Done` (derived, never stored, §3). Read-only — no publish.
-    // The P1 scheduler's frontier query; unused in P0.
-    #[allow(dead_code)]
+    // Called by the scheduler's `frontier` (P1).
     pub fn ready_ids(&self) -> Vec<u32> {
         let tasks = self.inner.tasks.lock().unwrap();
         tasks
