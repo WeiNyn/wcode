@@ -1,6 +1,6 @@
 # wcode — task DAG (Option A: root-as-scheduler)
 
-Status: **planned — locked, not yet built.** This is C3 of
+Status: **shipped — landed P0–P5; terminal review APPROVED.** This is C3 of
 [`swarm-comparison-plan.md`](swarm-comparison-plan.md) (§5/§6), scoped to the
 **minimal on-doctrine variant**: the graph lives under the existing star, the
 root stays the only dispatcher, and rework is a runtime control action rather
