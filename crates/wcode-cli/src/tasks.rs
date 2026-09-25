@@ -23,10 +23,10 @@
 //! its whole downstream cone, bounded by the attempt cap (§6).
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -204,9 +204,22 @@ pub(crate) enum PlanOp {
         id: u32,
         reason: String,
     },
+    Restart {
+        id: u32,
+    },
+    Snapshot {
+        tasks: Vec<Task>,
+    },
+    /// A future op this build does not understand; ignored on apply.
+    #[serde(other)]
+    #[allow(dead_code)]
+    Unknown,
 }
 
-/// The append-only journal sink. P4/B adds the compaction counter.
+/// Rewrite the journal as a single `Snapshot` once it exceeds this many lines (§7).
+const COMPACT_AFTER: u64 = 512;
+
+/// The append-only journal sink: append one op line at a time.
 struct Journal {
     path: PathBuf,
 }
@@ -223,7 +236,10 @@ struct Inner {
     /// `Some` while live (`<groupdir>/plan.ndjson`); `None` in memory.
     journal: Option<Mutex<Journal>>,
     /// True while replaying, so `record` is a no-op (Ruling 2).
+    /// True while replaying, so `record` is a no-op (Ruling 2).
     replaying: AtomicBool,
+    /// Ops since the last `Snapshot` (compaction trigger).
+    lines: AtomicU64,
 }
 
 impl Default for Inner {
@@ -238,6 +254,7 @@ impl Default for Inner {
             max_attempts: 3,
             journal: None,
             replaying: AtomicBool::new(false),
+            lines: AtomicU64::new(0),
         }
     }
 }
@@ -261,7 +278,44 @@ impl Inner {
         file.write_all(format!("{line}\n").as_bytes())
             .map_err(|e| format!("plan write: {e}"))?;
         file.flush().map_err(|e| format!("plan flush: {e}"))?;
+        self.lines.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+impl Inner {
+    /// Rewrite the journal as a single `Snapshot` once it exceeds `COMPACT_AFTER`.
+    /// Atomic (temp + rename) under the journal lock; a crash mid-rewrite leaves
+    /// the old file intact. No-op while replaying.
+    fn maybe_compact(&self, tasks: &[Task]) {
+        if self.replaying.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(sink) = &self.journal else {
+            return;
+        };
+        let guard = sink.lock().unwrap();
+        if self.lines.load(Ordering::Relaxed) <= COMPACT_AFTER {
+            return;
+        }
+        let Ok(line) = serde_json::to_string(&PlanOp::Snapshot { tasks: tasks.to_vec() }) else {
+            return;
+        };
+        let tmp = crate::tools::temp_path(&guard.path);
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(format!("{line}\n").as_bytes())?;
+                f.flush()
+            });
+        if written.is_ok() && std::fs::rename(&tmp, &guard.path).is_ok() {
+            self.lines.store(1, Ordering::Relaxed);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -285,34 +339,172 @@ fn cone(tasks: &[Task], id: u32) -> Vec<u32> {
 
 impl TaskList {
     /// An empty list.
-    // ==== SKETCH (review-only, not real code) — P4 (4): load + reconcile ====
-    // A journaled list, and a loader (mirrors `Session::{open,create}` shape).
-    //
-    //     /// An empty list that journals every mutation to `path`; the parent dir
-    //     /// is created, the file appears on the first mutation.
-    //     pub fn with_journal(path: PathBuf) -> Self { … }   // journal: Some(Mutex::new(path))
-    //
-    //     /// Load `path`: replay each NDJSON `PlanOp` into a list built with the sink
-    //     /// set but a `replaying` flag ON (so `record` is suppressed — Ruling 2),
-    //     /// then CLEAR the flag and RECONCILE. A missing file ⇒ an empty journaled
-    //     /// list. A parse error is tolerated ONLY on the last non-empty line (a torn
-    //     /// tail — mirrors `Session::open`'s `last_non_empty` guard, `session.rs:118`);
-    //     /// an earlier bad line is an `Err`. A `Snapshot` op REPLACES the task set.
-    //     pub fn load(path: &Path) -> Result<Self, String> { … }
-    //
-    //     /// Apply one op via the PUBLIC methods. `Snapshot` clears + rebuilds;
-    //     /// `Reject` re-runs the whole cone reset (its internal reopens don't journal).
-    //     fn apply(&self, op: PlanOp) { … }
-    //
-    //     /// Crash reconcile (§7): every `Doing` -> `Todo` WITHOUT bumping `attempts`
-    //     /// (a crash is not the node's fault), journaling one `Restart{id}` per flip.
-    //     /// MUST run BEFORE the scheduler subscribes — else a `Doing` node never
-    //     /// re-enters `ready_ids()` and the plan stalls forever.
-    //     fn reconcile(&self) { … }
-    //
-    // Note the sink ordering: replay runs with `record` OFF, then reconcile runs
-    // with it ON (so the `Restart` lines persist).
-    // ==== /SKETCH ====
+    /// An empty list that journals every mutation to `path` (the parent dir is
+    /// created; the file appears on the first mutation).
+    pub fn with_journal(path: PathBuf) -> Self {
+        Self::with_sink(Some(path), false)
+    }
+
+    /// A list with an optional sink and the `replaying` flag (Ruling 2). The flag
+    /// — not `journal: None` — suppresses writes during replay; it is resettable.
+    fn with_sink(journal: Option<PathBuf>, replaying: bool) -> Self {
+        let journal = journal.map(|path| {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            Mutex::new(Journal { path })
+        });
+        Self {
+            inner: Arc::new(Inner {
+                tasks: Mutex::new(Vec::new()),
+                next_id: AtomicU32::new(1),
+                updates: watch::channel(Vec::new()).0,
+                max_attempts: 3,
+                journal,
+                replaying: AtomicBool::new(replaying),
+                lines: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Load `path`: replay each NDJSON `PlanOp` into a list built with the sink
+    /// set but `replaying` ON (so `record` is suppressed — Ruling 2), then clear
+    /// the flag and RECONCILE. A missing file ⇒ an empty journaled list. A parse
+    /// error is tolerated only on the last non-empty line (a torn tail — mirrors
+    /// `Session::open`).
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let list = Self::with_sink(Some(path.to_path_buf()), true);
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                list.inner.replaying.store(false, Ordering::Relaxed);
+                return Ok(list);
+            }
+            Err(e) => return Err(format!("plan {}: {e}", path.display())),
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let last_non_empty = lines.iter().rposition(|l| !l.trim().is_empty());
+        let mut applied = 0u64;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<PlanOp>(line) {
+                Ok(op) => {
+                    list.apply(op);
+                    applied += 1;
+                }
+                Err(e) => {
+                    if Some(i) == last_non_empty {
+                        break; // torn final write; rest is blank
+                    }
+                    return Err(format!("plan {} line {}: {e}", path.display(), i + 1));
+                }
+            }
+        }
+        list.inner.lines.store(applied, Ordering::Relaxed);
+        list.inner.replaying.store(false, Ordering::Relaxed);
+        list.reconcile();
+        Ok(list)
+    }
+
+    /// Apply one replayed op. `Create`/`Snapshot` bypass the public methods so a
+    /// replay keeps ids verbatim (Blocker A); everything else goes through them
+    /// (writes are suppressed by `replaying`).
+    fn apply(&self, op: PlanOp) {
+        match op {
+            PlanOp::Create {
+                id,
+                title,
+                deps,
+                gate,
+            } => {
+                {
+                    let mut tasks = self.inner.tasks.lock().unwrap();
+                    if !tasks.iter().any(|t| t.id == id) {
+                        tasks.push(Task {
+                            id,
+                            title,
+                            owner: None,
+                            state: TaskState::Todo,
+                            deps,
+                            attempts: 0,
+                            feedback: None,
+                            artifact: None,
+                            gate,
+                            run: RunSpec::Session { member: None },
+                        });
+                    }
+                }
+                self.inner.next_id.fetch_max(id + 1, Ordering::Relaxed);
+                self.publish();
+            }
+            PlanOp::Snapshot { tasks } => {
+                let next = tasks.iter().map(|t| t.id).max().map_or(1, |m| m + 1);
+                *self.inner.tasks.lock().unwrap() = tasks;
+                self.inner.next_id.store(next, Ordering::Relaxed);
+                self.publish();
+            }
+            PlanOp::Depends { id, on } => {
+                let _ = self.depends(id, on);
+            }
+            PlanOp::Assign { id, owner } => {
+                let _ = self.assign(id, owner);
+            }
+            PlanOp::Configure { id, run, gate } => {
+                let _ = self.configure(id, run, gate);
+            }
+            PlanOp::Start { id } => {
+                let _ = self.start(id);
+            }
+            PlanOp::Complete { id, artifact } => {
+                let _ = self.complete(id, artifact);
+            }
+            PlanOp::Reopen { id, reason } => {
+                let _ = self.reopen(id, reason);
+            }
+            PlanOp::Reject { gate, reason } => {
+                let _ = self.reject(gate, reason);
+            }
+            PlanOp::Reset { id } => {
+                let _ = self.reset(id);
+            }
+            PlanOp::Fail { id, reason } => {
+                let _ = self.fail(id, reason);
+            }
+            PlanOp::Restart { id } => {
+                {
+                    let mut tasks = self.inner.tasks.lock().unwrap();
+                    if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
+                        t.state = TaskState::Todo;
+                    }
+                }
+                self.publish();
+            }
+            PlanOp::Unknown => {}
+        }
+    }
+
+    /// Crash reconcile (§7): every `Doing` → `Todo` WITHOUT bumping `attempts`
+    /// (a crash is not the node's fault), journaling one `Restart{id}` per flip.
+    /// MUST run before the scheduler subscribes.
+    fn reconcile(&self) {
+        let doing: Vec<u32> = {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            let mut ids = Vec::new();
+            for t in tasks.iter_mut() {
+                if t.state == TaskState::Doing {
+                    t.state = TaskState::Todo;
+                    ids.push(t.id);
+                }
+            }
+            ids
+        };
+        for id in doing {
+            let _ = self.inner.record(&PlanOp::Restart { id });
+        }
+        self.publish();
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -564,9 +756,7 @@ impl TaskList {
 
     /// Journal one `Reopen`, then delegate to [`TaskList::reopen_inner`]. A cap
     /// `Reopen` is journaled too — replay recomputes the `Failed` state.
-    // The public rework seam: used by tests and a future explicit `task` op.
-    // `reject` intentionally calls `reopen_inner` so it journals ONE line.
-    #[allow(dead_code)]
+    // The public rework seam: applied on replay (and by tests / a future op).
     pub fn reopen(&self, id: u32, reason: impl Into<String>) -> Result<ReopenOutcome, String> {
         let reason = reason.into();
         self.inner.record(&PlanOp::Reopen {
@@ -715,26 +905,10 @@ impl TaskList {
     /// Recompute the snapshot and publish it to every subscriber. Uses
     /// `send_replace` so the value survives with no receiver yet (mirrors
     /// `Registry`'s roster channel).
-    // ==== SKETCH (review-only, not real code) — P4 (5): snapshot / compaction ====
-    // A `Snapshot { tasks }` op replaces the whole set on replay (honored on load).
-    //
-    //   TRIGGER: when the journal exceeds `COMPACT_AFTER = 512` lines, rewrite the
-    //   file as a SINGLE `Snapshot` line. A rewrite is temp-file + `rename` (atomic)
-    //   — NOT append — so a crash mid-rewrite leaves the old file intact (the
-    //   `rename` is the atomic step; the torn-tail risk is gone).
-    //
-    //   REUSE: `crate::tools::temp_path` already names a same-dir
-    //   `*.tmp-wcode-<pid>` sibling — the same helper the mutating tools use.
-    //
-    //   COUNTER: a `lines: AtomicU64` on `Inner` (bumped in `record`); the rewrite
-    //   happens under the `journal` lock so a concurrent append cannot interleave.
-    //
-    // DEFER-ALTERNATIVE: honor `Snapshot` on load only (never emit one in P4) and
-    // compact on a later load — cheaper, but the file grows unbounded within a
-    // session. Recommend the 512-line atomic rewrite.
-    // ==== /SKETCH ====
     fn publish(&self) {
-        self.inner.updates.send_replace(self.snapshot());
+        let snapshot = self.snapshot();
+        self.inner.updates.send_replace(snapshot.clone());
+        self.inner.maybe_compact(&snapshot);
     }
 }
 
@@ -1079,46 +1253,173 @@ fn plan_op_and_task_serde_round_trip() {
         let gate = list.create("check", vec![], true).unwrap();
         let err = list.reject(gate.id, "nope").unwrap_err();
         assert!(err.contains("no deps to re-open"), "{err}");
-        // ==== SKETCH (review-only, not real code) — P4 test skeletons ====
-        // (`tempfile` is already a dev-dep — used by `tools/bash.rs`'s tests.)
-        //
-        // /// Round-trip: a journaled list reloads to an identical snapshot.
-        // #[test]
-        // fn journal_round_trips() {
-        //     let dir = tempfile::tempdir().unwrap();
-        //     let path = dir.path().join("plan.ndjson");
-        //     todo!("P4: l = TaskList::with_journal(path.clone()); \
-        //            create->depends->assign->complete->reject->reset->fail; \
-        //            let r = TaskList::load(&path).unwrap(); \
-        //            assert_eq!(r.snapshot(), l.snapshot());")
-        // }
-        //
-        // /// A torn trailing line is dropped (mirrors `Session::open`).
-        // #[test]
-        // fn a_torn_tail_is_dropped() {
-        //     todo!("P4: write two ops + a truncated third line; load => the first two apply")
-        // }
-        //
-        // /// Reconcile: a journal ending with a `Doing` node reloads as `Todo`,
-        // /// `attempts` unchanged, a `Restart` op present.
-        // #[test]
-        // fn reload_reconciles_a_doing_node() {
-        //     todo!("P4: create+assign+start (Doing); load => state Todo, attempts 0; \
-        //            the file ends with a restart line")
-        // }
-        //
-        // /// A `reject` writes exactly ONE line (no nested `reopen` lines).
-        // #[test]
-        // fn reject_journals_one_line() {
-        //     todo!("P4: create work+gate, complete work; reject; count lines with op == reject \
-        //            => 1, and NO op == reopen from the internal reopens")
-        // }
-        //
-        // /// A `Snapshot` line replaces the set; later ops apply on top.
-        // #[test]
-        // fn snapshot_replaces_the_task_set() {
-        //     todo!("P4: write a snapshot of two tasks then a Reopen op; load => those two tasks with the reopen applied")
-        // }
-        // ==== /SKETCH ====
+    }
+
+    /// A bare task record for building a `Snapshot` by hand.
+    fn task(id: u32, title: &str) -> Task {
+        Task {
+            id,
+            title: title.into(),
+            owner: None,
+            state: TaskState::Todo,
+            deps: vec![],
+            attempts: 0,
+            feedback: None,
+            artifact: None,
+            gate: false,
+            run: RunSpec::Session { member: None },
+        }
+    }
+
+    /// Round-trip: a journaled list reloads to an identical snapshot.
+    #[test]
+    fn journal_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal(path.clone());
+        let a = l.create("a", vec![], false).unwrap();
+        let b = l.create("b", vec![a.id], false).unwrap();
+        l.assign(b.id, SessionId::agent("w1")).unwrap();
+        l.complete(a.id, Some("A".into())).unwrap();
+        l.configure(b.id, RunSpec::Session { member: Some("rev".into()) }, true)
+            .unwrap();
+        l.reject(b.id, "redo").unwrap();
+        l.reset(a.id).unwrap();
+        l.fail(a.id, "boom").unwrap();
+
+        let r = TaskList::load(&path).unwrap();
+        assert_eq!(r.snapshot(), l.snapshot());
+    }
+
+    /// Blocker A: a `Create` after a `Snapshot` gets a FRESH, non-colliding id.
+    #[test]
+    fn a_create_after_a_snapshot_gets_a_fresh_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let snap = PlanOp::Snapshot {
+            tasks: vec![task(1, "one"), task(2, "two")],
+        };
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&snap).unwrap())).unwrap();
+
+        let l = TaskList::load(&path).unwrap();
+        assert_eq!(l.snapshot().len(), 2);
+        let c = l.create("three", vec![], false).unwrap();
+        assert_eq!(c.id, 3, "a Create after a Snapshot must not collide with its ids");
+    }
+
+    /// A torn trailing line is dropped (mirrors `Session::open`).
+    #[test]
+    fn a_torn_tail_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let one = PlanOp::Create {
+            id: 1,
+            title: "a".into(),
+            deps: vec![],
+            gate: false,
+        };
+        let two = PlanOp::Create {
+            id: 2,
+            title: "b".into(),
+            deps: vec![],
+            gate: false,
+        };
+        let body = format!(
+            "{}\n{}\n{{\"op\":\"create\",\"id\":3",
+            serde_json::to_string(&one).unwrap(),
+            serde_json::to_string(&two).unwrap()
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let l = TaskList::load(&path).unwrap();
+        assert_eq!(l.snapshot().len(), 2, "the torn third line is dropped");
+    }
+
+    /// Reconcile: a journal ending with a `Doing` node reloads as `Todo`,
+    /// `attempts` unchanged, with a `Restart` line appended.
+    #[test]
+    fn reload_reconciles_a_doing_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal(path.clone());
+        let a = l.create("a", vec![], false).unwrap();
+        l.assign(a.id, SessionId::agent("w1")).unwrap();
+        l.start(a.id).unwrap();
+        assert_eq!(l.snapshot()[0].state, TaskState::Doing);
+
+        let r = TaskList::load(&path).unwrap();
+        let got = &r.snapshot()[0];
+        assert_eq!(got.state, TaskState::Todo, "a Doing node was reconciled");
+        assert_eq!(got.attempts, 0, "a crash is not the node's fault");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("restart"), "a Restart line was journaled: {raw}");
+    }
+
+    /// A `reject` writes exactly ONE line (no nested `reopen` lines).
+    #[test]
+    fn reject_journals_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal(path.clone());
+        let work = l.create("work", vec![], false).unwrap();
+        let gate = l.create("verify", vec![work.id], true).unwrap();
+        l.complete(work.id, Some("A".into())).unwrap();
+        l.reject(gate.id, "redo").unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.lines().filter(|l| l.contains("\"op\":\"reject\"")).count(),
+            1
+        );
+        assert_eq!(
+            raw.lines().filter(|l| l.contains("\"op\":\"reopen\"")).count(),
+            0
+        );
+    }
+
+    /// A `Snapshot` line replaces the set; later ops apply on top.
+    #[test]
+    fn snapshot_replaces_the_set_then_later_ops_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let snap = PlanOp::Snapshot {
+            tasks: vec![task(1, "one"), task(2, "two")],
+        };
+        let reopen = PlanOp::Reopen {
+            id: 1,
+            reason: "x".into(),
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&snap).unwrap(),
+                serde_json::to_string(&reopen).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let l = TaskList::load(&path).unwrap();
+        assert_eq!(l.snapshot().len(), 2);
+        assert_eq!(l.snapshot()[0].attempts, 1, "the reopen applied on top");
+    }
+
+    /// The journal compacts to a single `Snapshot` past `COMPACT_AFTER`.
+    #[test]
+    fn the_journal_compacts_to_a_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal(path.clone());
+        let n = COMPACT_AFTER + 10;
+        for i in 0..n {
+            l.create(format!("t{i}"), vec![], false).unwrap();
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.lines().next().unwrap().contains("\"op\":\"snapshot\""),
+            "compacted to a snapshot"
+        );
+        let r = TaskList::load(&path).unwrap();
+        assert_eq!(r.snapshot().len(), n as usize);
     }
 }

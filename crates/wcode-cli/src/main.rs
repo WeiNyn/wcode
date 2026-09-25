@@ -34,6 +34,7 @@ use crate::repl::{
     system_prompt,
 };
 use crate::skills::{SkillSet, discover as discover_skills};
+use crate::tasks::TaskList;
 use crate::tools::background::Background;
 
 const USAGE: &str = "\
@@ -811,7 +812,26 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             digest_cas: cfg.workspace.digest_cas,
             sessions_dir: crate::repl::session_dir(),
         };
-        crate::agents::Orchestrator::new(wcode_protocol::Registry::new(), template)
+        // Build the plan BEFORE the orchestrator (so `--resume` reloads it and a
+        // fresh `[team]` session journals to `<groupdir>/plan.ndjson`) and, hard
+        // constraint, BEFORE `spawn_scheduler`: `load`'s reconcile turns every
+        // `Doing` → `Todo` while the sink is active — start the scheduler first and
+        // a `Doing` node never re-enters `ready_ids()`.
+        let tasks = match &setup.active_group {
+            Some(group) => {
+                let path = group.plan_path();
+                if path.exists() {
+                    TaskList::load(&path).unwrap_or_else(|e| {
+                        eprintln!("warning: plan not loaded: {e}");
+                        TaskList::with_journal(path)
+                    })
+                } else {
+                    TaskList::with_journal(path)
+                }
+            }
+            None => TaskList::new(),
+        };
+        crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
     });
     // Register remote peers (`--peer name=socket`): a served session becomes an
     // addressable A2A peer reachable over its socket (S4-4).

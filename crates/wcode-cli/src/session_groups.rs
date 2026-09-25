@@ -78,6 +78,11 @@ impl SessionGroup {
         self.dir.join("manifest.json")
     }
 
+    /// `<dir>/plan.ndjson` — the task-DAG journal (§7). Derived from the group
+    /// dir, so it is the single unambiguous home (a group ⇒ a plan).
+    pub fn plan_path(&self) -> PathBuf {
+        self.dir.join("plan.ndjson")
+    }
     /// `<members>/<name>.jsonl` — the transcript for member `name`.
     pub fn member_path(&self, name: &str) -> PathBuf {
         self.members_dir.join(format!("{name}.jsonl"))

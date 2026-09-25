@@ -493,13 +493,22 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    // Convenience ctor over an in-memory plan; the composition root uses
+    // `with_tasks` (a journaled list), so this is exercised by tests.
+    #[allow(dead_code)]
     pub fn new(registry: Registry, template: WorkerTemplate) -> Self {
+        Self::with_tasks(registry, template, TaskList::new())
+    }
+
+    /// Like [`Self::new`], but over a caller-provided plan — the composition root
+    /// passes a journaled/loaded [`TaskList`] so the graph survives a crash (P4).
+    pub fn with_tasks(registry: Registry, template: WorkerTemplate, tasks: TaskList) -> Self {
         Self {
             factory: SessionFactory::new(registry.clone(), template),
             registry,
             id: SessionId::agent("orchestrator"),
             phonebook: Phonebook::default(),
-            tasks: TaskList::new(),
+            tasks,
         }
     }
 
