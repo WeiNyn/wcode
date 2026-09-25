@@ -191,9 +191,15 @@ impl TaskList {
     /// Err `"no task #<d>"` for the first dep id that names no task. Self-dep
     /// and cycles are impossible here: the id is fresh (strictly greater than
     /// every existing one), so existence is the only check. Initialises
-    /// attempts=0, feedback/artifact=None, gate=false, run=Session{member:None};
-    /// a gate or `Script` node is set afterwards via [`TaskList::configure`].
-    pub fn create(&self, title: impl Into<String>, deps: Vec<u32>) -> Result<Task, String> {
+    /// attempts=0, feedback/artifact=None, run=Session{member:None}, and `gate`
+    /// set from the arg (a `Script` node is still set later via
+    /// [`TaskList::configure`]).
+    pub fn create(
+        &self,
+        title: impl Into<String>,
+        deps: Vec<u32>,
+        gate: bool,
+    ) -> Result<Task, String> {
         let task = {
             let mut tasks = self.inner.tasks.lock().unwrap();
             for &d in &deps {
@@ -211,7 +217,7 @@ impl TaskList {
                 attempts: 0,
                 feedback: None,
                 artifact: None,
-                gate: false,
+                gate,
                 run: RunSpec::Session { member: None },
             };
             tasks.push(task.clone());
@@ -287,6 +293,9 @@ impl TaskList {
     /// on Ok.
     // The P5 config seam (build gate / `Script` nodes); only tests call it in P0.
     #[allow(dead_code)]
+    // `create` now carries `gate` itself (P2), so this is no longer the dynamic
+    // gate path — it stays the **test / P5 config** seam for the `run` axis
+    // (`RunSpec::Script`, P3) and an explicit post-hoc reconfigure.
     pub fn configure(&self, id: u32, run: RunSpec, gate: bool) -> Result<(), String> {
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
@@ -394,11 +403,37 @@ impl TaskList {
         Ok(outcome)
     }
 
+    /// Manually clear a terminal `Failed` node so it can run again — the
+    /// human/model escape hatch for a cap hit that should NOT end the plan (§6).
+    ///
+    /// Resets `id` ALONE: `state = Todo`, `attempts = 0`, `feedback = None`,
+    /// `artifact = None`. The downstream cone is left untouched — a capped node
+    /// never invalidated it (`reopen`'s cap branch); `reject`'s gate fix is what
+    /// makes the gate re-runnable. `reset` on a non-`Failed` node is allowed (it
+    /// just clears the counters). Err `"no task #<id>"`. Publishes on Ok.
+    pub fn reset(&self, id: u32) -> Result<(), String> {
+        {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task #{id}"))?;
+            task.state = TaskState::Todo;
+            task.attempts = 0;
+            task.feedback = None;
+            task.artifact = None;
+        }
+        self.publish();
+        Ok(())
+    }
+
     /// A gate's rejection (§5): `gate_id` must be a gate; re-open each of its
-    /// `deps` (via [`TaskList::reopen`]) and return `(dep_id, outcome)` per dep
-    /// — so the caller can journal `reopen` vs. `fail` (§7). A dep that hit the
-    /// cap becomes `Failed` with [`ReopenOutcome::ReachedCap`]. The gate itself
-    /// is in the cone (it depends on a reopened dep), so it resets too (§6). Err
+    /// `deps` (via [`TaskList::reopen`]) and return `(dep_id, outcome)` per dep —
+    /// so the caller can journal `reopen` vs. `fail` (§7). A dep that hit the cap
+    /// becomes `Failed` with [`ReopenOutcome::ReachedCap`]. The gate itself is
+    /// returned to `Todo` (§6): on the success path it is already in the cone
+    /// (`reopen` resets it); on the cap path — where `reopen` leaves the cone
+    /// alone — this is what re-arms it, so a `reset` of the dep can resume. Err
     /// `"no task #<gate_id>"` or `"task #<gate_id> is not a gate"`. Publishes.
     pub fn reject(
         &self,
@@ -422,6 +457,19 @@ impl TaskList {
             let outcome = self.reopen(dep, reason.clone())?;
             reopened.push((dep, outcome));
         }
+        // §6: a gate does not "finish" when it rejects — return it to `Todo` so it
+        // re-runs once its deps are `Done` again. On the success path this is
+        // redundant with `reopen`'s cone reset (the gate is in the cone); on the
+        // cap path, where `reopen` correctly leaves the cone alone, it is the only
+        // thing that returns the gate to `Todo` (else it stays `Doing` forever).
+        {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            if let Some(gate) = tasks.iter_mut().find(|t| t.id == gate_id) {
+                gate.state = TaskState::Todo;
+                gate.artifact = None;
+            }
+        }
+        self.publish();
         Ok(reopened)
     }
 
@@ -478,8 +526,8 @@ mod tests {
     #[test]
     fn create_returns_increasing_ids() {
         let list = TaskList::new();
-        let a = list.create("first", vec![]).unwrap();
-        let b = list.create("second", vec![]).unwrap();
+        let a = list.create("first", vec![], false).unwrap();
+        let b = list.create("second", vec![], false).unwrap();
         assert_eq!(a.id, 1, "ids start at 1");
         assert_eq!(b.id, 2);
         assert_eq!(a.state, TaskState::Todo);
@@ -491,7 +539,7 @@ mod tests {
     #[test]
     fn create_rejects_an_unknown_dep() {
         let list = TaskList::new();
-        let err = list.create("t", vec![7]).unwrap_err();
+        let err = list.create("t", vec![7], false).unwrap_err();
         assert!(err.contains('7'), "names the bad dep: {err}");
         assert!(list.snapshot().is_empty(), "nothing is created");
     }
@@ -502,7 +550,7 @@ mod tests {
     #[test]
     fn assign_sets_the_owner() {
         let list = TaskList::new();
-        let t = list.create("first", vec![]).unwrap();
+        let t = list.create("first", vec![], false).unwrap();
         list.assign(t.id, SessionId::agent("w1")).unwrap();
 
         let got = &list.snapshot()[0];
@@ -518,7 +566,7 @@ mod tests {
     #[test]
     fn complete_flips_state() {
         let list = TaskList::new();
-        let t = list.create("first", vec![]).unwrap();
+        let t = list.create("first", vec![], false).unwrap();
         list.complete(t.id, None).unwrap();
         assert_eq!(list.snapshot()[0].state, TaskState::Done);
 
@@ -535,8 +583,8 @@ mod tests {
     #[test]
     fn complete_stores_the_artifact_and_respects_blocking() {
         let list = TaskList::new();
-        let a = list.create("a", vec![]).unwrap();
-        let b = list.create("b", vec![a.id]).unwrap();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![a.id], false).unwrap();
 
         // b is blocked by a.
         let err = list.complete(b.id, None).unwrap_err();
@@ -553,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_sees_an_update() {
         let list = TaskList::new();
-        list.create("first", vec![]).unwrap();
+        list.create("first", vec![], false).unwrap();
 
         let mut rx = list.subscribe();
         // Seeded with the current list, no publish needed.
@@ -561,7 +609,7 @@ mod tests {
         assert_eq!(rx.borrow()[0].title, "first");
 
         // A post-subscribe create publishes a fresh snapshot.
-        list.create("second", vec![]).unwrap();
+        list.create("second", vec![], false).unwrap();
         rx.changed().await.expect("open");
         let seen = rx.borrow_and_update();
         assert_eq!(seen.len(), 2);
@@ -573,8 +621,8 @@ mod tests {
     #[test]
     fn depends_rejects_a_cycle() {
         let list = TaskList::new();
-        let a = list.create("a", vec![]).unwrap();
-        let b = list.create("b", vec![a.id]).unwrap();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![a.id], false).unwrap();
 
         // b already depends on a: closing a→b would make the cycle a→b→a.
         let err = list.depends(a.id, b.id).unwrap_err();
@@ -600,8 +648,8 @@ mod tests {
     #[test]
     fn ready_ids_tracks_the_frontier() {
         let list = TaskList::new();
-        let a = list.create("a", vec![]).unwrap();
-        let b = list.create("b", vec![a.id]).unwrap();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![a.id], false).unwrap();
 
         assert_eq!(list.ready_ids(), vec![a.id], "only the root is ready");
         list.complete(a.id, None).unwrap();
@@ -616,9 +664,9 @@ mod tests {
     #[test]
     fn reopen_resets_the_transitive_cone() {
         let list = TaskList::new();
-        let t1 = list.create("one", vec![]).unwrap();
-        let t2 = list.create("two", vec![t1.id]).unwrap();
-        let t3 = list.create("three", vec![t2.id]).unwrap();
+        let t1 = list.create("one", vec![], false).unwrap();
+        let t2 = list.create("two", vec![t1.id], false).unwrap();
+        let t3 = list.create("three", vec![t2.id], false).unwrap();
         list.complete(t1.id, Some("A₁".into())).unwrap();
         list.complete(t2.id, Some("A₂".into())).unwrap();
         list.complete(t3.id, Some("A₃".into())).unwrap();
@@ -649,8 +697,8 @@ mod tests {
     fn reopen_hits_the_cap_and_fails_terminal() {
         let list = TaskList::new();
         assert_eq!(list.max_attempts(), 3);
-        let t = list.create("t", vec![]).unwrap();
-        let child = list.create("child", vec![t.id]).unwrap();
+        let t = list.create("t", vec![], false).unwrap();
+        let child = list.create("child", vec![t.id], false).unwrap();
 
         // Three successful reopens, each invalidating the cone (child → Todo).
         for _ in 0..3 {
@@ -688,8 +736,8 @@ mod tests {
     #[test]
     fn reject_reopens_the_gated_dep_and_the_cone() {
         let list = TaskList::new();
-        let work = list.create("work", vec![]).unwrap();
-        let gate = list.create("verify", vec![work.id]).unwrap();
+        let work = list.create("work", vec![], false).unwrap();
+        let gate = list.create("verify", vec![work.id], false).unwrap();
         list.configure(
             gate.id,
             RunSpec::Session {
@@ -714,8 +762,58 @@ mod tests {
         assert_eq!(snap[1].state, TaskState::Todo, "the gate is in the cone");
 
         // A non-gate `reject` is a clear error.
-        let work2 = list.create("w2", vec![]).unwrap();
+        let work2 = list.create("w2", vec![], false).unwrap();
         let err = list.reject(work2.id, "nope").unwrap_err();
         assert!(err.contains("not a gate"), "{err}");
+    }
+
+    /// `reset` clears a terminal `Failed` node back to a fresh `Todo`.
+    #[test]
+    fn reset_clears_a_failed_node() {
+        let list = TaskList::new();
+        let t = list.create("t", vec![], false).unwrap();
+        for _ in 0..4 {
+            list.reopen(t.id, "again").unwrap();
+        }
+        assert_eq!(list.snapshot()[0].state, TaskState::Failed, "capped");
+
+        list.reset(t.id).unwrap();
+        let got = &list.snapshot()[0];
+        assert_eq!(got.state, TaskState::Todo);
+        assert_eq!(got.attempts, 0);
+        assert_eq!(got.feedback, None);
+        assert_eq!(got.artifact, None);
+
+        // A bad id errors, naming it.
+        let err = list.reset(99).unwrap_err();
+        assert!(err.contains("99"), "{err}");
+    }
+
+    /// `reject` returns the GATE to `Todo` even when a dep hits the cap — the P2
+    /// blocker fix (without it a capped dep's gate stays `Doing` forever).
+    #[test]
+    fn reject_unsticks_the_gate_on_a_cap() {
+        let list = TaskList::new();
+        let work = list.create("work", vec![], false).unwrap();
+        let gate = list.create("verify", vec![work.id], true).unwrap();
+        list.complete(work.id, Some("A".into())).unwrap();
+
+        // Three reworks, then the gate is on it (Doing) when the cap hits.
+        for _ in 0..3 {
+            let r = list.reject(gate.id, "nope").unwrap();
+            assert_eq!(r, vec![(work.id, ReopenOutcome::Reopened)]);
+        }
+        list.start(gate.id).unwrap();
+        assert_eq!(list.snapshot()[1].state, TaskState::Doing);
+
+        let r = list.reject(gate.id, "nope").unwrap();
+        assert_eq!(r, vec![(work.id, ReopenOutcome::ReachedCap)]);
+        let snap = list.snapshot();
+        assert_eq!(snap[0].state, TaskState::Failed, "the dep hit the cap");
+        assert_eq!(
+            snap[1].state,
+            TaskState::Todo,
+            "reject returns the gate to Todo even on a cap"
+        );
     }
 }

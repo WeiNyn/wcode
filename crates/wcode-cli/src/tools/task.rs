@@ -5,7 +5,8 @@
 //! plans; a worker keeps its report-back. The module is registered in
 //! `crate::tools` (tools/mod.rs) but kept out of `default_tools`.
 //!
-//! Ops: `create | assign | depends | complete | reject | list`. `assignee` is
+//! Ops: `create | assign | depends | complete | reject | reset | list` (`create`
+//! also takes an optional `gate`, §5). `assignee` is
 //! resolved through the `Phonebook` first, then falls back to `agent:<name>` —
 //! the same resolution the `message` tool uses (message.rs).
 
@@ -20,9 +21,9 @@ use crate::tasks::{ReopenOutcome, Task as TaskRecord, TaskList};
 /// schema serves all ops; the op-specific requirement is enforced in `execute`.
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskArgs {
-    /// The operation: `create | assign | depends | complete | reject | list`.
+    /// The operation: `create | assign | depends | complete | reject | reset | list`.
     op: String,
-    /// The task id (`assign` / `depends` / `complete` / `reject`).
+    /// The task id (`assign` / `depends` / `complete` / `reject` / `reset`).
     #[serde(default)]
     id: Option<u32>,
     /// The task title (`create`).
@@ -43,6 +44,10 @@ pub struct TaskArgs {
     /// The artifact to store (`complete`): the node's output, hydrating dependents.
     #[serde(default)]
     artifact: Option<String>,
+    /// Whether this new task is a gate (`create`): its `reject` re-opens its
+    /// deps instead of itself (§5). Absent = not a gate.
+    #[serde(default)]
+    gate: Option<bool>,
 }
 
 /// The root's task tool — the plan the orchestrator shares with its workers.
@@ -78,14 +83,18 @@ fn err(message: impl Into<String>) -> ToolOutput {
     }
 }
 
-/// Render a reopened-dep list as `#2, #3`; empty ⇒ `(none)`.
+/// Render a reopened-dep list — `#2` for a re-opened node, `#2 FAILED (cap)` for
+/// one that hit the cap; empty ⇒ `(none)`.
 fn fmt_ids(reopened: &[(u32, ReopenOutcome)]) -> String {
     if reopened.is_empty() {
         return "(none)".to_string();
     }
     reopened
         .iter()
-        .map(|(id, _)| format!("#{id}"))
+        .map(|(id, outcome)| match outcome {
+            ReopenOutcome::Reopened => format!("#{id}"),
+            ReopenOutcome::ReachedCap => format!("#{id} FAILED (cap)"),
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -140,10 +149,12 @@ impl TypedTool for Task {
 
     fn description(&self) -> &str {
         "Plan and track tasks for the team. `op` is `create` (needs `title`; \
-         optional `deps` = ids to run after), `assign` (needs `id` and \
-         `assignee`), `depends` (needs `id` and `on`), `complete` (needs `id`; \
-         optional `artifact`), `reject` (needs `id`; optional `reason`) for a \
-         gate, or `list`. `assignee` is a worker name (or `agent:<id>`)."
+         optional `deps` = ids to run after, optional `gate` = a check whose \
+         `reject` re-opens its deps), `assign` (needs `id` and `assignee`), \
+         `depends` (needs `id` and `on`), `complete` (needs `id`; optional \
+         `artifact`), `reject` (needs `id`; optional `reason`) for a gate, \
+         `reset` (needs `id`) to clear a Failed node, or `list`. `assignee` \
+         is a worker name (or `agent:<id>`)."
     }
 
     async fn execute(&self, args: TaskArgs, _ctx: &ToolContext) -> ToolOutput {
@@ -152,7 +163,8 @@ impl TypedTool for Task {
                 let Some(title) = args.title.as_deref() else {
                     return err("create needs `title`");
                 };
-                match self.list.create(title, args.deps.clone().unwrap_or_default()) {
+                let deps = args.deps.clone().unwrap_or_default();
+                match self.list.create(title, deps, args.gate.unwrap_or(false)) {
                     Ok(task) => ToolOutput {
                         output: format!("created #{} {}", task.id, task.title),
                         ..ToolOutput::default()
@@ -203,11 +215,35 @@ impl TypedTool for Task {
                 };
                 let reason = args.reason.as_deref().unwrap_or("");
                 match self.list.reject(id, reason) {
-                    Ok(reopened) => ToolOutput {
-                        output: format!("rejected #{id}; reopened {}", fmt_ids(&reopened)),
+                    Ok(reopened) => {
+                        let mut msg =
+                            format!("rejected #{id}; reopened {}", fmt_ids(&reopened));
+                        if reopened
+                            .iter()
+                            .any(|(_, o)| *o == ReopenOutcome::ReachedCap)
+                        {
+                            msg.push_str(
+                                "\n(a node hit the rework cap and is now Failed — reset it or accept)",
+                            );
+                        }
+                        ToolOutput {
+                            output: msg,
+                            ..ToolOutput::default()
+                        }
+                    }
+                    Err(e) => err(e), // unknown id, or not a gate
+                }
+            }
+            "reset" => {
+                let Some(id) = args.id else {
+                    return err("reset needs `id`");
+                };
+                match self.list.reset(id) {
+                    Ok(()) => ToolOutput {
+                        output: format!("reset #{id}"),
                         ..ToolOutput::default()
                     },
-                    Err(e) => err(e), // unknown id, or not a gate
+                    Err(e) => err(e),
                 }
             }
             "list" => ToolOutput {
@@ -215,7 +251,8 @@ impl TypedTool for Task {
                 ..ToolOutput::default()
             },
             other => err(format!(
-                "unknown op `{other}` (expected create | assign | depends | complete | reject | list)"
+                "unknown op `{other}` (expected create | assign | depends | \
+                 complete | reject | reset | list)"
             )),
         }
     }
