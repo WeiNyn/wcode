@@ -98,11 +98,6 @@ pub enum RunSpec {
         member: Option<String>,
     },
     /// A physical node: a definable action; the exit code IS the verdict (§5, P3).
-    // P3's scheduler MATCHES this variant, but only tests CONSTRUCT it — matching
-    // is not construction, and derived impls don't count, so the dead-code
-    // attribute stays until P5's `[workflow]` loader builds a `Script` in
-    // non-test code.
-    #[allow(dead_code)]
     Script { command: String },
 }
 
@@ -212,7 +207,6 @@ pub(crate) enum PlanOp {
     },
     /// A future op this build does not understand; ignored on apply.
     #[serde(other)]
-    #[allow(dead_code)]
     Unknown,
 }
 
@@ -235,7 +229,6 @@ struct Inner {
     max_attempts: u32,
     /// `Some` while live (`<groupdir>/plan.ndjson`); `None` in memory.
     journal: Option<Mutex<Journal>>,
-    /// True while replaying, so `record` is a no-op (Ruling 2).
     /// True while replaying, so `record` is a no-op (Ruling 2).
     replaying: AtomicBool,
     /// Ops since the last `Snapshot` (compaction trigger).
