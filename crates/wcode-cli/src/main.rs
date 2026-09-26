@@ -60,6 +60,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
+   -V, --version      show version
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
@@ -148,6 +149,7 @@ struct Args {
 enum Parsed {
     Args(Args),
     Help,
+    Version,
 }
 
 fn parse_args(args: &[String]) -> Result<Parsed, String> {
@@ -157,6 +159,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         let flag = args[i].as_str();
         i += 1;
         match flag {
+            "-V" | "--version" => return Ok(Parsed::Version),
             "-h" | "--help" => return Ok(Parsed::Help),
             "-p" => {
                 a.prompt = Some(args.get(i).ok_or("-p requires a prompt")?.clone());
@@ -284,6 +287,10 @@ fn parse_cli() -> Args {
         }
     };
     match parsed {
+        Parsed::Version => {
+            println!("wcode {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         Parsed::Help => {
             print!("{USAGE}");
             let _ = std::io::stdout().flush();
@@ -1963,6 +1970,12 @@ mod tests {
     fn parse_help() {
         assert_eq!(parse_args(&args(&["-h"])), Ok(Parsed::Help));
         assert_eq!(parse_args(&args(&["--help"])), Ok(Parsed::Help));
+    }
+
+    #[test]
+    fn parse_version() {
+        assert_eq!(parse_args(&args(&["-V"])), Ok(Parsed::Version));
+        assert_eq!(parse_args(&args(&["--version"])), Ok(Parsed::Version));
     }
 
     #[test]
