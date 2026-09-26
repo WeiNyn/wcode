@@ -23,6 +23,7 @@ mod session_groups;
 mod skills;
 mod tasks;
 mod tools;
+mod verify_gate;
 mod workspace;
 
 use crate::config::{
@@ -795,7 +796,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     let instructions = load_instructions(&mode, cwd, config_dir().as_deref());
     let skills = discover_skills_for(args, cfg, cwd);
 
-    let hooks = default_hooks(&cfg.hooks);
+    let mut hooks = default_hooks(&cfg.hooks);
     // A2A (opt-in): an orchestrator wiring — the registry + factory + the root's
     // `spawn`/`message` tools. Only the root gets them, so only it spawns
     // (§10.1).
@@ -836,6 +837,23 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         };
         crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
     });
+
+    // C4 — the verify gate (`VerifyGateHooks`, `crate::verify_gate`): once the
+    // root holds a plan, refuse `task{op:"complete"}` for a `Session` work node
+    // that no gate consumes (rule R′). Pushed AFTER the `WorkerTemplate` cloned
+    // `hooks` (`GkFtU`), so only the ROOT gates — a worker has no `task` tool.
+    // The set rides `Runtime.hooks` (`V5hC5`) into the root agent
+    // (`build_agent_for`, `XEp0a`) and `repl::run`'s rebuild set (`kywRV` ->
+    // repl.rs 813/969/1018), so it survives `/new`/`/resume`. `spawn_scheduler`
+    // gets a clone too (`WFtxI`/`kDC4A`): a harmless no-op (it only ever pipes
+    // `bash`). A run with no `--agents`, or a socket client (`Qr5L7`, no
+    // orchestrator), never gets it.
+    if let Some(o) = &orchestrator {
+        // `agents.rs:IueNb` (the `Orchestrator`); `n9aLi` = `Orchestrator::tasks()`.
+        hooks.push(std::sync::Arc::new(
+            crate::verify_gate::VerifyGateHooks::new(o.tasks().clone()),
+        ));
+    }
     // Register remote peers (`--peer name=socket`): a served session becomes an
     // addressable A2A peer reachable over its socket (S4-4).
     if !args.peers.is_empty() && orchestrator.is_none() {
