@@ -51,7 +51,7 @@ the boxes as each task completes and keep the status table current.
 
 | 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN`, **before** the Pages site advertises `cargo install wcode-cli` |
 | 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ◐ in progress — manual: create `WeiNyn/homebrew-tap` + `TAP_GITHUB_TOKEN` |
-| 45 | GitHub Pages landing page (`site/`, `pages.yml`) | ◐ in progress — manual: enable Pages (Source = GitHub Actions) |
+| 45 | GitHub Pages landing page (root `index.html`; branch deploy) | ☑ done — served from the repo root with `.nojekyll`; the `site/`+Actions approach never took effect (README was rendering at `/`) |
 | 46 | Per-model endpoints + reasoning on the Responses wire (see §46) | ☑ done — `c510c1a`/`1fe2243` |
 | 47 | Abort hardening: TUI escape hatch + repeated Ctrl-C, cancel observed *during* a tool call, live-block render cache; `bash` no longer inherits the TTY's stdin | ☑ done — `e32b02d`/`7a8ef79`/`e500113`/`e22656c`; second-layer APPROVED |
 | 48 | Member status: server-side liveness on the roster (`SessionInfo.state` + `MemberState`, `peers` shows `[state]`; `ask_within`/`AskError`) | ☑ done — `421ea61`; second-layer APPROVED |
@@ -997,17 +997,28 @@ once the tap repo exists, `brew install WeiNyn/tap/wcode` also works.
 
 ## 45. GitHub Pages landing page
 
-**New.** A self-contained static site under `site/` (no CDN, no web fonts, no
-analytics, no JS) deployed by `pages.yml` through the Pages Actions artifact.
+**New.** A self-contained static site at the **repo root** (`index.html`,
+`style.css`, `favicon.svg`; no CDN, no web fonts, no analytics, no JS), served
+directly by the Pages **branch deploy** (`main / (root)`) with a root
+`.nojekyll`, so Jekyll no longer renders `README.md` as the homepage.
 
-**Prerequisites (manual).** Settings → Pages → Source = "GitHub Actions".
+**Why root, not `site/` + Actions.** The original design shipped the site under
+`site/` and deployed it via the Pages Actions artifact (`pages.yml`), gated on a
+manual Settings → Pages → Source = "GitHub Actions". That was never switched, so
+the branch deploy kept serving the Jekyll-rendered `README.md` (the "wrong
+format" homepage); the designed page rendered only at `/wcode/site/`. A 3-file
+static site needs no artifact indirection, so the files now live at the root and
+`pages.yml` was removed.
 
 **Tasks**
-- [x] `site/index.html` + `site/style.css` (+ `favicon.svg`).
-- [x] `.github/workflows/pages.yml`.
-- [ ] Enable Pages (Actions source) and confirm the URL.
+- [x] `index.html` + `style.css` + `favicon.svg` at the repo root (+ `.nojekyll`).
+- [x] Remove `site/` and `.github/workflows/pages.yml`.
+- [ ] Confirm `https://weinyn.github.io/wcode/` renders the page (branch deploy).
 
-**Open questions.** Settled at the sketch gate. Q5: deploy the `site/` Actions artifact, never serve `/docs` — that would publish the internal plan corpus (`next-steps.md`, every `*-plan.md`, the review notes).
+**Open questions.** Q5 (revised): the branch deploy serves the whole repo, so
+`/docs` becomes web-reachable — but the repo is already public, so this exposes
+nothing new. The prior "never serve /docs" note presupposed a dedicated artifact;
+with a branch deploy it does not apply.
 
 ---
 
