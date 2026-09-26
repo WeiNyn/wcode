@@ -9,14 +9,25 @@ chat-completions endpoint.
 
 ## Install
 
-Prebuilt binaries for Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon)
-are attached to each [release](https://github.com/WeiNyn/wcode/releases).
-
-From source (a Rust toolchain is required):
+Install with [Homebrew](https://brew.sh) — a tap by URL, no extra repo:
 
 ```
-cargo install --path crates/wcode-cli
+brew tap WeiNyn/wcode https://github.com/WeiNyn/wcode
+brew install wcode
 ```
+
+From crates.io (a Rust toolchain is required):
+
+```
+cargo install wcode-cli
+```
+
+Or grab a prebuilt binary — Linux (x86_64, aarch64) and macOS (Intel, Apple
+Silicon) tarballs are attached to each
+[release](https://github.com/WeiNyn/wcode/releases). Build the latest from source
+with `cargo install --path crates/wcode-cli`.
+
+More at **[weinyn.github.io/wcode](https://weinyn.github.io/wcode/)**.
 
 ## Configure
 

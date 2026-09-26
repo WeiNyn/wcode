@@ -49,6 +49,10 @@ the boxes as each task completes and keep the status table current.
 | 41 | `/btw` gives no feedback while in flight (looks frozen) | ☑ done — `e128d8a`; second-layer APPROVED. Residual (out of scope): a hung-but-open backend leaves a stuck `⠹ btw…` — the fix is an `ask` timeout at the protocol layer (all `Action::Ask` paths) |
 | 42 | Task DAG — Option A (root-as-scheduler) — C3 (see [`task-dag-plan.md`](task-dag-plan.md)) | ☑ done — P0–P5 landed (`8503b79`…`c708468`); terminal review APPROVED; 941 tests; live-verified (resume no longer duplicates) |
 
+| 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN` |
+| 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ◐ in progress — manual: create `WeiNyn/homebrew-tap` + `TAP_GITHUB_TOKEN` |
+| 45 | GitHub Pages landing page (`site/`, `pages.yml`) | ◐ in progress — manual: enable Pages (Source = GitHub Actions) |
+
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
 Suggested commit per item. Reference files by function, not line number
@@ -938,6 +942,68 @@ produced eight Tier-1 candidates. Their disposition:
 `25749bd` (todo resume wart). The session-search design lives in
 [`session-search-plan.md`](session-search-plan.md). Tier-2 (medium) and Tier-3
 (larger) candidates are in `gap-analysis-jcode.md` §3–§4; none started.
+
+---
+
+## 43. Publish to crates.io
+
+**New.** Only `wcode-harness` packages cleanly today; `wcode-protocol`,
+`wcode-tui`, and `wcode-cli` fail `cargo package` with "dependency
+`wcode-harness` does not specify a version". Give every member a workspace
+readme plus a versioned `[workspace.dependencies]` entry, then publish
+`wcode-harness → wcode-protocol → wcode-tui → wcode-cli` from an exact-tag
+workflow (`publish.yml`) that guards the version, publishes in order, and polls
+the index between crates (`cargo publish` does not wait for it).
+
+**Prerequisites (manual).** A crates.io account; claim each name (all five of
+`wcode`, `wcode-cli`, `wcode-harness`, `wcode-protocol`, `wcode-tui` are
+unclaimed). Do ONE manual first publish per crate, or set a repo secret
+`CARGO_REGISTRY_TOKEN`. For the OIDC path, configure crates.io Trusted
+Publishing naming this repo + `.github/workflows/publish.yml`.
+
+**Tasks**
+- [ ] `[workspace.package] readme` + `[workspace.dependencies]` versions; members opt in.
+- [ ] Per-crate `keywords`/`categories` (crates.io slugs).
+- [ ] `.github/workflows/publish.yml` (tag + a manual dry-run input).
+- [ ] `cargo package` clean for all four; one live `--dry-run` on a real tag.
+
+**Open questions.** See `docs/release-sketches/00-plan.md` Q1/Q4.
+
+---
+
+## 44. Homebrew formula
+
+**New.** A generated `Formula/wcode.rb` (4 targets: mac/linux × arm/intel) with
+an in-repo tap install and an opt-in mirror to `WeiNyn/homebrew-tap`. Install
+today needs no extra repo:
+`brew tap WeiNyn/wcode https://github.com/WeiNyn/wcode && brew install wcode`;
+once the tap repo exists, `brew install WeiNyn/tap/wcode` also works.
+
+**Prerequisites (manual).** For the mirror: create `WeiNyn/homebrew-tap` and a
+`TAP_GITHUB_TOKEN` secret (the mirror is skipped when it is absent).
+
+**Tasks**
+- [ ] `scripts/gen-homebrew-formula.sh` (deterministic; fails on a missing checksum).
+- [ ] `Formula/wcode.rb` for v0.2.0 (real sha256s).
+- [ ] `release.yml` `homebrew` job (idempotent commit to `main`, `[skip ci]`).
+
+**Open questions.** See `00-plan.md` Q2/Q3.
+
+---
+
+## 45. GitHub Pages landing page
+
+**New.** A self-contained static site under `site/` (no CDN, no web fonts, no
+analytics, no JS) deployed by `pages.yml` through the Pages Actions artifact.
+
+**Prerequisites (manual).** Settings → Pages → Source = "GitHub Actions".
+
+**Tasks**
+- [ ] `site/index.html` + `site/style.css` (+ `favicon.svg`).
+- [ ] `.github/workflows/pages.yml`.
+- [ ] Enable Pages (Actions source) and confirm the URL.
+
+**Open questions.** See `00-plan.md` Q5.
 
 ---
 
