@@ -403,13 +403,21 @@ pub fn reload_args(
     }
     args.push("--model".to_string());
     args.push(llm.model.clone());
-    if let Some(url) = &llm.base_url {
+    // Forward the LAUNCH provider (`model_profiles.base`), never the settled one:
+    // `llm`'s endpoint/base_url may be a `[models.<id>]` profile, and promoting
+    // them to `--base-url`/`--endpoint` would make that profile the re-exec'd
+    // DEFAULT (switching back to an unmapped model would then hit the wrong wire).
+    let (endpoint, base_url) = match llm.model_profiles.base() {
+        Some(base) => (base.endpoint, base.base_url.clone()),
+        None => (llm.endpoint, llm.base_url.clone()),
+    };
+    if let Some(url) = base_url {
         args.push("--base-url".to_string());
-        args.push(url.clone());
+        args.push(url);
     }
     args.push("--endpoint".to_string());
     args.push(
-        match llm.endpoint {
+        match endpoint {
             LlmEndpoint::Chat => "chat",
             LlmEndpoint::Responses => "responses",
         }
@@ -1456,6 +1464,8 @@ fn out(s: &str) {
 mod tests {
     use super::*;
 
+    use wcode_harness::streamfn::{LlmProfile, LlmProvider, ModelProfiles};
+
     #[tokio::test]
     async fn build_agent_leaves_the_shared_hook_set_untouched() {
         // Reviewer #1's correction: WorkspaceHooks is built INSIDE build_agent,
@@ -1738,6 +1748,58 @@ mod tests {
                 "--effort",
                 "high",
             ]
+        );
+    }
+
+    #[test]
+    fn reload_args_forwards_the_launch_base_not_the_settled_provider() {
+        let base = LlmProvider {
+            endpoint: LlmEndpoint::Chat,
+            base_url: Some("http://base/v1".into()),
+            api_key: Some("base-key".into()),
+        };
+        let mut profiles = ModelProfiles::new(base.clone());
+        profiles.insert(
+            "m2",
+            LlmProfile {
+                endpoint: Some(LlmEndpoint::Responses),
+                base_url: Some("http://openai/v1".into()),
+                api_key: None,
+            },
+        );
+        let mut llm = LlmOpts {
+            model: "m2".into(),
+            endpoint: base.endpoint,
+            base_url: base.base_url.clone(),
+            api_key: base.api_key.clone(),
+            model_profiles: profiles,
+            ..LlmOpts::default()
+        };
+        llm.settle_provider(); // llm is now (Responses, http://openai/v1)
+        assert_eq!(llm.endpoint, LlmEndpoint::Responses, "precondition: settled");
+
+        let args = reload_args(
+            &llm,
+            Some(Path::new("/s/a.jsonl")),
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--endpoint" && w[1] == "chat"),
+            "must forward the BASE endpoint, got: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--base-url" && w[1] == "http://base/v1"),
+            "must forward the BASE base_url, got: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "http://openai/v1"),
+            "must not leak the profile's base_url, got: {args:?}"
         );
     }
 

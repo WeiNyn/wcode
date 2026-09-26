@@ -1021,20 +1021,26 @@ sketched against the reviewer's binding amendments:
   (`map_item`), NOT in `loop_.rs:replace_thinking`, so no custom `StreamFn`
   changes contract.
 - **FIX A — per-model provider profiles.** `[models.<id>]` resolves to an
-  `LlmProfile` (endpoint / base_url / api_key) held on `LlmOpts.model_profiles`;
-  `set_model` re-points the endpoint/base_url/api_key for a mapped id via
-  `LlmOpts::apply_profile` (a no-op when unmapped). No new field on
-  `Agent`/`AgentConfig`.
+  `LlmProfile` (endpoint / base_url / api_key) held on `LlmOpts.model_profiles`,
+  alongside the launch provider (`LlmProvider`) it is seeded from. `set_model`
+  **settles** the provider: reset to the launch provider, then overlay the
+  selected model's profile — so a switch is reversible (`m1 → m2 → m1` lands
+  back on `m1`'s provider; an unmapped id falls back to the launch provider).
+  Precedence: `[models.<id>]` > flags/env/config globals (the globals, `WCODE_*`,
+  and `--base-url`/`--endpoint` together set the **default** provider; a profile
+  field wins over a flag for that id). No new field on `Agent`/`AgentConfig`.
 
 **Tasks**
 - [x] FIX B: `reasoning_params` (was `effort_params`) always requests the summary.
 - [x] FIX B: `reasoning_text` + `map_item` render the summary; empty-block guard.
 - [x] FIX B: `tests/responses_reasoning.rs` (default-run, keyless local SSE).
-- [ ] FIX A: `LlmOpts.model_profiles` + `apply_profile`; config + `set_model` wiring.
+- [x] FIX A: `LlmOpts.model_profiles` + `settle_provider`; `set_model` wiring (1fe2243).
+- [x] FIX A: `[models.<id>]` config parse + `to_llm_opts` base seeding + worker wiring (c510c1a).
 
 **Open questions.** Settled at the sketch gate. FIX B: `summary: "auto"` is
 requested unconditionally (not only when an effort is set) — without it the model
 emits an encrypted-only item whose displayable text is empty.
+FIX A: the provider model is settle (not overlay) and precedence is profile > flag(=base) > globals; ModelProfiles::default() (no base) is the no-op "not managing" state.
 
 ---
 

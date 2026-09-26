@@ -175,6 +175,13 @@ impl ModelProfiles {
         }
     }
 
+    /// The launch provider an unmapped model falls back to; `None` when the map
+    /// is not managing providers (the `Default`). Re-forwarded verbatim across a
+    /// `/reload` / resume so the DEFAULT provider survives the process boundary.
+    pub fn base(&self) -> Option<&LlmProvider> {
+        self.base.as_ref()
+    }
+
     /// Register a profile for `model` (boot-time config build).
     pub fn insert(&mut self, model: impl Into<String>, profile: LlmProfile) {
         self.profiles.insert(model.into(), profile);
