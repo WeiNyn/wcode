@@ -271,7 +271,7 @@ chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
-group for a team — by re-exec'ing with no `--resume`), and `/reload
+group for a team — by re-exec'ing with no `--resume`; refused over a socket), and
 [--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
 refused over a socket). The remaining session-lifecycle commands below stay in
 the REPL.

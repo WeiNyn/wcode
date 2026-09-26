@@ -492,7 +492,6 @@ fn report_for_stop(me: &SessionId, stop: StopReason) -> String {
 
 /// The text of the last assistant message, if the run ended with one (a run
 /// that stopped on a bare tool call has none).
-/// that stopped on a bare tool call has none).
 fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
     let message = ctx
         .iter()
