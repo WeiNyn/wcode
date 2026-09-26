@@ -753,6 +753,10 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                             eprintln!("tui: cannot resume over a socket");
                             std::process::exit(1);
                         }
+                        Ok(wcode_tui::Outcome::New) => {
+                            eprintln!("tui: cannot start a new session over a socket");
+                            std::process::exit(1);
+                        }
                         Err(e) => {
                             eprintln!("tui: {e}");
                             std::process::exit(1);
@@ -1514,6 +1518,20 @@ async fn dispatch(
                             args.name.as_deref(),
                         ));
                         std::process::exit(1); // only reached if the exec failed
+                    }
+                    Ok(wcode_tui::Outcome::New) => {
+                        // A fresh session: re-exec with no `--resume` (startup
+                        // mints a new session file, or a fresh group for a team).
+                        // The terminal is already restored.
+                        println!("starting a new session ...");
+                        repl::exec_self(&repl::new_session_args(
+                            &llm,
+                            args.agents,
+                            args.config.as_deref(),
+                            args.owner.as_deref(),
+                            args.name.as_deref(),
+                        ));
+                        std::process::exit(1); // reached only if the exec failed
                     }
                     Err(e) => {
                         eprintln!("tui: {e}");

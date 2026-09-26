@@ -375,6 +375,12 @@ struct Command {
 /// The command table — its order is the `/help` listing.
 const COMMANDS: &[Command] = &[
     Command {
+        name: "new",
+        aliases: &["clear"],
+        args: None,
+        summary: "start a new session",
+    },
+    Command {
         name: "exit",
         aliases: &["quit"],
         args: None,
@@ -1666,6 +1672,9 @@ pub struct App {
     /// Set by `/reload`; the run returns it so the CLI can rebuild + re-exec
     /// into the same session (`no_session` = start fresh with `--no-session`).
     pending_reload: Option<bool>,
+    /// Set by `/new` (alias `/clear`); the run returns it so the CLI can re-exec
+    /// with no `--resume` — startup mints a fresh session (a fresh group for a team).
+    pending_new: bool,
     /// True when this TUI is a `--socket` client: there is no local binary or
     /// session to rebuild/re-exec, so `/reload` is refused.
     remote: bool,
@@ -1744,6 +1753,7 @@ impl App {
             tasks: Vec::new(),
             pending_resume: None,
             pending_reload: None,
+            pending_new: false,
             remote: false,
             overlay: None,
             completion: None,
@@ -2812,6 +2822,7 @@ impl App {
     /// Run a looked-up command; `arg` is the text after the name, if any.
     fn run_command(&mut self, cmd: &Command, arg: Option<&str>) {
         match cmd.name {
+            "new" => self.request_new(),
             "exit" => self.should_quit = true,
             "model" => match arg {
                 Some(m) => self.actions.push(Action::Ask(Request::SetModel {
@@ -3493,6 +3504,12 @@ impl App {
         self.pending_reload
     }
 
+    /// Set by `/new` (alias `/clear`): the run returns `true` so the CLI can
+    /// re-exec with no `--resume`, starting a fresh session.
+    pub fn pending_new(&self) -> bool {
+        self.pending_new
+    }
+
     /// Mark this TUI as a `--socket` client, so `/reload` is refused.
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
@@ -3507,6 +3524,18 @@ impl App {
             return;
         }
         self.pending_reload = Some(no_session);
+        self.should_quit = true;
+    }
+
+    /// `/new` (alias `/clear`): ask the composition root to start a fresh
+    /// session (a new session file, or a new group for a team) by re-exec'ing
+    /// with no `--resume`. Over a socket the server owns the session, so refuse.
+    fn request_new(&mut self) {
+        if self.remote {
+            self.notice("/new (start a fresh session) is unavailable over a socket");
+            return;
+        }
+        self.pending_new = true;
         self.should_quit = true;
     }
 
@@ -5328,6 +5357,42 @@ mod tests {
     }
 
     #[test]
+    fn a_new_command_starts_a_fresh_session_and_quits() {
+        let mut app = App::new();
+        submit(&mut app, "/new");
+        assert!(app.pending_new(), "a fresh session is requested");
+        assert!(app.should_quit(), "a new session quits the TUI to re-exec");
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.pending_reload(), None);
+        assert_eq!(app.pending_resume(), None);
+    }
+
+    #[test]
+    fn new_is_refused_over_a_socket() {
+        let mut app = App::new();
+        app.set_remote(true);
+        submit(&mut app, "/new");
+        assert!(
+            !app.pending_new(),
+            "a socket client cannot start a fresh session"
+        );
+        assert!(!app.should_quit());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("unavailable over a socket")
+        ));
+    }
+
+    #[test]
+    fn clear_is_an_alias_for_new() {
+        let mut app = App::new();
+        submit(&mut app, "/clear");
+        assert!(app.pending_new(), "/clear aliases /new");
+        assert!(app.should_quit());
+        assert_eq!(command_named("clear").map(|c| c.name), Some("new"));
+    }
+
+    #[test]
     fn the_command_table_lists_reload() {
         assert!(COMMANDS.iter().any(|c| c.name == "reload"));
         assert!(help_text().contains("/reload [--no-session]"));
@@ -5363,14 +5428,15 @@ mod tests {
         };
         assert!(
             text.starts_with(
-                "commands: /exit /model <id> /theme [name] /effort [level] /compact [text] \
+                "commands: /new /exit /model <id> /theme [name] /effort [level] /compact [text] \
                  /changes /resume /reload [--no-session] /btw <question> /plan [on|off] \
                  /verify /usage /copy /surface /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
-            "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload", "btw",
+            "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload",
+            "btw", "plan", "verify", "usage", "copy", "surface", "team", "tasks", "help",
             "plan", "verify", "usage", "copy", "surface", "team", "tasks", "help",
         ] {
             assert!(

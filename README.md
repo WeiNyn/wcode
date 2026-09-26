@@ -270,9 +270,11 @@ chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit
 `/surface`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
-CLI re-execs into it), and `/reload [--no-session]` (rebuild + re-exec into the
-current session, mirroring the REPL; refused over a socket). The remaining
-session-lifecycle commands below stay in the REPL.
+CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
+group for a team — by re-exec'ing with no `--resume`), and `/reload
+[--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
+refused over a socket). The remaining session-lifecycle commands below stay in
+the REPL.
 `--agents` and a team, each member runs as its own **surface** (the root, plus one
 per member): input and `/`-commands go to the **focused** surface — switch with
 `/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a

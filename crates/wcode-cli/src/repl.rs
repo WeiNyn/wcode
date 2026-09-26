@@ -401,6 +401,37 @@ pub fn reload_args(
         args.push("--resume".to_string());
         args.push(p.display().to_string());
     }
+    push_launch_args(&mut args, llm, agents, config, owner, name);
+    args
+}
+
+/// Re-exec argv for `/new`: a brand-new session. Unlike `/reload --no-session`
+/// this pushes NEITHER `--resume` NOR `--no-session`, so sessions stay enabled
+/// and startup mints a fresh session file (a fresh group, with fresh member
+/// files, for a team). Shares the launch-opts tail with [`reload_args`].
+pub fn new_session_args(
+    llm: &LlmOpts,
+    agents: bool,
+    config: Option<&str>,
+    owner: Option<&str>,
+    name: Option<&str>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    push_launch_args(&mut args, llm, agents, config, owner, name);
+    args
+}
+
+/// The launch-opts tail shared by [`reload_args`] and [`new_session_args`]: the
+/// effective model/provider/effort and the `--agents`/`--config`/`--owner`/
+/// `--name` flags, so flag overrides survive a re-exec.
+fn push_launch_args(
+    args: &mut Vec<String>,
+    llm: &LlmOpts,
+    agents: bool,
+    config: Option<&str>,
+    owner: Option<&str>,
+    name: Option<&str>,
+) {
     args.push("--model".to_string());
     args.push(llm.model.clone());
     // Forward the LAUNCH provider (`model_profiles.base`), never the settled one:
@@ -447,7 +478,6 @@ pub fn reload_args(
         args.push("--name".to_string());
         args.push(id.to_string());
     }
-    args
 }
 
 /// Cargo root for the rebuild. The running binary is authoritative: a
@@ -1831,6 +1861,44 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
         assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
         assert!(!args.iter().any(|a| a == "--base-url"));
+    }
+
+    #[test]
+    fn new_session_args_has_no_session_flags_but_keeps_launch_opts() {
+        let llm = LlmOpts {
+            model: "gpt-x".to_string(),
+            base_url: Some("http://x/v1".to_string()),
+            effort: Some("high".to_string()),
+            ..LlmOpts::default()
+        };
+        let args = new_session_args(
+            &llm,
+            true,
+            Some(".wcode/team.toml"),
+            Some("127.0.0.1:9"),
+            Some("w1"),
+        );
+        // A fresh session: neither `--resume` nor the `--no-session` opt-out.
+        assert!(!args.iter().any(|a| a == "--resume"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--no-session"), "{args:?}");
+        // ...but the launch-opts tail is all forwarded.
+        assert!(
+            args.windows(2).any(|w| w == ["--model", "gpt-x"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w == ["--endpoint", "chat"]),
+            "{args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--base-url", "http://x/v1"]));
+        assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
+        assert!(args.iter().any(|a| a == "--agents"), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["--config", ".wcode/team.toml"]),
+            "{args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--owner", "127.0.0.1:9"]));
+        assert!(args.windows(2).any(|w| w == ["--name", "w1"]));
     }
 
     #[test]
