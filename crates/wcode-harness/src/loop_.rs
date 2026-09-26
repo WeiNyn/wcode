@@ -590,9 +590,37 @@ pub async fn run_loop(
                         session_path: session_path.clone(),
                     };
                     let hooks = cfg.hooks.clone();
+                    // Race the tool against the run's cancel token (bug 2).
+                    // Checked only at the turn boundary and after the whole
+                    // tool loop, a tool that does NOT watch `ctx.cancel` would
+                    // otherwise hold the run until it returns. `biased` polls
+                    // the tool arm FIRST, so a tool that is already done — or a
+                    // watcher that has just observed the token — wins; only a
+                    // tool that ignores the token is force-dropped by the
+                    // cancel arm. The synthetic output still flows through the
+                    // existing tail (end event + `ToolResult` push), so history
+                    // keeps one `ToolResult` per `ToolCall`.
+                    //
+                    // A tool that needs clean-up must watch `ToolContext.cancel`
+                    // and finish before returning (`bash` kills its child); the
+                    // race is only a backstop for tools that ignore it.
+                    let cancel = cfg.cancel.clone();
                     running.push(async move {
                         let started = std::time::Instant::now();
-                        let mut out = tool.execute(arguments, tctx).await;
+                        let mut out = tokio::select! {
+                            biased;
+                            out = tool.execute(arguments, tctx) => out,
+                            _ = cancel.cancelled() => ToolOutput {
+                                output: "aborted: cancelled before the tool returned"
+                                    .to_string(),
+                                is_error: true,
+                                diff: None,
+                                path: None,
+                            },
+                        };
+                        // `after_tool_call` is the pair of `before_tool_call`,
+                        // which already ran — keep the pair even for the
+                        // synthetic abort output.
                         hooks.after_tool_call(&hook_call, &mut out).await;
                         let duration_ms = started.elapsed().as_millis() as u64;
                         (i, out, duration_ms)
@@ -842,4 +870,208 @@ fn replace_thinking(content: &mut Vec<ContentBlock>, text: &str) {
     content.push(ContentBlock::Thinking {
         text: text.to_string(),
     });
+}
+
+#[cfg(test)]
+mod cancel_in_tool_tests {
+    use super::*;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+
+    use crate::tool::{TypedTool, erased};
+
+    /// Empty tool args — serde deserializes a struct with no fields from `{}`.
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    struct NoArgs {}
+
+    /// A `StreamFn` that emits one tool call per `(id, name)` pair plus a
+    /// tool-use finish, then ends — so the loop runs one tool batch.
+    fn stream_of_calls(calls: Vec<(&'static str, &'static str)>) -> StreamFn {
+        std::sync::Arc::new(move |_ctx, _system, _tools, _opts| {
+            let mut events: Vec<LlmStreamEvent> = calls
+                .iter()
+                .map(|(id, name)| LlmStreamEvent::ToolCall {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    arguments: serde_json::json!({}),
+                })
+                .collect();
+            events.push(LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            });
+            Box::pin(futures::stream::iter(events))
+        })
+    }
+
+    /// Signals `started`, then sleeps far longer than any test — and IGNORES
+    /// `ctx.cancel`, so only the loop's race can end it (bug 2).
+    #[derive(Clone)]
+    struct SlowTool {
+        started: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl TypedTool for SlowTool {
+        type Args = NoArgs;
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "sleeps for an hour, ignoring cancel"
+        }
+        async fn execute(&self, _args: NoArgs, _ctx: &ToolContext) -> ToolOutput {
+            let _ = self.started.send(());
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            ToolOutput {
+                output: "slow finished".to_string(),
+                is_error: false,
+                ..ToolOutput::default()
+            }
+        }
+    }
+
+    /// Signals `started`, then WATCHES `ctx.cancel` and returns its OWN output
+    /// when the token fires — the race's `biased` tool arm must let it win.
+    #[derive(Clone)]
+    struct WatcherTool {
+        started: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl TypedTool for WatcherTool {
+        type Args = NoArgs;
+        fn name(&self) -> &str {
+            "watcher"
+        }
+        fn description(&self) -> &str {
+            "returns its own output once cancel fires"
+        }
+        async fn execute(&self, _args: NoArgs, ctx: &ToolContext) -> ToolOutput {
+            let _ = self.started.send(());
+            ctx.cancel.cancelled().await;
+            ToolOutput {
+                output: "watcher saw cancel".to_string(),
+                is_error: false,
+                ..ToolOutput::default()
+            }
+        }
+    }
+
+    fn config(tool: Tool, cancel: CancellationToken, stream_fn: StreamFn) -> LoopConfig<'static> {
+        let (_steer_tx, steering) = mpsc::unbounded_channel();
+        let (_follow_tx, follow_ups) = mpsc::unbounded_channel();
+        LoopConfig {
+            system: String::new(),
+            tools: vec![tool],
+            llm: LlmOpts::default(),
+            stream_fn,
+            hooks: HooksSet::default(),
+            steering,
+            follow_ups,
+            cancel,
+            working_dir: std::env::temp_dir(),
+            max_turns: DEFAULT_MAX_TURNS,
+            parallel: false,
+            compaction: CompactionPolicy::default(),
+            session: None,
+        }
+    }
+
+    /// Cancel `token` once the tool has signalled `started_rx` — a helper so
+    /// each test cancels mid-tool, not before the turn starts.
+    fn cancel_on_start(
+        token: CancellationToken,
+        mut started_rx: mpsc::UnboundedReceiver<()>,
+    ) {
+        let worker = token.clone();
+        tokio::spawn(async move {
+            let _ = started_rx.recv().await;
+            worker.cancel();
+        });
+    }
+
+    fn tool_result(ctx: &[AgentMessage]) -> (String, bool, String) {
+        ctx.iter()
+            .find_map(|m| match m {
+                AgentMessage::ToolResult {
+                    tool_call_id,
+                    output,
+                    is_error,
+                    ..
+                } => Some((tool_call_id.clone(), *is_error, output.clone())),
+                _ => None,
+            })
+            .expect("the aborted call must still push a ToolResult")
+    }
+
+    #[tokio::test]
+    async fn a_cancel_aborts_a_running_tool() {
+        let cancel = CancellationToken::new();
+        let (started_tx, started_rx) = mpsc::unbounded_channel();
+        cancel_on_start(cancel.clone(), started_rx);
+
+        let mut ctx: Vec<AgentMessage> = Vec::new();
+        let cfg = config(
+            erased(SlowTool { started: started_tx }),
+            cancel,
+            stream_of_calls(vec![("c1", "slow")]),
+        );
+        let (sink, _events) = mpsc::unbounded_channel();
+        let run = tokio::time::timeout(Duration::from_secs(5), run_loop(&mut ctx, cfg, sink))
+            .await
+            .expect("run_loop must abort a stuck tool, not hang");
+        assert_eq!(run.unwrap().stop_reason, StopReason::Aborted);
+    }
+
+    #[tokio::test]
+    async fn the_aborted_result_is_recorded_in_ctx() {
+        let cancel = CancellationToken::new();
+        let (started_tx, started_rx) = mpsc::unbounded_channel();
+        cancel_on_start(cancel.clone(), started_rx);
+
+        let mut ctx: Vec<AgentMessage> = Vec::new();
+        let cfg = config(
+            erased(SlowTool { started: started_tx }),
+            cancel,
+            stream_of_calls(vec![("c1", "slow")]),
+        );
+        let (sink, _events) = mpsc::unbounded_channel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), run_loop(&mut ctx, cfg, sink))
+            .await
+            .expect("run_loop must abort a stuck tool, not hang");
+
+        let (id, is_error, output) = tool_result(&ctx);
+        assert_eq!(id, "c1");
+        assert!(is_error, "the aborted result is an error ToolResult");
+        assert_eq!(output, "aborted: cancelled before the tool returned");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_watching_tool_keeps_its_own_output() {
+        let cancel = CancellationToken::new();
+        let (started_tx, started_rx) = mpsc::unbounded_channel();
+        cancel_on_start(cancel.clone(), started_rx);
+
+        let mut ctx: Vec<AgentMessage> = Vec::new();
+        let cfg = config(
+            erased(WatcherTool { started: started_tx }),
+            cancel,
+            stream_of_calls(vec![("c1", "watcher")]),
+        );
+        let (sink, _events) = mpsc::unbounded_channel();
+        let run = tokio::time::timeout(Duration::from_secs(5), run_loop(&mut ctx, cfg, sink))
+            .await
+            .expect("run_loop must not hang");
+        assert_eq!(run.unwrap().stop_reason, StopReason::Aborted);
+
+        let (_id, is_error, output) = tool_result(&ctx);
+        assert_eq!(
+            output, "watcher saw cancel",
+            "the tool's OWN output wins under biased"
+        );
+        assert!(!is_error);
+    }
 }

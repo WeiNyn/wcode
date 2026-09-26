@@ -369,7 +369,9 @@ async fn kill_group(child: &mut tokio::process::Child) {
 /// a `[stderr]\n…` section, a trailing `exit code: …` line) with identical
 /// spill/limit behaviour. `events` (when `Some`) streams `ToolExecutionUpdate`s
 /// for the live UI; `label` is the `call_id` (the event `name` is the literal
-/// "bash"). The scheduler passes `None`.
+/// "bash"). The scheduler passes `None`. `cancel` kills the group and returns
+/// here cleanly, so the tool finishes on its own — the loop's race is only a
+/// backstop for a tool that ignores the token.
 pub(crate) async fn run_command(
     command: &str,
     working_dir: &Path,

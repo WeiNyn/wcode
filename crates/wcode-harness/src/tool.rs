@@ -6,6 +6,11 @@ pub struct ToolContext {
     pub call_id: String,
     pub name: String,
     pub working_dir: std::path::PathBuf,
+/// The run's cancel token. A tool that needs clean-up must watch this and
+    /// finish BEFORE returning (e.g. `bash` kills its process group); the loop
+    /// only backstops a tool that ignores it, racing the call and recording a
+    /// synthetic error `ToolResult` ("aborted: cancelled before the tool
+    /// returned") if the token fires first.
     pub cancel: tokio_util::sync::CancellationToken,
     pub events: tokio::sync::mpsc::UnboundedSender<AgentEvent>, // tool may send ToolExecutionUpdate
     /// The current run's session transcript path, when it has one — `None` for
