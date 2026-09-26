@@ -398,15 +398,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         ranges.push(app.focused_mut().append_block_lines(i, width, &mut lines));
     }
     // The in-flight message trails the committed transcript (it is transient, so
-    // it is never a selection target).
-    if let Some(message) = app.live() {
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        if let AgentMessage::Assistant { content, .. } = message {
-            lines.extend(content_lines(content, width, true));
-        }
-    }
+    // it is never a selection target). `append_live_lines` owns the separator and
+    // the `(live_rev, width)` cache; the returned range is dropped.
+    let _ = app.focused_mut().append_live_lines(width, &mut lines);
     let height = area.height as usize;
     let total = lines.len();
     let grew = total != app.total_lines();
@@ -537,6 +531,16 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
+    }
+}
+
+/// Render the live (streaming) assistant message for `width` — the same body
+/// `draw_transcript` used inline, with the streaming cursor (`live = true`).
+/// Empty for a non-assistant message.
+pub(crate) fn live_lines(message: &AgentMessage, width: usize) -> Vec<Line<'static>> {
+    match message {
+        AgentMessage::Assistant { content, .. } => content_lines(content, width, true),
+        _ => Vec::new(),
     }
 }
 

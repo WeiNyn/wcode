@@ -871,81 +871,6 @@ pub(crate) struct InputView {
 /// `label` the team strip shows, the transcript, run state, changeset,
 /// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
 /// root, the rest are team members.
-// ==== SKETCH (review-only, not real code) ====
-// Bug 3 — the LIVE (streaming) block is re-rendered from scratch every frame
-// (ui.rs:cJZIx -> `content_lines` ui.rs:MoCCM -> `markdown::render` ui.rs:9X2Z9),
-// while committed blocks are cached here (CacheEntry app.rs:ak5ad, `block_revs`
-// app.rs:15dPS, `append_block_lines` app.rs:4f4oV). Because the run tick redraws
-// every 120ms while a run is in flight (lib.rs:eyzKj / TICK lib.rs:WrdPc) even
-// when no delta arrived, the live block re-parses on every such frame.
-//
-// FIX — give the live block its own (rev, width) cache, exactly like a
-// committed block, invalidated on each delta and cleared on flush->commit.
-//
-// Reuse `CacheEntry` verbatim (no new type). Add to `Surface` (struct
-// app.rs:VoEVp; init in `Surface::new` app.rs:2m3je):
-//
-//     /// The streamed message's revision; bumped on every MessageUpdate (and on
-//     /// MessageStart), so the live cache re-renders once per delta — not once
-//     /// per frame.
-//     live_rev: u64,
-//     /// The live block's cached render, keyed (live_rev, width) like
-//     /// cache/block_revs are for committed blocks. `CacheEntry::never()`
-//     /// (app.rs:GMtkM) when there is no live message.
-//     live_cache: CacheEntry,
-//
-// A new method mirrors `append_block_lines` (app.rs:4f4oV) for the live message;
-// it owns the render-cache split borrow the same way:
-//
-//     /// Ensure the live message is rendered for `width`, then append the
-//     /// separator (when `out` is non-empty) and the cached lines. Returns the
-//     /// range of the block's OWN lines, or `None` when there is no live message.
-//     /// A cache hit appends the stored `Line`s unchanged.
-//     pub(crate) fn append_live_lines(
-//         &mut self,
-//         width: usize,
-//         out: &mut Vec<Line<'static>>,
-//     ) -> Option<Range<usize>> {
-//         let Some(message) = self.live.as_ref() else { return None };
-//         let stale = self.live_cache.rev != self.live_rev || self.live_cache.width != width;
-//         let rendered = stale.then(|| crate::ui::live_lines(message, width));
-//         if let Some(lines) = rendered {
-//             self.live_cache = CacheEntry { rev: self.live_rev, width, lines };
-//         }
-//         let own = if out.is_empty() { out.len() } else { out.push(Line::default()); out.len() };
-//         out.extend(self.live_cache.lines.iter().cloned());
-//         Some(own..out.len())
-//     }
-//
-// Invalidation (all four points):
-//  1. MessageStart (app.rs:6DiH6): `self.live = Some(message)` -> also
-//     `self.live_rev = self.live_rev.wrapping_add(1); self.live_cache = CacheEntry::never();`
-//  2. MessageUpdate (app.rs:8b2AA): same bump (it already replaces `self.live`).
-//  3. MessageEnd (app.rs:1ypOR) / `flush_live` (app.rs:HbG4X): `self.live = None`,
-//     so the next `append_live_lines` returns `None` and the stale entry is never
-//     read (resetting `live_cache` here is optional, just frees memory earlier).
-//  4. `sync_theme` (app.rs:U0iUX): bump `live_rev` alongside `block_revs`, or the
-//     live cache keeps `Line`s baked in the old palette. REQUIRED — mirror the
-//     existing `for rev in &mut surface.block_revs` loop with a
-//     `surface.live_rev = surface.live_rev.wrapping_add(1);`.
-//
-// The render site (ui.rs:cJZIx) collapses to one call — see the ui.rs sketch.
-//
-// Residual (honest): this removes the per-frame re-render; it does NOT make a
-// single growing block sub-linear — each delta still re-renders the whole block
-// once. A stream of `n` deltas over `n` frames is still O(n^2) in block length.
-// The truly-linear follow-on is an incremental re-parse seam in markdown.rs (see
-// that file's sketch) keyed on the trailing text block.
-//
-// #[cfg(test)] tests to fill (mirror the cache_misses test ui.rs:GS5Mk):
-// mod live_cache_tests {
-//     #[test] fn a_frame_with_no_delta_hits_the_live_cache() { todo!() }
-//     #[test] fn a_delta_misses_once_then_the_next_frame_hits() { todo!() }
-//     #[test] fn a_width_change_misses_the_live_cache() { todo!() }
-//     #[test] fn flush_to_commit_clears_the_live_block() { todo!() }
-//     #[test] fn a_theme_change_invalidates_the_live_cache() { todo!() }
-// }
-// ==== /SKETCH ====
 /// One committed block's cached render, index-aligned with `Surface::transcript`.
 ///
 /// A frame hits iff `rev == block_revs[i] && width == draw_width`; a miss re-renders
@@ -1038,6 +963,13 @@ pub struct Surface {
     cache: Vec<CacheEntry>,
     /// Per-block revision, bumped at each `Block::Tool` mutation; `0` = append-only.
     block_revs: Vec<u64>,
+    /// The streamed message's revision; bumped on every `MessageStart` /
+    /// `MessageUpdate` (and on a theme change), so the live cache re-renders
+    /// once per delta — not once per frame.
+    live_rev: u64,
+    /// The live (streaming) block's cached render, keyed `(live_rev, width)`
+    /// like `cache`/`block_revs` are for committed blocks. `never()` when idle.
+    live_cache: CacheEntry,
     /// Time since this surface's `AgentStart`, set by the loop on each tick
     /// while the run is in flight; cleared on `AgentEnd`. `None` when idle, so
     /// the status line shows the bare state glyph.
@@ -1046,6 +978,10 @@ pub struct Surface {
     /// reads it.
     #[cfg(test)]
     cache_misses: usize,
+    /// Live (streaming) re-renders so far (a `ui::live_lines` call). Test-only;
+    /// the renderer never reads it.
+    #[cfg(test)]
+    live_renders: usize,
 }
 
 impl Surface {
@@ -1088,9 +1024,13 @@ impl Surface {
             ranges: Vec::new(),
             cache: Vec::new(),
             block_revs: Vec::new(),
+            live_rev: 0,
+            live_cache: CacheEntry::never(),
             run_elapsed: None,
             #[cfg(test)]
             cache_misses: 0,
+            #[cfg(test)]
+            live_renders: 0,
         }
     }
 
@@ -1138,6 +1078,57 @@ impl Surface {
         let len = lines.len();
         out.extend(lines.iter().cloned());
         start..start + len
+    }
+
+    /// Bump the live message's revision so its cache re-renders on the next
+    /// frame. Call at every `MessageStart`/`MessageUpdate` and on a theme change.
+    fn bump_live(&mut self) {
+        self.live_rev = self.live_rev.wrapping_add(1);
+    }
+
+    /// Ensure the live (streaming) message is rendered for `width`, then append
+    /// the inter-block blank separator (when `out` is non-empty and the render is
+    /// non-empty) and the cached lines. Returns the range of the block's OWN
+    /// lines, or `None` when there is no live message. A cache hit appends the
+    /// stored `Line`s unchanged, so a frame with no new delta does no markdown
+    /// work. The sub-linear (per-delta incremental) follow-on is deferred — the
+    /// block-level `(rev, width)` cache is enough for v1.
+    pub(crate) fn append_live_lines(
+        &mut self,
+        width: usize,
+        out: &mut Vec<Line<'static>>,
+    ) -> Option<Range<usize>> {
+        let message = self.live.as_ref()?;
+        let stale = self.live_cache.rev != self.live_rev || self.live_cache.width != width;
+        let rendered = stale.then(|| crate::ui::live_lines(message, width));
+        if let Some(lines) = rendered {
+            self.live_cache = CacheEntry {
+                rev: self.live_rev,
+                width,
+                lines,
+            };
+            #[cfg(test)]
+            {
+                self.live_renders += 1;
+            }
+        }
+        // Validate the separator against the RENDERED lines, like
+        // `append_block_lines`, so the frame stays byte-identical.
+        let lines = &self.live_cache.lines;
+        if !out.is_empty() && !lines.is_empty() {
+            out.push(Line::default());
+        }
+        let start = out.len();
+        let len = lines.len();
+        out.extend(lines.iter().cloned());
+        Some(start..start + len)
+    }
+
+    /// Live (streaming) re-renders so far (each is a `ui::live_lines` call).
+    /// Test-only; the renderer never reads it.
+    #[cfg(test)]
+    pub(crate) fn live_renders(&self) -> usize {
+        self.live_renders
     }
 
     /// Bump block `i`'s revision (saturating). Call at every `Block::Tool`
@@ -1193,12 +1184,14 @@ impl Surface {
             AgentEvent::MessageStart { message } => {
                 if matches!(message, AgentMessage::Assistant { .. }) {
                     self.live = Some(message);
+                    self.bump_live();
                 }
                 true
             }
             AgentEvent::MessageUpdate { message } => {
                 if self.live.is_some() {
                     self.live = Some(message);
+                    self.bump_live();
                     true
                 } else {
                     false
@@ -3464,6 +3457,8 @@ impl App {
             for rev in &mut surface.block_revs {
                 *rev = rev.wrapping_add(1);
             }
+            // The live block's cached `Line`s bake `Style`s too — re-render it.
+            surface.live_rev = surface.live_rev.wrapping_add(1);
         }
     }
 
@@ -6581,5 +6576,137 @@ mod abort_escape_tests {
         assert!(!app.force_quit());
         app.handle(AppEvent::Signal(Signal::Interrupt));
         assert!(app.force_quit(), "a second SIGINT abandons");
+    }
+}
+
+#[cfg(test)]
+mod live_cache_tests {
+    use super::*;
+    use wcode_harness::message::StopReason;
+
+    fn root() -> SessionId {
+        SessionId::agent("root")
+    }
+
+    fn assistant(text: &str) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    fn start(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageStart {
+                message: assistant(text),
+            },
+        ));
+    }
+
+    fn update(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageUpdate {
+                message: assistant(text),
+            },
+        ));
+    }
+
+    /// One "frame": append the live block at `width`. Returns the lines drawn
+    /// and the running `live_renders` count.
+    fn frame(app: &mut App, width: usize) -> (Vec<Line<'static>>, usize) {
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let _ = app.focused_mut().append_live_lines(width, &mut out);
+        (out, app.focused().live_renders())
+    }
+
+    #[test]
+    fn a_frame_with_no_delta_does_zero_live_renders() {
+        let mut app = App::new();
+        start(&mut app, "hello");
+        let (first, r1) = frame(&mut app, 60);
+        assert!(r1 >= 1, "the first frame renders the live block");
+        let (second, r2) = frame(&mut app, 60);
+        assert_eq!(r2, r1, "a second frame with no delta renders ZERO times");
+        assert_eq!(first, second, "and is byte-identical");
+    }
+
+    #[test]
+    fn each_delta_renders_exactly_once() {
+        let mut app = App::new();
+        start(&mut app, "");
+        let _ = frame(&mut app, 60); // render on MessageStart
+        let after_start = app.focused().live_renders();
+        let _ = frame(&mut app, 60);
+        assert_eq!(
+            app.focused().live_renders(),
+            after_start,
+            "an unchanged frame is a hit"
+        );
+
+        update(&mut app, "a");
+        let _ = frame(&mut app, 60);
+        assert_eq!(
+            app.focused().live_renders(),
+            after_start + 1,
+            "each MessageUpdate renders exactly once"
+        );
+        let _ = frame(&mut app, 60);
+        assert_eq!(app.focused().live_renders(), after_start + 1, "then hits");
+
+        update(&mut app, "ab");
+        let _ = frame(&mut app, 60);
+        assert_eq!(app.focused().live_renders(), after_start + 2);
+    }
+
+    #[test]
+    fn a_width_change_rerenders_the_live_block() {
+        let mut app = App::new();
+        start(&mut app, "hello");
+        let _ = frame(&mut app, 60);
+        let n = app.focused().live_renders();
+        let _ = frame(&mut app, 61);
+        assert_eq!(app.focused().live_renders(), n + 1, "a width change re-renders");
+        let _ = frame(&mut app, 61);
+        assert_eq!(app.focused().live_renders(), n + 1, "the re-cache then hits");
+    }
+
+    #[test]
+    fn a_theme_change_rerenders_the_live_block() {
+        let mut app = App::new();
+        start(&mut app, "hello");
+        let _ = frame(&mut app, 60);
+        let n = app.focused().live_renders();
+        // Make the app lag the current theme generation, then sync.
+        app.theme_gen = crate::theme::generation().wrapping_sub(1);
+        app.sync_theme();
+        let _ = frame(&mut app, 60);
+        assert_eq!(
+            app.focused().live_renders(),
+            n + 1,
+            "a theme change re-renders the live block in the new palette"
+        );
+    }
+
+    #[test]
+    fn flush_to_commit_clears_the_live_block() {
+        let mut app = App::new();
+        start(&mut app, "hello");
+        let _ = frame(&mut app, 60);
+        assert!(app.live().is_some());
+
+        app.focused_mut().flush_live();
+        assert!(app.live().is_none(), "the live message is cleared");
+        let mut out: Vec<Line<'static>> = Vec::new();
+        assert!(
+            app.focused_mut().append_live_lines(60, &mut out).is_none(),
+            "no live block after a flush"
+        );
+        assert!(!app.transcript().is_empty(), "the message was committed");
     }
 }
