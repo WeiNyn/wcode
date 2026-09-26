@@ -41,6 +41,7 @@ impl Bash {
         cmd.arg("-c")
             .arg(&args.command)
             .current_dir(&ctx.working_dir)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         background::spawn_group(&mut cmd);
@@ -381,6 +382,7 @@ pub(crate) async fn run_command(
     cmd.arg("-c")
         .arg(command)
         .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // Own process group so a timeout/cancel can kill the shell *and* its
@@ -952,5 +954,39 @@ mod tests {
         .await;
         assert_eq!(code, Some(3));
         assert!(out.contains("exit code: 3"), "{out}");
+    }
+
+    /// The child's stdin is null, never the terminal's: under the raw-mode TUI
+    /// an inherited stdin lets an interactive child (a pager, `read`, a bare
+    /// `cat`) swallow the UI's keystrokes — ESC/Ctrl-C included. A `read` must
+    /// instead see EOF at once and let the shell finish on its own.
+    #[tokio::test]
+    async fn stdin_is_null_so_a_reading_child_gets_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let started = Instant::now();
+        let out = Bash::new(Background::new())
+            .execute(
+                BashArgs {
+                    command: "read x; echo \"got:$x\"".into(),
+                    timeout_secs: None,
+                    background: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        // `read` hit EOF immediately (empty `$x`); it never blocked on stdin.
+        assert!(out.output.contains("got:"), "{}", out.output);
+        assert!(
+            !out.output.contains("got:x"),
+            "stdin must not carry data: {}",
+            out.output
+        );
+        assert!(out.output.contains("exit code: 0"), "{}", out.output);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must not block waiting on stdin"
+        );
     }
 }
