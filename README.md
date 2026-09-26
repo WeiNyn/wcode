@@ -132,6 +132,7 @@ read_only = true
 name   = "reviewer"
 role   = "verify diffs; PASS / NITS / FAIL"
 effort = "high"
+```
 
 ### `[workflow]` — a plan template (requires `--agents`)
 
@@ -164,6 +165,8 @@ automation policy); `gate = true` makes its reject re-open its deps, and a gate
 needs at least one `depends_on`. The graph is validated acyclic at load. The plan
 shows in the TUI's `/tasks` listing as
 `#id [state] title (owner) ← #deps ×attempts`.
+
+```toml
 [orchestrator]
 # Root-only workflow guidance (requires --agents), folded into the system prompt
 # as a `# Orchestrator workflow` section after the team roster.
