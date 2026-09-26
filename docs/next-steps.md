@@ -27,7 +27,7 @@ the boxes as each task completes and keep the status table current.
 | 19 | Digest-CAS follow-ups (item 18 review debt) | ☑ done — `3886148`; chain test has teeth (reviewer reproduced); second-layer APPROVED |
 | 20 | Digest-CAS chain-test residuals (item 19 review debt) | ☑ done — `1b2ca6b` + `28fde3e`; real-seam chain (edit + HooksSet order + plain negative); second-layer APPROVED |
 | 21 | Session relaunch UX: TUI `/reload` + a relaunch line on exit | ☑ done — `85911d5`/`2f920f8`/`7c55844`/`0765661`; second-layer APPROVED |
-| 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) landed; second-layer APPROVED; C3 (DAG) is the north star |
+| 22 | Team vs jcode swarm: comparison & candidate features (see [`swarm-comparison-plan.md`](swarm-comparison-plan.md)) | ☑ done — C1 (`d99ab65`) + C2 (`7bd24bb`/`f1338c2`/`ca12f16`) + C3 (DAG) + C4 (verify gate hook, R′ `a8e4673`) landed; second-layer APPROVED |
 | 23 | LLM stream stall hangs the run — no idle timeout | ☑ done — ttft/idle timeouts in the adapter + a kernel backstop; default on, `0` disables |
 | 24 | jcode feature-gap analysis (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ review snapshot; Tier-1 sweep complete — see the summary below |
 | 25 | Tier-1 gap sweep: Retry-After + socket hardening (see [gap-analysis-jcode.md](gap-analysis-jcode.md)) | ☑ done — b3b3240, 9705f06 |
@@ -637,7 +637,9 @@ auto-forward is tested. `cli:` `d99ab65`.
 - [x] C2 — shared task list: root-owned list + `task` tool + TUI `/tasks`.
       `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [x] C3 — task DAG + scheduler: **landed** (Option A; P0–P5; see [`task-dag-plan.md`](task-dag-plan.md)) — model, scheduler, rework loop, physical gates, persistence, `[workflow]` config + TUI; terminal review APPROVED.
-- [ ] C4 — verify gate as a `Hooks` policy (rides on C2/C3).
+- [x] C4 — verify gate as a `Hooks` policy: **landed** — rule R′ refuses
+      `task{op:complete}` on a `Session` work node that no gate consumes; wired once
+      in `build_runtime` (root agent only). `cli:` `a8e4673`.
 - [ ] C5 — lifecycle footer (partial: `failed` shipped, `5911eab`; `blocked`/`waiting-on-detail` deferred).
 
 ---

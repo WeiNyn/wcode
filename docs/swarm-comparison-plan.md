@@ -188,7 +188,8 @@ report shape and (maybe) the task list; leave the framework and the DAG.*
 - [x] **C2 — shared task list**: a root-owned list + the `task` tool + TUI
       `/tasks`. `cli:` `7bd24bb`/`ca12f16`, `tui:` `f1338c2`.
 - [ ] **C3 — task DAG + scheduler** (decision gate): own plan doc first.
-- [ ] **C4 — verify gate as a `Hooks` policy** (rides on C2/C3).
+- [x] **C4 — verify gate as a `Hooks` policy** (rides on C2/C3): **landed** — rule
+      R′; `cli:` `a8e4673`.
 - [ ] **C5 — lifecycle footer** (small, presentation): `failed` shipped
       (`5911eab`); `blocked`/`waiting-on-detail` deferred.
 
