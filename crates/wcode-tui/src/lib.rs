@@ -263,7 +263,9 @@ pub async fn run(
 /// with anything else — or errors — leaves its surface empty, as before.
 async fn replay_history(backends: &[(SessionId, Backend)], app: &mut App) {
     for (id, backend) in backends {
-        if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
+        if let Ok(AgentEvent::History { messages }) =
+            backend.ask_within(Request::GetHistory, ASK_TIMEOUT).await
+        {
             app.seed_history(id, &messages);
         }
     }
@@ -470,6 +472,11 @@ async fn recv_opt(
     }
 }
 
+/// The budget for a side ask (`/btw`, `/usage`, a model/effort swap). A
+/// hung-but-open backend must not wedge the UI's spinner forever (item-41
+/// residual); the bounded `Backend::ask_within` is the seam.
+const ASK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Ask one surface and feed the reply back as an app event, tagged with that
 /// surface's id. Runs off the main loop, so a slow reply never blocks input.
 fn spawn_ask(
@@ -478,14 +485,35 @@ fn spawn_ask(
     reply_tx: &mpsc::UnboundedSender<AppEvent>,
     request: Request,
 ) {
+    spawn_ask_within(id, backend, reply_tx, request, ASK_TIMEOUT)
+}
+
+/// [`spawn_ask`] with an explicit bound — split out so a test can drive the
+/// same path with a tiny timeout.
+fn spawn_ask_within(
+    id: &SessionId,
+    backend: &Backend,
+    reply_tx: &mpsc::UnboundedSender<AppEvent>,
+    request: Request,
+    timeout: Duration,
+) {
     let id = id.clone();
     let backend = backend.clone();
     let reply_tx = reply_tx.clone();
     tokio::spawn(async move {
-        let event = match backend.ask(request).await {
-            Ok(event) => event,
-            Err(_) => AgentEvent::Error {
+        // Bound the ask so a hung-but-open backend cannot wedge the spinner. This
+        // is what `Backend::ask_within` does for the local path; `AskError` is
+        // not re-exported by `wcode_protocol` (its `backend` module is private),
+        // so the bound is spelled out here. It stays leak-free on the remote
+        // path: the client's `PendingGuard` drops its waiter when this future is
+        // cancelled, exactly as `Client::ask_within` relies on.
+        let event = match tokio::time::timeout(timeout, backend.ask(request)).await {
+            Ok(Ok(event)) => event,
+            Ok(Err(_)) => AgentEvent::Error {
                 message: "session closed".into(),
+            },
+            Err(_) => AgentEvent::Error {
+                message: format!("request timed out after {timeout:?}"),
             },
         };
         let _ = reply_tx.send(AppEvent::Agent(id, event));
@@ -536,9 +564,25 @@ mod tests {
     /// A live, never-streaming backend seeded with `context`, so its
     /// `GetHistory` reply carries prior turns (what a resumed member has, D1).
     fn backend_with(context: Vec<AgentMessage>) -> Backend {
-        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+        backend_streaming(context, Arc::new(|_c, _s, _t, _o| {
             Box::pin(futures::stream::empty()) as LlmStream
-        });
+        }))
+    }
+
+    /// A backend whose run never yields a stream item — a hung-but-open session,
+    /// the thing a bounded ask must not wedge on (item-41 residual).
+    fn backend_hanging() -> Backend {
+        backend_streaming(
+            Vec::new(),
+            Arc::new(|_c, _s, _t, _o| {
+                Box::pin(futures::stream::pending::<wcode_harness::event::LlmStreamEvent>())
+                    as LlmStream
+            }),
+        )
+    }
+
+    /// Build a session backend around `stream_fn` with `context` seeded.
+    fn backend_streaming(context: Vec<AgentMessage>, stream_fn: StreamFn) -> Backend {
         let agent = Agent::new(AgentConfig {
             system: "test".into(),
             tools: Vec::new(),
@@ -624,6 +668,41 @@ mod tests {
         match event {
             AppEvent::Agent(id, AgentEvent::History { .. }) => assert_eq!(id, asked),
             other => panic!("expected Agent(asked-id, History), got {other:?}"),
+        }
+    }
+
+    /// A hung-but-open backend must not wedge the UI (item-41 residual): the
+    /// bounded `spawn_ask` times out and emits a tagged timeout error rather
+    /// than spinning at `⠹ btw…` forever.
+    #[tokio::test]
+    async fn a_hung_ask_times_out_to_a_tagged_error() {
+        let backend = backend_hanging();
+        let asked = SessionId::agent("w7");
+        // Start a run that never yields a stream item, so the actor defers the
+        // ask below (it is not answered until the run ends — i.e. never).
+        backend
+            .send(Request::Submit { text: "hi".into() })
+            .expect("the run starts");
+        let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+
+        spawn_ask_within(
+            &asked,
+            &backend,
+            &tx,
+            Request::GetHistory,
+            Duration::from_millis(50),
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the timeout fires within the outer bound")
+            .expect("the channel stays open");
+        match event {
+            AppEvent::Agent(id, AgentEvent::Error { message }) => {
+                assert_eq!(id, asked, "the timeout error is tagged with the asked surface");
+                assert!(message.contains("timed out"), "a useful message: {message}");
+            }
+            other => panic!("expected Agent(asked-id, Error{{timed out}}), got {other:?}"),
         }
     }
 
