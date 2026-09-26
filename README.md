@@ -184,14 +184,13 @@ helper   = "agent:w7"
 
 Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `OPENAI_API_KEY` as a key fallback, plus `WCODE_ENDPOINT`, `WCODE_EFFORT`,
-`WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override `tools.grep`/
-`tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
+`WCODE_RTK` and `WCODE_GREP`/`WCODE_FIND` (which override
+`tools.grep`/`tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
 `off`), `WCODE_SKILLS` (extra skill roots, or `off`), and `WCODE_RETRY_MAX`,
 `WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS`, `WCODE_RETRY_TTFT_MS`,
-`WCODE_RETRY_IDLE_MS` (the
-`[retry]` table).
+`WCODE_RETRY_IDLE_MS` (the `[retry]` table).
 
 Provider precedence is `[models.<id>]` > flags/env/config: the toml globals,
 `WCODE_*`, and `--base-url`/`--endpoint` together set the **default provider**;
@@ -205,25 +204,28 @@ per key, so an overlay's `[tools] grep = true` adds that flag without clobbering
 the rest of the global `[tools]`, while a scalar or array is replaced wholesale.
 This keeps team/model overlays (per repo, per project) out of the provider
 config. A missing or unparseable overlay is an error.
+
 `--model` / `--base-url` / `--endpoint` / `--effort` / `--config` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
-cannot rescue an unreadable or invalid config.toml — that still exits with
-an error. `--effort -` (or `none`/`off`) clears back to send-nothing. After
-`--model` selects an id; its `[models.<id>]` entry overrides the default
-provider for the fields it names, and switching back to an unmapped model
-restores the default provider (a model switch is reversible).
+cannot rescue an unreadable or invalid `config.toml` — that still exits with an
+error. `--effort -` (or `none`/`off`) clears back to send-nothing. When `--model`
+selects an id, its `[models.<id>]` entry overrides the default provider for the
+fields it names, and switching back to an unmapped model restores the default
+provider (a model switch is reversible).
+
 `--no-instructions` skips the instruction files; `--dump-system-prompt` prints
 the composed system prompt (instructions included) and exits — no model needed.
-With `--agents` and a `[team]`, wcode spawns each member at startup and the root's
-system prompt gains a `# Your team` block listing them by name (and role); members
-are addressed by name with `message`. A `[team]` without `--agents` is an error,
-and a served `--owner` worker never sees the block. An `[orchestrator]
-guidelines` string (also requiring `--agents`) is appended as a `# Orchestrator
-workflow` section after the roster, so the workflow can reference the team. The
-repo ships `.wcode/team.toml` as exactly this — an overlay that adds the dev team,
-the orchestrator workflow, and `[tools] grep/find = true`, leaving your
-provider/model in the global config: run it with
-`wcode --agents --config .wcode/team.toml` (or
+
+With `--agents` and a `[team]`, wcode spawns each member at startup and the
+root's system prompt gains a `# Your team` block listing them by name (and role);
+members are addressed by name with `message`. A `[team]` without `--agents` is an
+error, and a served `--owner` worker never sees the block. An
+`[orchestrator] guidelines` string (also requiring `--agents`) is appended as a
+`# Orchestrator workflow` section after the team roster, so the workflow can
+reference the team. The repo ships `.wcode/team.toml` as exactly this — an
+overlay that adds the dev team, the orchestrator workflow, and
+`[tools] grep/find = true`, leaving your provider/model in the global config:
+run it with `wcode --agents --config .wcode/team.toml` (or
 `WCODE_CONFIG=.wcode/team.toml wcode --agents`).
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
