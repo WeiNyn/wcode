@@ -42,7 +42,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -62,6 +62,9 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
   serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
+  --task <text>      run a [workflow] headless on <text> (requires [workflow]
+                     and --agents; WCODE_TASK is the fallback)
+  --timeout <secs>   cap the headless run (0/absent = no cap)
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
    -V, --version      show version
    -h, --help         show this help
@@ -105,10 +108,16 @@ env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
 env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
+env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
+    /// `--task <text>`: run a `[workflow]` headless on `<text>`. Requires
+    /// `[workflow]` + `--agents`; `WCODE_TASK` is the env fallback.
+    task: Option<String>,
+    /// `--timeout <secs>`: cap the headless run; 0/absent = disabled.
+    timeout: Option<u64>,
     prompt: Option<String>,
     /// None = flag absent; Some(None) = latest; Some(Some(path)) = that file.
     resume: Option<Option<String>>,
@@ -178,6 +187,18 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-p" => {
                 a.prompt = Some(args.get(i).ok_or("-p requires a prompt")?.clone());
+                i += 1;
+            }
+            "--task" => {
+                a.task = Some(args.get(i).ok_or("--task requires text")?.clone());
+                i += 1;
+            }
+            "--timeout" => {
+                let v = args.get(i).ok_or("--timeout requires seconds")?;
+                a.timeout = Some(
+                    v.parse::<u64>()
+                        .map_err(|_| format!("--timeout expects seconds, got `{v}`"))?,
+                );
                 i += 1;
             }
             "--resume" => {
@@ -940,6 +961,34 @@ struct Runtime {
 /// `--agents`; register `--peer` remotes; non-unix `--peer` `exit(2)`; register
 /// `[peers]` aliases/remotes; rebuild a resumed group's team; spawn `[team]`
 /// members; print the `team: ...` line.
+/// The `--task`/`--timeout` boot guards (§4.5): `Err(message)` for a
+/// misconfiguration the caller prints and exits 2 on. Pure, so each case is
+/// unit-tested; the `eprintln!` + `exit(2)` shape lives at the call site.
+fn check_task_args(
+    args: &Args,
+    workflow: Option<&crate::config::Workflow>,
+    has_agents: bool,
+) -> Result<(), String> {
+    if args.task.is_some() {
+        if workflow.is_none() {
+            return Err("--task requires [workflow]".into());
+        }
+        if args.prompt.is_some() {
+            return Err("--task cannot be combined with -p".into());
+        }
+        if !has_agents {
+            return Err("--task requires --agents".into());
+        }
+    }
+    if args.timeout.is_some() && args.task.is_none() {
+        return Err("--timeout requires --task".into());
+    }
+    if workflow.is_some_and(|w| w.uses_task()) && args.task.is_none() {
+        return Err("[workflow] uses {{task}} but no --task/WCODE_TASK was given".into());
+    }
+    Ok(())
+}
+
 fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup) -> Runtime {
     let cwd = &setup.cwd;
     // Instruction ("reference") files: discover the configured candidates
@@ -1015,6 +1064,10 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // addressable A2A peer reachable over its socket (S4-4).
     if !args.peers.is_empty() && orchestrator.is_none() {
         eprintln!("error: --peer requires --agents");
+        std::process::exit(2);
+    }
+    if let Err(msg) = check_task_args(args, cfg.workflow.as_ref(), orchestrator.is_some()) {
+        eprintln!("error: {msg}");
         std::process::exit(2);
     }
     if cfg.workflow.is_some() && orchestrator.is_none() {
@@ -1133,7 +1186,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         && let Some(o) = &orchestrator
         && let Some(workflow) = &cfg.workflow
     {
-        let n = instantiate_workflow(o.tasks(), workflow);
+        let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
         println!("workflow: {n} nodes");
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
@@ -1322,253 +1375,280 @@ async fn dispatch(
     agent: Agent,
     bg: Arc<Background>,
 ) -> () {
-    match &args.prompt {
-        Some(prompt) => {
+    if let Some(prompt) = &args.prompt {
+        let handle = SessionActor::spawn(agent);
+        bg.bind(handle.clone());
+        if let Some(o) = &rt.orchestrator {
+            o.register_root(handle.clone());
+        }
+        let code = one_shot(Backend::from(handle), prompt).await;
+        // Flush queued fire-and-forget deliveries to any `--peer`/`[peers]`
+        // remotes (a `message`/`spawn { to }` sent during the turn) before
+        // the runtime is dropped.
+        #[cfg(unix)]
+        wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+        Background::shutdown_all();
+        std::process::exit(code)
+    } else if args.task.is_some() {
+        let handle = SessionActor::spawn(agent);
+        bg.bind(handle.clone());
+        if let Some(o) = &rt.orchestrator {
+            o.register_root(handle.clone());
+        }
+        let tasks = rt
+            .orchestrator
+            .as_ref()
+            .expect("--task guard ensured --agents")
+            .tasks()
+            .clone();
+        let seed = workflow_seed(args.task.as_deref().unwrap_or_default());
+        let timeout = args
+            .timeout
+            .filter(|&s| s > 0)
+            .map(std::time::Duration::from_secs);
+        let code = run_workflow(Backend::from(handle), tasks, seed, timeout).await;
+        #[cfg(unix)]
+        wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
+        Background::shutdown_all();
+        std::process::exit(code)
+    } else {
+        if choose_tui(args, is_tty()) {
+            let status = wcode_tui::Status {
+                model: llm.model.clone(),
+                effort: llm.effort.clone(),
+                session: agent.session_id(),
+                context_limit: wcode_harness::limits::model_limit(
+                    llm.base_url.as_deref(),
+                    &llm.model,
+                )
+                .map(|l| l.context),
+                plan: false,
+            };
+            let cwd = std::env::current_dir().ok().and_then(|p| {
+                p.file_name().map(|n| n.to_string_lossy().into_owned())
+            });
+            let git = git_branch_dirty();
+            let options = wcode_tui::Options {
+                status,
+                models: wcode_harness::streamfn::list_models(&llm)
+                    .await
+                    .unwrap_or_default(),
+                sessions: session_items(),
+                tasks: task_items(&rt.orchestrator),
+                theme: cfg.theme.clone(),
+                history: Some(repl::history_path()),
+                remote: false,
+                cwd,
+                git,
+            };
+            let session_path = agent.session_path().map(Path::to_path_buf);
             let handle = SessionActor::spawn(agent);
             bg.bind(handle.clone());
             if let Some(o) = &rt.orchestrator {
                 o.register_root(handle.clone());
             }
-            let code = one_shot(Backend::from(handle), prompt).await;
-            // Flush queued fire-and-forget deliveries to any `--peer`/`[peers]`
-            // remotes (a `message`/`spawn { to }` sent during the turn) before
-            // the runtime is dropped.
-            #[cfg(unix)]
-            wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
-            Background::shutdown_all();
-            std::process::exit(code)
-        }
-        None => {
-            if choose_tui(args, is_tty()) {
-                let status = wcode_tui::Status {
-                    model: llm.model.clone(),
-                    effort: llm.effort.clone(),
-                    session: agent.session_id(),
-                    context_limit: wcode_harness::limits::model_limit(
-                        llm.base_url.as_deref(),
-                        &llm.model,
-                    )
-                    .map(|l| l.context),
-                    plan: false,
-                };
-                let cwd = std::env::current_dir().ok().and_then(|p| {
-                    p.file_name().map(|n| n.to_string_lossy().into_owned())
-                });
-                let git = git_branch_dirty();
-                let options = wcode_tui::Options {
-                    status,
-                    models: wcode_harness::streamfn::list_models(&llm)
-                        .await
-                        .unwrap_or_default(),
-                    sessions: session_items(),
-                    tasks: task_items(&rt.orchestrator),
-                    theme: cfg.theme.clone(),
-                    history: Some(repl::history_path()),
-                    remote: false,
-                    cwd,
-                    git,
-                };
-                let session_path = agent.session_path().map(Path::to_path_buf);
-                let handle = SessionActor::spawn(agent);
-                bg.bind(handle.clone());
-                if let Some(o) = &rt.orchestrator {
-                    o.register_root(handle.clone());
-                }
-                // Surface list: the root, then one per team member — only for
-                // the root orchestrator (a served `--owner` worker has no team).
-                let mut surfaces = vec![wcode_tui::SurfaceSpec {
-                    id: rt
-                        .orchestrator
-                        .as_ref()
-                        .map(|o| o.id().clone())
-                        .unwrap_or_else(|| SessionId::agent("root")),
-                    label: "root".to_string(),
-                    model: llm.model.clone(),
-                    is_root: true,
-                    backend: Backend::from(handle),
-                }];
-                if args.owner.is_none()
-                    && let Some(o) = &rt.orchestrator
-                {
-                    // A resumed group's members come from its files; otherwise
-                    // from `[team]`. Either way the phonebook resolves each name.
-                    let member_names: Vec<String> =
-                        match (setup.resuming_group, &setup.active_group) {
-                            (true, Some(group)) => session_groups::scan_members(group)
-                                .unwrap_or_default()
+            // Surface list: the root, then one per team member — only for
+            // the root orchestrator (a served `--owner` worker has no team).
+            let mut surfaces = vec![wcode_tui::SurfaceSpec {
+                id: rt
+                    .orchestrator
+                    .as_ref()
+                    .map(|o| o.id().clone())
+                    .unwrap_or_else(|| SessionId::agent("root")),
+                label: "root".to_string(),
+                model: llm.model.clone(),
+                is_root: true,
+                backend: Backend::from(handle),
+            }];
+            if args.owner.is_none()
+                && let Some(o) = &rt.orchestrator
+            {
+                // A resumed group's members come from its files; otherwise
+                // from `[team]`. Either way the phonebook resolves each name.
+                let member_names: Vec<String> =
+                    match (setup.resuming_group, &setup.active_group) {
+                        (true, Some(group)) => session_groups::scan_members(group)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|p| {
+                                p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                            })
+                            .collect(),
+                        _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
+                    };
+                for name in member_names {
+                    if let Some(backend) = o.worker_backend(&name) {
+                        let model = match (setup.resuming_group, &setup.active_group) {
+                            (true, Some(group)) => {
+                                session_groups::member_spec(group, &name).model
+                            }
+                            _ => cfg
+                                .team
                                 .iter()
-                                .filter_map(|p| {
-                                    p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
-                                })
-                                .collect(),
-                            _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
+                                .find(|m| m.name == name)
+                                .and_then(|m| m.model.clone()),
                         };
-                    for name in member_names {
-                        if let Some(backend) = o.worker_backend(&name) {
-                            let model = match (setup.resuming_group, &setup.active_group) {
-                                (true, Some(group)) => {
-                                    session_groups::member_spec(group, &name).model
-                                }
-                                _ => cfg
-                                    .team
-                                    .iter()
-                                    .find(|m| m.name == name)
-                                    .and_then(|m| m.model.clone()),
-                            };
-                            surfaces.push(wcode_tui::SurfaceSpec {
-                                id: SessionId::agent(&name),
-                                label: name.clone(),
-                                model: model.unwrap_or_else(|| llm.model.clone()),
-                                is_root: false,
-                                backend,
-                            });
-                        }
-                    }
-                }
-                // Runtime-spawned workers reach the TUI through this feed. Install
-                // the sink only AFTER the `[team]` loop above, so preset members
-                // (already in `surfaces`) are not re-emitted. A served worker
-                // (`--owner`) has no team surfaces, so it installs nothing.
-                let new_surfaces = if args.owner.is_none() {
-                    match &rt.orchestrator {
-                        Some(o) => {
-                            let (tx, rx) =
-                                tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
-                            o.set_spawn_sink(tx);
-                            Some(rx)
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                // Seed the plan and forward live updates: the TUI holds no
-                // `TaskList`, so the composition root maps each snapshot to the
-                // `TaskItem` view type over a feed shaped like `new_surfaces`.
-                let new_tasks = rt.orchestrator.as_ref().map(|o| {
-                    let (tx, rx) =
-                        tokio::sync::mpsc::unbounded_channel::<Vec<wcode_tui::TaskItem>>();
-                    let mut updates = o.tasks().subscribe();
-                    tokio::spawn(async move {
-                        loop {
-                            let items: Vec<wcode_tui::TaskItem> = updates
-                                .borrow_and_update()
-                                .iter()
-                                .map(task_item)
-                                .collect();
-                            // A closed receiver means the TUI has exited.
-                            if tx.send(items).is_err() {
-                                return;
-                            }
-                            if updates.changed().await.is_err() {
-                                return;
-                            }
-                        }
-                    });
-                    rx
-                });
-                match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
-                    Ok(wcode_tui::Outcome::Quit) => {
-                        // The terminal is already restored: print the exact
-                        // command to bring this session back (nothing when there
-                        // is no local session path).
-                        repl::print_relaunch(
-                            &llm,
-                            session_path.as_deref(),
-                            args.agents,
-                            args.config.as_deref(),
-                            args.owner.as_deref(),
-                            args.name.as_deref(),
-                        );
-                        Background::shutdown_all();
-                        std::process::exit(0)
-                    }
-                    Ok(wcode_tui::Outcome::Abandoned) => {
-                        // A force-quit abandoned the run: skip the relaunch
-                        // banner, kill any background groups, exit 0.
-                        Background::shutdown_all();
-                        std::process::exit(0)
-                    }
-                    Ok(wcode_tui::Outcome::Reload { no_session }) => {
-                        // Rebuild + re-exec into the same session (the REPL's
-                        // `/reload`); the terminal is already restored.
-                        repl::reload(
-                            &llm,
-                            session_path.as_deref(),
-                            no_session,
-                            args.agents,
-                            args.config.as_deref(),
-                            args.owner.as_deref(),
-                            args.name.as_deref(),
-                            None,
-                        )
-                        .await;
-                        std::process::exit(1); // reached only if the build failed
-                    }
-                    Ok(wcode_tui::Outcome::Resume(path)) => {
-                        // The TUI cannot rebuild an agent: hand off by re-exec'ing
-                        // with `--resume <path>` (the terminal is already restored).
-                        repl::exec_self(&repl::reload_args(
-                            &llm,
-                            Some(&path),
-                            false,
-                            args.agents,
-                            args.config.as_deref(),
-                            args.owner.as_deref(),
-                            args.name.as_deref(),
-                        ));
-                        std::process::exit(1); // only reached if the exec failed
-                    }
-                    Ok(wcode_tui::Outcome::New) => {
-                        // A fresh session: re-exec with no `--resume` (startup
-                        // mints a new session file, or a fresh group for a team).
-                        // The terminal is already restored.
-                        println!("starting a new session ...");
-                        repl::exec_self(&repl::new_session_args(
-                            &llm,
-                            args.agents,
-                            args.config.as_deref(),
-                            args.owner.as_deref(),
-                            args.name.as_deref(),
-                        ));
-                        std::process::exit(1); // reached only if the exec failed
-                    }
-                    Err(e) => {
-                        eprintln!("tui: {e}");
-                        std::process::exit(1);
+                        surfaces.push(wcode_tui::SurfaceSpec {
+                            id: SessionId::agent(&name),
+                            label: name.clone(),
+                            model: model.unwrap_or_else(|| llm.model.clone()),
+                            is_root: false,
+                            backend,
+                        });
                     }
                 }
             }
-            let Runtime {
-                instructions,
-                skills,
-                hooks,
-                orchestrator,
-            } = rt;
-            repl::run(
-                repl::SessionSource::Local(Box::new(agent), bg),
-                llm,
-                hooks,
-                cfg.tools,
-                cfg.compaction,
-                instructions,
-                skills,
-                root.team,
-                root.guidelines,
-                args.config.as_deref(),
-                args.owner.as_deref(),
-                args.name.as_deref(),
-                orchestrator,
-                cfg.workspace.digest_cas,
-            )
-            .await;
+            // Runtime-spawned workers reach the TUI through this feed. Install
+            // the sink only AFTER the `[team]` loop above, so preset members
+            // (already in `surfaces`) are not re-emitted. A served worker
+            // (`--owner`) has no team surfaces, so it installs nothing.
+            let new_surfaces = if args.owner.is_none() {
+                match &rt.orchestrator {
+                    Some(o) => {
+                        let (tx, rx) =
+                            tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
+                        o.set_spawn_sink(tx);
+                        Some(rx)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            // Seed the plan and forward live updates: the TUI holds no
+            // `TaskList`, so the composition root maps each snapshot to the
+            // `TaskItem` view type over a feed shaped like `new_surfaces`.
+            let new_tasks = rt.orchestrator.as_ref().map(|o| {
+                let (tx, rx) =
+                    tokio::sync::mpsc::unbounded_channel::<Vec<wcode_tui::TaskItem>>();
+                let mut updates = o.tasks().subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        let items: Vec<wcode_tui::TaskItem> = updates
+                            .borrow_and_update()
+                            .iter()
+                            .map(task_item)
+                            .collect();
+                        // A closed receiver means the TUI has exited.
+                        if tx.send(items).is_err() {
+                            return;
+                        }
+                        if updates.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                });
+                rx
+            });
+            match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
+                Ok(wcode_tui::Outcome::Quit) => {
+                    // The terminal is already restored: print the exact
+                    // command to bring this session back (nothing when there
+                    // is no local session path).
+                    repl::print_relaunch(
+                        &llm,
+                        session_path.as_deref(),
+                        args.agents,
+                        args.config.as_deref(),
+                        args.owner.as_deref(),
+                        args.name.as_deref(),
+                    );
+                    Background::shutdown_all();
+                    std::process::exit(0)
+                }
+                Ok(wcode_tui::Outcome::Abandoned) => {
+                    // A force-quit abandoned the run: skip the relaunch
+                    // banner, kill any background groups, exit 0.
+                    Background::shutdown_all();
+                    std::process::exit(0)
+                }
+                Ok(wcode_tui::Outcome::Reload { no_session }) => {
+                    // Rebuild + re-exec into the same session (the REPL's
+                    // `/reload`); the terminal is already restored.
+                    repl::reload(
+                        &llm,
+                        session_path.as_deref(),
+                        no_session,
+                        args.agents,
+                        args.config.as_deref(),
+                        args.owner.as_deref(),
+                        args.name.as_deref(),
+                        None,
+                    )
+                    .await;
+                    std::process::exit(1); // reached only if the build failed
+                }
+                Ok(wcode_tui::Outcome::Resume(path)) => {
+                    // The TUI cannot rebuild an agent: hand off by re-exec'ing
+                    // with `--resume <path>` (the terminal is already restored).
+                    repl::exec_self(&repl::reload_args(
+                        &llm,
+                        Some(&path),
+                        false,
+                        args.agents,
+                        args.config.as_deref(),
+                        args.owner.as_deref(),
+                        args.name.as_deref(),
+                    ));
+                    std::process::exit(1); // only reached if the exec failed
+                }
+                Ok(wcode_tui::Outcome::New) => {
+                    // A fresh session: re-exec with no `--resume` (startup
+                    // mints a new session file, or a fresh group for a team).
+                    // The terminal is already restored.
+                    println!("starting a new session ...");
+                    repl::exec_self(&repl::new_session_args(
+                        &llm,
+                        args.agents,
+                        args.config.as_deref(),
+                        args.owner.as_deref(),
+                        args.name.as_deref(),
+                    ));
+                    std::process::exit(1); // reached only if the exec failed
+                }
+                Err(e) => {
+                    eprintln!("tui: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
+        let Runtime {
+            instructions,
+            skills,
+            hooks,
+            orchestrator,
+        } = rt;
+        repl::run(
+            repl::SessionSource::Local(Box::new(agent), bg),
+            llm,
+            hooks,
+            cfg.tools,
+            cfg.compaction,
+            instructions,
+            skills,
+            root.team,
+            root.guidelines,
+            args.config.as_deref(),
+            args.owner.as_deref(),
+            args.name.as_deref(),
+            orchestrator,
+            cfg.workspace.digest_cas,
+        )
+        .await;
     }
 }
 #[tokio::main]
 async fn main() {
     // Phase 1: parse argv, resolving the `--help`/`--version` early exits.
-    let args = parse_cli();
+    let mut args = parse_cli();
+    // A whitespace-only `WCODE_TASK` counts as unset; the `--task` flag wins
+    // (a direct read, like `WCODE_CONFIG` — an invocation input, not provider
+    // config, so it is not part of `EnvVars`).
+    if args.task.is_none() {
+        args.task = std::env::var("WCODE_TASK")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+    }
     // Phase 2: load config raw (flags applied, `to_llm_opts` not yet run), then
     // optional endpoint detection, the provider diagnostic, and finally the
     // launch provider. Detection runs HERE so `to_llm_opts` captures the
@@ -1660,7 +1740,7 @@ fn resolve_overlay(flag: Option<&str>, env: Option<&str>) -> Option<String> {
 /// default on a TTY; `--no-tui` (or a pipe/CI) keeps the line REPL. One-shot
 /// (`-p`) and `serve` never use the TUI.
 fn choose_tui(args: &Args, tty: bool) -> bool {
-    if args.no_tui || args.prompt.is_some() || args.serve {
+    if args.no_tui || args.prompt.is_some() || args.serve || args.task.is_some() {
         return false;
     }
     args.tui || tty
@@ -1867,6 +1947,94 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
+/// The headless `--task` run: the plan is already seeded by boot instantiation;
+/// this seeds the root and waits for the plan to reach a terminal state.
+/// Exit: 0 once every node is `Done`, 1 for a `Failed` node (fail-fast) or a
+/// timeout.
+async fn run_workflow(
+    backend: Backend,
+    tasks: crate::tasks::TaskList,
+    seed: String,
+    timeout: Option<std::time::Duration>,
+) -> i32 {
+    // A whole-run drain (A3): unlike `one_shot`'s, it does NOT stop at the first
+    // `AgentEnd`, so the subscription stays live across the run's many root
+    // turns. Non-load-bearing otherwise — `ask` replies over a oneshot and a
+    // broadcast with no reader never blocks the actor.
+    let mut rx = backend.subscribe();
+    tokio::spawn(async move { while rx.recv().await.is_ok() {} });
+
+    // The root's first turn (A2): if it errors or exhausts turns, no node
+    // transitions, and without a `--timeout` the wait below would never end.
+    match backend.ask(Request::Submit { text: seed }).await {
+        Ok(AgentEvent::Stopped {
+            stop_reason: StopReason::Error | StopReason::MaxTurns,
+        })
+        | Err(_) => return 1,
+        Ok(_) => {}
+    }
+
+    let mut updates = tasks.subscribe();
+    let code = loop {
+        if let Some(code) = tasks.terminal_code() {
+            break code;
+        }
+        match timeout {
+            Some(d) => {
+                tokio::select! {
+                    _ = updates.changed() => {}
+                    _ = tokio::time::sleep(d) => break 1,
+                }
+            }
+            None => {
+                if updates.changed().await.is_err() {
+                    break 1;
+                }
+            }
+        }
+    };
+
+    for task in tasks.snapshot() {
+        println!("#{} [{}] {}", task.id, task.state.label(), task.title);
+    }
+    code
+}
+
+/// The root's opening seed: the plan is ALREADY instantiated, so its one job is
+/// `task complete` / `task reject` per report — NOT to author a duplicate plan
+/// (obedience is a soft guarantee, §8).
+fn workflow_seed(task: &str) -> String {
+    format!(
+        "The task is:\n{task}\n\nA `[workflow]` plan is ALREADY instantiated \
+         (see `task list`). Do NOT create nodes — the scheduler dispatches each \
+         ready node to its member. As each worker reports, call \
+         `task complete <id>` with the report as `artifact`; for a gate, call \
+         `task reject <id> <reason>` with the reason. Stop when no node is \
+         ready and none is running."
+    )
+}
+
+#[cfg(test)]
+mod workflow_seed_tests {
+    use super::*;
+
+    #[test]
+    fn seed_names_the_task_and_forbids_new_nodes() {
+        let seed = workflow_seed("fix bug 123");
+        assert!(seed.contains("fix bug 123"), "names the task: {seed}");
+        assert!(
+            seed.contains("ALREADY instantiated"),
+            "says the plan exists: {seed}"
+        );
+        assert!(
+            seed.contains("Do NOT create nodes"),
+            "forbids a duplicate plan: {seed}"
+        );
+        assert!(seed.contains("task complete"), "says how to complete: {seed}");
+        assert!(seed.contains("task reject"), "says how to reject: {seed}");
+    }
+}
+
 /// Whether to instantiate a `[workflow]` template at boot: a fresh (non-resumed)
 /// session with a workflow configured. A resume loads the persisted plan (P4) and
 /// must NOT re-seed it (else the plan grows 2N after N resumes).
@@ -1877,7 +2045,11 @@ fn should_instantiate_workflow(resuming_group: bool, has_workflow: bool) -> bool
 /// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so a
 /// `depends_on` may name a later-authored sibling — Blocker 1), mapping each
 /// string id to its numeric task id before resolving deps. Returns the count.
-fn instantiate_workflow(tasks: &crate::tasks::TaskList, workflow: &crate::config::Workflow) -> usize {
+fn instantiate_workflow(
+    tasks: &crate::tasks::TaskList,
+    workflow: &crate::config::Workflow,
+    task: Option<&str>,
+) -> usize {
     use std::collections::HashMap;
     let order = crate::config::topo_order(workflow)
         .unwrap_or_else(|e| workflow_fail(&e.to_string()));
@@ -1894,7 +2066,7 @@ fn instantiate_workflow(tasks: &crate::tasks::TaskList, workflow: &crate::config
                 )),
             }
         }
-        let t = match tasks.create(node.id.as_str(), deps, node.gate) {
+        let t = match tasks.create(crate::config::node_title(node, task), deps, node.gate) {
             Ok(t) => t,
             Err(e) => workflow_fail(&format!("node `{}`: {e}", node.id)),
         };
@@ -2167,12 +2339,39 @@ mod tests {
             ],
         };
         let tasks = crate::tasks::TaskList::new();
-        assert_eq!(instantiate_workflow(&tasks, &w), 2);
+        assert_eq!(instantiate_workflow(&tasks, &w, None), 2);
         let snap = tasks.snapshot();
         assert_eq!(snap.len(), 2);
         let b = snap.iter().find(|t| t.title == "b").unwrap();
         assert_eq!(b.deps, vec![1], "b depends on a's assigned (numeric) id");
         assert_eq!(b.owner.as_ref().map(|o| o.as_str()), Some("agent:w1"));
+    }
+
+    #[test]
+    fn instantiate_workflow_resolves_node_titles() {
+        use crate::config::{Workflow, WorkflowNode};
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![
+                WorkflowNode {
+                    id: "explore".into(),
+                    member: Some("w1".into()),
+                    title: Some("Explore: {{task}}".into()),
+                    ..Default::default()
+                },
+                WorkflowNode {
+                    id: "plain".into(),
+                    member: Some("w1".into()),
+                    title: None,
+                    ..Default::default()
+                },
+            ],
+        };
+        let tasks = crate::tasks::TaskList::new();
+        assert_eq!(instantiate_workflow(&tasks, &w, Some("fix 123")), 2);
+        let snap = tasks.snapshot();
+        assert_eq!(snap[0].title, "Explore: fix 123", "{{task}} substituted");
+        assert_eq!(snap[1].title, "plain", "no title -> the node id");
     }
 
     #[test]
@@ -2443,6 +2642,14 @@ mod tests {
             },
             true
         ));
+        // A `--task` run is headless: never the TUI.
+        assert!(!choose_tui(
+            &Args {
+                task: Some("x".into()),
+                ..Args::default()
+            },
+            true
+        ));
     }
 
     #[test]
@@ -2452,6 +2659,100 @@ mod tests {
         };
         assert_eq!(a.config.as_deref(), Some(".wcode/team.toml"));
         assert!(parse_args(&args(&["--config"])).is_err());
+    }
+
+    #[test]
+    fn parse_task_and_timeout() {
+        let v = args(&["--task", "fix bug 123", "--timeout", "30"]);
+        let Parsed::Args(a) = parse_args(&v).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.task.as_deref(), Some("fix bug 123"));
+        assert_eq!(a.timeout, Some(30));
+        // `0` (disabled) parses as-is; the driver filters it out.
+        let Parsed::Args(a) = parse_args(&args(&["--timeout", "0"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.timeout, Some(0));
+        assert!(parse_args(&args(&["--task"])).is_err(), "--task needs text");
+        assert!(
+            parse_args(&args(&["--timeout"])).is_err(),
+            "--timeout needs seconds"
+        );
+    }
+
+    #[test]
+    fn timeout_rejects_junk() {
+        let err = parse_args(&args(&["--timeout", "abc"])).unwrap_err();
+        assert!(err.contains("abc"), "echoes the bad value: {err}");
+    }
+
+    /// Parse a `&[&str]` argv to `Args` (test helper).
+    fn parsed(v: &[&str]) -> Args {
+        let Parsed::Args(a) = parse_args(&args(v)).unwrap() else {
+            panic!("not args");
+        };
+        a
+    }
+
+    #[test]
+    fn task_guards_reject_misconfiguration() {
+        use crate::config::{Workflow, WorkflowNode};
+        let plain = Workflow::default();
+        let templated = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                id: "a".into(),
+                title: Some("Explore: {{task}}".into()),
+                ..Default::default()
+            }],
+        };
+        // --task without [workflow].
+        assert_eq!(
+            check_task_args(&parsed(&["--task", "x"]), None, true),
+            Err("--task requires [workflow]".into())
+        );
+        // --task together with -p.
+        assert_eq!(
+            check_task_args(&parsed(&["--task", "x", "-p", "y"]), Some(&plain), true),
+            Err("--task cannot be combined with -p".into())
+        );
+        // --task without --agents.
+        assert_eq!(
+            check_task_args(&parsed(&["--task", "x"]), Some(&plain), false),
+            Err("--task requires --agents".into())
+        );
+        // --timeout without --task.
+        assert_eq!(
+            check_task_args(&parsed(&["--timeout", "5"]), Some(&plain), true),
+            Err("--timeout requires --task".into())
+        );
+        // A {{task}} template without a task.
+        assert_eq!(
+            check_task_args(&parsed(&[]), Some(&templated), true),
+            Err("[workflow] uses {{task}} but no --task/WCODE_TASK was given".into())
+        );
+    }
+
+    #[test]
+    fn task_guards_accept_a_well_formed_run() {
+        use crate::config::Workflow;
+        assert_eq!(
+            check_task_args(&parsed(&[]), Some(&Workflow::default()), false),
+            Ok(())
+        );
+        assert_eq!(
+            check_task_args(
+                &parsed(&["--timeout", "30", "--task", "x"]),
+                Some(&Workflow::default()),
+                true
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            check_task_args(&parsed(&["--task", "x"]), Some(&Workflow::default()), true),
+            Ok(())
+        );
     }
 
     #[test]
@@ -2487,4 +2788,3 @@ mod instructions_flag_tests {
         assert!(!Args::default().no_instructions);
     }
 }
-

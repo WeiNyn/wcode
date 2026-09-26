@@ -288,9 +288,6 @@ pub fn substitute_task(text: &str, task: &str) -> String {
 
 /// A node's resolved title: its `title`, with `{{task}}` substituted when a task
 /// is present, else its `id`. Pure; `main.rs::instantiate_workflow` calls it.
-// P1 config seam: `instantiate_workflow` wires this in P2; the tests here cover
-// it until then.
-#[allow(dead_code)]
 pub fn node_title(node: &WorkflowNode, task: Option<&str>) -> String {
     match (node.title.as_deref(), task) {
         (Some(t), Some(task)) => substitute_task(t, task),
@@ -301,9 +298,6 @@ pub fn node_title(node: &WorkflowNode, task: Option<&str>) -> String {
 
 impl Workflow {
     /// `true` iff any node title contains the `{{task}}` placeholder.
-    // P1 config seam: the `--task` boot guard wires this once it lands; the
-    // tests here cover it until then.
-    #[allow(dead_code)]
     pub fn uses_task(&self) -> bool {
         self.nodes.iter().any(|n| {
             n.title

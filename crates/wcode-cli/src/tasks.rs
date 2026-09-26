@@ -902,6 +902,21 @@ impl TaskList {
         cone(&self.inner.tasks.lock().unwrap(), id)
     }
 
+    /// The headless driver's terminal verdict. `Some(0)` once every node is
+    /// `Done`; `Some(1)` as soon as any node is `Failed` — FAIL-FAST, because a
+    /// `Failed` node's blocked dependents can never progress, so waiting for
+    /// "all terminal" would hang. `None` = still running. Read-only; no publish.
+    pub fn terminal_code(&self) -> Option<i32> {
+        let tasks = self.inner.tasks.lock().unwrap();
+        if tasks.iter().any(|t| t.state == TaskState::Failed) {
+            return Some(1);
+        }
+        if tasks.iter().all(|t| t.state == TaskState::Done) {
+            return Some(0);
+        }
+        None
+    }
+
     /// A point-in-time copy, in creation (id) order — what the TUI renders.
     pub fn snapshot(&self) -> Vec<Task> {
         self.inner.tasks.lock().unwrap().clone()
@@ -1449,5 +1464,43 @@ fn plan_op_and_task_serde_round_trip() {
         );
         let r = TaskList::load(&path).unwrap();
         assert_eq!(r.snapshot().len(), n as usize);
+    }
+}
+
+#[cfg(test)]
+mod terminal_code_tests {
+    use super::*;
+
+    #[test]
+    fn none_while_any_node_is_open() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        list.create("b", vec![], false).unwrap();
+        list.complete(a.id, None).unwrap(); // a Done, b still Todo
+        assert_eq!(list.terminal_code(), None);
+        // A `Doing` node is still open too.
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        list.start(a.id).unwrap();
+        assert_eq!(list.terminal_code(), None);
+    }
+
+    #[test]
+    fn zero_when_all_done() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![a.id], false).unwrap();
+        list.complete(a.id, None).unwrap();
+        list.complete(b.id, None).unwrap();
+        assert_eq!(list.terminal_code(), Some(0));
+    }
+
+    #[test]
+    fn one_as_soon_as_a_node_fails() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        list.create("b", vec![], false).unwrap();
+        list.fail(a.id, "boom").unwrap(); // a Failed while b is still open
+        assert_eq!(list.terminal_code(), Some(1));
     }
 }

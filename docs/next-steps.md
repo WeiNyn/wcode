@@ -57,7 +57,7 @@ the boxes as each task completes and keep the status table current.
 | 48 | Member status: server-side liveness on the roster (`SessionInfo.state` + `MemberState`, `peers` shows `[state]`; `ask_within`/`AskError`) | ☑ done — `421ea61`; second-layer APPROVED |
 | 49 | Endpoint resolution: surface the effective provider (`--dump-config`/startup diagnostic) + opt-in local detect (`--detect-endpoint`) | ☑ done — `9debb37`/`0083446` (history reordered so each commit compiles); second-layer APPROVED |
 | 50 | Second-layer review fold: Esc inert at idle, `/new` (alias `/clear`), a worker report on a dead turn | ☑ done — `cbfbee5` (Esc inert at idle; Ctrl-C still quits), `cefc1e0` (`/new` begins a fresh session, incl. a fresh team group), `1a3a0df` (a worker now always reports its turn end to the owner — a provider drop no longer deadlocks the orchestrator); second-layer APPROVED |
-| 51 | Workflow task injection: `--task` (`WCODE_TASK`) + `{{task}}` node titles, headless run (see [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md)) | ◐ P1 landed — config schema + `{{task}}` substitution; P2/P3 pending |
+| 51 | Workflow task injection: `--task` (`WCODE_TASK`) + `{{task}}` node titles, headless run (see [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md)) | ☑ landed — config schema + `{{task}}` titles, `--task`/`WCODE_TASK` CLI + guards, boot threading, headless `run_workflow`/`workflow_seed`, `terminal_code` |
 
 **Open (item 50 residual).** `ReportBack::after_run` is called only on `Agent::run`'s
 `Ok` arm, so a `run_loop` `Err` — a session-append I/O failure (`record_session` →
