@@ -7583,7 +7583,7 @@ dependencies = [
 
 [[package]]
 name = "wcode-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -7609,7 +7609,7 @@ dependencies = [
 
 [[package]]
 name = "wcode-harness"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7627,7 +7627,7 @@ dependencies = [
 
 [[package]]
 name = "wcode-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "serde",
@@ -7639,7 +7639,7 @@ dependencies = [
 
 [[package]]
 name = "wcode-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "crossterm",
