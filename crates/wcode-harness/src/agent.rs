@@ -128,7 +128,10 @@ impl Agent {
         };
     }
     /// Swaps the model mid-conversation (takes effect on the next run) and
-    /// logs a `ModelChange` entry when a session is open.
+    /// logs a `ModelChange` entry when a session is open. The new id's
+    /// `[models.<id>]` profile re-points `endpoint`/`base_url`/`api_key` by
+    /// settling on the launch provider first, so an unmapped id — and a switch
+    /// back to a previous model — falls back to it (the switch is reversible).
     pub fn set_model(&mut self, model: String) -> std::io::Result<()> {
         // Log first: a failed append must not leave the agent and the session
         // disagreeing about which model runs next.
@@ -139,6 +142,9 @@ impl Agent {
             })?;
         }
         self.llm.model = model;
+        // Settle the new id's provider: the launch provider, then this model's
+        // `[models.<id>]` overlay (a no-op when no profiles are configured).
+        self.llm.settle_provider();
         Ok(())
     }
 

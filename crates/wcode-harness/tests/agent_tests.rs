@@ -18,7 +18,9 @@ use wcode_harness::event::{AgentEvent, LlmStreamEvent};
 use wcode_harness::hooks::HooksSet;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::{Session, SessionEntry};
-use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
+use wcode_harness::streamfn::{
+    LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, LlmStream, ModelProfiles, StreamFn,
+};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool, erased};
 
 // ---------------------------------------------------------------------------
@@ -30,6 +32,9 @@ struct StreamCall {
     ctx: Vec<AgentMessage>,
     system: String,
     model: String,
+    endpoint: LlmEndpoint,
+    base_url: Option<String>,
+    api_key: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -59,6 +64,9 @@ fn fake_stream_fn(rec: &Recorder) -> StreamFn {
                 ctx: ctx.to_vec(),
                 system: system.to_string(),
                 model: _opts.model.clone(),
+                endpoint: _opts.endpoint,
+                base_url: _opts.base_url.clone(),
+                api_key: _opts.api_key.clone(),
             });
             let events = rec.script.lock().unwrap().pop_front().unwrap_or_default();
             Box::pin(futures::stream::iter(events)) as LlmStream
@@ -108,13 +116,29 @@ fn agent_config(
     tools: Vec<wcode_harness::tool::Tool>,
     session: Option<Session>,
 ) -> AgentConfig {
-    AgentConfig {
-        system: "sys".into(),
+    agent_config_with_llm(
+        stream_fn,
         tools,
-        llm: LlmOpts {
+        session,
+        LlmOpts {
             model: "m1".into(),
             ..LlmOpts::default()
         },
+    )
+}
+
+/// Like [`agent_config`] but with a caller-supplied `LlmOpts`, so a test can
+/// seed `model_profiles` / a non-default provider.
+fn agent_config_with_llm(
+    stream_fn: StreamFn,
+    tools: Vec<wcode_harness::tool::Tool>,
+    session: Option<Session>,
+    llm: LlmOpts,
+) -> AgentConfig {
+    AgentConfig {
+        system: "sys".into(),
+        tools,
+        llm,
         stream_fn,
         hooks: HooksSet::default(),
         session,
@@ -577,6 +601,235 @@ async fn set_model_swaps_llm_and_logs_session_change() {
     assert_eq!(rec.calls()[1].model, "m2");
     let reopened = Session::open(&path).unwrap();
     assert_eq!(reopened.model().as_deref(), Some("m2"));
+}
+
+/// FIX A (amendment): a model switch SETTLES the provider = the launch provider
+/// overlaid with the model's `[models.<id>]` profile — so switching is
+/// reversible (`m1 → m2 → m1` lands back on `m1`'s provider). This is the test
+/// that would have caught the round-trip hole.
+#[tokio::test]
+async fn set_model_settles_the_provider_and_round_trips() {
+    let rec = Recorder::default();
+    for _ in 0..3 {
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("x".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+    }
+
+    // The launch provider (chat) plus a profile for m2 (responses).
+    let base = LlmProvider {
+        endpoint: LlmEndpoint::Chat,
+        base_url: Some("http://base".into()),
+        api_key: Some("base-key".into()),
+    };
+    let mut profiles = ModelProfiles::new(base.clone());
+    profiles.insert(
+        "m2",
+        LlmProfile {
+            endpoint: Some(LlmEndpoint::Responses),
+            base_url: Some("http://profile".into()),
+            api_key: Some("profile-key".into()),
+        },
+    );
+
+    let llm = LlmOpts {
+        model: "m1".into(),
+        endpoint: base.endpoint,
+        base_url: base.base_url.clone(),
+        api_key: base.api_key.clone(),
+        model_profiles: profiles,
+        ..LlmOpts::default()
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let mut agent = Agent::new(agent_config_with_llm(
+        fake_stream_fn(&rec),
+        vec![],
+        Some(session),
+        llm,
+    ));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("one", tx).await.unwrap();
+    agent.set_model("m2".into()).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("two", tx).await.unwrap();
+    agent.set_model("m1".into()).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("three", tx).await.unwrap();
+
+    let provider = |i: usize| {
+        let c = &rec.calls()[i];
+        (
+            c.model.clone(),
+            c.endpoint,
+            c.base_url.clone(),
+            c.api_key.clone(),
+        )
+    };
+    assert_eq!(
+        [provider(0), provider(1), provider(2)],
+        [
+            (
+                "m1".to_string(),
+                LlmEndpoint::Chat,
+                Some("http://base".to_string()),
+                Some("base-key".to_string()),
+            ),
+            (
+                "m2".to_string(),
+                LlmEndpoint::Responses,
+                Some("http://profile".to_string()),
+                Some("profile-key".to_string()),
+            ),
+            (
+                "m1".to_string(),
+                LlmEndpoint::Chat,
+                Some("http://base".to_string()),
+                Some("base-key".to_string()),
+            ),
+        ],
+        "a switch must settle on the launch provider, not leak the previous model's"
+    );
+}
+
+/// FIX A (amendment): an UNMAPPED id settles to the launch provider (the base),
+/// not to whatever provider the previous model left behind.
+#[tokio::test]
+async fn set_model_on_unmapped_id_settles_to_the_base_provider() {
+    let rec = Recorder::default();
+    for _ in 0..2 {
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("x".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+    }
+
+    let base = LlmProvider {
+        endpoint: LlmEndpoint::Chat,
+        base_url: Some("http://base".into()),
+        api_key: Some("base-key".into()),
+    };
+    // A profile exists, but for "other" — not the id being selected.
+    let mut profiles = ModelProfiles::new(base.clone());
+    profiles.insert(
+        "other",
+        LlmProfile {
+            endpoint: Some(LlmEndpoint::Responses),
+            base_url: Some("http://other".into()),
+            api_key: None,
+        },
+    );
+    let llm = LlmOpts {
+        model: "m1".into(),
+        endpoint: base.endpoint,
+        base_url: base.base_url.clone(),
+        api_key: base.api_key.clone(),
+        model_profiles: profiles,
+        ..LlmOpts::default()
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create(dir.path()).unwrap();
+    let mut agent = Agent::new(agent_config_with_llm(
+        fake_stream_fn(&rec),
+        vec![],
+        Some(session),
+        llm,
+    ));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("one", tx).await.unwrap();
+    agent.set_model("m2".into()).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent.run("two", tx).await.unwrap();
+
+    let c = &rec.calls()[1];
+    assert_eq!(c.model, "m2");
+    assert_eq!(c.endpoint, LlmEndpoint::Chat, "unmapped id === the base");
+    assert_eq!(c.base_url.as_deref(), Some("http://base"));
+    assert_eq!(c.api_key.as_deref(), Some("base-key"));
+}
+
+/// FIX A (amendment): an all-`None` profile leaves the base provider unchanged.
+#[test]
+fn all_none_profile_leaves_the_base_provider() {
+    let base = LlmProvider {
+        endpoint: LlmEndpoint::Chat,
+        base_url: Some("http://base/v1".into()),
+        api_key: Some("base-key".into()),
+    };
+    let mut profiles = ModelProfiles::new(base.clone());
+    profiles.insert("m", LlmProfile::default());
+    let mut llm = LlmOpts {
+        model: "m".into(),
+        endpoint: LlmEndpoint::Chat,
+        base_url: Some("http://base/v1".into()),
+        api_key: Some("base-key".into()),
+        model_profiles: profiles,
+        ..LlmOpts::default()
+    };
+    llm.settle_provider();
+    assert_eq!(llm.endpoint, base.endpoint);
+    assert_eq!(llm.base_url, base.base_url);
+    assert_eq!(llm.api_key, base.api_key);
+}
+
+/// FIX A (amendment): a profile that omits `endpoint` (`None`) inherits the
+/// BASE endpoint rather than resetting it to `Chat`.
+#[test]
+fn profile_with_no_endpoint_keeps_the_base_endpoint() {
+    let mut profiles = ModelProfiles::new(LlmProvider {
+        endpoint: LlmEndpoint::Responses,
+        base_url: Some("http://base/v1".into()),
+        api_key: None,
+    });
+    profiles.insert(
+        "m",
+        LlmProfile {
+            endpoint: None,
+            base_url: Some("http://over/v1".into()),
+            api_key: None,
+        },
+    );
+    let mut llm = LlmOpts {
+        model: "m".into(),
+        endpoint: LlmEndpoint::Chat,
+        model_profiles: profiles,
+        ..LlmOpts::default()
+    };
+    llm.settle_provider();
+    assert_eq!(
+        llm.endpoint,
+        LlmEndpoint::Responses,
+        "a None endpoint inherits the base endpoint, not Chat"
+    );
+    assert_eq!(llm.base_url.as_deref(), Some("http://over/v1"));
+}
+
+/// FIX A (amendment): a `Default` `ModelProfiles` (no base) does NOT manage
+/// providers — `settle_provider` is a no-op, so a bare kernel is never touched.
+#[test]
+fn default_model_profiles_settle_is_a_noop() {
+    let mut llm = LlmOpts {
+        model: "m".into(),
+        endpoint: LlmEndpoint::Responses,
+        base_url: Some("http://keep".into()),
+        api_key: Some("keep".into()),
+        ..LlmOpts::default()
+    };
+    llm.settle_provider();
+    assert_eq!(llm.endpoint, LlmEndpoint::Responses);
+    assert_eq!(llm.base_url.as_deref(), Some("http://keep"));
+    assert_eq!(llm.api_key.as_deref(), Some("keep"));
 }
 
 /// `/effort` backbone: set_effort swaps LlmOpts for the next stream call and

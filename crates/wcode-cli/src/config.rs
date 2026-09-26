@@ -786,6 +786,7 @@ impl Config {
             effort: self.effort.clone(),
             session_id: None,
             retry: self.retry,
+            model_profiles: wcode_harness::streamfn::ModelProfiles::default(),
         }
     }
 }

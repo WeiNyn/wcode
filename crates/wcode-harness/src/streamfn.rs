@@ -54,6 +54,148 @@ pub struct LlmOpts {
     /// Retry policy for the connect phase (transient failures). See
     /// [`RetryPolicy`].
     pub retry: RetryPolicy,
+    /// Per-model provider profiles (`[models.<id>]`) plus the launch provider a
+    /// switch falls back to. `Agent::set_model` (and the CLI) call
+    /// `settle_provider` to re-point endpoint/base_url/api_key for the selected
+    /// model; the `Default` map (no base) never touches the provider.
+    pub model_profiles: ModelProfiles,
+}
+
+/// A per-model provider profile: how to reach the model when it differs from
+/// the launch provider. Every field is optional — `None` means "leave the
+/// launch provider's value", so an empty profile is a no-op and a profile may
+/// override only `base_url` without resetting the endpoint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LlmProfile {
+    /// Endpoint for this model. `None` = keep the launch endpoint — so a
+    /// profile may override only `base_url` without silently toggling
+    /// chat ⇄ responses.
+    pub endpoint: Option<LlmEndpoint>,
+    /// Base URL for this model. `None` = inherit.
+    pub base_url: Option<String>,
+    /// API key for this model. `None` = inherit. No CLI flag surfaces a key;
+    /// env/file still feed `to_llm_opts`, and a profile sits above both.
+    pub api_key: Option<String>,
+}
+
+impl LlmProfile {
+    /// Overlay this profile onto `llm` in place; absent fields are left
+    /// untouched, so an empty profile is a no-op and only fields the profile
+    /// SETS can win.
+    /// Overlay this profile onto `llm` in place; absent fields are left
+    /// untouched, so an empty profile is a no-op and only fields the profile
+    /// SETS can win. `ModelProfiles::settle` is the only entry point.
+    fn apply(&self, llm: &mut LlmOpts) {
+        if let Some(endpoint) = self.endpoint {
+            llm.endpoint = endpoint;
+        }
+        if let Some(base_url) = &self.base_url {
+            llm.base_url = Some(base_url.clone());
+        }
+        if let Some(api_key) = &self.api_key {
+            llm.api_key = Some(api_key.clone());
+        }
+    }
+}
+
+/// The provider a session starts on — what a model switch falls back to when the
+/// model has no `[models.<id>]` entry. Captured at boot AFTER env/flag overrides,
+/// so flags/env/config globals define the DEFAULT provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LlmProvider {
+    pub endpoint: LlmEndpoint,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl LlmProvider {
+    /// The provider `llm` is on right now.
+    pub fn of(llm: &LlmOpts) -> Self {
+        Self {
+            endpoint: llm.endpoint,
+            base_url: llm.base_url.clone(),
+            api_key: llm.api_key.clone(),
+        }
+    }
+
+    /// Reset `llm`'s provider fields to this one.
+    fn apply(&self, llm: &mut LlmOpts) {
+        llm.endpoint = self.endpoint;
+        llm.base_url = self.base_url.clone();
+        llm.api_key = self.api_key.clone();
+    }
+}
+
+/// `id → provider profile` resolved once at boot from `[models.<id>]`, plus the
+/// launch provider (`base`) an unmapped model falls back to. The `Default` (no
+/// base) does NOT manage providers: every operation is a no-op, so a bare
+/// kernel embedder's `LlmOpts::default()` is never touched. A `BTreeMap` (not
+/// `HashMap`) keeps debug/`--dump-*` output deterministic.
+///
+/// PRECEDENCE: `profile > flag(=base) > config/env globals`. `settle` computes
+/// `base ⊕ profile`, and `base` is the post-flag provider, so a field a profile
+/// sets necessarily wins over the flag. Flags/env/config therefore set the
+/// DEFAULT provider; a `[models.<id>]` entry overrides it for that model.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelProfiles {
+    /// The provider an unmapped model falls back to. `None` = not managing.
+    base: Option<LlmProvider>,
+    profiles: std::collections::BTreeMap<String, LlmProfile>,
+}
+
+impl ModelProfiles {
+    /// Start managing: `base` is the provider an unmapped model falls back to.
+    pub fn new(base: LlmProvider) -> Self {
+        Self {
+            base: Some(base),
+            profiles: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The profile for `model`, if one is configured (internal to `settle`).
+    fn resolve(&self, model: &str) -> Option<&LlmProfile> {
+        self.profiles.get(model)
+    }
+
+    /// Settle `llm`'s provider for `llm.model`: reset endpoint/base_url/api_key
+    /// to `base`, then overlay that model's profile. No-op when `base` is `None`.
+    pub fn settle(&self, llm: &mut LlmOpts) {
+        // A non-empty map that is not managing providers is the footgun: those
+        // profiles would be silently dead. (The `Default` is legitimately empty.)
+        debug_assert!(
+            self.base.is_some() || self.profiles.is_empty(),
+            "ModelProfiles has profiles but no base (was `insert` called on the Default?)"
+        );
+        let Some(base) = &self.base else {
+            return;
+        };
+        base.apply(llm);
+        if let Some(profile) = self.resolve(&llm.model) {
+            profile.apply(llm);
+        }
+    }
+
+    /// Register a profile for `model` (boot-time config build).
+    pub fn insert(&mut self, model: impl Into<String>, profile: LlmProfile) {
+        self.profiles.insert(model.into(), profile);
+        // Post-condition: inserting into a `Default` (base `None`) is the footgun
+        // this catches — such a profile could never be applied by `settle`.
+        debug_assert!(
+            self.base.is_some() || self.profiles.is_empty(),
+            "insert on a ModelProfiles with no base: the profile is dead (use `new`)"
+        );
+    }
+}
+
+impl LlmOpts {
+    /// Re-point `endpoint`/`base_url`/`api_key` for `self.model`: the launch
+    /// provider (`model_profiles.base`), then this model's `[models.<id>]`
+    /// overlay. No-op when no profiles are configured. Cloning the map avoids
+    /// borrowing `self.model_profiles` while mutably borrowing `self`.
+    pub fn settle_provider(&mut self) {
+        let profiles = self.model_profiles.clone();
+        profiles.settle(self);
+    }
 }
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmStreamEvent> + Send>>;
@@ -1364,6 +1506,7 @@ mod tests {
             effort: None,
             session_id: None,
             retry: RetryPolicy::default(),
+            model_profiles: ModelProfiles::default(),
         };
         assert_eq!(opts.endpoint, LlmEndpoint::Chat);
         assert_eq!(LlmOpts::default().endpoint, LlmEndpoint::Chat);
@@ -1605,6 +1748,65 @@ mod tests {
     }
 
     #[test]
+    fn settle_determines_the_client_key() {
+        // `settle` fully determines base_url/api_key; the rig client caches on
+        // those (not the endpoint), so an endpoint-only swap reuses it and a
+        // base_url change rebuilds it.
+        let base = LlmProvider {
+            endpoint: LlmEndpoint::Chat,
+            base_url: Some("http://127.0.0.1:9/v1".to_string()),
+            api_key: Some("k".to_string()),
+        };
+        let mut profiles = ModelProfiles::new(base.clone());
+        // Same provider, different endpoint (base_url/api_key inherited).
+        profiles.insert(
+            "ep-swap",
+            LlmProfile {
+                endpoint: Some(LlmEndpoint::Responses),
+                ..LlmProfile::default()
+            },
+        );
+        // A different provider entirely.
+        profiles.insert(
+            "moved",
+            LlmProfile {
+                base_url: Some("http://127.0.0.1:8/v1".to_string()),
+                ..LlmProfile::default()
+            },
+        );
+
+        let settled = |model: &str| {
+            let mut llm = LlmOpts {
+                model: model.to_string(),
+                endpoint: base.endpoint,
+                base_url: base.base_url.clone(),
+                api_key: base.api_key.clone(),
+                model_profiles: profiles.clone(),
+                ..LlmOpts::default()
+            };
+            llm.settle_provider();
+            llm
+        };
+
+        let cache = ClientCache::default();
+        let builds = || cache.builds.load(std::sync::atomic::Ordering::SeqCst);
+
+        let plain = settled("m0");
+        cache.get(&plain).expect("builds");
+        assert_eq!(builds(), 1);
+
+        let ep_swap = settled("ep-swap");
+        assert_eq!(ep_swap.endpoint, LlmEndpoint::Responses);
+        assert_eq!(ep_swap.base_url, base.base_url, "the base_url is inherited");
+        cache.get(&ep_swap).expect("reuses");
+        assert_eq!(builds(), 1, "an endpoint-only swap must reuse the client");
+
+        let moved = settled("moved");
+        cache.get(&moved).expect("rebuilds");
+        assert_eq!(builds(), 2, "a base_url change must rebuild the client");
+    }
+
+    #[test]
     fn responses_request_builds_against_default_client_type() {
         use rig::client::CompletionClient;
         let client = openai::Client::builder()
@@ -1662,6 +1864,7 @@ mod tests {
             effort: None,
             session_id: None,
             retry: RetryPolicy::default(),
+            model_profiles: ModelProfiles::default(),
         };
         let stream_fn = rig_stream_fn();
         let stream = stream_fn(&[], "sys", &[], &opts);

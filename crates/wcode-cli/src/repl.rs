@@ -1722,6 +1722,7 @@ mod tests {
             effort: Some("high".to_string()),
             session_id: None,
             retry: wcode_harness::streamfn::RetryPolicy::default(),
+            model_profiles: wcode_harness::streamfn::ModelProfiles::default(),
         };
         assert_eq!(
             reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None),
