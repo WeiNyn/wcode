@@ -452,19 +452,46 @@ struct ReportBack {
 
 #[async_trait::async_trait]
 impl Hooks for ReportBack {
-    async fn after_run(&self, ctx: &[AgentMessage], _stop: StopReason) {
-        if let Some(text) = last_assistant_text(ctx) {
-            // A `Wake`, so the report runs the orchestrator's turn even if idle.
-            let _ = self.registry.deliver(
-                &self.me,
-                &self.owner,
-                Request::Wake { content: text },
-            );
-        }
+    async fn after_run(&self, ctx: &[AgentMessage], stop: StopReason) {
+        // ALWAYS notify the owner, so a failed / aborted / turn-limited worker
+        // can never leave the orchestrator blocking for a report that never
+        // comes. Forward the final reply verbatim ONLY on a clean `Stop` — on
+        // any other ending (or an empty reply) synthesize a status line, so a
+        // run that pushed no assistant cannot forward a PRIOR run's stale reply.
+        let content = match (stop, last_assistant_text(ctx)) {
+            (StopReason::Stop, Some(text)) => text,
+            _ => report_for_stop(&self.me, stop),
+        };
+        // A `Wake`, so the report runs the orchestrator's turn even if idle.
+        let _ = self
+            .registry
+            .deliver(&self.me, &self.owner, Request::Wake { content });
     }
 }
 
+/// A status line for a run that ended without a forwardable reply — the report
+/// that keeps the orchestrator from waiting forever. `me` names the worker so a
+/// model reading the `MessageReceived` sees who ended.
+///
+/// Only a clean [`StopReason::Stop`] forwards the worker's final text verbatim
+/// (see `ReportBack::after_run`); every other ending synthesizes one of these.
+/// A `Length` stop's partial text *is* fresh (the run pushed non-empty content),
+/// but forwarding it could read as a complete answer, so it is deliberately not
+/// forwarded here.
+fn report_for_stop(me: &SessionId, stop: StopReason) -> String {
+    let why = match stop {
+        StopReason::Stop => "produced no reply",
+        StopReason::Length => "cut off at the length limit",
+        StopReason::ToolUse => "stopped on a tool call with no final reply",
+        StopReason::Aborted => "cancelled",
+        StopReason::Error => "the provider/stream errored before any result",
+        StopReason::MaxTurns => "stopped at the turn limit before a final reply",
+    };
+    format!("⚠ {me}: {why} — no result; the task may be incomplete")
+}
+
 /// The text of the last assistant message, if the run ended with one (a run
+/// that stopped on a bare tool call has none).
 /// that stopped on a bare tool call has none).
 fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
     let message = ctx
@@ -968,6 +995,60 @@ mod tests {
             matches!(&event, AgentEvent::MessageReceived { from, content }
                 if from == &worker.id && content == "the answer is 56"),
             "{event:?}"
+        );
+    }
+
+    /// A run that dies before producing a reply must STILL wake the owner — with
+    /// a synthesized status line, not a silent drop. Regression: a fatal stream
+    /// error pushes no assistant, so the old hook forwarded nothing and the
+    /// orchestrator blocked forever.
+    #[tokio::test]
+    async fn a_worker_reports_a_failed_run_to_its_orchestrator() {
+        use wcode_harness::event::LlmStreamEvent;
+
+        // A single FATAL error: the run ends `StopReason::Error` with no
+        // assistant pushed (`loop_.rs`).
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::iter(vec![LlmStreamEvent::Error {
+                message: "provider dropped".into(),
+                fatal: true,
+            }])) as LlmStream
+        });
+        let (factory, registry) = factory_with(stream_fn);
+        let orch = SessionId::agent("orch");
+        let root = session();
+        registry.register(orch.clone(), root.clone());
+
+        let worker = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        let mut root_rx = root.subscribe();
+
+        // Hand the worker a task — a `Wake` starts its run.
+        registry
+            .deliver(
+                &orch,
+                &worker.id,
+                Request::Wake {
+                    content: "do it".into(),
+                },
+            )
+            .unwrap();
+
+        // The run fails → the worker must STILL wake the orchestrator.
+        let event = tokio::time::timeout(Duration::from_secs(3), root_rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        let AgentEvent::MessageReceived { from, content } = &event else {
+            panic!("expected a MessageReceived, got {event:?}");
+        };
+        assert_eq!(from, &worker.id, "the worker reports its own failure");
+        assert!(
+            content.contains("no result"),
+            "a synthesized failure report, not a silent drop: {content}"
+        );
+        assert!(
+            content.contains("errored"),
+            "the report names the failure: {content}"
         );
     }
 
