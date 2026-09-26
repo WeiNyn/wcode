@@ -2154,6 +2154,7 @@ mod tests {
                     script: None,
                     depends_on: vec!["a".into()],
                     gate: false,
+                    title: None,
                 },
                 WorkflowNode {
                     id: "a".into(),
@@ -2161,6 +2162,7 @@ mod tests {
                     script: None,
                     depends_on: vec![],
                     gate: false,
+                    title: None,
                 },
             ],
         };

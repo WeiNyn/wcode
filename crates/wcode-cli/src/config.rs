@@ -260,6 +260,10 @@ pub struct Workflow {
 pub struct WorkflowNode {
     /// A string label, unique within the workflow (resolved to a numeric task id).
     pub id: String,
+    /// Optional display title. `{{task}}` is substituted with the run's task;
+    /// absent → the node's `id` is used (back-compat).
+    #[serde(default)]
+    pub title: Option<String>,
     /// Exactly one of `member` | `script` (validated at load).
     #[serde(default)]
     pub member: Option<String>,
@@ -271,6 +275,42 @@ pub struct WorkflowNode {
     /// A gate (judgment or physical): its `reject` re-opens its deps (§5).
     #[serde(default)]
     pub gate: bool,
+}
+
+/// The one placeholder v1 recognizes in a node title.
+pub const TASK_PLACEHOLDER: &str = "{{task}}";
+
+/// Replace every `{{task}}` with `task`. Pure; no other brace form is special
+/// (unknown braces pass through verbatim).
+pub fn substitute_task(text: &str, task: &str) -> String {
+    text.replace(TASK_PLACEHOLDER, task)
+}
+
+/// A node's resolved title: its `title`, with `{{task}}` substituted when a task
+/// is present, else its `id`. Pure; `main.rs::instantiate_workflow` calls it.
+// P1 config seam: `instantiate_workflow` wires this in P2; the tests here cover
+// it until then.
+#[allow(dead_code)]
+pub fn node_title(node: &WorkflowNode, task: Option<&str>) -> String {
+    match (node.title.as_deref(), task) {
+        (Some(t), Some(task)) => substitute_task(t, task),
+        (Some(t), None) => t.to_string(),
+        (None, _) => node.id.clone(),
+    }
+}
+
+impl Workflow {
+    /// `true` iff any node title contains the `{{task}}` placeholder.
+    // P1 config seam: the `--task` boot guard wires this once it lands; the
+    // tests here cover it until then.
+    #[allow(dead_code)]
+    pub fn uses_task(&self) -> bool {
+        self.nodes.iter().any(|n| {
+            n.title
+                .as_deref()
+                .is_some_and(|t| t.contains(TASK_PLACEHOLDER))
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
@@ -1556,6 +1596,99 @@ name = "reviewer"
         .unwrap();
         let cfg = merge(EnvLike::default(), file).unwrap();
         assert_eq!(cfg.workflow.unwrap().max_attempts, Some(5));
+    }
+
+    // ---- workflow task injection: {{task}} substitution (P1) ----
+
+    fn wf_node(id: &str, title: Option<&str>) -> WorkflowNode {
+        WorkflowNode {
+            id: id.into(),
+            title: title.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn substitute_task_replaces_every_placeholder() {
+        assert_eq!(substitute_task("x {{task}} y", "T"), "x T y");
+        assert_eq!(
+            substitute_task("{{task}}/{{task}}", "fix 123"),
+            "fix 123/fix 123"
+        );
+        // No placeholder → unchanged.
+        assert_eq!(substitute_task("plain", "T"), "plain");
+        // An empty task replaces the placeholder with nothing.
+        assert_eq!(substitute_task("a{{task}}b", ""), "ab");
+    }
+
+    #[test]
+    fn unknown_braces_are_left_literal() {
+        // Only `{{task}}` is special; `{a}`, `{{b}}`, and a single-braced
+        // `{task}` pass through verbatim (locked decision — not an error).
+        assert_eq!(substitute_task("{a} {{b}} {task}", "T"), "{a} {{b}} {task}");
+        // `{{foo}}`, a single-braced `{task}`, an unclosed `{{task}`, and a lone
+        // `{` are all left verbatim.
+        assert_eq!(
+            substitute_task("{a} {{foo}} {task} {{task} { ", "T"),
+            "{a} {{foo}} {task} {{task} { "
+        );
+    }
+
+    #[test]
+    fn uses_task_detects_a_title_only() {
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![wf_node("a", Some("Explore: {{task}}"))],
+        };
+        assert!(w.uses_task());
+        // A placeholder in a `script` (not a title) does not count.
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                script: Some("echo {{task}}".into()),
+                ..Default::default()
+            }],
+        };
+        assert!(!w.uses_task());
+        // A title carrying *other* brace syntax is not the placeholder.
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![wf_node("a", Some("Explore: {task} {{foo}}"))],
+        };
+        assert!(!w.uses_task());
+        // A plain title with no placeholder is not a use of the task.
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![wf_node("a", Some("Explore the codebase"))],
+        };
+        assert!(!w.uses_task());
+    }
+
+    #[test]
+    fn node_title_resolves_and_falls_back_to_id() {
+        let titled = wf_node("explore", Some("Explore: {{task}}"));
+        assert_eq!(node_title(&titled, Some("fix 123")), "Explore: fix 123");
+        // No task present → the literal title, braces left literal.
+        assert_eq!(node_title(&titled, None), "Explore: {{task}}");
+        // No title → the node's id.
+        assert_eq!(node_title(&wf_node("explore", None), Some("T")), "explore");
+        // An empty task substitutes the placeholder down to nothing.
+        assert_eq!(node_title(&titled, Some("")), "Explore: ");
+    }
+
+    #[test]
+    fn toml_round_trips_a_title_with_the_placeholder() {
+        let file: FileConfig = toml::from_str(
+            "model = \"m\"\n[[team]]\nname = \"w1\"\n[workflow]\n\
+             [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ntitle = \"Explore: {{task}}\"\n",
+        )
+        .unwrap();
+        // A `{{task}}` title passes load validation (unchanged `validate_workflow`).
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(
+            cfg.workflow.unwrap().nodes[0].title.as_deref(),
+            Some("Explore: {{task}}")
+        );
     }
 
     #[test]
