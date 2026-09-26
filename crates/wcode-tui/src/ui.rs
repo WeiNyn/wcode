@@ -2735,7 +2735,11 @@ mod tests {
         assert!(selection.is_some(), "a live selection");
 
         app.handle(AppEvent::Key(Key::Esc));
-        assert_eq!(app.text_sel(), selection, "Esc keeps its cancel/quit meaning");
+        assert_eq!(
+            app.text_sel(),
+            selection,
+            "Esc no longer quits at idle, so it leaves a live selection in place"
+        );
     }
 
     #[test]

@@ -639,7 +639,8 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("/ (browse)", "search the transcript (n / N repeat)"),
     ("F1", "toggle this help"),
     ("Ctrl-Y", "copy the last reply"),
-    ("Esc / Ctrl-C", "cancel a run; quit when idle"),
+    ("Esc", "cancel a run (no-op when idle)"),
+    ("Ctrl-C", "cancel a run; quit when idle"),
 ];
 
 /// The generated `/help` text: the command list, then the keymap from [`KEYS`].
@@ -2066,7 +2067,7 @@ impl App {
             // Global: the keymap overlay and the panic button. Neither leaves
             // browse — closing help returns to the mode you opened it from.
             Key::F(1) | Key::Char('?') => self.open_help(),
-            Key::Ctrl('c') => self.interrupt(),
+            Key::Ctrl('c') => self.interrupt(true),
             // Act on the selected block.
             Key::Enter | Key::Char(' ') => self.toggle_selected(),
             Key::Char('y') => self.copy_selected(),
@@ -2103,7 +2104,7 @@ impl App {
         match key {
             Key::Esc => self.close_search(),
             Key::F(1) | Key::Char('?') => self.open_help(),
-            Key::Ctrl('c') => self.interrupt(),
+            Key::Ctrl('c') => self.interrupt(true),
             Key::Enter => self.accept_search(),
             Key::Char(c) => {
                 if let Some(search) = self.search.as_mut() {
@@ -2680,7 +2681,8 @@ impl App {
                 self.focused_mut().history_index = None;
                 self.insert_char('\n');
             }
-            Key::Esc | Key::Ctrl('c') => self.interrupt(),
+            Key::Esc => self.interrupt(false),
+            Key::Ctrl('c') => self.interrupt(true),
             Key::Ctrl('y') => self.copy_last(),
             // Ctrl-N / Shift-Tab cycle the focused surface (Ctrl-C cancels,
             // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
@@ -2712,10 +2714,11 @@ impl App {
         self.recompute_completion();
     }
 
-    /// Esc / Ctrl-C. First press cancels a run (or quits when idle); a SECOND
-    /// press while a cancel is still in flight abandons the run — the escape
-    /// hatch for a stuck tool that ignores the cancel token.
-    fn interrupt(&mut self) {
+    /// Esc / Ctrl-C. Ctrl-C (and SIGINT) quits when idle; Esc does not — it only
+    /// cancels a run, and is inert when idle (a stray Esc must not kill the
+    /// session). A SECOND press while a cancel is still in flight abandons the
+    /// run — the escape hatch for a stuck tool that ignores the cancel token.
+    fn interrupt(&mut self, quit_when_idle: bool) {
         if self.focused().running {
             if !self.focused().cancelled {
                 self.focused_mut().cancelled = true;
@@ -2723,8 +2726,11 @@ impl App {
             } else {
                 self.abandon_run();
             }
-        } else {
+        } else if quit_when_idle {
             self.should_quit = true;
+        } else {
+            // Esc at idle: nothing to cancel, and a stray Esc must not kill the session.
+            return;
         }
         self.dirty = true;
     }
@@ -2744,7 +2750,7 @@ impl App {
     /// when idle, is a plain quit — so `force_quit` is never set idle.
     pub(crate) fn on_signal(&mut self, sig: Signal) {
         match sig {
-            Signal::Interrupt => self.interrupt(),
+            Signal::Interrupt => self.interrupt(true),
             Signal::Terminate => {
                 if self.focused().running {
                     self.abandon_run();
@@ -4394,10 +4400,11 @@ mod tests {
     }
 
     #[test]
-    fn esc_quits_when_idle() {
+    fn esc_when_idle_is_inert() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::Esc));
-        assert!(app.should_quit());
+        assert!(!app.should_quit(), "Esc at idle must not quit");
+        assert!(app.take_actions().is_empty(), "Esc at idle does nothing");
     }
 
     #[test]
@@ -6545,9 +6552,9 @@ mod abort_escape_tests {
     }
 
     #[test]
-    fn interrupt_when_idle_quits() {
+    fn ctrl_c_when_idle_quits() {
         let mut app = App::new();
-        app.handle(AppEvent::Key(Key::Esc));
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
         assert!(app.should_quit());
         assert!(!app.force_quit(), "an idle quit is not an abandon");
     }
