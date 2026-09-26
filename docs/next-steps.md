@@ -49,7 +49,7 @@ the boxes as each task completes and keep the status table current.
 | 41 | `/btw` gives no feedback while in flight (looks frozen) | ☑ done — `e128d8a`; second-layer APPROVED. Residual (out of scope): a hung-but-open backend leaves a stuck `⠹ btw…` — the fix is an `ask` timeout at the protocol layer (all `Action::Ask` paths) |
 | 42 | Task DAG — Option A (root-as-scheduler) — C3 (see [`task-dag-plan.md`](task-dag-plan.md)) | ☑ done — P0–P5 landed (`8503b79`…`c708468`); terminal review APPROVED; 941 tests; live-verified (resume no longer duplicates) |
 
-| 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN` |
+| 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN`, **before** the Pages site advertises `cargo install wcode-cli` |
 | 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ◐ in progress — manual: create `WeiNyn/homebrew-tap` + `TAP_GITHUB_TOKEN` |
 | 45 | GitHub Pages landing page (`site/`, `pages.yml`) | ◐ in progress — manual: enable Pages (Source = GitHub Actions) |
 
@@ -962,12 +962,12 @@ unclaimed). Do ONE manual first publish per crate, or set a repo secret
 Publishing naming this repo + `.github/workflows/publish.yml`.
 
 **Tasks**
-- [ ] `[workspace.package] readme` + `[workspace.dependencies]` versions; members opt in.
-- [ ] Per-crate `keywords`/`categories` (crates.io slugs).
-- [ ] `.github/workflows/publish.yml` (tag + a manual dry-run input).
-- [ ] `cargo package` clean for all four; one live `--dry-run` on a real tag.
+- [x] `[workspace.package] readme` + `[workspace.dependencies]` versions; members opt in.
+- [x] Per-crate `keywords`/`categories` (crates.io slugs).
+- [x] `.github/workflows/publish.yml` (tag + a manual dry-run input).
+- [x] All six internal edges require `^0.2.0` (the `publish.yml` guard enforces it). Note `cargo package` still fails for the three dependents *by design* — the packaged manifest strips `path`, so verification resolves the dep from crates.io and can only succeed once it is published. `--no-verify` does not skip that resolution; a real tag run is the only exercise.
 
-**Open questions.** See `docs/release-sketches/00-plan.md` Q1/Q4.
+**Open questions.** Settled at the sketch gate. Q1: keep the dual path — a `CARGO_REGISTRY_TOKEN` secret when set, else crates.io Trusted Publishing (OIDC, `id-token: write`; `secrets` is legal in a job-level `env` but not a step `if:`, hence the `HAS_TOKEN` funnel). Q4: no bare `wcode` alias crate — four crates, documented `cargo install wcode-cli`.
 
 ---
 
@@ -983,11 +983,11 @@ once the tap repo exists, `brew install WeiNyn/tap/wcode` also works.
 `TAP_GITHUB_TOKEN` secret (the mirror is skipped when it is absent).
 
 **Tasks**
-- [ ] `scripts/gen-homebrew-formula.sh` (deterministic; fails on a missing checksum).
-- [ ] `Formula/wcode.rb` for v0.2.0 (real sha256s).
-- [ ] `release.yml` `homebrew` job (idempotent commit to `main`, `[skip ci]`).
+- [x] `scripts/gen-homebrew-formula.sh` (deterministic; fails on a missing checksum).
+- [x] `Formula/wcode.rb` for v0.2.0 (real sha256s).
+- [x] `release.yml` `homebrew` job (idempotent commit to `main`, `[skip ci]`).
 
-**Open questions.** See `00-plan.md` Q2/Q3.
+**Open questions.** Settled at the sketch gate. Q2: the in-repo `Formula/` is primary (tap-by-URL); the `WeiNyn/homebrew-tap` mirror is opt-in behind `TAP_GITHUB_TOKEN`, so its absence cannot break a release. Q3: auto-commit to `main` from the tag build, with `[skip ci]` and a `git add` before the `git diff --cached` idempotence test (a bare `git diff` reports nothing for an untracked first-run file). The formula's `homepage` is the repo URL, not the Pages URL — `brew audit --online` probes it, and Pages 404s until enabled.
 
 ---
 
@@ -999,11 +999,11 @@ analytics, no JS) deployed by `pages.yml` through the Pages Actions artifact.
 **Prerequisites (manual).** Settings → Pages → Source = "GitHub Actions".
 
 **Tasks**
-- [ ] `site/index.html` + `site/style.css` (+ `favicon.svg`).
-- [ ] `.github/workflows/pages.yml`.
+- [x] `site/index.html` + `site/style.css` (+ `favicon.svg`).
+- [x] `.github/workflows/pages.yml`.
 - [ ] Enable Pages (Actions source) and confirm the URL.
 
-**Open questions.** See `00-plan.md` Q5.
+**Open questions.** Settled at the sketch gate. Q5: deploy the `site/` Actions artifact, never serve `/docs` — that would publish the internal plan corpus (`next-steps.md`, every `*-plan.md`, the review notes).
 
 ---
 

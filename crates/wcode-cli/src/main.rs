@@ -1397,7 +1397,7 @@ async fn dispatch(
 }
 #[tokio::main]
 async fn main() {
-    // Phase 1: parse argv, resolving `--help`.
+    // Phase 1: parse argv, resolving the `--help`/`--version` early exits.
     let args = parse_cli();
     // Phase 2: load config + apply flag overrides, deriving the `LlmOpts`.
     let (cfg, mut llm) = load_config(&args);

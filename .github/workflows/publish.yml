@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (cargo publish --dry-run; no upload)"
+        description: "Dry run (package the leaf + a release build; no upload)"
         type: boolean
         default: true
 
