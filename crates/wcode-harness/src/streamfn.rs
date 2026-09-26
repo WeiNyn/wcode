@@ -823,7 +823,7 @@ fn build_request(
         temperature: opts.temperature,
         max_tokens: None,
         tool_choice: None,
-        additional_params: effort_params(opts),
+        additional_params: reasoning_params(opts),
         output_schema: None,
         record_telemetry_content: false,
     }
@@ -852,15 +852,36 @@ fn invalid_effort(opts: &LlmOpts) -> Option<String> {
     None
 }
 
-/// Free-style effort passthrough, fanned out per wire shape. None sends
-/// nothing (backends that reject unknown fields keep working). Values are
-/// forwarded verbatim on Chat (`reasoning_effort`); on Responses the payload
-/// is `reasoning: { effort }` after `invalid_effort` has validated the level.
-fn effort_params(opts: &LlmOpts) -> Option<serde_json::Value> {
-    let effort = opts.effort.as_ref()?;
+/// Reasoning/effort passthrough, fanned out per wire shape.
+///
+/// Chat: `opts.effort` alone → `{"reasoning_effort": effort}`; None sends
+/// nothing (unchanged), so backends that reject unknown fields keep working.
+///
+/// Responses: ALWAYS emits `{"reasoning": {"summary": "auto"}}`, merging
+/// `"effort"` in when `opts.effort` is `Some`. The summary is what makes
+/// reasoning DISPLAYABLE: rig auto-injects `include:["reasoning.encrypted_content"]`
+/// whenever `additional_params` carries `reasoning` (rig-core-0.42.0
+/// responses_api/mod.rs:1461 — `if additional_parameters.reasoning.is_some()`),
+/// and `ReasoningSummaryLevel::Auto` serializes to snake_case "auto"
+/// (responses_api/mod.rs:2133). Without a summary the model emits an
+/// encrypted-only reasoning item whose displayable text is empty (see the
+/// `map_item` guard below).
+///
+/// `invalid_effort` still validates the level client-side before this runs.
+fn reasoning_params(opts: &LlmOpts) -> Option<serde_json::Value> {
     match opts.endpoint {
-        LlmEndpoint::Chat => Some(serde_json::json!({ "reasoning_effort": effort })),
-        LlmEndpoint::Responses => Some(serde_json::json!({ "reasoning": { "effort": effort } })),
+        LlmEndpoint::Chat => opts
+            .effort
+            .as_ref()
+            .map(|effort| serde_json::json!({ "reasoning_effort": effort })),
+        LlmEndpoint::Responses => {
+            let mut reasoning = serde_json::Map::new();
+            reasoning.insert("summary".into(), serde_json::json!("auto"));
+            if let Some(effort) = &opts.effort {
+                reasoning.insert("effort".into(), serde_json::json!(effort));
+            }
+            Some(serde_json::json!({ "reasoning": reasoning }))
+        }
     }
 }
 
@@ -933,12 +954,23 @@ fn map_item(item: StreamedAssistantContent) -> Vec<LlmStreamEvent> {
         StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
             vec![LlmStreamEvent::ThinkingDelta(reasoning)]
         }
-        // ponytail: kernel v1 is append-only; this complete-block branch is dead
-        // on chat-completions wires (deltas only). Restating wire => replacement variant.
+        // A complete reasoning block supersedes the streamed deltas: the Responses
+        // wire restates the whole reasoning item after the deltas. Dead on
+        // chat-completions (deltas only) but LIVE on Responses — it must not be
+        // dropped.
         StreamedAssistantContent::Reasoning { reasoning, .. } => {
             // Replacement semantics: the complete block supersedes the
             // accumulated deltas (the loop drops prior thinking on this event).
-            vec![LlmStreamEvent::ThinkingReplace(reasoning_text(&reasoning))]
+            let text = reasoning_text(&reasoning);
+            if text.is_empty() {
+                // Encrypted-only terminal item: no displayable text. Emitting
+                // ThinkingReplace("") would reach `loop_.rs:replace_thinking`,
+                // which retains-out ALL accumulated thinking and pushes an empty
+                // block — erasing the streamed ThinkingDeltas. Yield nothing.
+                vec![]
+            } else {
+                vec![LlmStreamEvent::ThinkingReplace(text)]
+            }
         }
         // Deltas are dropped: rig's streaming fold accumulates every tool-call
         // fragment and emits the complete `ToolCall` on `ToolInputEnd` (both
@@ -991,10 +1023,12 @@ fn reasoning_text(reasoning: &Reasoning) -> String {
         .iter()
         .filter_map(|block| match block {
             ReasoningContent::Text { text, .. } => Some(text.as_str()),
-            _ => None,
+            ReasoningContent::Summary(summary) => Some(summary.as_str()),
+            ReasoningContent::Redacted { data } => Some(data.as_str()),
+            ReasoningContent::Encrypted(_) => None,
         })
         .collect::<Vec<_>>()
-        .join("")
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1061,6 +1095,63 @@ mod tests {
             events,
             vec![LlmStreamEvent::ThinkingReplace("full thought".to_string())]
         );
+    }
+
+    #[test]
+    fn reasoning_text_joins_summary_text_and_redacted_drops_encrypted() {
+        // Exactly rig's `Reasoning::display_text()` contract: Summary | Text |
+        // Redacted join with "\n"; Encrypted is skipped.
+        let reasoning = Reasoning {
+            id: None,
+            content: vec![
+                ReasoningContent::Summary("a".to_string()),
+                ReasoningContent::Text {
+                    text: "b".to_string(),
+                    signature: None,
+                },
+                ReasoningContent::Redacted {
+                    data: "c".to_string(),
+                },
+                ReasoningContent::Encrypted("opaque".to_string()),
+            ],
+        };
+        assert_eq!(reasoning_text(&reasoning), "a\nb\nc");
+    }
+
+    #[test]
+    fn reasoning_text_summary_only_is_the_summary() {
+        let reasoning = Reasoning::summaries(vec!["just a summary".to_string()]);
+        assert_eq!(reasoning_text(&reasoning), "just a summary");
+    }
+
+    #[test]
+    fn reasoning_text_encrypted_only_is_empty() {
+        let reasoning = Reasoning::encrypted("opaque");
+        assert_eq!(reasoning_text(&reasoning), "");
+    }
+
+    #[test]
+    fn summary_reasoning_block_replaces_with_full_text() {
+        let events = map_item(StreamedAssistantContent::Reasoning {
+            reasoning: Reasoning::summaries(vec!["a summary".to_string()]),
+            id: "rs_1".to_string(),
+        });
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ThinkingReplace("a summary".to_string())]
+        );
+    }
+
+    #[test]
+    fn encrypted_only_reasoning_block_emits_no_event() {
+        // An encrypted-only terminal item has no displayable text; emitting
+        // ThinkingReplace("") would erase the streamed ThinkingDeltas downstream
+        // (see the `map_item` guard).
+        let events = map_item(StreamedAssistantContent::Reasoning {
+            reasoning: Reasoning::encrypted("opaque"),
+            id: "rs_1".to_string(),
+        });
+        assert!(events.is_empty(), "got: {events:?}");
     }
 
     #[test]
@@ -1309,7 +1400,24 @@ mod tests {
         let request = build_request(&[], "sys", &[], &opts);
         assert_eq!(
             request.additional_params,
-            Some(json!({ "reasoning": { "effort": "xhigh" } }))
+            Some(json!({ "reasoning": { "effort": "xhigh", "summary": "auto" } }))
+        );
+    }
+
+    #[test]
+    fn responses_always_requests_a_reasoning_summary() {
+        // The case that was invisible before this change: with NO effort the
+        // Responses wire must still ask for a reasoning summary — otherwise the
+        // model emits an encrypted-only item whose displayable text is empty.
+        let opts = LlmOpts {
+            endpoint: LlmEndpoint::Responses,
+            effort: None,
+            ..LlmOpts::default()
+        };
+        let request = build_request(&[], "sys", &[], &opts);
+        assert_eq!(
+            request.additional_params,
+            Some(json!({ "reasoning": { "summary": "auto" } }))
         );
     }
 
