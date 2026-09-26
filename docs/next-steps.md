@@ -1007,6 +1007,37 @@ analytics, no JS) deployed by `pages.yml` through the Pages Actions artifact.
 
 ---
 
+## 46. Per-model endpoints + reasoning on the Responses wire
+
+**New.** Two fixes at the model/endpoint seam and the reasoning display, both
+sketched against the reviewer's binding amendments:
+
+- **FIX B — reasoning on the Responses wire.** The Responses arm of the request
+  builder now ALWAYS sends `{"reasoning": {"summary": "auto"}}` (merging
+  `"effort"` when set); Chat is untouched. The stream mapper renders the
+  restated `Summary`/`Redacted` reasoning blocks (`reasoning_text`, joined with
+  `\n`, `Encrypted` dropped) and yields no event for an empty block, so an
+  encrypted-only item cannot erase the streamed deltas. Guarded in the adapter
+  (`map_item`), NOT in `loop_.rs:replace_thinking`, so no custom `StreamFn`
+  changes contract.
+- **FIX A — per-model provider profiles.** `[models.<id>]` resolves to an
+  `LlmProfile` (endpoint / base_url / api_key) held on `LlmOpts.model_profiles`;
+  `set_model` re-points the endpoint/base_url/api_key for a mapped id via
+  `LlmOpts::apply_profile` (a no-op when unmapped). No new field on
+  `Agent`/`AgentConfig`.
+
+**Tasks**
+- [x] FIX B: `reasoning_params` (was `effort_params`) always requests the summary.
+- [x] FIX B: `reasoning_text` + `map_item` render the summary; empty-block guard.
+- [x] FIX B: `tests/responses_reasoning.rs` (default-run, keyless local SSE).
+- [ ] FIX A: `LlmOpts.model_profiles` + `apply_profile`; config + `set_model` wiring.
+
+**Open questions.** Settled at the sketch gate. FIX B: `summary: "auto"` is
+requested unconditionally (not only when an effort is set) — without it the model
+emits an encrypted-only item whose displayable text is empty.
+
+---
+
 ## Sequencing
 
 1. **5** README (minutes) — clear the deck.
