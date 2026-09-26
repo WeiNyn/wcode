@@ -49,8 +49,8 @@ the boxes as each task completes and keep the status table current.
 | 41 | `/btw` gives no feedback while in flight (looks frozen) | ☑ done — `e128d8a`; second-layer APPROVED. Residual (out of scope): a hung-but-open backend leaves a stuck `⠹ btw…` — the fix is an `ask` timeout at the protocol layer (all `Action::Ask` paths) |
 | 42 | Task DAG — Option A (root-as-scheduler) — C3 (see [`task-dag-plan.md`](task-dag-plan.md)) | ☑ done — P0–P5 landed (`8503b79`…`c708468`); terminal review APPROVED; 941 tests; live-verified (resume no longer duplicates) |
 
-| 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN`, **before** the Pages site advertises `cargo install wcode-cli` |
-| 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ◐ in progress — manual: create `WeiNyn/homebrew-tap` + `TAP_GITHUB_TOKEN` |
+| 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ☑ done — **v0.3.0 published** (harness→protocol→tui→cli, via Trusted Publishing/OIDC); a tag now releases end-to-end |
+| 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ☑ in-repo `Formula/wcode.rb` auto-committed for v0.3.0 (`f23f898`); the `WeiNyn/homebrew-tap` mirror stays opt-in (`TAP_GITHUB_TOKEN`) |
 | 45 | GitHub Pages landing page (root `index.html`; branch deploy) | ☑ done — served from the repo root with `.nojekyll`; the `site/`+Actions approach never took effect (README was rendering at `/`) |
 | 46 | Per-model endpoints + reasoning on the Responses wire (see §46) | ☑ done — `c510c1a`/`1fe2243` |
 | 47 | Abort hardening: TUI escape hatch + repeated Ctrl-C, cancel observed *during* a tool call, live-block render cache; `bash` no longer inherits the TTY's stdin | ☑ done — `e32b02d`/`7a8ef79`/`e500113`/`e22656c`; second-layer APPROVED |
