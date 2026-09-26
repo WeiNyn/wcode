@@ -24,7 +24,7 @@ mod backend;
 mod frame;
 mod registry;
 
-pub use backend::{Backend, Closed};
+pub use backend::{AskError, Backend, Closed};
 pub use frame::{read_frame, write_frame};
 pub use registry::{Registry, RouteError};
 

@@ -30,7 +30,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{MissedTickBehavior, interval};
 use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Request, SessionId};
-use wcode_protocol::Backend;
+use wcode_protocol::{AskError, Backend};
 
 pub use crate::app::{
     Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool,
@@ -501,18 +501,14 @@ fn spawn_ask_within(
     let backend = backend.clone();
     let reply_tx = reply_tx.clone();
     tokio::spawn(async move {
-        // Bound the ask so a hung-but-open backend cannot wedge the spinner. This
-        // is what `Backend::ask_within` does for the local path; `AskError` is
-        // not re-exported by `wcode_protocol` (its `backend` module is private),
-        // so the bound is spelled out here. It stays leak-free on the remote
-        // path: the client's `PendingGuard` drops its waiter when this future is
-        // cancelled, exactly as `Client::ask_within` relies on.
-        let event = match tokio::time::timeout(timeout, backend.ask(request)).await {
-            Ok(Ok(event)) => event,
-            Ok(Err(_)) => AgentEvent::Error {
+        // Bound the ask so a hung-but-open backend cannot wedge the spinner
+        // (item-41 residual); the kernel's `ask_within` is the single seam.
+        let event = match backend.ask_within(request, timeout).await {
+            Ok(event) => event,
+            Err(AskError::Closed) => AgentEvent::Error {
                 message: "session closed".into(),
             },
-            Err(_) => AgentEvent::Error {
+            Err(AskError::Timeout) => AgentEvent::Error {
                 message: format!("request timed out after {timeout:?}"),
             },
         };
