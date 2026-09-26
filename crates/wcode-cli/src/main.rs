@@ -358,10 +358,11 @@ async fn detect_endpoint() -> Option<String> {
 
 /// Visibility (unconditional): one provider line to STDERR (never stdout — it
 /// would corrupt `-p` output and the TUI alt-screen). Warns when `base_url` is
-/// implicit, so the fallback to api.openai.com is no longer silent.
+/// effective base is implicit (profile-aware), so the fallback to
+/// api.openai.com is no longer silent and a pinned model is never misreported.
 fn print_provider_diagnostic(cfg: &Config) {
     eprintln!("provider: {}", cfg.provider_summary());
-    if cfg.base_url_is_implicit() {
+    if cfg.effective_base_url_is_implicit(&cfg.model) {
         eprintln!(
             "warning: base_url is unset — requests go to {OPENAI_DEFAULT_BASE_URL} (set base_url or WCODE_BASE_URL)"
         );
@@ -387,11 +388,20 @@ fn config_dump(cfg: &Config) -> String {
         endpoint_label(cfg.endpoint),
         cfg.provenance.endpoint
     );
+    let effective_base = cfg.effective_base_url(&cfg.model);
+    let base_source = if cfg
+        .models
+        .get(&cfg.model)
+        .is_some_and(|profile| profile.base_url.is_some())
+    {
+        "model profile".to_string()
+    } else {
+        cfg.provenance.base_url.to_string()
+    };
     let _ = writeln!(
         out,
-        "base_url: {} (source: {})",
-        cfg.base_url.as_deref().unwrap_or(OPENAI_DEFAULT_BASE_URL),
-        cfg.provenance.base_url
+        "base_url: {} (source: {base_source})",
+        effective_base.unwrap_or(OPENAI_DEFAULT_BASE_URL)
     );
     let _ = writeln!(out, "model: {} (source: {})", cfg.model, cfg.provenance.model);
     let _ = writeln!(
@@ -719,29 +729,6 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         });
                         Some(rx)
                     };
-                    // ==== SKETCH (review-only, not real code) ====
-                    // Bug 1 — handle the new `Outcome::Abandoned` at BOTH call
-                    // sites of `wcode_tui::run`: the socket client (main.rs:QnhSS)
-                    // and the local TUI (main.rs:y1Rko).
-                    //
-                    // An `Abandoned` exit means the user forced out of an in-flight
-                    // run (a second Ctrl-C, or SIGTERM). The terminal is already
-                    // restored (the guard dropped when `run` returned), so this is a
-                    // normal teardown — NOT an error. Suggested arm (mirror at both
-                    // sites):
-                    //
-                    //   Ok(wcode_tui::Outcome::Abandoned) => {
-                    //       // No relaunch banner: the run did not finish. Kill any
-                    //       // background groups, then exit 0.
-                    //       Background::shutdown_all();
-                    //       std::process::exit(0);
-                    //   }
-                    //
-                    // The `match wcode_tui::run(...)` at both sites is exhaustive,
-                    // so `cargo build` fails until both arms exist — the intended
-                    // nudge. (The local site additionally has the relaunch print
-                    // main.rs:qMohH for the *Quit* arm; Abandoned skips it.)
-                    // ==== /SKETCH ====
                     // Tasks are unavailable across a socket: the server owns the
                     // plan, and the client holds no `TaskList`.
                     let new_tasks = None;
@@ -749,6 +736,12 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         Ok(wcode_tui::Outcome::Quit) => {
                             // A socket client owns no local Background, but the
                             // seam is shared: signal any live group before exit (D8).
+                            Background::shutdown_all();
+                            std::process::exit(0)
+                        }
+                        Ok(wcode_tui::Outcome::Abandoned) => {
+                            // A force-quit abandoned the run: no relaunch banner,
+                            // just kill any live background groups and exit 0.
                             Background::shutdown_all();
                             std::process::exit(0)
                         }
@@ -1486,6 +1479,12 @@ async fn dispatch(
                         Background::shutdown_all();
                         std::process::exit(0)
                     }
+                    Ok(wcode_tui::Outcome::Abandoned) => {
+                        // A force-quit abandoned the run: skip the relaunch
+                        // banner, kill any background groups, exit 0.
+                        Background::shutdown_all();
+                        std::process::exit(0)
+                    }
                     Ok(wcode_tui::Outcome::Reload { no_session }) => {
                         // Rebuild + re-exec into the same session (the REPL's
                         // `/reload`); the terminal is already restored.
@@ -1562,7 +1561,7 @@ async fn main() {
             Some(url) => {
                 eprintln!("detected endpoint: {url}");
                 cfg.base_url = Some(url);
-                cfg.provenance.base_url = Source::Flag;
+                cfg.provenance.base_url = Source::Detect;
             }
             None => eprintln!("detect: no local endpoint answered; using {OPENAI_DEFAULT_BASE_URL}"),
         }
@@ -2011,10 +2010,38 @@ mod tests {
     }
 
     #[test]
-    fn detection_lands_before_to_llm_opts_and_settle_keeps_it() {
-        // Emulate main's ordering: set the detected base on the RAW config, THEN
-        // derive + settle. `settle_provider` overlays only a `[models.<id>]`
-        // profile; a model with none keeps the detected launch base.
+    fn config_dump_names_a_pinned_model_base_not_openai() {
+        // Global base unset + the SELECTED model pins a base: neither the summary
+        // nor the dump may name api.openai.com as the destination.
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m".to_string(),
+                    crate::config::ModelProfile {
+                        base_url: Some("http://pinned/v1".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.base_url.is_none());
+        let dump = config_dump(&cfg);
+        assert!(dump.contains("base_url: http://pinned/v1"), "{dump}");
+        assert!(dump.contains("(source: model profile)"), "{dump}");
+        assert!(!dump.contains(OPENAI_DEFAULT_BASE_URL), "{dump}");
+        // The startup diagnostic is likewise profile-aware: no implicit warning.
+        assert!(!cfg.effective_base_url_is_implicit(&cfg.model));
+    }
+
+    #[tokio::test]
+    async fn detection_lands_before_to_llm_opts_and_settle_keeps_it() {
+        // POSITIVE: main's ordering is raw-config (detected base) THEN derive +
+        // settle. `settle_provider` overlays only a `[models.<id>]` profile, and
+        // a model with none keeps the detected launch base.
         let mut cfg = merge(
             EnvLike::default(),
             FileConfig {
@@ -2028,6 +2055,26 @@ mod tests {
         let mut llm = cfg.to_llm_opts();
         llm.settle_provider();
         assert_eq!(llm.base_url.as_deref(), Some("http://detected:11434/v1"));
+
+        // NEGATIVE CONTROL: set the base AFTER `to_llm_opts` (the wrong order) —
+        // the captured launch provider is `None`, so `settle_provider` REVERTS
+        // the late set. This is what a detection phase moved below the derive
+        // would hit, so the pair fails if the ordering regresses.
+        let late = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        let mut llm = late.to_llm_opts();
+        llm.base_url = Some("http://too-late:11434/v1".into());
+        llm.settle_provider();
+        assert_eq!(
+            llm.base_url, None,
+            "a post-derive base set must be reverted by settle_provider"
+        );
     }
 
     #[test]

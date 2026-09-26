@@ -2685,22 +2685,40 @@ mod retry_tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept one connection");
-            // Drain the request head so the client's write completes.
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
-            std::thread::sleep(delay);
-            let body = "{\"object\":\"list\",\"data\":[{\"id\":\"m1\",\"object\":\"model\"}]}";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Type: application/json\r\n\
-                 Connection: close\r\n\
-                 Content-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
+            // Serve connections until the process ends: the client may open a
+            // fresh connection per request, and a timed-out probe leaves one
+            // half-read behind.
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                // Read the request head (through `\r\n\r\n`) so the client's
+                // write completes before we answer — a single `read` can race
+                // the request into multiple segments.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(delay);
+                let body = "{\"object\":\"list\",\"data\":[{\"id\":\"m1\",\"object\":\"model\"}]}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/json\r\n\
+                     Connection: close\r\n\
+                     Content-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
         });
         format!("http://{addr}/v1")
     }
@@ -2717,6 +2735,11 @@ mod retry_tests {
 
     #[tokio::test]
     async fn a_live_models_endpoint_probes_true() {
+        // rig's HTTP client pays a one-time, process-wide init on its very first
+        // request (seconds on macOS, where system-proxy detection is slow) — it
+        // happens BEFORE any connection, so a refused port triggers it cheaply.
+        // Pre-warm so the assertion below is not racing that one-time cost.
+        let _ = probe_endpoint("http://127.0.0.1:9/v1", std::time::Duration::from_secs(60)).await;
         let base = spawn_models_server(std::time::Duration::ZERO);
         let up = probe_endpoint(&base, std::time::Duration::from_secs(5)).await;
         assert!(up, "a live /models endpoint probes true");

@@ -345,6 +345,8 @@ pub enum Source {
     Toml,
     /// The built-in default (endpoint = chat; base_url = OpenAI).
     Default,
+    /// Opt-in local endpoint detection supplied it.
+    Detect,
 }
 
 impl std::fmt::Display for Source {
@@ -354,6 +356,7 @@ impl std::fmt::Display for Source {
             Source::Env(name) => write!(f, "env {name}"),
             Source::Toml => write!(f, "config"),
             Source::Default => write!(f, "default"),
+            Source::Detect => write!(f, "detected"),
         }
     }
 }
@@ -971,7 +974,7 @@ impl Config {
     /// · key <source>` — one line, no secret. Used by the startup diagnostic,
     /// the REPL banner and `--dump-config`.
     pub fn provider_summary(&self) -> String {
-        let base = match self.base_url.as_deref() {
+        let base = match self.effective_base_url(&self.model) {
             Some(url) => url.to_string(),
             None => format!("{OPENAI_DEFAULT_BASE_URL} (implicit)"),
         };
@@ -983,10 +986,21 @@ impl Config {
         )
     }
 
-    /// True when `base_url` is implicit (requests would hit api.openai.com) —
-    /// the startup path warns on this.
-    pub fn base_url_is_implicit(&self) -> bool {
-        self.base_url.is_none()
+    /// The base URL the SELECTED `model` actually talks to: its
+    /// `[models.<id>].base_url` when set (it wins in `settle_provider`), else the
+    /// global base. `None` means the implicit `api.openai.com` fallback.
+    pub fn effective_base_url(&self, model: &str) -> Option<&str> {
+        self.models
+            .get(model)
+            .and_then(|profile| profile.base_url.as_deref())
+            .or(self.base_url.as_deref())
+    }
+
+    /// True when the SELECTED `model`'s EFFECTIVE base is implicit (it would hit
+    /// api.openai.com). A profile-pinned base is NOT implicit, so the warning
+    /// never misfires when `[models.<id>]` routes the model elsewhere.
+    pub fn effective_base_url_is_implicit(&self, model: &str) -> bool {
+        self.effective_base_url(model).is_none()
     }
     pub fn to_llm_opts(&self) -> LlmOpts {
         let mut opts = LlmOpts {
@@ -2048,7 +2062,7 @@ mod endpoint_detect_tests {
             },
         )
         .unwrap();
-        assert!(cfg.base_url_is_implicit());
+        assert!(cfg.effective_base_url_is_implicit(&cfg.model));
         let summary = cfg.provider_summary();
         assert!(summary.contains(OPENAI_DEFAULT_BASE_URL), "{summary}");
         assert!(summary.contains("(implicit)"), "{summary}");
@@ -2067,12 +2081,42 @@ mod endpoint_detect_tests {
             },
         )
         .unwrap();
-        assert!(!cfg.base_url_is_implicit());
+        assert!(!cfg.effective_base_url_is_implicit(&cfg.model));
         assert!(cfg.provider_summary().contains("base_url http://x/v1"));
     }
 
     #[test]
     fn detect_timeout_is_half_a_second() {
         assert_eq!(DETECT_TIMEOUT, std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_pinned_model_base_is_never_reported_implicit() {
+        // Global base_url unset, but the SELECTED model pins its own base: the
+        // summary must name THAT base, never api.openai.com.
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m".to_string(),
+                    ModelProfile {
+                        base_url: Some("http://pinned/v1".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.base_url.is_none(), "the global base is unset");
+        assert!(!cfg.effective_base_url_is_implicit(&cfg.model));
+        assert_eq!(cfg.effective_base_url(&cfg.model), Some("http://pinned/v1"));
+        let summary = cfg.provider_summary();
+        assert!(summary.contains("base_url http://pinned/v1"), "{summary}");
+        assert!(!summary.contains(OPENAI_DEFAULT_BASE_URL), "{summary}");
+        assert!(!summary.contains("(implicit)"), "{summary}");
+        // A DIFFERENT (unpinned) model still falls back to the implicit default.
+        assert!(cfg.effective_base_url_is_implicit("other"));
     }
 }
