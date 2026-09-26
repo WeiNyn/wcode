@@ -324,6 +324,25 @@ fn session_headers(opts: &LlmOpts) -> HeaderMap {
     headers
 }
 
+/// Probe `base_url` for a live OpenAI-compatible endpoint: `GET
+/// {base_url}/models` under a hard `timeout`. `true` iff the endpoint answered
+/// with a model list (an empty list still counts — the endpoint is up). Any
+/// error (refused, DNS, non-2xx, timeout) is `false`; the caller treats `false`
+/// as "not this endpoint" and moves on.
+///
+/// The keyless-placeholder rule lives in `openai_client`: only a
+/// `http://localhost|127.0.0.1|[::1]` base builds without a key, so a
+/// non-loopback `$OLLAMA_HOST` with no key probes `false`.
+pub async fn probe_endpoint(base_url: &str, timeout: std::time::Duration) -> bool {
+    let opts = LlmOpts {
+        base_url: Some(base_url.to_string()),
+        ..LlmOpts::default()
+    };
+    matches!(
+        tokio::time::timeout(timeout, list_models(&opts)).await,
+        Ok(Ok(_))
+    )
+}
 /// List models via `GET {base_url}/models` using the same client config as
 /// streaming. Ids are sorted for stable display. The endpoint only returns
 /// id/name metadata — no capability flags — so effort support stays
@@ -2654,5 +2673,59 @@ mod retry_tests {
                 .any(|e| matches!(e, LlmStreamEvent::Done { .. })),
             "no Done on a truncated stream: {events:?}"
         );
+    }
+
+    // --- probe_endpoint (opt-in local detection) ---------------------------
+
+    /// Stand up a one-shot HTTP server on `127.0.0.1:0` that answers `GET
+    /// /models` with an OpenAI-shaped list after `delay`. Returns its base URL.
+    fn spawn_models_server(delay: std::time::Duration) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept one connection");
+            // Drain the request head so the client's write completes.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(delay);
+            let body = "{\"object\":\"list\",\"data\":[{\"id\":\"m1\",\"object\":\"model\"}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 Connection: close\r\n\
+                 Content-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[tokio::test]
+    async fn a_refused_port_probes_false() {
+        let up = probe_endpoint(
+            "http://127.0.0.1:9/v1",
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+        assert!(!up, "a refused port is not an endpoint");
+    }
+
+    #[tokio::test]
+    async fn a_live_models_endpoint_probes_true() {
+        let base = spawn_models_server(std::time::Duration::ZERO);
+        let up = probe_endpoint(&base, std::time::Duration::from_secs(5)).await;
+        assert!(up, "a live /models endpoint probes true");
+    }
+
+    #[tokio::test]
+    async fn a_slow_endpoint_times_out_to_false() {
+        let base = spawn_models_server(std::time::Duration::from_millis(500));
+        let up = probe_endpoint(&base, std::time::Duration::from_millis(50)).await;
+        assert!(!up, "a slow endpoint is not treated as up");
     }
 }

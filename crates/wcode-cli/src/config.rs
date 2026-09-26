@@ -333,6 +333,113 @@ pub struct ModelProfile {
     pub api_key: Option<String>,
 }
 
+/// Where a resolved provider field came from (startup diagnostic and
+/// `--dump-config`). Never affects behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// `--base-url` / `--endpoint` / `--model`.
+    Flag,
+    /// The named environment variable supplied it.
+    Env(&'static str),
+    /// `config.toml`.
+    Toml,
+    /// The built-in default (endpoint = chat; base_url = OpenAI).
+    Default,
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Flag => write!(f, "flag"),
+            Source::Env(name) => write!(f, "env {name}"),
+            Source::Toml => write!(f, "config"),
+            Source::Default => write!(f, "default"),
+        }
+    }
+}
+
+/// Provenance for the four resolved provider fields, captured at merge time so
+/// the startup diagnostic and `--dump-config` can name each field's SOURCE
+/// (never the secret value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderProvenance {
+    pub endpoint: Source,
+    /// [`Source::Default`] here means the implicit `api.openai.com` fallback.
+    pub base_url: Source,
+    pub api_key: Source,
+    pub model: Source,
+}
+
+/// The base URL rig falls back to when `base_url` is unset — named once so the
+/// startup warning, the REPL banner and `--dump-config` cannot drift.
+pub const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// Per-candidate probe budget for opt-in endpoint detection (loopback answers
+/// instantly when up; a refused port fails immediately). Worst case = N × this.
+pub const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The wire label for an endpoint (`chat` / `responses`).
+pub fn endpoint_label(endpoint: LlmEndpoint) -> &'static str {
+    match endpoint {
+        LlmEndpoint::Chat => "chat",
+        LlmEndpoint::Responses => "responses",
+    }
+}
+
+/// Normalize an `$OLLAMA_HOST` value to a `…/v1` base URL. Rules: strip a
+/// trailing `/`; keep an existing `/v1`; otherwise add a scheme if missing,
+/// append the default `:11434` port when none is present, then append `/v1`.
+fn normalize_ollama_host(raw: &str) -> Option<String> {
+    let stripped = raw.trim().trim_end_matches('/');
+    if stripped.is_empty() {
+        return None;
+    }
+    if stripped.ends_with("/v1") {
+        return Some(stripped.to_string());
+    }
+    let with_scheme = if stripped.contains("://") {
+        stripped.to_string()
+    } else {
+        format!("http://{stripped}")
+    };
+    let authority = with_scheme
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    // A bracketed IPv6 literal `[::1]` carries an optional `:port` after `]`.
+    let has_port = match authority.strip_prefix('[') {
+        Some(rest) => rest
+            .split_once(']')
+            .is_some_and(|(_, after)| after.starts_with(':')),
+        None => authority.contains(':'),
+    };
+    let with_port = if has_port {
+        with_scheme
+    } else {
+        format!("{with_scheme}:11434")
+    };
+    Some(format!("{with_port}/v1"))
+}
+
+/// The ordered local endpoints to probe for opt-in detection, deduped.
+/// `$OLLAMA_HOST` first (normalized to a `/v1` base), then the well-known
+/// default ports. Pure — no network, no I/O.
+pub fn detect_candidates(env: &EnvLike) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(url) = env.ollama_host.as_deref().and_then(normalize_ollama_host) {
+        out.push(url);
+    }
+    for url in ["http://localhost:11434/v1", "http://localhost:1234/v1"] {
+        if !out.iter().any(|u| u == url) {
+            out.push(url.to_string());
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub base_url: Option<String>,
@@ -360,7 +467,10 @@ pub struct Config {
     /// Resolved `[theme]`: a validated overlay on the default TUI palette.
     pub theme: wcode_tui::ThemeSpec,
     /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
+    /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
     pub workflow: Option<Workflow>,
+    /// Provenance of the resolved provider fields (diagnostic / `--dump-config`).
+    pub provenance: ProviderProvenance,
 }
 
 /// Snapshot of the relevant environment variables, so merging is testable.
@@ -386,6 +496,8 @@ pub struct EnvLike {
     pub wcode_retry_cap_ms: Option<String>,
     pub wcode_retry_ttft_ms: Option<String>,
     pub wcode_retry_idle_ms: Option<String>,
+    /// `OLLAMA_HOST`: fed to `detect_candidates` (opt-in detection only).
+    pub ollama_host: Option<String>,
 }
 
 impl EnvLike {
@@ -411,6 +523,7 @@ impl EnvLike {
             wcode_retry_cap_ms: std::env::var("WCODE_RETRY_CAP_MS").ok(),
             wcode_retry_ttft_ms: std::env::var("WCODE_RETRY_TTFT_MS").ok(),
             wcode_retry_idle_ms: std::env::var("WCODE_RETRY_IDLE_MS").ok(),
+            ollama_host: std::env::var("OLLAMA_HOST").ok(),
         }
     }
 }
@@ -500,6 +613,38 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     };
     let endpoint = parse_endpoint(env.wcode_endpoint.as_deref().or(file.endpoint.as_deref()))
         .map_err(ConfigError::Io)?;
+    // Capture WHERE each provider field came from, before values are moved into
+    // the `Config` below. Env beats toml; a missing source is the built-in default.
+    let provenance = ProviderProvenance {
+        endpoint: if env.wcode_endpoint.is_some() {
+            Source::Env("WCODE_ENDPOINT")
+        } else if file.endpoint.is_some() {
+            Source::Toml
+        } else {
+            Source::Default
+        },
+        base_url: if env.wcode_base_url.is_some() {
+            Source::Env("WCODE_BASE_URL")
+        } else if file.base_url.is_some() {
+            Source::Toml
+        } else {
+            Source::Default
+        },
+        api_key: if env.wcode_api_key.is_some() {
+            Source::Env("WCODE_API_KEY")
+        } else if env.openai_api_key.is_some() {
+            Source::Env("OPENAI_API_KEY")
+        } else if file.api_key.is_some() {
+            Source::Toml
+        } else {
+            Source::Default
+        },
+        model: if file.model.is_some() {
+            Source::Toml
+        } else {
+            Source::Default
+        },
+    };
     let mut hooks = file.hooks;
     if let Some(v) = env.wcode_rtk.as_deref() {
         hooks.rtk = RtkPreference::parse(Some(v)).map_err(ConfigError::Io)?;
@@ -633,6 +778,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         theme,
         workflow: file.workflow,
         models,
+        provenance,
     })
 }
 
@@ -821,6 +967,27 @@ impl Config {
         config_dir().map(|d| d.join("config.toml"))
     }
 
+    /// `chat · base_url <url|https://api.openai.com/v1 (implicit)> · model <id>
+    /// · key <source>` — one line, no secret. Used by the startup diagnostic,
+    /// the REPL banner and `--dump-config`.
+    pub fn provider_summary(&self) -> String {
+        let base = match self.base_url.as_deref() {
+            Some(url) => url.to_string(),
+            None => format!("{OPENAI_DEFAULT_BASE_URL} (implicit)"),
+        };
+        format!(
+            "{} · base_url {base} · model {} · key {}",
+            endpoint_label(self.endpoint),
+            self.model,
+            self.provenance.api_key
+        )
+    }
+
+    /// True when `base_url` is implicit (requests would hit api.openai.com) —
+    /// the startup path warns on this.
+    pub fn base_url_is_implicit(&self) -> bool {
+        self.base_url.is_none()
+    }
     pub fn to_llm_opts(&self) -> LlmOpts {
         let mut opts = LlmOpts {
             model: self.model.clone(),
@@ -1729,5 +1896,183 @@ mod workspace_cfg_tests {
         let on: FileConfig =
             toml::from_str("model = \"m\"\n[workspace]\ndigest_cas = true\n").unwrap();
         assert!(merge(EnvLike::default(), on).unwrap().workspace.digest_cas);
+    }
+}
+
+/// Endpoint visibility + opt-in local detection (next-steps item 49).
+#[cfg(test)]
+mod endpoint_detect_tests {
+    use super::*;
+
+    #[test]
+    fn candidates_are_ordered_and_deduped() {
+        // No OLLAMA_HOST: the two well-known default ports, in order.
+        assert_eq!(
+            detect_candidates(&EnvLike::default()),
+            vec![
+                "http://localhost:11434/v1".to_string(),
+                "http://localhost:1234/v1".to_string(),
+            ]
+        );
+        // An OLLAMA_HOST that normalizes to the well-known default is not repeated.
+        let env = EnvLike {
+            ollama_host: Some("http://localhost:11434".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(
+            detect_candidates(&env),
+            vec![
+                "http://localhost:11434/v1".to_string(),
+                "http://localhost:1234/v1".to_string(),
+            ]
+        );
+        // A distinct OLLAMA_HOST comes first.
+        let env = EnvLike {
+            ollama_host: Some("box:9999".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(
+            detect_candidates(&env),
+            vec![
+                "http://box:9999/v1".to_string(),
+                "http://localhost:11434/v1".to_string(),
+                "http://localhost:1234/v1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ollama_host_is_normalized_to_v1() {
+        // Port-less: a scheme is added, the default port appended, then `/v1`.
+        let env = EnvLike {
+            ollama_host: Some("myhost".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(detect_candidates(&env)[0], "http://myhost:11434/v1");
+        // A trailing slash is stripped; an existing `/v1` is kept.
+        let env = EnvLike {
+            ollama_host: Some("http://host:7777/v1/".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(detect_candidates(&env)[0], "http://host:7777/v1");
+        // A scheme + host:port with no path gets `/v1` only.
+        let env = EnvLike {
+            ollama_host: Some("http://host:8080".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(detect_candidates(&env)[0], "http://host:8080/v1");
+        // A bare host:port keeps its port.
+        let env = EnvLike {
+            ollama_host: Some("192.168.1.5:11434".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(detect_candidates(&env)[0], "http://192.168.1.5:11434/v1");
+        // An empty/whitespace value is ignored (just the defaults).
+        let env = EnvLike {
+            ollama_host: Some("   ".into()),
+            ..EnvLike::default()
+        };
+        assert_eq!(
+            detect_candidates(&env),
+            vec![
+                "http://localhost:11434/v1".to_string(),
+                "http://localhost:1234/v1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn provenance_records_env_over_toml() {
+        let cfg = merge(
+            EnvLike {
+                wcode_base_url: Some("http://env".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                base_url: Some("http://toml".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.provenance.base_url, Source::Env("WCODE_BASE_URL"));
+    }
+
+    #[test]
+    fn provenance_records_toml_and_default() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                api_key: Some("k".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.provenance.model, Source::Toml);
+        assert_eq!(cfg.provenance.api_key, Source::Toml);
+        assert_eq!(cfg.provenance.endpoint, Source::Default);
+        assert_eq!(cfg.provenance.base_url, Source::Default);
+    }
+
+    #[test]
+    fn provenance_flags_win_over_env() {
+        // The flag bump is applied by `main` after merge; here we assert the
+        // summary renders the bump (env -> flag) and the value it carries.
+        let mut cfg = merge(
+            EnvLike {
+                wcode_base_url: Some("http://env".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.provenance.base_url, Source::Env("WCODE_BASE_URL"));
+        cfg.base_url = Some("http://flag".into());
+        cfg.provenance.base_url = Source::Flag;
+        let summary = cfg.provider_summary();
+        assert!(summary.contains("base_url http://flag"), "{summary}");
+        assert_eq!(cfg.provenance.base_url, Source::Flag);
+    }
+
+    #[test]
+    fn summary_names_the_implicit_openai_default() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.base_url_is_implicit());
+        let summary = cfg.provider_summary();
+        assert!(summary.contains(OPENAI_DEFAULT_BASE_URL), "{summary}");
+        assert!(summary.contains("(implicit)"), "{summary}");
+        assert!(summary.contains("model m"), "{summary}");
+        assert!(summary.starts_with("chat · "), "{summary}");
+        assert!(summary.ends_with("key default"), "{summary}");
+        // A set base_url renders verbatim and is no longer implicit.
+        let cfg = merge(
+            EnvLike {
+                wcode_base_url: Some("http://x/v1".into()),
+                ..EnvLike::default()
+            },
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.base_url_is_implicit());
+        assert!(cfg.provider_summary().contains("base_url http://x/v1"));
+    }
+
+    #[test]
+    fn detect_timeout_is_half_a_second() {
+        assert_eq!(DETECT_TIMEOUT, std::time::Duration::from_millis(500));
     }
 }

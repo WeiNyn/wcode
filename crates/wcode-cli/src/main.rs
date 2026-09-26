@@ -27,7 +27,8 @@ mod verify_gate;
 mod workspace;
 
 use crate::config::{
-    Config, ConfigError, EnvLike, FileConfig, TeamMember, config_dir, merge, parse_endpoint,
+    Config, ConfigError, DETECT_TIMEOUT, EnvLike, FileConfig, OPENAI_DEFAULT_BASE_URL, Source,
+    TeamMember, config_dir, detect_candidates, endpoint_label, merge, parse_endpoint,
 };
 use crate::instructions::{InstructionSet, Mode, load as load_instructions};
 use crate::repl::{
@@ -57,6 +58,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
   --dump-system-prompt  print the composed system prompt and exit
+  --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
+  --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
   serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
@@ -124,6 +127,13 @@ struct Args {
     list_models: bool,
     no_instructions: bool,
     dump_system_prompt: bool,
+    /// `--detect-endpoint`: before deriving `LlmOpts`, probe common local
+    /// endpoints (OLLAMA_HOST, :11434, :1234) when `base_url` is unset. Strictly
+    /// opt-in (`WCODE_DETECT_ENDPOINT=1` also enables it) — no network by default.
+    detect_endpoint: bool,
+    /// `--dump-config`: print the resolved effective provider (sources, never a
+    /// secret) and the resolved config, then exit. Touches no session.
+    dump_config: bool,
     no_skills: bool,
     /// `--agents`: register the `spawn` tool so this session can spawn worker
     /// agents (A2A, §10.1).
@@ -216,6 +226,8 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--list-models" => a.list_models = true,
             "--no-instructions" => a.no_instructions = true,
             "--dump-system-prompt" => a.dump_system_prompt = true,
+            "--detect-endpoint" => a.detect_endpoint = true,
+            "--dump-config" => a.dump_config = true,
             "--no-skills" => a.no_skills = true,
             "--sequential" => a.sequential = true,
             "--agents" => a.agents = true,
@@ -311,7 +323,111 @@ fn parse_cli() -> Args {
 /// LAST, after every override, so the launch provider it captures already
 /// includes the flags; `settle_provider()` then overlays the selected model's
 /// `[models.<id>]` profile (precedence: profile > flag > env/config globals).
-fn load_config(args: &Args) -> (Config, LlmOpts) {
+/// Where opt-in detection is enabled: the flag, or `WCODE_DETECT_ENDPOINT`.
+fn detect_opt_in(args: &Args) -> bool {
+    args.detect_endpoint || env_detect_flag(std::env::var("WCODE_DETECT_ENDPOINT").ok().as_deref())
+}
+
+/// The env half of [`detect_opt_in`], split out so it is testable without
+/// touching the process environment.
+fn env_detect_flag(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true") | Some("yes"))
+}
+
+/// Skip probing when the SELECTED model already pins a `[models.<id>].base_url`
+/// — a profile base beats anything detection could set. The launch base still
+/// matters for a later switch to an *unmapped* model, so detection's result is
+/// only a DEFAULT; a mapped model is never overridden by it.
+fn selected_model_pins_base(cfg: &Config) -> bool {
+    cfg.models
+        .get(&cfg.model)
+        .is_some_and(|profile| profile.base_url.is_some())
+}
+
+/// Try the CLI candidate list (`config::detect_candidates`) in order via the
+/// harness probe (`streamfn::probe_endpoint`); the first answer wins. `None`
+/// when none answers. Bounded by `config::DETECT_TIMEOUT` per site.
+async fn detect_endpoint() -> Option<String> {
+    for candidate in detect_candidates(&EnvLike::from_env()) {
+        if wcode_harness::streamfn::probe_endpoint(&candidate, DETECT_TIMEOUT).await {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Visibility (unconditional): one provider line to STDERR (never stdout — it
+/// would corrupt `-p` output and the TUI alt-screen). Warns when `base_url` is
+/// implicit, so the fallback to api.openai.com is no longer silent.
+fn print_provider_diagnostic(cfg: &Config) {
+    eprintln!("provider: {}", cfg.provider_summary());
+    if cfg.base_url_is_implicit() {
+        eprintln!(
+            "warning: base_url is unset — requests go to {OPENAI_DEFAULT_BASE_URL} (set base_url or WCODE_BASE_URL)"
+        );
+    }
+}
+
+/// `--dump-config` (phase 3a): print the resolved config and exit — provider /
+/// model / key SOURCES only, NEVER a key value. Touches no session.
+fn print_config(cfg: &Config) -> ! {
+    print!("{}", config_dump(cfg));
+    std::process::exit(0)
+}
+
+/// The `--dump-config` body. An explicit field list (never `{cfg:?}`), and every
+/// key slot rendered as `(set)`/`(none)` — the secret never reaches the output.
+fn config_dump(cfg: &Config) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "provider: {}", cfg.provider_summary());
+    let _ = writeln!(
+        out,
+        "endpoint: {} (source: {})",
+        endpoint_label(cfg.endpoint),
+        cfg.provenance.endpoint
+    );
+    let _ = writeln!(
+        out,
+        "base_url: {} (source: {})",
+        cfg.base_url.as_deref().unwrap_or(OPENAI_DEFAULT_BASE_URL),
+        cfg.provenance.base_url
+    );
+    let _ = writeln!(out, "model: {} (source: {})", cfg.model, cfg.provenance.model);
+    let _ = writeln!(
+        out,
+        "api_key: {} (source: {})",
+        redact_key(cfg.api_key.as_deref()),
+        cfg.provenance.api_key
+    );
+    let _ = writeln!(out, "effort: {}", cfg.effort.as_deref().unwrap_or("(none)"));
+    for (id, profile) in &cfg.models {
+        let endpoint = profile.endpoint.map(endpoint_label).unwrap_or("(inherit)");
+        let _ = writeln!(
+            out,
+            "models.{id}: endpoint {endpoint} · base_url {} · api_key {}",
+            profile.base_url.as_deref().unwrap_or("(inherit)"),
+            redact_key(profile.api_key.as_deref())
+        );
+    }
+    for member in &cfg.team {
+        let _ = writeln!(
+            out,
+            "team.{}: model {} · base_url {} · api_key {}",
+            member.name,
+            member.model.as_deref().unwrap_or("(inherit)"),
+            member.base_url.as_deref().unwrap_or("(inherit)"),
+            redact_key(member.api_key.as_deref())
+        );
+    }
+    out
+}
+
+/// `(set)`/`(none)` for a key slot — never the value itself.
+fn redact_key(key: Option<&str>) -> &'static str {
+    if key.is_some() { "(set)" } else { "(none)" }
+}
+fn load_config_raw(args: &Args) -> Config {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
     // `--config` / `WCODE_CONFIG`: an overlay file deep-merged over the global
@@ -360,6 +476,7 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
     };
     if let Some(m) = args.model.clone() {
         cfg.model = m;
+        cfg.provenance.model = Source::Flag;
     }
     // Sweep spill files a previous run left behind (> 24h old) — best-effort,
     // once per process, before agent construction on every path.
@@ -369,10 +486,14 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
     // already includes them. The loud `--endpoint` failure is preserved.
     if let Some(u) = args.base_url.clone() {
         cfg.base_url = Some(u);
+        cfg.provenance.base_url = Source::Flag;
     }
     if let Some(e) = args.endpoint.as_deref() {
         match parse_endpoint(Some(e)) {
-            Ok(endpoint) => cfg.endpoint = endpoint,
+            Ok(endpoint) => {
+                cfg.endpoint = endpoint;
+                cfg.provenance.endpoint = Source::Flag;
+            }
             Err(msg) => {
                 eprintln!("error: {msg}");
                 std::process::exit(2);
@@ -397,11 +518,7 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
             }
         };
     }
-    let mut llm = cfg.to_llm_opts();
-    // Settle the selected model onto the launch base (its profile overlays the
-    // fields it sets); a no-op when no `[models]` are configured.
-    llm.settle_provider();
-    (cfg, llm)
+    cfg
 }
 
 /// P3a: `--dump-system-prompt` — print the composed prompt (instructions
@@ -602,6 +719,29 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         });
                         Some(rx)
                     };
+                    // ==== SKETCH (review-only, not real code) ====
+                    // Bug 1 — handle the new `Outcome::Abandoned` at BOTH call
+                    // sites of `wcode_tui::run`: the socket client (main.rs:QnhSS)
+                    // and the local TUI (main.rs:y1Rko).
+                    //
+                    // An `Abandoned` exit means the user forced out of an in-flight
+                    // run (a second Ctrl-C, or SIGTERM). The terminal is already
+                    // restored (the guard dropped when `run` returned), so this is a
+                    // normal teardown — NOT an error. Suggested arm (mirror at both
+                    // sites):
+                    //
+                    //   Ok(wcode_tui::Outcome::Abandoned) => {
+                    //       // No relaunch banner: the run did not finish. Kill any
+                    //       // background groups, then exit 0.
+                    //       Background::shutdown_all();
+                    //       std::process::exit(0);
+                    //   }
+                    //
+                    // The `match wcode_tui::run(...)` at both sites is exhaustive,
+                    // so `cargo build` fails until both arms exist — the intended
+                    // nudge. (The local site additionally has the relaunch print
+                    // main.rs:qMohH for the *Quit* arm; Abandoned skips it.)
+                    // ==== /SKETCH ====
                     // Tasks are unavailable across a socket: the server owns the
                     // plan, and the client holds no `TaskList`.
                     let new_tasks = None;
@@ -1412,8 +1552,27 @@ async fn dispatch(
 async fn main() {
     // Phase 1: parse argv, resolving the `--help`/`--version` early exits.
     let args = parse_cli();
-    // Phase 2: load config + apply flag overrides, deriving the `LlmOpts`.
-    let (cfg, mut llm) = load_config(&args);
+    // Phase 2: load config raw (flags applied, `to_llm_opts` not yet run), then
+    // optional endpoint detection, the provider diagnostic, and finally the
+    // launch provider. Detection runs HERE so `to_llm_opts` captures the
+    // detected base (a post-`settle_provider` set would be reverted).
+    let mut cfg = load_config_raw(&args);
+    if detect_opt_in(&args) && cfg.base_url.is_none() && !selected_model_pins_base(&cfg) {
+        match detect_endpoint().await {
+            Some(url) => {
+                eprintln!("detected endpoint: {url}");
+                cfg.base_url = Some(url);
+                cfg.provenance.base_url = Source::Flag;
+            }
+            None => eprintln!("detect: no local endpoint answered; using {OPENAI_DEFAULT_BASE_URL}"),
+        }
+    }
+    print_provider_diagnostic(&cfg);
+    if args.dump_config {
+        print_config(&cfg);
+    }
+    let mut llm = cfg.to_llm_opts();
+    llm.settle_provider();
     // Phase 3a/3b: the request-reply one-shots that never touch a session.
     if args.dump_system_prompt {
         print_system_prompt(&args, &cfg);
@@ -1781,6 +1940,123 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_detect_and_dump_config_flags() {
+        let Parsed::Args(a) =
+            parse_args(&args(&["--detect-endpoint", "--dump-config"])).unwrap()
+        else {
+            panic!("not args");
+        };
+        assert!(a.detect_endpoint);
+        assert!(a.dump_config);
+        assert!(!Args::default().detect_endpoint);
+        assert!(!Args::default().dump_config);
+    }
+
+    #[test]
+    fn env_detect_flag_matches_truthy_values() {
+        for yes in ["1", "true", "yes"] {
+            assert!(env_detect_flag(Some(yes)), "{yes} enables detection");
+        }
+        for no in ["0", "false", "no", "on", "", "TRUE"] {
+            assert!(!env_detect_flag(Some(no)), "{no} does not enable detection");
+        }
+        assert!(!env_detect_flag(None));
+    }
+
+    #[test]
+    fn detect_opt_in_reads_the_flag() {
+        assert!(detect_opt_in(&Args {
+            detect_endpoint: true,
+            ..Args::default()
+        }));
+    }
+
+    #[test]
+    fn config_dump_never_prints_a_key_value() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                base_url: Some("https://api.example.com/v1".into()),
+                api_key: Some("sk-secret-12345".into()),
+                team: vec![TeamMember {
+                    name: "w".into(),
+                    api_key: Some("sk-team-999".into()),
+                    ..TeamMember::default()
+                }],
+                models: std::collections::BTreeMap::from([(
+                    "m2".to_string(),
+                    crate::config::ModelProfile {
+                        base_url: Some("http://m2/v1".into()),
+                        api_key: Some("sk-model-777".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        let dump = config_dump(&cfg);
+        // The visible fields are there...
+        assert!(dump.contains("https://api.example.com/v1"), "{dump}");
+        assert!(dump.contains("model m"), "{dump}");
+        assert!(dump.contains("(set)"), "{dump}");
+        // ...and no key VALUE ever reaches the output.
+        for secret in ["sk-secret-12345", "sk-team-999", "sk-model-777"] {
+            assert!(!dump.contains(secret), "secret leaked: {secret}\n{dump}");
+        }
+    }
+
+    #[test]
+    fn detection_lands_before_to_llm_opts_and_settle_keeps_it() {
+        // Emulate main's ordering: set the detected base on the RAW config, THEN
+        // derive + settle. `settle_provider` overlays only a `[models.<id>]`
+        // profile; a model with none keeps the detected launch base.
+        let mut cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.base_url.is_none());
+        cfg.base_url = Some("http://detected:11434/v1".into());
+        let mut llm = cfg.to_llm_opts();
+        llm.settle_provider();
+        assert_eq!(llm.base_url.as_deref(), Some("http://detected:11434/v1"));
+    }
+
+    #[test]
+    fn selected_model_pins_base_skips_probing() {
+        let pinned = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m".to_string(),
+                    crate::config::ModelProfile {
+                        base_url: Some("http://pinned/v1".into()),
+                        ..Default::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(selected_model_pins_base(&pinned));
+        let plain = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!selected_model_pins_base(&plain));
     }
 
     #[test]

@@ -747,6 +747,17 @@ pub async fn run(
         });
     }
 
+    // Endpoint visibility: the resolved wire + base. A silent OpenAI default is
+    // named once via `OPENAI_DEFAULT_BASE_URL` so the banner and the warning
+    // cannot drift.
+    println!(
+        "endpoint: {} · base_url: {}",
+        crate::config::endpoint_label(llm.endpoint),
+        llm.base_url.as_deref().map(str::to_string).unwrap_or_else(|| format!(
+            "{} (implicit)",
+            crate::config::OPENAI_DEFAULT_BASE_URL
+        )),
+    );
     println!("wcode {} — model: {}", env!("CARGO_PKG_VERSION"), llm.model);
     match &llm.effort {
         Some(e) => println!("effort: {e}"),
