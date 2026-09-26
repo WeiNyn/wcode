@@ -1,34 +1,54 @@
-# .wcode/workflow.toml — wcode's own development workflow (a [workflow] plan
-# template). Use it as the single --config overlay:
+# .wcode/workflow.toml — wcode's feature pipeline (a [workflow] plan template).
+# Self-contained: use it as the single --config overlay, driving it with a task:
 #
-#   wcode --agents --config .wcode/workflow.toml
-#   WCODE_CONFIG=.wcode/workflow.toml wcode --agents
+#   wcode --agents --config .wcode/workflow.toml --task "add dark mode"
+#   WCODE_CONFIG=.wcode/workflow.toml wcode --agents --task "add dark mode"
 #
-# Only one overlay is honored (the --config flag beats WCODE_CONFIG), so this
-# file is self-contained: it carries the dev team (the same members as
-# .wcode/team.toml), the orchestrator guidance, and the [tools] the explorer
-# needs — plus the [workflow] graph seeded at boot.
+# This file requires a task: its node titles carry {{task}}, and the boot guard
+# exits 2 if none is given. For the INTERACTIVE dev loop (no injected task; watch
+# the team work in the TUI) use .wcode/team.toml instead.
 #
-# The graph is the loop from the orchestrator guidance, made structural. The two
-# review steps are `gate = true`, so a reviewer's reject re-opens the node it
-# gated **and its whole downstream cone**, and the scheduler re-dispatches it
-# with the reason — up to `max_attempts`, then the node fails and the scheduler
-# escalates. Nodes are instantiated in topological order (author order is free).
+# The run is HEADLESS: the root is seeded with the task, the scheduler drives the
+# DAG, and wcode exits 0 once every node is Done (a node that reaches Failed, a
+# --timeout, or a root-turn error exits 1).
+#
+# The graph turns a feature request into a PR whose pipeline (CI) passes:
+#
+#   explore → sketch → review-sketch → implement → verify → publish → ci
+#
+# Only one overlay is honored (--config beats WCODE_CONFIG), so this file is
+# self-contained: the dev team (the same members as .wcode/team.toml), the
+# orchestrator guidance, and the [tools] the explorer needs — plus the [workflow]
+# graph. {{task}} is substituted into node titles only (scripts are never
+# templated), so the request reaches each member as part of its dispatched node.
+#
+# The three review nodes are `gate = true`. A reject re-opens the node(s) the gate
+# depends on AND their entire downstream cone, and the scheduler re-dispatches
+# them with the reason — up to `max_attempts`, then the node fails and the
+# scheduler escalates. `ci` depends on both `implement` and `publish`, so a red
+# pipeline re-opens `implement` (fix) and `publish` (re-push) and the cone re-runs.
+#
+# The publish/ci legs need an authenticated `gh` on PATH and a git remote to push
+# to; without them the pipeline stalls at `publish` (or `ci`).
 
 [orchestrator]
 guidelines = """
-You orchestrate wcode's development team. The [workflow] below seeds the plan
-at boot as a DAG; a scheduler dispatches each ready node to its member and
-hydrates it with its dependencies' artifacts. You do NOT spawn workers or wake
-them by hand — you drive the plan:
+You orchestrate wcode's development team for the feature request in the task. The
+[workflow] below seeds the plan at boot as a DAG; a scheduler dispatches each
+ready node to its member and hydrates it with its dependencies' artifacts. You do
+NOT spawn workers or wake them by hand — you drive the plan:
 
 - A node completes when its worker reports. Call `task complete <id>` — pass the
   worker's report as `artifact` so it hydrates the dependents.
-- The two review nodes are `gate = true`. Relaying a reviewer's verdict:
-  `task complete <id>` to approve, or `task reject <id> "<reason>"` to send the
-  work back. A rejection re-opens the node it gated (and its downstream cone) and
-  the scheduler re-dispatches it with the reason injected. At the rework cap the
-  node fails and the scheduler escalates to you; `task reset <id>` retries it.
+- The three review nodes are `gate = true` (review-sketch, verify, ci). Relay a
+  verdict: `task complete <id>` to approve, or `task reject <id> "<reason>"` to
+  send the work back. A rejection re-opens the node(s) the gate depends on — and
+  their whole downstream cone — and the scheduler re-dispatches with the reason
+  injected. At the rework cap the node fails and the scheduler escalates to you;
+  `task reset <id>` retries it.
+- `ci` is the pipeline gate. When its report says the PR checks PASS, `task
+  complete ci`; when they FAIL, `task reject ci "<the failing check(s)>"` so the
+  implementation cone is re-opened and the loop runs again.
 - `task list` shows the plan: `#id [state] title (owner) ← #deps ×attempts`.
 - You may add nodes (`task create`/`depends`) for a task the seeded graph does
   not cover — e.g. skip the sketch/review-first-layer steps for a tiny change.
@@ -59,36 +79,55 @@ role  = "Implement exactly the dispatched task and its acceptance criteria; star
 name  = "reviewer"
 role  = "Two gates. FIRST-LAYER (on a sketch — new files OR in-place `// SKETCH` comment blocks): verify the interface matches the locked design, settle the design's open questions, approve/block before implementation. SECOND-LAYER (on a diff): read the change against the task, confirm the tests assert behavior (not merely pass), confirm the first layer's amendments landed, confirm ZERO `SKETCH` markers remain in the diff (the developer must replace every block with real code), run build/test/clippy. Verdict: APPROVE, or blocking issues with file:anchor evidence. No rubber-stamping."
 
-# The development loop, as a DAG. `explore → sketch → review-sketch →
-# implement → verify`; the two review nodes are gates that send work back.
+# The feature pipeline, as a DAG. `{{task}}` is the request, substituted into each
+# member title. The three review nodes are gates that send work back; `ci`
+# re-opens the whole implementation cone when the PR pipeline is red.
 [workflow]
 max_attempts = 3
 
 [[workflow.node]]
-id = "explore"                      # map the ground truth first
+id = "explore"                      # map the ground truth for the request
 member = "explorer"
+title = "Explore the repo for the feature request: {{task}}"
 
 [[workflow.node]]
 id = "sketch"                       # sketch the interface before coding
 member = "sketcher"
 depends_on = ["explore"]
+title = "Sketch the interface for: {{task}}"
 
 [[workflow.node]]
 id = "review-sketch"                # first-layer gate: approve the sketch, or
 member = "reviewer"                 # reject it and re-open `sketch`
 depends_on = ["sketch"]
 gate = true
+title = "First-layer review of the sketch"
 
 [[workflow.node]]
-id = "implement"                    # the developer fills the approved sketch
-member = "developer"
+id = "implement"                    # the developer fills the approved sketch on
+member = "developer"                # a feature branch it creates or reuses
 depends_on = ["review-sketch"]
+title = "Create/reuse a feature branch, then implement the feature: {{task}}"
 
 [[workflow.node]]
-id = "verify"                       # second-layer gate: approve the diff, or
-member = "reviewer"                 # reject it and re-open `implement`
+id = "verify"                       # second-layer gate: approve the diff (after
+member = "reviewer"                 # running cargo test/clippy), or re-open it
 depends_on = ["implement"]
 gate = true
+title = "Second-layer review: read the diff, run cargo test --workspace and cargo clippy --workspace --all-targets, then approve or reject"
+
+[[workflow.node]]
+id = "publish"                      # commit + push the branch + open/update the PR
+member = "developer"
+depends_on = ["verify"]
+title = "Commit all changes, push the branch, and open or update the PR (gh pr create --fill, or gh pr view when it already exists)"
+
+[[workflow.node]]
+id = "ci"                           # the pipeline gate: wait for the PR checks
+member = "developer"                # (gh pr checks --watch) and report the result
+depends_on = ["implement", "publish"]
+gate = true
+title = "Wait for the PR checks to finish (gh pr checks --watch, run via bash with a long timeout_secs such as 900), then report PASS or FAIL"
 
 # grep/find are off by default; the explorer's allow-list names them.
 [tools]

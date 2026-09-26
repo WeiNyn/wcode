@@ -1,8 +1,9 @@
 # wcode — workflow task injection
 
-Status: **locked (pre-implementation).** This is the design the first-layer
-sketch hangs on; it builds on [`task-dag-plan.md`](task-dag-plan.md) (the DAG +
-scheduler it parameterizes) and the tracker [`next-steps.md`](next-steps.md).
+Status: **landed** — tracker row 51 (`2cd53c7` schema · `4a4a891` plan ·
+`452c196` CLI/guards/headless · `c26c590` wall-clock `--timeout` · `686cd04`
+README/tracker). §1–§11 are the frozen design + first-layer amendments; §12 adds
+the *feature pipeline* framing and the **inert-without-a-task** contract.
 
 > The design here is **user-approved and frozen**; the sketch must not redesign
 > it. Where a bullet says "non-change" it is deliberate.
@@ -439,3 +440,97 @@ The `explore` node resolves to title `Explore: fix bug 123` (task id `1`), so
 The `implement` node (#2) dispatches after #1 completes, hydrated with #1's
 `artifact`, and its title is `Implement: fix bug 123`. Exit `0` when both are
 `Done`; exit `1` if any node fails or the 600 s cap elapses.
+
+## 12. The feature pipeline & the inert-without-a-task contract
+
+This section **frames** the landed feature (row 51) as a *task-injected feature
+pipeline* and states the inertness contract it must keep. It adds no behavior;
+the design body (§1–§11) is unchanged.
+
+### 12.1 The feature pipeline (config)
+
+A *task-injected feature pipeline* is an ordinary `[workflow]` template whose node
+titles carry `{{task}}`, driven by `--task`/`WCODE_TASK`. **No new config keys.**
+The canonical pipeline is **`.wcode/workflow.toml`** — 7 nodes
+(`explore → sketch → review-sketch → implement → verify → publish → ci`), with
+`{{task}}` in the member titles and **no script nodes** (a `Script` gate is capped at
+`SCRIPT_TIMEOUT = 300 s`; a timeout rejects → spurious rework, so `verify` is a member
+that runs the suite and `ci` is a member gate that watches the PR checks). A trimmed
+shape (the real file adds the `publish`/`ci` tail):
+
+```toml
+[workflow]
+max_attempts = 3
+
+[[workflow.node]]
+id = "explore"
+member = "explorer"
+title = "Explore: {{task}}"
+
+[[workflow.node]]
+id = "sketch"
+member = "sketcher"
+depends_on = ["explore"]
+title = "Sketch: {{task}}"
+
+[[workflow.node]]
+id = "review-sketch"
+member = "reviewer"
+depends_on = ["sketch"]
+gate = true
+
+[[workflow.node]]
+id = "implement"
+member = "developer"
+depends_on = ["review-sketch"]
+title = "Implement: {{task}}"
+
+[[workflow.node]]
+id = "verify"
+member = "reviewer"
+depends_on = ["implement"]
+gate = true
+```
+
+Run:
+
+```sh
+wcode --agents --config .wcode/workflow.toml --task "add a --task flag" --timeout 600
+```
+
+**The split (a real footgun).** `Workflow::uses_task()` (`config.rs:eXPXw`) is
+true iff any node title contains `{{task}}`, and the boot guard `check_task_args`
+(`main.rs:tIhUo`) then `exit(2)`s when no task is given. So the two overlays have
+distinct jobs: **`.wcode/team.toml` is the interactive dev loop** (no `[workflow]`,
+run with no `--task`), and **`.wcode/workflow.toml` is the task-driven feature
+pipeline** — its node titles carry `{{task}}` and it is launched with `--task`, so
+a missing task is a loud `exit(2)` rather than a silent mis-title. (This supersedes
+the earlier "workflow.toml must stay `{{task}}`-free" rule: the DAG dev loop is now
+reached by passing a task, which turns it into the pipeline below.)
+
+### 12.2 Inert without a task (the contract)
+
+> **With no `--task` and no `WCODE_TASK`, the feature is inert**: behavior is
+> byte-for-byte the pre-feature binary. The pipeline activates only when a task is
+> supplied.
+
+The shipped code enforces it at every seam:
+
+| seam | no task → | anchor |
+|---|---|---|
+| boot guards | every `--task`/`--timeout` case is skipped (`args.task.is_none()`); the `uses_task()` case only fires for a `{{task}}` overlay | `main.rs:tIhUo` |
+| `dispatch` | the `else if args.task.is_some()` arm is not taken → the pre-feature `else` (TUI/REPL) runs | `main.rs:1392` |
+| `choose_tui` | the added `|| args.task.is_some()` is false → the pre-feature decision | `main.rs:1743` |
+| title resolution | `node_title(node, None)` = `title` verbatim, else `id` → the pre-feature `create(node.id, …)` | `config.rs:x56tz` |
+| scheduler / tasks | `dispatch_content` (`scheduler.rs:fd3M2`) and `terminal_code` (`tasks.rs:909`) are never reached on the interactive path | — |
+
+**The one intentional non-inert case:** a *template* that opts in to `{{task}}`
+run without a task `exit(2)`s (`main.rs:IAMr0`). That is the guard's job — a
+pipeline must not silently mis-title its nodes — and it only affects configs that
+chose to use `{{task}}`.
+
+### 12.3 What to pin (tests)
+
+Regression tests to ADD (a future code change — none exist yet): the inert
+`check_task_args` case (`Ok`), the `node_title` fallback, and `uses_task() == false`
+for a placeholder-less workflow. Anchors: `main.rs:tIhUo` and `config.rs:eXPXw`.
