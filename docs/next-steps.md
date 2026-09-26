@@ -52,6 +52,10 @@ the boxes as each task completes and keep the status table current.
 | 43 | crates.io publish: 4 crates in dependency order (see [`.github/workflows/publish.yml`](../.github/workflows/publish.yml)) | ◐ in progress — manual: crates.io first-publish / `CARGO_REGISTRY_TOKEN`, **before** the Pages site advertises `cargo install wcode-cli` |
 | 44 | Homebrew formula: in-repo tap-by-URL + opt-in tap mirror | ◐ in progress — manual: create `WeiNyn/homebrew-tap` + `TAP_GITHUB_TOKEN` |
 | 45 | GitHub Pages landing page (`site/`, `pages.yml`) | ◐ in progress — manual: enable Pages (Source = GitHub Actions) |
+| 46 | Per-model endpoints + reasoning on the Responses wire (see §46) | ☑ done — `c510c1a`/`1fe2243` |
+| 47 | Abort hardening: TUI escape hatch + repeated Ctrl-C, cancel observed *during* a tool call, live-block render cache; `bash` no longer inherits the TTY's stdin | ☑ done — `e32b02d`/`7a8ef79`/`e500113`/`e22656c`; second-layer APPROVED |
+| 48 | Member status: server-side liveness on the roster (`SessionInfo.state` + `MemberState`, `peers` shows `[state]`; `ask_within`/`AskError`) | ☑ done — `421ea61`; second-layer APPROVED |
+| 49 | Endpoint resolution: surface the effective provider (`--dump-config`/startup diagnostic) + opt-in local detect (`--detect-endpoint`) | ☑ done — `9debb37`/`0083446` (history reordered so each commit compiles); second-layer APPROVED |
 
 Legend: ☑ done · ◐ in progress · ☐ todo.
 
