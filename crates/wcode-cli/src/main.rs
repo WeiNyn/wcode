@@ -70,6 +70,11 @@ config: ~/.config/wcode/config.toml
   endpoint = \"...\"   (optional, chat|responses, default chat)
   effort = \"...\"     (optional, free-style reasoning effort, omitted = not sent)
 
+  [models.\"<id>\"]     (optional; overrides the DEFAULT provider for that model id)
+  endpoint = \"...\"    (optional; chat|responses — overrides the default endpoint)
+  base_url = \"...\"    (optional; overrides the default base_url)
+  api_key = \"...\"    (optional; overrides the default api_key)
+
   [hooks]
   rtk = \"...\"        (optional, auto|true|false; route bash output through the rtk proxy to cut tokens)
 
@@ -91,8 +96,8 @@ config: ~/.config/wcode/config.toml
   max = 3            (optional; retry transient connect errors this many times; 0 disables)
   base_ms = 500      (optional; base backoff for the first retry)
   cap_ms = 8000      (optional; cap on a single backoff wait)
-env: WCODE_BASE_URL and WCODE_API_KEY override the toml; OPENAI_API_KEY is a key fallback
-env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort
+env: WCODE_BASE_URL and WCODE_API_KEY override the toml globals (the DEFAULT provider); a [models.<id>] entry overrides it for that id; OPENAI_API_KEY is a key fallback
+env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort; a [models.<id>] entry overrides the default for that id
 env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
@@ -303,7 +308,9 @@ fn parse_cli() -> Args {
 /// P2: resolve the `--config`/`WCODE_CONFIG` overlay, load the config (rescuing
 /// a model-less file when `--model`/`--dump-system-prompt` is set), apply the
 /// flag overrides in order, then derive the `LlmOpts`. `to_llm_opts()` runs
-/// LAST, after every override.
+/// LAST, after every override, so the launch provider it captures already
+/// includes the flags; `settle_provider()` then overlays the selected model's
+/// `[models.<id>]` profile (precedence: profile > flag > env/config globals).
 fn load_config(args: &Args) -> (Config, LlmOpts) {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
@@ -357,6 +364,9 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
     // Sweep spill files a previous run left behind (> 24h old) — best-effort,
     // once per process, before agent construction on every path.
     let _ = crate::tools::bash::sweep_stale_spills(&crate::tools::bash::spill_root());
+    // Flags land on the config FIRST, so the launch provider `to_llm_opts`
+    // captures (what an unmapped model — or a later switch — falls back to)
+    // already includes them. The loud `--endpoint` failure is preserved.
     if let Some(u) = args.base_url.clone() {
         cfg.base_url = Some(u);
     }
@@ -387,7 +397,10 @@ fn load_config(args: &Args) -> (Config, LlmOpts) {
             }
         };
     }
-    let llm = cfg.to_llm_opts();
+    let mut llm = cfg.to_llm_opts();
+    // Settle the selected model onto the launch base (its profile overlays the
+    // fields it sets); a no-op when no `[models]` are configured.
+    llm.settle_provider();
     (cfg, llm)
 }
 

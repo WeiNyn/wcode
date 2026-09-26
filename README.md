@@ -40,6 +40,15 @@ api_key = "sk-..."     # optional
 endpoint = "chat"      # optional; chat|responses, default chat
 effort = "high"        # optional; free-style reasoning effort, omitted = not sent
 
+# Per-model providers: when a model id is selected (mid-session `/model`, a
+# worker's `spec.model`, or `--model`), this entry's endpoint/base_url/api_key
+# re-point the provider. Absent fields inherit the globals above. Quote ids that
+# contain dots or slashes.
+[models."gpt-5.1"]
+endpoint = "responses"
+base_url = "https://api.openai.com/v1"
+api_key = "sk-..."
+
 [hooks]
 rtk = "auto"           # optional; auto|true|false — route bash output through the
                        # rtk proxy (https://github.com/rtk-ai/rtk) to cut tokens
@@ -181,6 +190,12 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `WCODE_RETRY_IDLE_MS` (the
 `[retry]` table).
 
+Provider precedence is `[models.<id>]` > flags/env/config: the toml globals,
+`WCODE_*`, and `--base-url`/`--endpoint` together set the **default provider**;
+a `[models.<id>]` entry for the selected model overrides the
+`endpoint`/`base_url`/`api_key` fields it names (an unmapped model — or a field
+the entry omits — uses the default).
+
 `--config <path>` (or `WCODE_CONFIG`; flag beats env, relative to the cwd)
 points at an **overlay** file deep-merged over the global config: tables merge
 per key, so an overlay's `[tools] grep = true` adds that flag without clobbering
@@ -190,7 +205,10 @@ config. A missing or unparseable overlay is an error.
 `--model` / `--base-url` / `--endpoint` / `--effort` / `--config` override a
 successfully loaded config (and `--model` rescues a missing `model`), but
 cannot rescue an unreadable or invalid config.toml — that still exits with
-an error. `--effort -` (or `none`/`off`) clears back to send-nothing.
+an error. `--effort -` (or `none`/`off`) clears back to send-nothing. After
+`--model` selects an id; its `[models.<id>]` entry overrides the default
+provider for the fields it names, and switching back to an unmapped model
+restores the default provider (a model switch is reversible).
 `--no-instructions` skips the instruction files; `--dump-system-prompt` prints
 the composed system prompt (instructions included) and exits — no model needed.
 With `--agents` and a `[team]`, wcode spawns each member at startup and the root's

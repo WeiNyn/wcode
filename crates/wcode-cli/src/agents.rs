@@ -389,6 +389,11 @@ impl SessionFactory {
         let mut llm = t.llm.clone();
         if let Some(model) = &spec.model {
             llm.model = model.clone();
+            // The model's own `[models.<id>]` profile settles the provider; an
+            // explicit `spec.base_url`/`spec.api_key` below still wins, and is
+            // intentionally NOT fed back into the launch base (a worker is a
+            // one-shot construction, so the spec override must not leak).
+            llm.settle_provider();
         }
         if let Some(base_url) = &spec.base_url {
             llm.base_url = Some(base_url.clone());
@@ -682,7 +687,7 @@ mod tests {
 
     use wcode_harness::event::AgentEvent;
     use wcode_harness::protocol::Request;
-    use wcode_harness::streamfn::LlmStream;
+    use wcode_harness::streamfn::{LlmEndpoint, LlmProfile, LlmProvider, LlmStream, ModelProfiles};
 
     /// A factory whose workers run on a never-streaming model — enough to prove
     /// spawn/registration, since the messages we deliver are `Notify` (no turn).
@@ -1151,7 +1156,103 @@ mod tests {
         assert_eq!(cfg.llm.model, base.llm.model);
         assert_eq!(cfg.llm.session_id, base.llm.session_id);
         assert_eq!(base.llm.base_url.as_deref(), Some("http://shared/v1"));
+        assert_eq!(base.llm.base_url.as_deref(), Some("http://shared/v1"));
         assert_eq!(base.llm.api_key.as_deref(), Some("shared-key"));
+    }
+
+    #[test]
+    fn a_mapped_model_adapts_the_worker_provider() {
+        // FIX A: the worker's `spec.model` selects a `[models.<id>]` profile,
+        // which re-points the endpoint too (not just base_url/api_key).
+        let mut profiles = ModelProfiles::new(LlmProvider {
+            endpoint: LlmEndpoint::Chat,
+            base_url: Some("http://shared/v1".into()),
+            api_key: Some("shared-key".into()),
+        });
+        profiles.insert(
+            "x",
+            LlmProfile {
+                endpoint: Some(LlmEndpoint::Responses),
+                base_url: Some("http://profile/v1".into()),
+                api_key: Some("profile-key".into()),
+            },
+        );
+        let llm = LlmOpts {
+            base_url: Some("http://shared/v1".into()),
+            api_key: Some("shared-key".into()),
+            model_profiles: profiles,
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let cfg = factory.worker_config(
+            &SessionId::agent("w1"),
+            &SessionId::agent("orch"),
+            &WorkerSpec {
+                model: Some("x".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.llm.model, "x");
+        assert_eq!(
+            cfg.llm.endpoint,
+            LlmEndpoint::Responses,
+            "the mapped id's endpoint follows the worker's model"
+        );
+        assert_eq!(cfg.llm.base_url.as_deref(), Some("http://profile/v1"));
+        assert_eq!(cfg.llm.api_key.as_deref(), Some("profile-key"));
+    }
+
+    #[test]
+    fn an_explicit_spec_provider_wins_over_the_model_profile() {
+        // FIX A precedence: a profile loses to an explicit `spec.base_url` /
+        // `spec.api_key`, but its endpoint still applies (the spec has none).
+        let mut profiles = ModelProfiles::new(LlmProvider {
+            endpoint: LlmEndpoint::Chat,
+            base_url: Some("http://shared/v1".into()),
+            api_key: Some("shared-key".into()),
+        });
+        profiles.insert(
+            "x",
+            LlmProfile {
+                endpoint: Some(LlmEndpoint::Responses),
+                base_url: Some("http://profile/v1".into()),
+                api_key: Some("profile-key".into()),
+            },
+        );
+        let llm = LlmOpts {
+            base_url: Some("http://shared/v1".into()),
+            api_key: Some("shared-key".into()),
+            model_profiles: profiles,
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let cfg = factory.worker_config(
+            &SessionId::agent("w1"),
+            &SessionId::agent("orch"),
+            &WorkerSpec {
+                model: Some("x".into()),
+                base_url: Some("http://worker/v1".into()),
+                api_key: Some("worker-key".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            cfg.llm.base_url.as_deref(),
+            Some("http://worker/v1"),
+            "an explicit spec.base_url beats the model profile"
+        );
+        assert_eq!(cfg.llm.api_key.as_deref(), Some("worker-key"));
+        assert_eq!(
+            cfg.llm.endpoint,
+            LlmEndpoint::Responses,
+            "the profile's endpoint still applies (the spec sets none)"
+        );
     }
 
     #[test]

@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wcode_harness::compaction::CompactionPolicy;
-use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, RetryPolicy};
+use wcode_harness::streamfn::{
+    LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, ModelProfiles, RetryPolicy,
+};
 
 use crate::instructions::Mode;
 use crate::rtk::RtkPreference;
@@ -290,6 +292,11 @@ pub struct FileConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub retry: RetryConfig,
+    /// `[models.<id>]`: a per-model provider profile (endpoint/base_url/api_key).
+    /// A model without an entry inherits the global provider. No env var for
+    /// this table — it is data, not a scalar knob.
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, ModelProfile>,
     /// `[workspace]`: whole-file digest CAS (default ON).
     #[serde(default)]
     pub workspace: WorkspaceConfig,
@@ -315,6 +322,17 @@ pub struct FileConfig {
     pub workflow: Option<Workflow>,
 }
 
+/// One `[models.<id>]` entry: the provider for a single model id. Every field
+/// is optional — absent = inherit the process default — so an entry may
+/// override only `base_url` without resetting the endpoint. Resolved into
+/// [`wcode_harness::streamfn::ModelProfiles`] by [`merge`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelProfile {
+    pub endpoint: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub base_url: Option<String>,
@@ -328,6 +346,9 @@ pub struct Config {
     pub instructions: InstructionsConfig,
     pub skills: SkillsConfig,
     pub retry: RetryPolicy,
+    /// Resolved `[models.<id>]`: id → provider profile (empty = inherit the
+    /// launch provider). [`Config::to_llm_opts`] turns it into `ModelProfiles`.
+    pub models: std::collections::BTreeMap<String, LlmProfile>,
     /// Resolved `[workspace]`: whole-file digest CAS (default ON).
     pub workspace: WorkspaceConfig,
     /// Resolved `[peers]` (name → socket path or address): the phonebook (§13.15).
@@ -570,6 +591,29 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     // `[theme]` is presentation-only, but a bad role or color is a hard error —
     // the "unparseable overlay fails loudly" style (§4 T3b).
     let theme = wcode_tui::parse_theme_table(&file.theme).map_err(ConfigError::Theme)?;
+    // `[models.<id>]`: resolve each entry into an `LlmProfile`, validating the
+    // endpoint value loudly (the same rule as the global `endpoint`). An absent
+    // or empty endpoint means INHERIT (`None`), not `parse_endpoint(None)`'s
+    // `Chat`, so a profile may override only `base_url`.
+    let mut models: std::collections::BTreeMap<String, LlmProfile> =
+        std::collections::BTreeMap::new();
+    for (id, entry) in &file.models {
+        let endpoint = match entry.endpoint.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => Some(
+                parse_endpoint(Some(value))
+                    .map_err(|e| ConfigError::Io(format!("[models.{id:?}] {e}")))?,
+            ),
+        };
+        models.insert(
+            id.clone(),
+            LlmProfile {
+                endpoint,
+                base_url: entry.base_url.clone(),
+                api_key: entry.api_key.clone(),
+            },
+        );
+    }
     Ok(Config {
         base_url: env.wcode_base_url.or(file.base_url),
         api_key: env.wcode_api_key.or(env.openai_api_key).or(file.api_key),
@@ -588,6 +632,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         orchestrator: file.orchestrator,
         theme,
         workflow: file.workflow,
+        models,
     })
 }
 
@@ -777,7 +822,7 @@ impl Config {
     }
 
     pub fn to_llm_opts(&self) -> LlmOpts {
-        LlmOpts {
+        let mut opts = LlmOpts {
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
@@ -786,8 +831,16 @@ impl Config {
             effort: self.effort.clone(),
             session_id: None,
             retry: self.retry,
-            model_profiles: wcode_harness::streamfn::ModelProfiles::default(),
+            model_profiles: ModelProfiles::default(),
+        };
+        // The launch provider (after the env/config globals) is what an unmapped
+        // model falls back to; each `[models.<id>]` overlays the fields it sets.
+        let mut profiles = ModelProfiles::new(LlmProvider::of(&opts));
+        for (id, profile) in &self.models {
+            profiles.insert(id.clone(), profile.clone());
         }
+        opts.model_profiles = profiles;
+        opts
     }
 }
 
@@ -856,7 +909,121 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
+        assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
         assert_eq!(cfg.to_llm_opts().endpoint, LlmEndpoint::Responses);
+    }
+
+    #[test]
+    fn a_models_profile_parses_and_resolves() {
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m2".to_string(),
+                    ModelProfile {
+                        endpoint: Some("responses".into()),
+                        base_url: Some("http://m2/v1".into()),
+                        api_key: Some("k2".into()),
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        let profile = cfg.models.get("m2").expect("m2 is mapped");
+        assert_eq!(profile.endpoint, Some(LlmEndpoint::Responses));
+        assert_eq!(profile.base_url.as_deref(), Some("http://m2/v1"));
+        assert_eq!(profile.api_key.as_deref(), Some("k2"));
+        // A model with no entry is unmapped: it inherits the global provider.
+        assert!(!cfg.models.contains_key("m1"));
+    }
+
+    #[test]
+    fn a_models_profile_bad_endpoint_fails_at_load_naming_the_value() {
+        let err = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m2".to_string(),
+                    ModelProfile {
+                        endpoint: Some("grpc".into()),
+                        ..ModelProfile::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("grpc"), "names the bad value: {msg}");
+        assert!(msg.contains("m2"), "names the model: {msg}");
+    }
+
+    #[test]
+    fn a_models_profile_absent_or_empty_endpoint_inherits() {
+        // AMENDMENT ruling #3: an absent/empty endpoint means INHERIT (None),
+        // not `parse_endpoint(None)`'s `Chat`.
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                models: std::collections::BTreeMap::from([
+                    (
+                        "empty".to_string(),
+                        ModelProfile {
+                            endpoint: Some("".into()),
+                            base_url: Some("http://empty/v1".into()),
+                            ..ModelProfile::default()
+                        },
+                    ),
+                    (
+                        "absent".to_string(),
+                        ModelProfile {
+                            base_url: Some("http://absent/v1".into()),
+                            ..ModelProfile::default()
+                        },
+                    ),
+                ]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.models.get("empty").unwrap().endpoint.is_none());
+        assert!(cfg.models.get("absent").unwrap().endpoint.is_none());
+    }
+
+    #[test]
+    fn a_models_profile_beats_the_flag_folded_into_the_config() {
+        // Precedence `profile > flag(=base) > globals`: a `--base-url`-style
+        // flag folded into the config, a `[models.<id>]` entry for that model,
+        // then `to_llm_opts()` → `settle_provider()` ⇒ the PROFILE wins.
+        let mut cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                models: std::collections::BTreeMap::from([(
+                    "m".to_string(),
+                    ModelProfile {
+                        endpoint: Some("responses".into()),
+                        base_url: Some("http://profile".into()),
+                        ..ModelProfile::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        // The `--base-url` flag lands on the config first...
+        cfg.base_url = Some("http://flag".into());
+        let mut llm = cfg.to_llm_opts();
+        // ...so the launch base (post-flag) is the flag-derived provider...
+        assert_eq!(llm.base_url.as_deref(), Some("http://flag"));
+        // ...and the `[models.<id>]` entry overlays it for that model.
+        llm.settle_provider();
+        assert_eq!(llm.base_url.as_deref(), Some("http://profile"));
+        assert_eq!(llm.endpoint, LlmEndpoint::Responses);
     }
 
     #[test]
