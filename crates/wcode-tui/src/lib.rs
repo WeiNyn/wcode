@@ -32,7 +32,9 @@ use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::Backend;
 
-pub use crate::app::{Action, App, AppEvent, Block, Key, SessionItem, Status, TaskItem, Tool};
+pub use crate::app::{
+    Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool,
+};
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 
 /// The catalog's theme names (for `--list-themes`, the `/theme` picker).
@@ -156,6 +158,9 @@ pub struct Options {
 pub enum Outcome {
     /// The user quit; nothing more to do.
     Quit,
+    /// A force-quit abandoned an in-flight run (a second Ctrl-C, or SIGTERM) —
+    /// the caller exits 0 without the relaunch banner.
+    Abandoned,
     /// The user picked a session to resume (`/resume`); the caller should
     /// re-exec with `--resume <path>`.
     Resume(PathBuf),
@@ -163,6 +168,22 @@ pub enum Outcome {
     /// the caller runs the build then re-execs (the REPL's `/reload`).
     /// `no_session` = start fresh with `--no-session`.
     Reload { no_session: bool },
+}
+
+/// Map the app's exit state to the TUI [`Outcome`]. A force-quit (a second
+/// Ctrl-C, or SIGTERM, on a running surface) wins over a pending `/reload` or
+/// `/resume`: the run was abandoned, so there is nothing to hand off.
+fn outcome_of(app: &App) -> Outcome {
+    if app.force_quit() {
+        return Outcome::Abandoned;
+    }
+    match app.pending_reload() {
+        Some(no_session) => Outcome::Reload { no_session },
+        None => match app.pending_resume() {
+            Some(path) => Outcome::Resume(path.to_path_buf()),
+            None => Outcome::Quit,
+        },
+    }
 }
 
 /// Run the TUI over `surfaces` (index 0 is the root) until the user quits.
@@ -230,14 +251,9 @@ pub async fn run(
 
     // The TUI only *decides* to hand off; the composition root owns the re-exec
     // — a plain `--resume` for `Resume`, or the REPL's rebuild+re-exec for
-    // `Reload`.
-    Ok(match app.pending_reload() {
-        Some(no_session) => Outcome::Reload { no_session },
-        None => match app.pending_resume() {
-            Some(path) => Outcome::Resume(path.to_path_buf()),
-            None => Outcome::Quit,
-        },
-    })
+    // `Reload`. A force-quit (`Abandoned`) wins over both: the run did not
+    // finish, so there is nothing to hand off.
+    Ok(outcome_of(&app))
 }
 
 /// Attach-replay: ask every surface's backend for its history and seed it, so a
@@ -250,6 +266,47 @@ async fn replay_history(backends: &[(SessionId, Backend)], app: &mut App) {
         if let Ok(AgentEvent::History { messages }) = backend.ask(Request::GetHistory).await {
             app.seed_history(id, &messages);
         }
+    }
+}
+
+/// The out-of-band signal source fed into `event_loop`'s `select`. On unix it
+/// awaits SIGINT/SIGTERM; elsewhere `recv` never resolves — Windows has no
+/// `SignalKind`, and ConPTY delivers Ctrl-C as a key anyway.
+#[cfg(unix)]
+struct Signals {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Signals {
+    fn new() -> Self {
+        use tokio::signal::unix::{SignalKind, signal};
+        Self {
+            int: signal(SignalKind::interrupt()).expect("install SIGINT handler"),
+            term: signal(SignalKind::terminate()).expect("install SIGTERM handler"),
+        }
+    }
+
+    async fn recv(&mut self) -> Signal {
+        tokio::select! {
+            _ = self.int.recv() => Signal::Interrupt,
+            _ = self.term.recv() => Signal::Terminate,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) -> Signal {
+        std::future::pending::<Signal>().await
     }
 }
 
@@ -278,6 +335,14 @@ async fn event_loop(
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     tick.tick().await; // consume the immediate first tick
 
+    // Out-of-band signals. Raw mode turns Ctrl-C into a key, but a signal
+    // (`kill -INT`, an IDE stop button) is NOT a key: with no handler the
+    // process dies on the default disposition and never restores the terminal.
+    // `Signals::recv` routes each through the reducer (via `AppEvent::Signal`)
+    // so the decision stays in app.rs, and the normal `should_quit` break drops
+    // the RAII guard. tokio "full" already provides `signal` — no new dependency.
+    let mut signals = Signals::new();
+
     draw(terminal, app)?;
 
     // The loop owns the clock (the reducer is pure): record each surface's run
@@ -286,6 +351,7 @@ async fn event_loop(
 
     loop {
         tokio::select! {
+            sig = signals.recv() => app.handle(AppEvent::Signal(sig)),
             maybe = events.next() => match maybe {
                 Some(Ok(event)) => {
                     for app_event in event::translate(event) {
@@ -621,5 +687,45 @@ mod tests {
             run(Vec::new(), options, None, None).await.unwrap(),
             Outcome::Quit
         );
+    }
+}
+
+#[cfg(test)]
+mod abort_signal_tests {
+    use super::*;
+
+    /// An app whose focused surface is mid-run, so interrupt escalates.
+    fn running() -> App {
+        let mut app = App::new();
+        let id = app.focused_id().clone();
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentStart));
+        app
+    }
+
+    #[test]
+    fn force_quit_maps_to_outcome_abandoned() {
+        let mut app = running();
+        app.handle(AppEvent::Signal(Signal::Terminate));
+        assert!(app.force_quit());
+        assert_eq!(outcome_of(&app), Outcome::Abandoned);
+    }
+
+    #[test]
+    fn second_interrupt_key_abandons_a_run() {
+        let mut app = running();
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_ne!(
+            outcome_of(&app),
+            Outcome::Abandoned,
+            "the first press only cancels"
+        );
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(outcome_of(&app), Outcome::Abandoned);
+    }
+
+    #[test]
+    fn idle_quit_is_not_abandoned() {
+        let app = App::new();
+        assert_eq!(outcome_of(&app), Outcome::Quit);
     }
 }

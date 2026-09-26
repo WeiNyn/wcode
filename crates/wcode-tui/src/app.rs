@@ -96,6 +96,18 @@ pub enum AppEvent {
     /// `Key` — NOT gated by `Mode` (a mouse is not a key; it works in Input and
     /// Browse alike, plan §"Locked decisions" #3).
     Mouse(MouseEvent),
+    /// An out-of-band process signal, fed through the reducer like a key.
+    Signal(Signal),
+}
+
+/// An out-of-band process signal: mapped by the reducer to the same actions a
+/// key press takes (`App::on_signal`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// SIGINT — identical to pressing Ctrl-C / Esc.
+    Interrupt,
+    /// SIGTERM — abandon a running surface, else quit.
+    Terminate,
 }
 
 /// A side effect the event loop must perform — the app's only outward channel.
@@ -859,6 +871,81 @@ pub(crate) struct InputView {
 /// `label` the team strip shows, the transcript, run state, changeset,
 /// scroll pin, and prompt history. `App` holds a `Vec<Surface>`; index 0 is the
 /// root, the rest are team members.
+// ==== SKETCH (review-only, not real code) ====
+// Bug 3 — the LIVE (streaming) block is re-rendered from scratch every frame
+// (ui.rs:cJZIx -> `content_lines` ui.rs:MoCCM -> `markdown::render` ui.rs:9X2Z9),
+// while committed blocks are cached here (CacheEntry app.rs:ak5ad, `block_revs`
+// app.rs:15dPS, `append_block_lines` app.rs:4f4oV). Because the run tick redraws
+// every 120ms while a run is in flight (lib.rs:eyzKj / TICK lib.rs:WrdPc) even
+// when no delta arrived, the live block re-parses on every such frame.
+//
+// FIX — give the live block its own (rev, width) cache, exactly like a
+// committed block, invalidated on each delta and cleared on flush->commit.
+//
+// Reuse `CacheEntry` verbatim (no new type). Add to `Surface` (struct
+// app.rs:VoEVp; init in `Surface::new` app.rs:2m3je):
+//
+//     /// The streamed message's revision; bumped on every MessageUpdate (and on
+//     /// MessageStart), so the live cache re-renders once per delta — not once
+//     /// per frame.
+//     live_rev: u64,
+//     /// The live block's cached render, keyed (live_rev, width) like
+//     /// cache/block_revs are for committed blocks. `CacheEntry::never()`
+//     /// (app.rs:GMtkM) when there is no live message.
+//     live_cache: CacheEntry,
+//
+// A new method mirrors `append_block_lines` (app.rs:4f4oV) for the live message;
+// it owns the render-cache split borrow the same way:
+//
+//     /// Ensure the live message is rendered for `width`, then append the
+//     /// separator (when `out` is non-empty) and the cached lines. Returns the
+//     /// range of the block's OWN lines, or `None` when there is no live message.
+//     /// A cache hit appends the stored `Line`s unchanged.
+//     pub(crate) fn append_live_lines(
+//         &mut self,
+//         width: usize,
+//         out: &mut Vec<Line<'static>>,
+//     ) -> Option<Range<usize>> {
+//         let Some(message) = self.live.as_ref() else { return None };
+//         let stale = self.live_cache.rev != self.live_rev || self.live_cache.width != width;
+//         let rendered = stale.then(|| crate::ui::live_lines(message, width));
+//         if let Some(lines) = rendered {
+//             self.live_cache = CacheEntry { rev: self.live_rev, width, lines };
+//         }
+//         let own = if out.is_empty() { out.len() } else { out.push(Line::default()); out.len() };
+//         out.extend(self.live_cache.lines.iter().cloned());
+//         Some(own..out.len())
+//     }
+//
+// Invalidation (all four points):
+//  1. MessageStart (app.rs:6DiH6): `self.live = Some(message)` -> also
+//     `self.live_rev = self.live_rev.wrapping_add(1); self.live_cache = CacheEntry::never();`
+//  2. MessageUpdate (app.rs:8b2AA): same bump (it already replaces `self.live`).
+//  3. MessageEnd (app.rs:1ypOR) / `flush_live` (app.rs:HbG4X): `self.live = None`,
+//     so the next `append_live_lines` returns `None` and the stale entry is never
+//     read (resetting `live_cache` here is optional, just frees memory earlier).
+//  4. `sync_theme` (app.rs:U0iUX): bump `live_rev` alongside `block_revs`, or the
+//     live cache keeps `Line`s baked in the old palette. REQUIRED — mirror the
+//     existing `for rev in &mut surface.block_revs` loop with a
+//     `surface.live_rev = surface.live_rev.wrapping_add(1);`.
+//
+// The render site (ui.rs:cJZIx) collapses to one call — see the ui.rs sketch.
+//
+// Residual (honest): this removes the per-frame re-render; it does NOT make a
+// single growing block sub-linear — each delta still re-renders the whole block
+// once. A stream of `n` deltas over `n` frames is still O(n^2) in block length.
+// The truly-linear follow-on is an incremental re-parse seam in markdown.rs (see
+// that file's sketch) keyed on the trailing text block.
+//
+// #[cfg(test)] tests to fill (mirror the cache_misses test ui.rs:GS5Mk):
+// mod live_cache_tests {
+//     #[test] fn a_frame_with_no_delta_hits_the_live_cache() { todo!() }
+//     #[test] fn a_delta_misses_once_then_the_next_frame_hits() { todo!() }
+//     #[test] fn a_width_change_misses_the_live_cache() { todo!() }
+//     #[test] fn flush_to_commit_clears_the_live_block() { todo!() }
+//     #[test] fn a_theme_change_invalidates_the_live_cache() { todo!() }
+// }
+// ==== /SKETCH ====
 /// One committed block's cached render, index-aligned with `Surface::transcript`.
 ///
 /// A frame hits iff `rev == block_revs[i] && width == draw_width`; a miss re-renders
@@ -1597,6 +1684,11 @@ pub struct App {
     /// Last-seen `theme::generation()`; `sync_theme` bumps `block_revs` on a change.
     theme_gen: u64,
     should_quit: bool,
+    /// A force-quit (a second Ctrl-C, or SIGTERM, on a running surface)
+    /// abandoned the run: `lib::run` returns `Outcome::Abandoned` and the CLI
+    /// exits 0 without the relaunch banner. Set only by `abandon_run`; never
+    /// set idle (SIGTERM-idle is a plain quit).
+    force_quit: bool,
     actions: Vec<Action>,
     /// Monotonic clock stamping the last action of each member, so the team
     /// strip can order members active-first then by action recency.
@@ -1664,6 +1756,7 @@ impl App {
             dirty: true,
             theme_gen: 0,
             should_quit: false,
+            force_quit: false,
             actions: Vec::new(),
             action_seq: 0,
             mode: Mode::Input,
@@ -2505,6 +2598,8 @@ impl App {
             // A mouse is not a key: routed directly, so `on_key`'s overlay/browse
             // gates never see it (a mouse works in both modes — plan #3).
             AppEvent::Mouse(m) => self.on_mouse(m),
+            // An out-of-band signal is just another input to the pure reducer.
+            AppEvent::Signal(sig) => self.on_signal(sig),
             AppEvent::Paste(text) => {
                 // A modal owns the input: a paste must not edit the buffer.
                 // With the browse search prompt up (not an `Overlay`, so its
@@ -2624,17 +2719,48 @@ impl App {
         self.recompute_completion();
     }
 
-    /// Esc / Ctrl-C: cancel a run, else quit.
+    /// Esc / Ctrl-C. First press cancels a run (or quits when idle); a SECOND
+    /// press while a cancel is still in flight abandons the run — the escape
+    /// hatch for a stuck tool that ignores the cancel token.
     fn interrupt(&mut self) {
         if self.focused().running {
             if !self.focused().cancelled {
                 self.focused_mut().cancelled = true;
                 self.actions.push(Action::Cancel);
+            } else {
+                self.abandon_run();
             }
         } else {
             self.should_quit = true;
         }
         self.dirty = true;
+    }
+
+    /// Abandon an in-flight run: leave the loop now, without waiting on the
+    /// kernel. The run's messages are already persisted incrementally (the
+    /// loop's `record_session`), so abandoning loses at most the in-flight
+    /// message. Sets `force_quit` so `lib::run` returns `Outcome::Abandoned`
+    /// rather than `Outcome::Quit`.
+    fn abandon_run(&mut self) {
+        self.force_quit = true;
+        self.should_quit = true;
+    }
+
+    /// Feed an out-of-band SIGINT/SIGTERM through the reducer, exactly like a
+    /// key: SIGINT is a Ctrl-C press; SIGTERM abandons a running surface and,
+    /// when idle, is a plain quit — so `force_quit` is never set idle.
+    pub(crate) fn on_signal(&mut self, sig: Signal) {
+        match sig {
+            Signal::Interrupt => self.interrupt(),
+            Signal::Terminate => {
+                if self.focused().running {
+                    self.abandon_run();
+                } else {
+                    self.should_quit = true;
+                }
+                self.dirty = true;
+            }
+        }
     }
 
     fn submit(&mut self) {
@@ -3482,6 +3608,12 @@ impl App {
         self.should_quit
     }
 
+    /// Whether a force-quit (`abandon_run`) abandoned an in-flight run — read
+    /// by `lib::run` to return `Outcome::Abandoned`. Never true when idle.
+    pub fn force_quit(&self) -> bool {
+        self.force_quit
+    }
+
     /// Drain the side effects accumulated since the last call.
     pub fn take_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.actions)
@@ -3774,7 +3906,6 @@ mod tests {
         submit(&mut app, "go");
         let _ = app.take_actions();
 
-        app.handle(AppEvent::Key(Key::Esc));
         app.handle(AppEvent::Key(Key::Esc));
         assert_eq!(app.take_actions(), vec![Action::Cancel]);
         assert!(!app.should_quit());
@@ -6343,9 +6474,9 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('c')));
         assert!(
             app.take_actions().is_empty(),
-            "a running turn is only cancelled once"
+            "the second press sends no second Cancel"
         );
-        assert!(!app.should_quit(), "Ctrl-C never quits a running turn");
+        assert!(app.should_quit(), "the second press abandons the stuck run");
     }
 
     #[test]
@@ -6383,5 +6514,72 @@ mod tests {
         app.handle(AppEvent::Key(Key::Enter));
         assert_eq!(app.selected(), Some(0), "first match at/after 3 wraps to 0");
         assert_eq!(app.input(), "draft", "still untouched after the jump");
+    }
+}
+
+#[cfg(test)]
+mod abort_escape_tests {
+    use super::*;
+
+    /// An app whose focused surface is mid-run, so interrupt escalates.
+    fn running() -> App {
+        let mut app = App::new();
+        let id = app.focused_id().clone();
+        app.handle(AppEvent::Agent(id, AgentEvent::AgentStart));
+        app
+    }
+
+    #[test]
+    fn first_interrupt_only_cancels() {
+        let mut app = running();
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.take_actions(), vec![Action::Cancel]);
+        assert!(app.running(), "the run is left to the kernel");
+        assert!(!app.should_quit(), "the first press does not quit");
+        assert!(!app.force_quit(), "the first press does not abandon");
+    }
+
+    #[test]
+    fn second_interrupt_abandons_a_running_surface() {
+        let mut app = running();
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(!app.force_quit(), "the FIRST press only cancels");
+        app.handle(AppEvent::Key(Key::Ctrl('c')));
+        assert!(app.force_quit(), "the SECOND press abandons");
+        assert!(app.should_quit(), "abandoning leaves the loop");
+    }
+
+    #[test]
+    fn interrupt_when_idle_quits() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.should_quit());
+        assert!(!app.force_quit(), "an idle quit is not an abandon");
+    }
+
+    #[test]
+    fn sigterm_abandons_even_without_a_first_cancel() {
+        let mut app = running();
+        app.handle(AppEvent::Signal(Signal::Terminate));
+        assert!(app.force_quit(), "SIGTERM abandons a running surface");
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn sigterm_when_idle_is_a_plain_quit() {
+        let mut app = App::new();
+        app.handle(AppEvent::Signal(Signal::Terminate));
+        assert!(app.should_quit());
+        assert!(!app.force_quit(), "an idle SIGTERM does not abandon");
+    }
+
+    #[test]
+    fn sigint_equals_a_ctrl_c_press() {
+        let mut app = running();
+        app.handle(AppEvent::Signal(Signal::Interrupt));
+        assert_eq!(app.take_actions(), vec![Action::Cancel], "SIGINT cancels");
+        assert!(!app.force_quit());
+        app.handle(AppEvent::Signal(Signal::Interrupt));
+        assert!(app.force_quit(), "a second SIGINT abandons");
     }
 }
