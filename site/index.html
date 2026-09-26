@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>wcode — a minimal, pi-like coding agent for the terminal</title>
+    <meta
+      name="description"
+      content="wcode is a minimal, pi-like coding agent for the terminal: streams an LLM conversation and gives it content-addressed tools over any OpenAI-compatible endpoint."
+    />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <!-- Hero (pitch from README.md:3–7) -->
+      <header class="hero">
+        <h1>wcode</h1>
+        <p class="pitch">
+          A minimal, pi-like coding agent for the terminal. It streams an LLM
+          conversation and gives it content-addressed tools — read (anchors per
+          line), grep/find, bash, edit/edits/replace, write, and ast-grep
+          search/rewrite — and stays out of the way.
+        </p>
+        <p class="built-on">
+          Built on a small kernel (<code>wcode-harness</code>) that speaks to any
+          OpenAI-compatible chat-completions endpoint.
+        </p>
+        <p class="cta">
+          <a class="btn" href="#install">Install</a>
+          <a class="btn ghost" href="https://github.com/WeiNyn/wcode">GitHub</a>
+        </p>
+      </header>
+
+      <!-- Terminal mock (README.md:203–217) -->
+      <section aria-label="example session">
+        <div class="term">
+          <div class="term-bar"><span></span><span></span><span></span></div>
+          <pre><code><span class="p">$</span> wcode -p "explain this repo"
+<span class="dim">wcode — model: gpt-4.1</span>
+
+This is <b>wcode</b>: a small terminal coding agent. The kernel is a few
+hundred lines — event loop, tool dispatch, hooks, JSONL sessions — and the
+CLI is a thin client over any OpenAI-compatible endpoint.
+
+<span class="p">$</span> wcode --resume
+<span class="dim">resuming latest session…</span></code></pre>
+        </div>
+      </section>
+
+      <!-- Features grid (README.md:3–7, :201–218, :276–, :302–, :375–) -->
+      <section class="features">
+        <h2>What it is</h2>
+        <ul class="grid">
+          <li>
+            <h3>Content-addressed tools</h3>
+            <p><code>read</code> emits a 5-char <code>ANCHOR│line</code>; <code>edit</code> targets anchors, so edits above never shift the target.</p>
+          </li>
+          <li>
+            <h3>Any endpoint</h3>
+            <p>Speaks to any OpenAI-compatible chat-completions endpoint — OpenAI, Ollama, a gateway.</p>
+          </li>
+          <li>
+            <h3>Small kernel</h3>
+            <p><code>wcode-harness</code> is a few hundred lines: event loop, tool dispatch, hooks, JSONL sessions.</p>
+          </li>
+          <li>
+            <h3>Full-screen TUI</h3>
+            <p>A <code>ratatui</code> client of the same <code>AgentEvent</code> stream, with a line REPL fallback for pipes and CI.</p>
+          </li>
+          <li>
+            <h3>Parallel tools</h3>
+            <p>Independent read-only calls run concurrently; mutating tools and <code>bash</code> are barriers.</p>
+          </li>
+          <li>
+            <h3>No approval flows</h3>
+            <p>Absent by design: MCP, subagents, permission prompts. Policy lives in code, via <code>Hooks</code>.</p>
+          </li>
+        </ul>
+      </section>
+
+      <!-- Install (README.md:10–19) -->
+      <section id="install" class="install">
+        <h2>Install</h2>
+        <ol>
+          <li>
+            <h3>Homebrew</h3>
+            <pre><code>brew tap WeiNyn/wcode https://github.com/WeiNyn/wcode
+brew install wcode</code></pre>
+          </li>
+          <li>
+            <h3>crates.io</h3>
+            <pre><code>cargo install wcode-cli</code></pre>
+          </li>
+          <li>
+            <h3>Prebuilt binaries</h3>
+            <p>
+              Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon) tarballs are
+              attached to each
+              <a href="https://github.com/WeiNyn/wcode/releases">release</a>.
+            </p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Quickstart (README.md:21–30) -->
+      <section class="quickstart">
+        <h2>Quickstart</h2>
+        <p><code>~/.config/wcode/config.toml</code>:</p>
+        <pre><code>model = "gpt-4.1"                          # required
+base_url = "https://api.openai.com/v1"     # optional; any OpenAI-compatible endpoint
+api_key = "sk-..."                         # optional</code></pre>
+        <pre><code>wcode -p "explain this repo"   # one-shot
+wcode                          # start the TUI</code></pre>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        <a href="https://github.com/WeiNyn/wcode/blob/main/README.md">README</a> ·
+        <a href="https://github.com/WeiNyn/wcode/releases">releases</a> ·
+        <a href="https://github.com/WeiNyn/wcode">repo</a>
+      </p>
+      <p class="c">MIT © 2026 Wei</p>
+    </footer>
+  </body>
+</html>
