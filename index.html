@@ -3,28 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>wcode — a minimal, pi-like coding agent for the terminal</title>
+    <title>wcode — a small, token-lean, team-first coding agent for the terminal</title>
     <meta
       name="description"
-      content="wcode is a minimal, pi-like coding agent for the terminal: streams an LLM conversation and gives it content-addressed tools over any OpenAI-compatible endpoint."
+      content="wcode is a minimal terminal coding agent: a few-hundred-line kernel, token-minimal by design (content-addressed edits, bounded output, compaction), and built for agent teams and workflows."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <main>
-      <!-- Hero (pitch from README.md:3–7) -->
+      <!-- Hero: the three ideas, up front -->
       <header class="hero">
         <h1>wcode</h1>
         <p class="pitch">
-          A minimal, pi-like coding agent for the terminal. It streams an LLM
-          conversation and gives it content-addressed tools — read (anchors per
-          line), grep/find, bash, edit/edits/replace, write, and ast-grep
-          search/rewrite — and stays out of the way.
+          A minimal, pi-like coding agent for the terminal —
+          <strong>small</strong>, <strong>token-lean</strong>, and
+          <strong>team-first</strong>.
         </p>
         <p class="built-on">
-          Built on a small kernel (<code>wcode-harness</code>) that speaks to any
-          OpenAI-compatible chat-completions endpoint.
+          A few-hundred-line kernel over any OpenAI-compatible endpoint, with a
+          thin CLI and a full-screen TUI.
         </p>
         <p class="cta">
           <a class="btn" href="#install">Install</a>
@@ -32,54 +31,59 @@
         </p>
       </header>
 
-      <!-- Terminal mock (README.md:203–217) -->
-      <section aria-label="example session">
-        <div class="term">
-          <div class="term-bar"><span></span><span></span><span></span></div>
-          <pre><code><span class="p">$</span> wcode -p "explain this repo"
-<span class="dim">wcode — model: gpt-4.1</span>
-
-This is <b>wcode</b>: a small terminal coding agent. The kernel is a few
-hundred lines — event loop, tool dispatch, hooks, JSONL sessions — and the
-CLI is a thin client over any OpenAI-compatible endpoint.
-
-<span class="p">$</span> wcode --resume
-<span class="dim">resuming latest session…</span></code></pre>
-        </div>
-      </section>
-
-      <!-- Features grid (README.md:3–7, :201–218, :276–, :302–, :375–) -->
-      <section class="features">
-        <h2>What it is</h2>
+      <!-- The main idea (README: philosophy + design + team) -->
+      <section class="pillars">
+        <h2>Three ideas, taken seriously</h2>
         <ul class="grid">
           <li>
-            <h3>Content-addressed tools</h3>
-            <p><code>read</code> emits a 5-char <code>ANCHOR│line</code>; <code>edit</code> targets anchors, so edits above never shift the target.</p>
+            <h3><span class="num">1</span>Simple</h3>
+            <p>
+              One small kernel (<code>wcode-harness</code>) — event loop, tool
+              dispatch, hooks, JSONL sessions — and a thin CLI. No MCP, no
+              subagent framework, no permission prompts, no behavior config:
+              policy lives in code, via <code>Hooks</code>.
+            </p>
           </li>
           <li>
-            <h3>Any endpoint</h3>
-            <p>Speaks to any OpenAI-compatible chat-completions endpoint — OpenAI, Ollama, a gateway.</p>
+            <h3><span class="num">2</span>Token-minimal, built in</h3>
+            <p>
+              Content-addressed <code>read</code>/<code>edit</code> — old code is
+              never re-typed. <code>bash</code> spills large output to a file and
+              returns a bounded preview. Auto-compaction keeps the window lean,
+              and an <code>rtk</code> hook can proxy shell output. Fewer tokens,
+              less context drift.
+            </p>
           </li>
           <li>
-            <h3>Small kernel</h3>
-            <p><code>wcode-harness</code> is a few hundred lines: event loop, tool dispatch, hooks, JSONL sessions.</p>
-          </li>
-          <li>
-            <h3>Full-screen TUI</h3>
-            <p>A <code>ratatui</code> client of the same <code>AgentEvent</code> stream, with a line REPL fallback for pipes and CI.</p>
-          </li>
-          <li>
-            <h3>Parallel tools</h3>
-            <p>Independent read-only calls run concurrently; mutating tools and <code>bash</code> are barriers.</p>
-          </li>
-          <li>
-            <h3>No approval flows</h3>
-            <p>Absent by design: MCP, subagents, permission prompts. Policy lives in code, via <code>Hooks</code>.</p>
+            <h3><span class="num">3</span>Teams &amp; workflows first</h3>
+            <p>
+              Spawn named members and <code>message</code> them by name; run a
+              real task DAG with gates, dependency edges, and rework caps; declare
+              the whole team and workflow in <code>[team]</code> /
+              <code>[workflow]</code>. Each member is its own surface in the TUI.
+            </p>
           </li>
         </ul>
       </section>
 
-      <!-- Install (README.md:10–19) -->
+      <!-- Example session: an orchestrator delegating -->
+      <section aria-label="example session">
+        <div class="term">
+          <div class="term-bar"><span></span><span></span><span></span></div>
+          <pre><code><span class="p">$</span> wcode --agents --config .wcode/team.toml
+<span class="dim"># your team · explorer (read-only) · builder · reviewer</span>
+
+<span class="p">❯</span> implement the retry policy, then have it reviewed
+<span class="dim">⚙ message(explorer) → "map the retry seam"         ✓ done</span>
+<span class="dim">⚙ task(create) #1 explore → #2 implement → #3 verify</span>
+<span class="dim">⚙ message(builder)  → "#2 implement"               ● running</span>
+<span class="dim">⚙ message(reviewer) → "#3 review the diff"         ○ queued</span>
+
+<span class="dim">read · grep/find · bash · edit — content-addressed, token-lean</span></code></pre>
+        </div>
+      </section>
+
+      <!-- Install (README:10-30) -->
       <section id="install" class="install">
         <h2>Install</h2>
         <ol>
@@ -103,7 +107,7 @@ brew install wcode</code></pre>
         </ol>
       </section>
 
-      <!-- Quickstart (README.md:21–30) -->
+      <!-- Quickstart (README:21-30) -->
       <section class="quickstart">
         <h2>Quickstart</h2>
         <p><code>~/.config/wcode/config.toml</code>:</p>
@@ -111,7 +115,8 @@ brew install wcode</code></pre>
 base_url = "https://api.openai.com/v1"     # optional; any OpenAI-compatible endpoint
 api_key = "sk-..."                         # optional</code></pre>
         <pre><code>wcode -p "explain this repo"   # one-shot
-wcode                          # start the TUI</code></pre>
+wcode                          # start the TUI
+wcode --agents                 # start with a team + workflow</code></pre>
       </section>
     </main>
 

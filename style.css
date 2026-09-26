@@ -53,7 +53,8 @@ h3 { font-size: 1.05rem; margin: 0 0 0.35rem; }
 
 /* Hero */
 .hero { padding: 3rem 0 1rem; }
-.pitch { font-size: 1.15rem; max-width: 46rem; }
+.pitch { font-size: 1.25rem; max-width: 46rem; }
+.pitch strong { color: var(--accent); }
 .built-on { color: var(--muted); }
 .cta { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
 .btn {
@@ -74,10 +75,26 @@ h3 { font-size: 1.05rem; margin: 0 0 0.35rem; }
 .term .p { color: var(--prompt); }
 .term .dim { color: var(--muted); }
 
-/* Features */
+/* Pillars + features grid */
 .grid { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
 .grid li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.1rem; }
 .grid p { margin: 0; color: var(--muted); }
+
+/* The numbered pillar badge */
+.pillars h3 { display: flex; align-items: center; gap: 0.55rem; }
+.num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
 
 /* Install + quickstart */
 .install ol { list-style: none; margin: 0; padding: 0; }
