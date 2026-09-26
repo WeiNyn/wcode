@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+readme.workspace = true
+keywords = ["wcode", "tui", "terminal", "ratatui", "agent"]
+categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
-wcode-harness = { path = "../wcode-harness" }
-wcode-protocol = { path = "../wcode-protocol" }
+wcode-harness = { workspace = true }
+wcode-protocol = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 ratatui = "0.30"

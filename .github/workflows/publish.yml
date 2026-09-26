@@ -1,0 +1,119 @@
+name: Publish
+
+# Publishes the four crates to crates.io in dependency order
+# (wcode-harness → wcode-protocol → wcode-tui → wcode-cli).
+# Fires on an exact version tag, or manually (dry-run by default).
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (cargo publish --dry-run; no upload)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish crates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # crates.io Trusted Publishing (OIDC); used only when no token secret
+    env:
+      # The whole auth decision rides on this flag (read in the two steps below).
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Fail fast when the tag and the manifests disagree — a forgotten bump in
+      # either `[workspace.package] version` or a `wcode-*` dep requirement
+      # would otherwise publish a broken dependency graph.
+      - name: Guard — tag and workspace version agree
+        run: |
+          set -euo pipefail
+          meta="$(cargo metadata --no-deps --format-version 1)"
+          version="$(jq -r '.packages[] | select(.name=="wcode-harness") | .version' <<<"$meta")"
+          echo "workspace version: $version"
+
+          # Only a tag push carries a version to check against; a manual run is
+          # free to dry-run whatever HEAD is.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            if [ "$tag" != "v${version}" ]; then
+              echo "::error title=tag-version-mismatch::tag '${tag}' != 'v${version}' — bump workspace.package.version"
+              exit 1
+            fi
+          fi
+
+          # Every internal wcode-* dep must require exactly this version, or the
+          # published crates resolve to a stale/incompatible neighbour.
+          for pkg in wcode-protocol wcode-tui wcode-cli; do
+            for dep in wcode-harness wcode-protocol wcode-tui; do
+              req="$(jq -r --arg p "$pkg" --arg d "$dep" \
+                '.packages[] | select(.name==$p) | .dependencies[] | select(.name==$d) | .req' <<<"$meta")"
+              [ -z "$req" ] && continue
+              if [ "$req" != "^${version}" ] && [ "$req" != "${version}" ]; then
+                echo "::error title=dep-version-mismatch::${pkg} requires ${dep} '${req}', expected '^${version}' — bump [workspace.dependencies]"
+                exit 1
+              fi
+            done
+          done
+
+      # Token-else-OIDC: when CARGO_REGISTRY_TOKEN is unset, mint a short-lived
+      # crates.io token via Trusted Publishing (only on a real, non-dry run).
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: auth
+        if: env.HAS_TOKEN != 'true' && inputs.dry_run != true
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish (in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' && secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          crates=(wcode-harness wcode-protocol wcode-tui wcode-cli)
+          version="$(jq -r '.packages[] | select(.name=="wcode-harness") | .version' \
+            < <(cargo metadata --no-deps --format-version 1))"
+
+          UA='wcode-publish-workflow (https://github.com/WeiNyn/wcode)'
+          # UA is required: crates.io answers 403 without a User-Agent.
+          published() {  # <crate> <version> -> 0 iff the index has it
+            [ "$(curl -sS -A "$UA" -o /dev/null -w '%{http_code}' \
+                  "https://crates.io/api/v1/crates/$1/$2")" = 200 ]
+          }
+
+          # `cargo publish` strips `path` from the packaged manifest, so a member
+          # resolves its `wcode-*` deps from crates.io. A per-crate
+          # `cargo publish --dry-run` therefore cannot succeed before its deps are
+          # published (`--no-verify` does not skip that resolution; `--list` skips
+          # the check entirely). Only the leaf (`wcode-harness`, all third-party)
+          # can be packaged and verified without the registry.
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            cargo publish -p wcode-harness --dry-run   # leaf: all deps third-party -> real package+verify
+            cargo build --workspace --release          # compile check
+            echo "note: wcode-protocol/-tui/-cli packaging is exercised only by a real tag run"
+            exit 0
+          fi
+
+          # Re-runnable: `cargo publish` hard-fails if the version already exists, so
+          # skip anything the index already has and wait for each new crate before the
+          # next one resolves it.
+          for c in "${crates[@]}"; do
+            if published "$c" "$version"; then
+              echo "${c} ${version} is already published; skipping"
+              continue
+            fi
+            cargo publish -p "${c}"
+            for _ in $(seq 1 60); do published "$c" "$version" && break; sleep 5; done
+            published "$c" "$version" || {
+              echo "::error title=index-timeout::${c} ${version} not visible after ~300s"; exit 1; }
+          done
