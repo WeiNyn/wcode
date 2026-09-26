@@ -293,6 +293,15 @@ back-edge or self-edge is a loud `ConfigError`), exactly one of `member`/`script
 per node, `member` names a `[team]` member, and a `gate` has at least one dep.
 Instantiation creates nodes in topological order, so author order is free.
 
+**Task injection & headless runs.** A template is task-agnostic by itself; the
+run's task is a *run input*, not plan state. `--task <text>` (or `WCODE_TASK`)
+parameterizes the node **titles** — `title = "Explore: {{task}}"` substitutes the
+task (absent → the node `id`; unknown braces stay literal, and `script`s are not
+templated). The same flag turns the run **headless**: the root is seeded with the
+task and the plan is driven to a terminal state (`0` all-`Done`; `1` a `Failed`
+node, a `--timeout` expiry, or a root-turn error). Design:
+[`workflow-task-injection-plan.md`](workflow-task-injection-plan.md).
+
 **(c) Programmatic — a code seam.** For compiled variants (the doctrine answer:
 *build the variant instead of configuring one*), a workflow can be a Rust
 builder / `Hooks`. The config is sugar over this.
@@ -387,7 +396,8 @@ names the shape, never the behavior.
   `crates/wcode-cli/src/main.rs` (team startup, TUI task feed),
   `crates/wcode-tui/src/app.rs` (`TaskItem`).
 - Plans: [`swarm-comparison-plan.md`](swarm-comparison-plan.md) (C1/C2/C3/C4/C5,
-  §5–§8), [`team-and-tui-plan.md`](team-and-tui-plan.md),
+  §5–§8), [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md),
+  [`team-and-tui-plan.md`](team-and-tui-plan.md),
   [`session-groups.md`](session-groups.md),
   [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md) §10.1
   (the star), [`gap-analysis-jcode.md`](gap-analysis-jcode.md).

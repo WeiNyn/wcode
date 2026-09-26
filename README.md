@@ -147,6 +147,7 @@ max_attempts = 3            # optional; the rework cap (default 3)
 [[workflow.node]]
 id = "explore"              # required; a unique label
 member = "explorer"         # EXACTLY ONE of member | script
+title = "Explore: {{task}}" # optional label; {{task}} is the run's task
 
 [[workflow.node]]
 id = "implement"
@@ -165,6 +166,20 @@ automation policy); `gate = true` makes its reject re-open its deps, and a gate
 needs at least one `depends_on`. The graph is validated acyclic at load. The plan
 shows in the TUI's `/tasks` listing as
 `#id [state] title (owner) ← #deps ×attempts`.
+
+A node may carry an optional `title` (its label, dispatched to the worker as
+`#<id> <title>`; absent → the node `id`). The one placeholder recognized in a
+title is `{{task}}` — substituted with the run's task; any other brace form is left
+literal, and `script`s are not templated.
+
+Passing `--task <text>` (or the `WCODE_TASK` env) turns a `[workflow]` run
+**headless** (no TUI): wcode seeds the root with the task, drives the plan to a
+terminal state, and exits — `0` once every node is `Done`, `1` if any node is
+`Failed`, if the `--timeout <secs>` **wall-clock** cap elapses (`0`/absent = no
+cap), or if the root's first turn errors (the cap starts after that turn). `--task` requires `[workflow]` and
+`--agents`, and cannot be combined with `-p`; a `{{task}}` template without a task
+is a boot error. `-p` is unaffected (it stays a single root turn), and a pure
+`[team]` (no `[workflow]`) remains the interactive, per-task path.
 
 ```toml
 [orchestrator]
@@ -188,7 +203,8 @@ Environment variables beat the toml: `WCODE_BASE_URL`, `WCODE_API_KEY`, and
 `tools.grep`/`tools.find`), and `WCODE_COMPACT_BUDGET`, `WCODE_COMPACT_WINDOW`,
 `WCODE_COMPACT_MIN_REMAINING`, `WCODE_COMPACT_KEEP_RECENT_TOKENS`,
 `WCODE_COMPACT_KEEP_RECENT_TURNS`, and `WCODE_INSTRUCTIONS` (a file name/path, or
-`off`), `WCODE_SKILLS` (extra skill roots, or `off`), and `WCODE_RETRY_MAX`,
+`off`), `WCODE_SKILLS` (extra skill roots, or `off`), `WCODE_TASK` (a `[workflow]`
+run's task when `--task` is absent), and `WCODE_RETRY_MAX`,
 `WCODE_RETRY_BASE_MS`, `WCODE_RETRY_CAP_MS`, `WCODE_RETRY_TTFT_MS`,
 `WCODE_RETRY_IDLE_MS` (the `[retry]` table).
 
@@ -237,6 +253,7 @@ placeholder bearer token so `--base-url http://localhost:11434/v1` just works.
 ```
 wcode                        # REPL
 wcode -p "explain this repo" # one-shot: run, print reply, exit
+wcode --agents --task "fix bug 123" --timeout 600   # headless [workflow] run
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
