@@ -1503,4 +1503,23 @@ mod terminal_code_tests {
         list.fail(a.id, "boom").unwrap(); // a Failed while b is still open
         assert_eq!(list.terminal_code(), Some(1));
     }
+
+    #[test]
+    fn rework_reopens_a_dep_and_clears_the_verdict() {
+        let list = TaskList::new();
+        let work = list.create("work", vec![], false).unwrap();
+        let gate = list.create("gate", vec![work.id], true).unwrap();
+        list.complete(work.id, None).unwrap();
+        list.complete(gate.id, None).unwrap();
+        assert_eq!(list.terminal_code(), Some(0), "all Done before rework");
+        // A gate `reject` re-opens its dep and returns the gate to Todo, so the
+        // plan is no longer terminal (the headless driver keeps waiting).
+        list.reject(gate.id, "not good enough").unwrap();
+        assert_eq!(list.terminal_code(), None, "rework reopened the plan");
+        assert_eq!(list.snapshot()[0].state, TaskState::Todo, "dep reopened");
+        // Accept the rework: terminal again.
+        list.complete(work.id, Some("v2".into())).unwrap();
+        list.complete(gate.id, None).unwrap();
+        assert_eq!(list.terminal_code(), Some(0), "rework accepted");
+    }
 }

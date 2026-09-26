@@ -1970,20 +1970,32 @@ async fn run_workflow(
         Ok(AgentEvent::Stopped {
             stop_reason: StopReason::Error | StopReason::MaxTurns,
         })
-        | Err(_) => return 1,
+        | Err(_) => {
+            print_workflow_summary(&tasks);
+            return 1;
+        }
         Ok(_) => {}
     }
 
+    // ONE wall-clock deadline for the whole wait (F1): a per-`changed()` timer
+    // would reset on every publish, so a continuous rework storm would never
+    // trip it.
+    let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
     let mut updates = tasks.subscribe();
     let code = loop {
         if let Some(code) = tasks.terminal_code() {
             break code;
         }
-        match timeout {
-            Some(d) => {
+        match deadline {
+            Some(deadline) => {
                 tokio::select! {
-                    _ = updates.changed() => {}
-                    _ = tokio::time::sleep(d) => break 1,
+                    changed = updates.changed() => {
+                        // A dropped sender means no further progress is possible (F3).
+                        if changed.is_err() {
+                            break tasks.terminal_code().unwrap_or(1);
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => break 1,
                 }
             }
             None => {
@@ -1994,10 +2006,15 @@ async fn run_workflow(
         }
     };
 
+    print_workflow_summary(&tasks);
+    code
+}
+
+/// The headless run's final per-node summary: `#id [state] title`, in id order.
+fn print_workflow_summary(tasks: &crate::tasks::TaskList) {
     for task in tasks.snapshot() {
         println!("#{} [{}] {}", task.id, task.state.label(), task.title);
     }
-    code
 }
 
 /// The root's opening seed: the plan is ALREADY instantiated, so its one job is
