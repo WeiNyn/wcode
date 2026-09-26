@@ -97,6 +97,75 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// A session's run-state — the server-side liveness fact (bug 2).
+///
+/// The wire twin of the TUI's client-local `TeamState`: born at the actor's
+/// `run()` boundary (actor.rs), mirrored into the registry roster, and carried
+/// on [`SessionInfo`] so it RIDES the existing
+/// [`crate::event::AgentEvent::Sessions`] push — no new `Request`/`Reply`
+/// variant is needed for the query (`Request::ListSessions` already returns
+/// `Sessions`; making it `state`-aware is the whole poll path).
+///
+/// serde shape: `snake_case` — `"idle" | "running" | "done" | "failed"`.
+/// `Default = Idle`, so an older server's [`SessionInfo`] (no `state` key)
+/// still deserializes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberState {
+    /// Not running and never has — a fresh worker before its first turn.
+    #[default]
+    Idle,
+    /// A run (a `Submit`/`Wake` turn) is in flight right now.
+    Running,
+    /// The last run finished normally; idle but not virgin.
+    Done,
+    /// The last run ended on a run-failure (`StopReason::Error`); sticky
+    /// across the run boundary, cleared by the next start.
+    Failed,
+}
+
+impl MemberState {
+    /// Lowercase label the roster push / `peers` listing render.
+    pub fn label(self) -> &'static str {
+        match self {
+            MemberState::Idle => "idle",
+            MemberState::Running => "running",
+            MemberState::Done => "done",
+            MemberState::Failed => "failed",
+        }
+    }
+}
+
+// Follow-on (not this change): the map from `MemberState` to the TUI's
+// `TeamState` does NOT live here — the harness must not depend on `wcode-tui`
+// (layering). That map, and the glyph styling it drives, is a separate TUI
+// change outside the roster work.
+
+#[cfg(test)]
+mod member_state_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serde_is_snake_case() {
+        assert_eq!(
+            serde_json::to_value(MemberState::Running).unwrap(),
+            json!("running")
+        );
+        assert_eq!(
+            serde_json::from_str::<MemberState>("\"failed\"").unwrap(),
+            MemberState::Failed
+        );
+        assert_eq!(MemberState::Done.label(), "done");
+    }
+
+    #[test]
+    fn absent_state_field_defaults_to_idle() {
+        let info: SessionInfo = serde_json::from_value(json!({"id": "agent:w1"})).unwrap();
+        assert_eq!(info.id, SessionId::agent("w1"));
+        assert_eq!(info.state, MemberState::Idle);
+    }
+}
 /// A served session's address plus the little metadata a roster shows: today
 /// only its **effective model**. Carried by
 /// [`crate::event::AgentEvent::Sessions`], so a client can label each member by
@@ -108,6 +177,11 @@ pub struct SessionInfo {
     /// registered with its model); `None` for a peer whose model is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Server-side liveness (see [`MemberState`] above). `#[serde(default)]`
+    /// keeps an older peer's `SessionInfo` (no `state` key) round-tripping as
+    /// `Idle`.
+    #[serde(default)]
+    pub state: MemberState,
 }
 
 /// Inbound intent: the requests a session's mailbox accepts.

@@ -31,6 +31,7 @@ use wcode_harness::actor::EVENT_BUFFER;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId, SessionInfo};
 
+use crate::backend::AskError;
 use crate::Closed;
 use crate::frame::{read_frame, write_frame};
 
@@ -204,22 +205,54 @@ impl Client {
 
     /// Send a request and await its correlated reply. Fails with [`Closed`] if
     /// the connection drops before the reply arrives.
+    /// Send a request and await its correlated reply. Fails with [`Closed`] if
+    /// the connection drops before the reply arrives.
     pub async fn ask(&self, request: Request) -> Result<AgentEvent, Closed> {
+        self.ask_bounded(request, None).await.map_err(|_| Closed)
+    }
+
+    /// Like [`Client::ask`], but bounded by `dur` — the remote twin of
+    /// [`crate::Backend::ask_within`]. Only the caller's wait is bounded (the
+    /// supervisor's reply path is unchanged). On timeout the pending slot is
+    /// removed (see `PendingGuard`), so a late reply finds no waiter.
+    pub async fn ask_within(
+        &self,
+        request: Request,
+        dur: Duration,
+    ) -> Result<AgentEvent, AskError> {
+        self.ask_bounded(request, Some(dur)).await
+    }
+
+    async fn ask_bounded(
+        &self,
+        request: Request,
+        deadline: Option<Duration>,
+    ) -> Result<AgentEvent, AskError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().unwrap().insert(id, tx);
+        // The guard removes the slot on every exit — reply, timeout, or drop —
+        // so a bounded ask never leaks a `pending` entry.
+        let _guard = PendingGuard {
+            inner: &self.inner,
+            id,
+        };
         if self
             .inner
             .out
             .send(Out::Frame(self.frame(id, None, request)))
             .is_err()
         {
-            self.inner.pending.lock().unwrap().remove(&id);
-            return Err(Closed);
+            return Err(AskError::Closed);
         }
-        rx.await.map_err(|_| Closed)
+        match deadline {
+            Some(dur) => tokio::time::timeout(dur, rx)
+                .await
+                .map_err(|_| AskError::Timeout)?
+                .map_err(|_| AskError::Closed),
+            None => rx.await.map_err(|_| AskError::Closed),
+        }
     }
-
     /// Stream the events this view hears: its own session's, or — for the
     /// connection-wide view (`connect`/`lazy`) — every session's. Each subscriber
     /// gets its own receiver, which survives a reconnect (only events during the
@@ -262,6 +295,21 @@ impl Client {
             sender,
             body,
         }
+    }
+}
+
+/// A `pending` entry that removes itself on `Drop`, so a cancelled or timed-out
+/// `ask` never leaks its slot. A reply that arrives after the waiter is gone
+/// finds no entry and is dropped, so this cleanup is invisible on the happy path
+/// (`deliver` already removed it).
+struct PendingGuard<'a> {
+    inner: &'a Inner,
+    id: u64,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.inner.pending.lock().unwrap().remove(&self.id);
     }
 }
 
@@ -519,5 +567,36 @@ mod tests {
             dead,
             "a dropped client leaves no live connection (the supervisor released it)"
         );
+    }
+
+    /// A timed-out `ask` must not leak its `pending` slot: the `PendingGuard`
+    /// removes it, so a late reply finds no waiter and is harmless.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ask_within_times_out_without_leaking_a_pending_entry() {
+        // A lazy client never connects: the frame is queued, no reply comes.
+        let client = Client::lazy(Path::new("/nonexistent-ask-within.sock"));
+        let err = client
+            .ask_within(Request::GetHistory, Duration::from_millis(20))
+            .await
+            .expect_err("a silent backend times out");
+        assert!(matches!(err, AskError::Timeout), "{err:?}");
+        assert!(
+            client.inner.pending.lock().unwrap().is_empty(),
+            "a timed-out ask removed its pending slot"
+        );
+        // A reply for the vanished waiter is dropped, not a panic.
+        deliver(
+            &client.inner,
+            Frame {
+                v: PROTOCOL_VERSION,
+                id: 1,
+                reply_to: Some(1),
+                session: SessionId::new("s"),
+                sender: None,
+                body: AgentEvent::Ack,
+            },
+        );
+        assert!(client.inner.pending.lock().unwrap().is_empty());
     }
 }

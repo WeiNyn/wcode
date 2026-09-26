@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 use wcode_harness::actor::SessionHandle;
-use wcode_harness::protocol::{Request, SessionId};
+use wcode_harness::protocol::{MemberState, Request, SessionId};
 
 use crate::backend::Backend;
 #[cfg(unix)]
@@ -66,6 +66,11 @@ struct Inner {
     /// Each session's effective model id (see [`Registry::set_model`]), so a
     /// socket server can name a member's model in the roster it pushes.
     models: Mutex<HashMap<SessionId, String>>,
+    /// Server-side liveness per session, mirrored from the actor's `watch` cell
+    /// so the roster push (and the `Sessions` reply) can name it — the twin of
+    /// `models`. Cheap: one entry per served session. `Idle` for a session the
+    /// registry never watched, or an older peer (a `state`-less `SessionInfo`).
+    states: Mutex<HashMap<SessionId, MemberState>>,
     /// The live **local** roster (see [`Registry::locals`]), refreshed on every
     /// `register`/`register_remote` so a socket server can fan a session that
     /// appears after it started. Read via [`Registry::subscribe`].
@@ -78,6 +83,7 @@ impl Default for Inner {
             peers: Mutex::new(HashMap::new()),
             owners: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
+            states: Mutex::new(HashMap::new()),
             roster: watch::channel(Vec::new()).0,
         }
     }
@@ -90,11 +96,23 @@ impl Registry {
 
     /// Register a peer's mailbox at `id`; re-registering replaces it.
     pub fn register(&self, id: SessionId, handle: SessionHandle) {
+        // Mirror the session's run-state into the roster: the registry keeps
+        // NO back-reference into the kernel (layering) — it watches the
+        // handle's `state_rx()` and re-publishes on every transition, so the
+        // socket server pushes the change without polling. One task per served
+        // session (a handful); it ends when the session drops.
+        let mut state_rx = handle.state_rx();
         self.inner
             .peers
             .lock()
             .unwrap()
-            .insert(id, Backend::Local(handle));
+            .insert(id.clone(), Backend::Local(handle));
+        let registry = self.clone();
+        tokio::spawn(async move {
+            while state_rx.changed().await.is_ok() {
+                registry.set_state(id.clone(), *state_rx.borrow_and_update());
+            }
+        });
         self.refresh_roster();
     }
 
@@ -106,7 +124,21 @@ impl Registry {
             .peers
             .lock()
             .unwrap()
-            .insert(id, Backend::Remote(client));
+            .insert(id, Backend::Remote(client.clone()));
+        // Remote liveness rides the peer's own roster push: a served peer
+        // stamps each `SessionInfo` with a `state`, so mirroring the remote
+        // client's roster into `states` makes `state_of` reflect a remote
+        // member with no back-channel of our own.
+        let registry = self.clone();
+        let mut roster = client.subscribe_roster();
+        tokio::spawn(async move {
+            while roster.changed().await.is_ok() {
+                let sessions = roster.borrow_and_update().clone();
+                for info in &sessions {
+                    registry.set_state(info.id.clone(), info.state);
+                }
+            }
+        });
         self.refresh_roster();
     }
 
@@ -168,6 +200,26 @@ impl Registry {
         self.inner.models.lock().unwrap().insert(id, model.into());
     }
 
+    /// Mirror a session's run-state. Called by the per-session watcher
+    /// `register` spawns — NOT by the actor, so the registry keeps NO
+    /// back-reference into the kernel (layering). Re-publishes the roster, so
+    /// the socket server pushes the change without polling.
+    pub fn set_state(&self, id: SessionId, state: MemberState) {
+        self.inner.states.lock().unwrap().insert(id, state);
+        self.refresh_roster();
+    }
+
+    /// The state last mirrored for `id`; `Idle` when unknown (a remote peer the
+    /// registry never watched, or an older server).
+    pub fn state_of(&self, id: &SessionId) -> MemberState {
+        *self
+            .inner
+            .states
+            .lock()
+            .unwrap()
+            .get(id)
+            .unwrap_or(&MemberState::Idle)
+    }
     /// The model recorded for `id`, if any ([`Self::set_model`]). `None` for a
     /// peer registered without one (e.g. a remote reached across a socket).
     pub fn model_of(&self, id: &SessionId) -> Option<String> {
@@ -227,17 +279,24 @@ mod tests {
     use wcode_harness::actor::SessionActor;
     use wcode_harness::agent::{Agent, AgentConfig};
     use wcode_harness::compaction::CompactionPolicy;
-    use wcode_harness::event::AgentEvent;
+    use wcode_harness::event::{AgentEvent, LlmStreamEvent};
     use wcode_harness::hooks::HooksSet;
     use wcode_harness::loop_::DEFAULT_MAX_TURNS;
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 
+    use futures::StreamExt as _;
+
     /// A live session whose model never streams — enough for routing tests (the
     /// messages we send are `Notify`, which run no turn).
     fn session() -> SessionHandle {
-        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        session_with(Arc::new(|_ctx, _sys, _tools, _opts| {
             Box::pin(futures::stream::empty()) as LlmStream
-        });
+        }))
+    }
+
+    /// A session over a caller-supplied stream — for tests that drive a real
+    /// turn (a hang, a stream error), not just routing.
+    fn session_with(stream_fn: StreamFn) -> SessionHandle {
         SessionActor::spawn(Agent::new(AgentConfig {
             system: "sys".into(),
             tools: Vec::new(),
@@ -380,6 +439,60 @@ mod tests {
         reg.set_model(w1.clone(), "m1");
         assert_eq!(reg.model_of(&w1).as_deref(), Some("m1"));
         assert_eq!(reg.model_of(&ghost), None);
+    }
+
+    #[tokio::test]
+    async fn set_state_is_read_back_and_republishes() {
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        assert_eq!(reg.state_of(&w1), MemberState::Idle, "unset id reads Idle");
+
+        let mut rx = reg.subscribe();
+        reg.set_state(w1.clone(), MemberState::Running);
+        assert_eq!(reg.state_of(&w1), MemberState::Running);
+        // `set_state` re-publishes, so a subscriber (the server's push) wakes.
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("a roster change")
+            .expect("open");
+    }
+
+    #[tokio::test]
+    async fn register_mirrors_the_actor_state_into_the_roster() {
+        // A stream that emits one delta then hangs: Running is observable until
+        // a cancel ends the run.
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            let head =
+                futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())]);
+            Box::pin(head.chain(futures::stream::pending())) as LlmStream
+        });
+        let handle = session_with(stream_fn);
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        reg.register(w1.clone(), handle.clone());
+        assert_eq!(reg.state_of(&w1), MemberState::Idle, "a virgin session is idle");
+
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+        let mut running = false;
+        for _ in 0..500 {
+            if reg.state_of(&w1) == MemberState::Running {
+                running = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(running, "the registry mirrors the actor's Running");
+
+        handle.send(Request::Cancel).unwrap();
+        let mut done = false;
+        for _ in 0..500 {
+            if reg.state_of(&w1) == MemberState::Done {
+                done = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(done, "the registry mirrors the actor's Done");
     }
 
     #[tokio::test]

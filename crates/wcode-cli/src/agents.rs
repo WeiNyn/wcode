@@ -531,7 +531,10 @@ impl Orchestrator {
                 None,
                 self.phonebook.clone(),
             )),
-            erased(crate::tools::peers::Peers::new(self.phonebook.clone())),
+            erased(crate::tools::peers::Peers::new(
+                self.phonebook.clone(),
+                self.registry.clone(),
+            )),
             // The plan — root-only: only the root holds this tool set.
             erased(crate::tools::task::Task::new(
                 self.tasks.clone(),

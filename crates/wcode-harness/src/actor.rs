@@ -112,7 +112,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::agent::Agent;
 use crate::compaction::CompactOutcome;
@@ -120,7 +120,7 @@ use crate::event::AgentEvent;
 use crate::hooks::HooksSet;
 use crate::loop_::LoopError;
 use crate::message::{AgentMessage, StopReason};
-use crate::protocol::{Request, SessionId};
+use crate::protocol::{MemberState, Request, SessionId};
 
 /// Default outbox buffer: how far a subscriber may lag before it starts losing
 /// events (`broadcast` semantics — the slowest reader drops, it never blocks the
@@ -135,6 +135,11 @@ pub const EVENT_BUFFER: usize = 1024;
 pub struct SessionHandle {
     inbox: mpsc::UnboundedSender<Message>,
     events: broadcast::Sender<AgentEvent>,
+    /// The run-state cell — the ONE server-side liveness fact (bug 2). A `watch`
+    /// (not a bare `AtomicU8`) so a registry/server task can WAKE on a transition
+    /// and re-push the roster; `send_replace` keeps the latest value even with no
+    /// receiver yet. `Clone` rides freely (the sender is shared).
+    state: watch::Sender<MemberState>,
 }
 
 impl SessionHandle {
@@ -201,6 +206,18 @@ impl SessionHandle {
         reply_rx.await.map_err(|_| SessionClosed)
     }
 
+    /// The session's current run-state. Read-only, lock-free (a `watch` borrow),
+    /// so a `peers` listing / roster read over N members is cheap.
+    pub fn state(&self) -> MemberState {
+        *self.state.borrow()
+    }
+
+    /// A live view of the run-state, so a registry/server task can wake on a
+    /// transition instead of polling. Seeded with the current value (like
+    /// `Registry::subscribe`).
+    pub fn state_rx(&self) -> watch::Receiver<MemberState> {
+        self.state.subscribe()
+    }
     /// Subscribe to the session's event stream. Each subscriber gets its own
     /// receiver; a lagging subscriber drops events rather than stalling the run.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -247,10 +264,12 @@ impl SessionActor {
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(EVENT_BUFFER);
         let events = events_tx.clone();
-        tokio::spawn(serve(agent, inbox_rx, events_tx));
+        let (state_tx, _state_rx) = watch::channel(MemberState::Idle);
+        tokio::spawn(serve(agent, inbox_rx, events_tx, state_tx.clone()));
         SessionHandle {
             inbox: inbox_tx,
             events,
+            state: state_tx,
         }
     }
 }
@@ -260,6 +279,7 @@ async fn serve(
     mut agent: Agent,
     mut inbox: mpsc::UnboundedReceiver<Message>,
     events: broadcast::Sender<AgentEvent>,
+    state: watch::Sender<MemberState>,
 ) {
     // Requests that arrive *during* a run but cannot be applied to it (a
     // second `Submit`, a model swap) wait here and are serviced once the run
@@ -275,7 +295,7 @@ async fn serve(
             },
         };
 
-        dispatch(&mut agent, message, &mut inbox, &events, &mut deferred).await;
+        dispatch(&mut agent, message, &mut inbox, &events, &mut deferred, &state).await;
     }
 }
 
@@ -306,6 +326,7 @@ async fn dispatch(
     inbox: &mut mpsc::UnboundedReceiver<Message>,
     events: &broadcast::Sender<AgentEvent>,
     deferred: &mut VecDeque<Message>,
+    state: &watch::Sender<MemberState>,
 ) {
     // Inbound peer-message policy (S4-1): a drop skips delivery entirely; a
     // rewrite (in place) is what gets serviced.
@@ -325,7 +346,7 @@ async fn dispatch(
     let sender = from.unwrap_or_else(SessionId::user);
 
     let event = match request {
-        Request::Submit { text } => match run(agent, &text, inbox, events, deferred).await {
+        Request::Submit { text } => match run(agent, &text, inbox, events, deferred, state).await {
             Ok(stop_reason) => AgentEvent::Stopped { stop_reason },
             Err(e) => AgentEvent::Error {
                 message: e.to_string(),
@@ -361,7 +382,7 @@ async fn dispatch(
                 from: sender.clone(),
                 content: content.clone(),
             });
-            match run(agent, &tag(&sender, &content), inbox, events, deferred).await {
+            match run(agent, &tag(&sender, &content), inbox, events, deferred, state).await {
                 Ok(stop_reason) => AgentEvent::Stopped { stop_reason },
                 Err(e) => AgentEvent::Error {
                     message: e.to_string(),
@@ -434,7 +455,15 @@ async fn run(
     inbox: &mut mpsc::UnboundedReceiver<Message>,
     events: &broadcast::Sender<AgentEvent>,
     deferred: &mut VecDeque<Message>,
+    state: &watch::Sender<MemberState>,
 ) -> Result<StopReason, LoopError> {
+    // State transitions live at the run boundary — this `run()` is the in-flight
+    // window. The event stream's `AgentStart`/`AgentEnd` are the OTHER place this
+    // could be derived; the actor-owned cell is authoritative because it is set
+    // synchronously before the first await, so a reader never misses `Running`.
+    // A `Cancel` ends on `Ok(StopReason::Aborted)` -> `Done`: an abort is not a
+    // failure, matching the TUI.
+    state.send_replace(MemberState::Running);
     let (sink_tx, mut sink_rx) = mpsc::unbounded_channel::<AgentEvent>();
     // Sender/token clones taken *before* `run` borrows the agent: steering and
     // cancelling the in-flight run must not need the `&mut`.
@@ -511,6 +540,17 @@ async fn run(
         let _ = events.send(AgentEvent::Error {
             message: e.to_string(),
         });
+    }
+    // Final transition: a normal stop is `Done`; a run-failure — the loop's
+    // `StopReason::Error` or a `LoopError` — is `Failed` (sticky until the next
+    // run sets `Running`).
+    match &result {
+        Ok(StopReason::Error) | Err(_) => {
+            state.send_replace(MemberState::Failed);
+        }
+        Ok(_) => {
+            state.send_replace(MemberState::Done);
+        }
     }
     result
 }
@@ -688,6 +728,54 @@ mod tests {
         }
         // Without a live cancel this would time out on the pending stream.
         wait_for_end(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn state_is_running_during_a_turn_then_done_after() {
+        // A stream that emits one delta then hangs: the run is observably in
+        // flight until a cancel ends it.
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            let head = futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())]);
+            Box::pin(head.chain(futures::stream::pending())) as LlmStream
+        });
+        let handle = SessionActor::spawn(Agent::new(agent_config(stream_fn, vec![])));
+        assert_eq!(handle.state(), MemberState::Idle, "a virgin session is idle");
+
+        // A watcher wakes on the transition rather than polling.
+        let mut state_rx = handle.state_rx();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), state_rx.changed())
+            .await
+            .expect("a state change")
+            .expect("open");
+        assert_eq!(*state_rx.borrow_and_update(), MemberState::Running);
+        assert_eq!(handle.state(), MemberState::Running, "the run is in flight");
+
+        handle.send(Request::Cancel).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), state_rx.changed())
+            .await
+            .expect("a state change")
+            .expect("open");
+        assert_eq!(
+            *state_rx.borrow_and_update(),
+            MemberState::Done,
+            "an abort ends Done, not Failed"
+        );
+        assert_eq!(handle.state(), MemberState::Done);
+    }
+
+    #[tokio::test]
+    async fn a_fatal_stream_error_ends_failed() {
+        let rec = Recorder::default();
+        rec.push(vec![LlmStreamEvent::Error {
+            message: "boom".into(),
+            fatal: true,
+        }]);
+        let handle = SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+        wait_for_end(&mut rx).await;
+        assert_eq!(handle.state(), MemberState::Failed);
     }
 
     #[derive(Deserialize, schemars::JsonSchema)]

@@ -170,24 +170,26 @@ async fn connection(
                     break;
                 }
                 let current = roster.borrow_and_update().clone();
-                let mut grew = false;
+                // Push on ANY roster change, not just growth: a state-only
+                // transition (a worker goes Running) leaves `locals()` identical,
+                // so a `grew` test would miss it — but `set_state` bumped the
+                // watch, so this task ran. The payload is tiny (one `SessionInfo`
+                // per member). `fan()` is still gated on `seen.insert`, so no
+                // event is fanned twice.
                 for (id, handle) in &current {
                     if seen.insert(id.clone()) {
                         fan(&out, id, handle);
-                        grew = true;
                     }
                 }
-                if grew {
-                    let sessions = roster_infos(&registry, &root_id, &current);
-                    let _ = out.send(Frame {
-                        v: PROTOCOL_VERSION,
-                        id: 0,
-                        reply_to: None,
-                        session: root_id.clone(),
-                        sender: None,
-                        body: AgentEvent::Sessions { sessions },
-                    });
-                }
+                let sessions = roster_infos(&registry, &root_id, &current);
+                let _ = out.send(Frame {
+                    v: PROTOCOL_VERSION,
+                    id: 0,
+                    reply_to: None,
+                    session: root_id.clone(),
+                    sender: None,
+                    body: AgentEvent::Sessions { sessions },
+                });
             }
         });
     }
@@ -332,7 +334,8 @@ fn roster_infos(
     ids.into_iter()
         .map(|id| {
             let model = registry.model_of(&id);
-            SessionInfo { id, model }
+            let state = registry.state_of(&id);
+            SessionInfo { id, model, state }
         })
         .collect()
 }

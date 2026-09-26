@@ -5,6 +5,8 @@
 //! session runs in this process ([`SessionHandle`]) or across a socket
 //! ([`Client`]). Swapping the transport is swapping the variant.
 
+use std::time::Duration;
+
 use tokio::sync::broadcast;
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::event::AgentEvent;
@@ -25,6 +27,28 @@ impl std::fmt::Display for Closed {
 }
 
 impl std::error::Error for Closed {}
+
+/// Why a bounded [`Backend::ask_within`] did not get a reply. `ask` keeps
+/// returning the narrower [`Closed`], so its existing call sites don't churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskError {
+    /// The session shut down (locally) or the connection dropped (remotely).
+    Closed,
+    /// No reply arrived before the deadline. The waiter is removed, so a reply
+    /// that arrives later finds no one and is silently dropped.
+    Timeout,
+}
+
+impl std::fmt::Display for AskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            AskError::Closed => "session is closed",
+            AskError::Timeout => "the ask timed out",
+        })
+    }
+}
+
+impl std::error::Error for AskError {}
 
 /// A handle to a session, local or remote.
 #[derive(Clone)]
@@ -56,6 +80,25 @@ impl Backend {
         }
     }
 
+    /// Like [`Backend::ask`], but **bounded** (item-41 residual). The single
+    /// choke point for every bounded `ask`: a hung in-process
+    /// `SessionHandle::ask` and a hung-but-open `Client::ask` both time out to
+    /// [`AskError::Timeout`]. `Submit` stays unbounded (a long turn is not a
+    /// hang); callers pass `dur` only for short command/side queries.
+    pub async fn ask_within(
+        &self,
+        request: Request,
+        dur: Duration,
+    ) -> Result<AgentEvent, AskError> {
+        match self {
+            Backend::Local(handle) => tokio::time::timeout(dur, handle.ask(request))
+                .await
+                .map_err(|_| AskError::Timeout)?
+                .map_err(|_| AskError::Closed),
+            #[cfg(unix)]
+            Backend::Remote(client) => client.ask_within(request, dur).await,
+        }
+    }
     /// Send and await the correlated reply.
     pub async fn ask(&self, request: Request) -> Result<AgentEvent, Closed> {
         match self {

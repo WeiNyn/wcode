@@ -329,10 +329,12 @@ mod tests {
                     crate::protocol::SessionInfo {
                         id: crate::protocol::SessionId::new("root"),
                         model: Some("m1".into()),
+                        state: crate::protocol::MemberState::Idle,
                     },
                     crate::protocol::SessionInfo {
                         id: crate::protocol::SessionId::agent("w1"),
                         model: None,
+                        state: crate::protocol::MemberState::Idle,
                     },
                 ],
             },
