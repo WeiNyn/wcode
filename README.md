@@ -432,8 +432,10 @@ team — copy-paste it to relaunch. A remote (`--socket`) session prints nothing
 
 ## Philosophy
 
-pi-like, deliberately small. The kernel is a few hundred lines — event loop,
-tool dispatch, hooks, JSONL sessions — and the CLI is a thin client. Absent by
+pi-like, deliberately small. One kernel — event loop, tool dispatch, hooks,
+JSONL sessions — and a thin CLI on top. The kernel crate (`wcode-harness`) is
+about 10k lines and the whole workspace about 52k, a fraction of a
+batteries-included agent. Absent by
 design: MCP, subagents, permission prompts, approval flows, config files for
 behavior. That logic belongs in code, via `Hooks`: block or rewrite tool calls
 (`before_tool_call`), transform context per turn, force stops. Build the
