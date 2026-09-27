@@ -105,3 +105,19 @@ pre code { background: none; padding: 0; color: var(--fg); }
 /* Footer */
 footer { max-width: 60rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; border-top: 1px solid var(--border); color: var(--muted); }
 footer .c { font-size: 0.9rem; }
+
+/* Section rhythm */
+section { margin-top: 2.75rem; }
+
+/* By-the-numbers strip */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: 0.75rem; margin-top: 1.75rem; }
+.stats div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.9rem 0.75rem; text-align: center; }
+.stats b { display: block; font-size: 1.55rem; line-height: 1.25; color: var(--accent); }
+.stats span { color: var(--muted); font-size: 0.8rem; }
+
+/* Tool table */
+.tools table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+.tools th, .tools td { text-align: left; vertical-align: top; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
+.tools th { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+.tools td:first-child { color: var(--fg); }
+.tools td:last-child { color: var(--muted); }

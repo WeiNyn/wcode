@@ -6,7 +6,7 @@
     <title>wcode — a small, token-lean, team-first coding agent for the terminal</title>
     <meta
       name="description"
-      content="wcode is a minimal terminal coding agent: a few-hundred-line kernel, token-minimal by design (content-addressed edits, bounded output, compaction), and built for agent teams and workflows."
+      content="wcode is a minimal terminal coding agent: a ~10k-line Rust kernel over any OpenAI-compatible endpoint, token-lean by design (content-addressed edits, bounded output, compaction), and built for agent teams and workflows."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
@@ -22,14 +22,28 @@
           <strong>team-first</strong>.
         </p>
         <p class="built-on">
-          A few-hundred-line kernel over any OpenAI-compatible endpoint, with a
-          thin CLI and a full-screen TUI.
+          Four Rust crates, ~52,000 lines: a <strong>~10k-line kernel</strong>
+          (<code>wcode-harness</code> — event loop, tool dispatch, hooks, JSONL
+          sessions), a socket protocol (<code>wcode-protocol</code>), a
+          full-screen TUI (<code>wcode-tui</code>), and a thin CLI
+          (<code>wcode-cli</code>). One binary over any OpenAI-compatible
+          endpoint.
         </p>
         <p class="cta">
           <a class="btn" href="#install">Install</a>
           <a class="btn ghost" href="https://github.com/WeiNyn/wcode">GitHub</a>
         </p>
       </header>
+
+      <!-- By the numbers (verifiable, not marketing) -->
+      <section class="stats" aria-label="by the numbers">
+        <div><b>4</b><span>crates</span></div>
+        <div><b>~52k</b><span>lines of Rust</span></div>
+        <div><b>19</b><span>tools</span></div>
+        <div><b>1,000+</b><span>tests</span></div>
+        <div><b>4</b><span>prebuilt targets</span></div>
+        <div><b>MIT</b><span>licensed</span></div>
+      </section>
 
       <!-- The main idea (README: philosophy + design + team) -->
       <section class="pillars">
@@ -38,29 +52,94 @@
           <li>
             <h3><span class="num">1</span>Simple</h3>
             <p>
-              One small kernel (<code>wcode-harness</code>) — event loop, tool
-              dispatch, hooks, JSONL sessions — and a thin CLI. No MCP, no
-              subagent framework, no permission prompts, no behavior config:
-              policy lives in code, via <code>Hooks</code>.
+              One small kernel (<code>wcode-harness</code>): an event loop, tool
+              dispatch, hooks, JSONL sessions — and a thin CLI on top. Absent by
+              design: MCP, a subagent framework, permission prompts, behavior
+              config. Policy lives in code, via <code>Hooks</code>.
             </p>
           </li>
           <li>
             <h3><span class="num">2</span>Token-minimal, built in</h3>
             <p>
-              Content-addressed <code>read</code>/<code>edit</code> — old code is
-              never re-typed. <code>bash</code> spills large output to a file and
-              returns a bounded preview. Auto-compaction keeps the window lean,
-              and an <code>rtk</code> hook can proxy shell output. Fewer tokens,
-              less context drift.
+              Content-addressed <code>read</code>/<code>edit</code> — a line's
+              5-char anchor is its address, so old code is never re-typed.
+              <code>bash</code> spills large output to a file and returns a
+              bounded preview. Auto-compaction keeps the window lean, and an
+              <code>rtk</code> hook can proxy shell output. Fewer tokens, less
+              context drift.
             </p>
           </li>
           <li>
             <h3><span class="num">3</span>Teams &amp; workflows first</h3>
             <p>
-              Spawn named members and <code>message</code> them by name; run a
-              real task DAG with gates, dependency edges, and rework caps; declare
-              the whole team and workflow in <code>[team]</code> /
+              Spawn named members, <code>message</code> them by name, and
+              <code>member</code> them to peek at — or stop — a run mid-flight. A
+              real task DAG with gates, dependency edges, and rework caps.
+              Declare the whole team and workflow in <code>[team]</code> /
               <code>[workflow]</code>. Each member is its own surface in the TUI.
+            </p>
+          </li>
+        </ul>
+      </section>
+
+      <!-- What's in the box -->
+      <section class="features">
+        <h2>What's in the box</h2>
+        <ul class="grid">
+          <li>
+            <h3>Full-screen TUI</h3>
+            <p>
+              Three bands — transcript, input, status. Streaming markdown
+              (CommonMark + GFM, syntax-highlighted), a 7-theme catalog with a
+              <code>Plain→Named→Indexed→Rgb</code> color ladder, browse mode,
+              drag-to-select, and a live team sidebar. It's a
+              <code>wcode-protocol</code> client, so it drives a local or a
+              socket session identically.
+            </p>
+          </li>
+          <li>
+            <h3>Sessions that persist</h3>
+            <p>
+              Every conversation is a JSONL file: resume it, group a whole team's
+              sessions together, and search across all of them with
+              <code>session_search</code>. One-shot <code>-p</code>, an
+              interactive line REPL, or the TUI — the same session.
+            </p>
+          </li>
+          <li>
+            <h3>Skills &amp; instructions</h3>
+            <p>
+              <code>SKILL.md</code> packages are discovered project-first; only
+              each skill's name + description enter the prompt, and the body
+              loads on demand. <code>AGENTS.md</code> / <code>CLAUDE.md</code> —
+              a global file plus the ancestor chain — fold into the system
+              prompt.
+            </p>
+          </li>
+          <li>
+            <h3>Plan mode</h3>
+            <p>
+              Explore and propose without touching the workspace: the editing
+              tools are disabled and mutating shell is refused, until you
+              approve. <code>/plan</code> flips it live, even mid-run.
+            </p>
+          </li>
+          <li>
+            <h3>Extensible by code</h3>
+            <p>
+              A tool is a <code>TypedTool</code> (typed args + a JSON schema). A
+              policy is a <code>Hooks</code> impl — a reason from
+              <code>before_tool_call</code> blocks the call and feeds it back to
+              the model. A provider is a <code>StreamFn</code>. No config needed.
+            </p>
+          </li>
+          <li>
+            <h3>Any endpoint</h3>
+            <p>
+              Speaks the OpenAI chat-completions wire, with a Responses-wire
+              path. Retry/backoff on transient errors, a stream-stall timeout,
+              and keyless local endpoints (Ollama, llama.cpp, vLLM) out of the
+              box.
             </p>
           </li>
         </ul>
@@ -68,19 +147,44 @@
 
       <!-- Example session: an orchestrator delegating -->
       <section aria-label="example session">
+        <h2>An orchestrator, delegating</h2>
         <div class="term">
           <div class="term-bar"><span></span><span></span><span></span></div>
           <pre><code><span class="p">$</span> wcode --agents --config .wcode/team.toml
 <span class="dim"># your team · explorer (read-only) · builder · reviewer</span>
 
 <span class="p">❯</span> implement the retry policy, then have it reviewed
-<span class="dim">⚙ message(explorer) → "map the retry seam"         ✓ done</span>
+<span class="dim">⚙ message(explorer) → "map the retry seam"          ✓ done</span>
 <span class="dim">⚙ task(create) #1 explore → #2 implement → #3 verify</span>
-<span class="dim">⚙ message(builder)  → "#2 implement"               ● running</span>
-<span class="dim">⚙ message(reviewer) → "#3 review the diff"         ○ queued</span>
+<span class="dim">⚙ message(builder)  → "#2 implement"                ● running</span>
+<span class="dim">⚙ member(builder)   → "what are you on?"            ✓ 1 line</span>
+<span class="dim">⚙ message(reviewer) → "#3 review the diff"          ○ queued</span>
 
 <span class="dim">read · grep/find · bash · edit — content-addressed, token-lean</span></code></pre>
         </div>
+      </section>
+
+      <!-- The tool set -->
+      <section class="tools">
+        <h2>19 tools, one small kernel</h2>
+        <table>
+          <thead>
+            <tr><th>tool</th><th>what it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>read</code></td><td>file contents as <code>ANCHOR│line</code> — the 5-char anchor is a line's address and the <code>edit</code> target</td></tr>
+            <tr><td><code>edit</code> · <code>edits</code></td><td>replace an anchor range; or a whole batch of ranges, atomically, in one file</td></tr>
+            <tr><td><code>replace</code></td><td>exact-string substitution for quick unique edits</td></tr>
+            <tr><td><code>write</code></td><td>create or overwrite a file, byte-for-byte</td></tr>
+            <tr><td><code>grep</code> · <code>find</code></td><td>regex search and glob listing; hits carry anchors, straight into <code>edit</code> (both respect <code>.gitignore</code>)</td></tr>
+            <tr><td><code>ast_search</code> · <code>ast_edit</code></td><td>structural search and rewrite via ast-grep</td></tr>
+            <tr><td><code>session_search</code></td><td>search this session, or across every session on disk</td></tr>
+            <tr><td><code>bash</code> · <code>bg</code></td><td><code>sh -c</code> with a timeout and Ctrl-C kill; big output spills to a file. Background a long command and <code>list</code>/<code>wait</code>/<code>kill</code> it</td></tr>
+            <tr><td><code>webfetch</code></td><td>one GET; HTML reduced to readable text; bounded</td></tr>
+            <tr><td><code>todo</code> · <code>task</code></td><td>the model's own checklist, streamed to the UI; and the shared task DAG (root-only)</td></tr>
+            <tr><td><code>spawn</code> · <code>message</code> · <code>peers</code> · <code>member</code></td><td>the team: define a member, message it by name, list the roster, and inspect or stop a run mid-flight</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <!-- Install (README:10-30) -->
@@ -99,8 +203,8 @@ brew install wcode</code></pre>
           <li>
             <h3>Prebuilt binaries</h3>
             <p>
-              Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon) tarballs are
-              attached to each
+              Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon) tarballs —
+              with a sha256 — are attached to each
               <a href="https://github.com/WeiNyn/wcode/releases">release</a>.
             </p>
           </li>
@@ -123,6 +227,7 @@ wcode --agents                 # start with a team + workflow</code></pre>
     <footer>
       <p>
         <a href="https://github.com/WeiNyn/wcode/blob/main/README.md">README</a> ·
+        <a href="https://crates.io/crates/wcode-cli">crates.io</a> ·
         <a href="https://github.com/WeiNyn/wcode/releases">releases</a> ·
         <a href="https://github.com/WeiNyn/wcode">repo</a>
       </p>
