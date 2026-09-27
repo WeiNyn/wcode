@@ -8,6 +8,7 @@
       name="description"
       content="wcode is a terminal coding agent built around teams and workflows: declare a team and a task DAG, then peek at, ask, or stop any member live — instead of firing off an opaque subagent and waiting for one answer. A ~10k-line Rust kernel over any OpenAI-compatible endpoint."
     />
+    <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
   </head>
@@ -15,6 +16,7 @@
     <main>
       <!-- Hero: teams & workflows, up front -->
       <header class="hero">
+        <p class="prompt"><span class="p">$</span> wcode --agents<span class="cursor"></span></p>
         <h1>wcode</h1>
         <p class="pitch">
           A coding agent for the terminal, built around
@@ -47,6 +49,90 @@
         <div><b>1,000+</b><span>tests</span></div>
         <div><b>4</b><span>prebuilt targets</span></div>
         <div><b>MIT</b><span>licensed</span></div>
+      </section>
+
+      <!-- How it fits together: two inline-SVG diagrams -->
+      <section class="diagrams" aria-label="how a team and a workflow fit together">
+        <figure>
+          <svg viewBox="0 0 760 330" role="img" aria-label="An orchestrator delegating to three members, each its own session">
+            <defs>
+              <marker id="t-arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" class="fill-accent" />
+              </marker>
+              <marker id="t-arw-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" class="fill-prompt" />
+              </marker>
+            </defs>
+
+            <!-- the orchestrator -->
+            <rect class="box-accent" x="270" y="18" width="220" height="66" rx="10" />
+            <text x="380" y="46" text-anchor="middle" class="accent">orchestrator (root)</text>
+            <text x="380" y="66" text-anchor="middle" class="muted">plans · delegates · stays in control</text>
+
+            <!-- fan-out -->
+            <path class="edge-accent" d="M380 84 V140" />
+            <path class="edge-accent" d="M130 140 H630" />
+            <path class="edge-accent" d="M130 140 V204" marker-end="url(#t-arw)" />
+            <path class="edge-accent" d="M380 140 V204" marker-end="url(#t-arw)" />
+            <path class="edge-accent" d="M630 140 V204" marker-end="url(#t-arw)" />
+            <text x="380" y="130" text-anchor="middle" class="muted">spawn · message · member status / ask / cancel</text>
+
+            <!-- the members -->
+            <rect class="box" x="40" y="206" width="180" height="72" rx="10" />
+            <circle class="dot-idle" cx="60" cy="226" r="4" />
+            <text x="130" y="234" text-anchor="middle">explorer</text>
+            <text x="130" y="256" text-anchor="middle" class="muted">read-only · maps the seam</text>
+
+            <rect class="box" x="290" y="206" width="180" height="72" rx="10" />
+            <circle class="dot-run" cx="310" cy="226" r="4" />
+            <text x="380" y="234" text-anchor="middle">builder</text>
+            <text x="380" y="256" text-anchor="middle" class="muted">edits · implements</text>
+
+            <rect class="box" x="540" y="206" width="180" height="72" rx="10" />
+            <circle class="dot-done" cx="560" cy="226" r="4" />
+            <text x="630" y="234" text-anchor="middle">reviewer</text>
+            <text x="630" y="256" text-anchor="middle" class="muted">reads the diff · verifies</text>
+
+            <!-- report back -->
+            <path class="edge-dash" d="M630 296 H726 V51 H496" marker-end="url(#t-arw-g)" />
+            <text x="611" y="43" text-anchor="middle" class="prompt">report back — every run end</text>
+          </svg>
+          <figcaption>Each member is its own session, addressable by name. Watch it, question it, or stop it — mid-run.</figcaption>
+        </figure>
+
+        <figure>
+          <svg viewBox="0 0 760 190" role="img" aria-label="A task DAG: explore, implement, then a verification gate that can re-open the work">
+            <defs>
+              <marker id="d-arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" class="fill-accent" />
+              </marker>
+              <marker id="d-arw-w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" class="fill-warn" />
+              </marker>
+            </defs>
+
+            <rect class="box" x="20" y="28" width="180" height="60" rx="10" />
+            <text x="110" y="52" text-anchor="middle">#1 explore</text>
+            <text x="110" y="72" text-anchor="middle" class="muted">explorer</text>
+
+            <rect class="box" x="290" y="28" width="180" height="60" rx="10" />
+            <text x="380" y="52" text-anchor="middle">#2 implement</text>
+            <text x="380" y="72" text-anchor="middle" class="muted">builder</text>
+
+            <rect class="box-accent" x="560" y="28" width="180" height="60" rx="10" />
+            <text x="650" y="52" text-anchor="middle" class="accent">#3 verify</text>
+            <text x="650" y="72" text-anchor="middle" class="muted">reviewer · gate</text>
+
+            <path class="edge-accent" d="M200 58 H288" marker-end="url(#d-arw)" />
+            <path class="edge-accent" d="M470 58 H558" marker-end="url(#d-arw)" />
+            <text x="244" y="48" text-anchor="middle" class="muted">deps</text>
+            <text x="514" y="48" text-anchor="middle" class="muted">deps</text>
+
+            <path class="edge-warn" d="M650 88 V150 H380 V90" marker-end="url(#d-arw-w)" />
+            <text x="515" y="172" text-anchor="middle" class="warn">reject → re-opens #2</text>
+          </svg>
+          <figcaption>A real DAG, not a to-do list: <code>deps</code> edges, a gate, and a <code>reject</code> that re-opens the work it judges.</figcaption>
+        </figure>
       </section>
 
       <!-- The focus: teams & workflows -->
