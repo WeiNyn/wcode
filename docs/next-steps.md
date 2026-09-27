@@ -59,11 +59,11 @@ the boxes as each task completes and keep the status table current.
 | 50 | Second-layer review fold: Esc inert at idle, `/new` (alias `/clear`), a worker report on a dead turn | ☑ done — `cbfbee5` (Esc inert at idle; Ctrl-C still quits), `cefc1e0` (`/new` begins a fresh session, incl. a fresh team group), `1a3a0df` (a worker now always reports its turn end to the owner — a provider drop no longer deadlocks the orchestrator); second-layer APPROVED |
 | 51 | Workflow task injection: `--task` (`WCODE_TASK`) + `{{task}}` node titles, headless run (see [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md)) | ☑ landed — `2cd53c7` (P1 schema), `4a4a891` (plan), `452c196` (P2+P3 CLI/guards/headless), `c26c590` (P3 fold: wall-clock `--timeout`, summary on every exit, `changed()`-Err) |
 
-**Open (item 50 residual).** `ReportBack::after_run` is called only on `Agent::run`'s
-`Ok` arm, so a `run_loop` `Err` — a session-append I/O failure (`record_session` →
-`session.append`, only when the worker has a persisted session) — skips it and the owner
-is never woken. A known, out-of-scope follow-up: a different failure class from the
-provider drop.
+**Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
+`Agent::run`'s error exits — the initial user-message append and the `run_loop`
+`Err` alike (a session-append I/O failure, `session.append` → `LoopError::Session`,
+only when the worker has a persisted session). The owner is woken with a
+synthesized status line instead of blocking forever on a report that never comes.
 
 **Open (item 51).** The gate-`reject` rework cycle has a deterministic task-state
 test (`rework_reopens_a_dep_and_clears_the_verdict`) but no model-driven E2E — a

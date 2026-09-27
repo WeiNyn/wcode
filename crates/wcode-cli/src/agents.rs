@@ -454,9 +454,9 @@ struct ReportBack {
 #[async_trait::async_trait]
 impl Hooks for ReportBack {
     async fn after_run(&self, ctx: &[AgentMessage], stop: StopReason) {
-        // ALWAYS notify the owner, so a failed / aborted / turn-limited worker
-        // can never leave the orchestrator blocking for a report that never
-        // comes. Forward the final reply verbatim ONLY on a clean `Stop` — on
+        // ALWAYS notify the owner, so a failed / aborted / turn-limited / errored
+        // worker can never leave the orchestrator blocking for a report that
+        // never comes. Forward the final reply verbatim ONLY on a clean `Stop` — on
         // any other ending (or an empty reply) synthesize a status line, so a
         // run that pushed no assistant cannot forward a PRIOR run's stale reply.
         let content = match (stop, wcode_harness::message::last_assistant_text(ctx)) {
@@ -485,7 +485,7 @@ fn report_for_stop(me: &SessionId, stop: StopReason) -> String {
         StopReason::Length => "cut off at the length limit",
         StopReason::ToolUse => "stopped on a tool call with no final reply",
         StopReason::Aborted => "cancelled",
-        StopReason::Error => "the provider/stream errored before any result",
+        StopReason::Error => "errored before any result",
         StopReason::MaxTurns => "stopped at the turn limit before a final reply",
     };
     format!("⚠ {me}: {why} — no result; the task may be incomplete")
@@ -1034,6 +1034,78 @@ mod tests {
         assert!(
             content.contains("errored"),
             "the report names the failure: {content}"
+        );
+    }
+
+    /// A session-append I/O failure on the worker's very first write ends the run
+    /// *before* the tool loop — an `Err` the old `Ok`-only report path never saw.
+    /// The owner must still be woken with a synthesized status line, so the
+    /// orchestrator never blocks on a report that never comes.
+    #[tokio::test]
+    async fn a_worker_reports_a_session_error_to_its_orchestrator() {
+        let base = tempfile::tempdir().unwrap();
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let registry = Registry::new();
+        let template = WorkerTemplate {
+            system: "sys".into(),
+            llm: LlmOpts::default(),
+            stream_fn,
+            hooks: HooksSet::default(),
+            tools: ToolsConfig::default(),
+            compaction: CompactionPolicy::default(),
+            working_dir: std::env::temp_dir(),
+            members_dir: Some(base.path().join("members")),
+            digest_cas: true,
+            sessions_dir: std::env::temp_dir(),
+        };
+        let factory = SessionFactory::new(registry.clone(), template);
+        let orch = SessionId::agent("orch");
+        let root = session();
+        registry.register(orch.clone(), root.clone());
+
+        let worker = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        let mut root_rx = root.subscribe();
+
+        // Sabotage the worker's transcript: a directory where its member file was,
+        // so every `append` fails with IsADirectory (EISDIR) — the initial write
+        // included, which is exactly the path that used to report nothing.
+        let member_path = base
+            .path()
+            .join("members")
+            .join(format!("{}.jsonl", short_name(&worker.id)));
+        std::fs::remove_file(&member_path).unwrap();
+        std::fs::create_dir(&member_path).unwrap();
+
+        // Hand the worker a task — its very first append fails during the run.
+        registry
+            .deliver(
+                &orch,
+                &worker.id,
+                Request::Wake {
+                    content: "do it".into(),
+                },
+            )
+            .unwrap();
+
+        // The failed run must STILL wake the orchestrator with a status line — not
+        // forward a prior reply (there is none) and not stay silent.
+        let event = tokio::time::timeout(Duration::from_secs(3), root_rx.recv())
+            .await
+            .expect("an event")
+            .expect("open");
+        let AgentEvent::MessageReceived { from, content } = &event else {
+            panic!("expected a MessageReceived, got {event:?}");
+        };
+        assert_eq!(from, &worker.id, "the worker reports its own failure");
+        assert!(
+            content.contains("no result"),
+            "a synthesized failure report, not a silent drop: {content}"
+        );
+        assert!(
+            content.contains("errored"),
+            "the report names the session-append failure: {content}"
         );
     }
 

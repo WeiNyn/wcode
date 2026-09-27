@@ -225,13 +225,22 @@ impl Agent {
         // turn (see `record_session` in loop_).
         let user = AgentMessage::user_text(user_text);
         if let Some(session) = &mut self.session {
-            session
+            let appended = session
                 .append(SessionEntry::Message {
                     id: uuid::Uuid::new_v4().to_string(),
                     parent_id: None,
                     message: user.clone(),
                 })
-                .map_err(LoopError::Session)?;
+                .map_err(LoopError::Session);
+            if let Err(e) = appended {
+                // A session-append I/O failure on this very first write exits the
+                // run *before* the loop, on a path the `Ok` arm far below never
+                // sees. Wake the owner here too, so a worker's report can never
+                // silently vanish; `StopReason::Error` makes `ReportBack`
+                // synthesize a status line rather than forward a stale prior reply.
+                self.hooks.after_run(&self.ctx, StopReason::Error).await;
+                return Err(e);
+            }
         }
         self.ctx.push(user);
 
@@ -289,6 +298,11 @@ impl Agent {
                 let (follow_tx, follow_rx) = mpsc::unbounded_channel();
                 self.follow_tx = follow_tx;
                 self.follow_rx = Some(follow_rx);
+                // A `LoopError` never reaches the `Ok` arm above, so the owner of a
+                // worker would block forever on a report that never fires. Wake it
+                // here too; `StopReason::Error` makes `ReportBack` synthesize a
+                // status line rather than forward a stale prior reply.
+                self.hooks.after_run(&self.ctx, StopReason::Error).await;
                 Err(e)
             }
         }

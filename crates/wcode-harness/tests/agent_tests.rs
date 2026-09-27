@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::{CompactOutcome, CompactionPolicy};
 use wcode_harness::event::{AgentEvent, LlmStreamEvent};
-use wcode_harness::hooks::HooksSet;
+use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::{Session, SessionEntry};
 use wcode_harness::streamfn::{
@@ -995,5 +995,49 @@ async fn compact_persists_and_resumes_to_summary_plus_tail() {
         reopened.message_count(),
         10,
         "all messages stay on disk; only the view is compacted"
+    );
+}
+
+/// Records the `StopReason` of every `after_run` — used to prove the report hook
+/// fires on the error exit (`Agent::run` returning `Err`), not only on `Ok`.
+#[derive(Default)]
+struct AfterRunLog {
+    stops: Mutex<Vec<StopReason>>,
+}
+
+#[async_trait::async_trait]
+impl Hooks for AfterRunLog {
+    async fn after_run(&self, _ctx: &[AgentMessage], stop: StopReason) {
+        self.stops.lock().unwrap().push(stop);
+    }
+}
+
+/// A sabotaged session — every `append` fails with IsADirectory — makes `run`
+/// return `Err(LoopError::Session)`. The `after_run` hook must still fire (once,
+/// with `StopReason::Error`) so a worker's owner is woken instead of blocking
+/// forever on a report that never comes.
+#[tokio::test]
+async fn after_run_fires_with_error_when_the_run_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create_named(dir.path(), "w1").unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    // Replace the transcript file with a directory, so every append fails.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let rec = Recorder::default();
+    let log = Arc::new(AfterRunLog::default());
+    let mut cfg = agent_config(fake_stream_fn(&rec), vec![], Some(session));
+    cfg.hooks = HooksSet::one(log.clone());
+
+    let mut agent = Agent::new(cfg);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let res = agent.run("do it", tx).await;
+
+    assert!(res.is_err(), "a sabotaged session makes the run fail: {res:?}");
+    assert_eq!(
+        *log.stops.lock().unwrap(),
+        vec![StopReason::Error],
+        "the hook fires exactly once, with the error stop reason"
     );
 }
