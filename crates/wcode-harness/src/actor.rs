@@ -471,6 +471,8 @@ async fn run(
     let follow_up = agent.follow_up_sender();
     let cancel = agent.cancel_token();
     let hooks = agent.hooks().clone();
+    // Read-only handle for mid-run `GetHistory`/`SideAsk` (see the arms below).
+    let side = agent.side_handle();
 
     let mut run = Box::pin(agent.run(text, sink_tx));
     let result = loop {
@@ -516,6 +518,53 @@ async fn run(
                             from,
                             content,
                         });
+                    }
+                    // Read-only queries are answered mid-run from the context
+                    // snapshot `run_loop` republishes each turn — a `/btw` or
+                    // `/usage` never waits for the whole run. `side` was cloned
+                    // before the run borrowed the agent.
+                    Message::Ask {
+                        request: Request::GetHistory,
+                        reply,
+                        ..
+                    } => {
+                        let _ = reply.send(AgentEvent::History { messages: side.history() });
+                    }
+                    Message::Ask {
+                        request: Request::SideAsk { text },
+                        reply,
+                        ..
+                    } => {
+                        // A side ask is itself a model call: spawn it so it runs
+                        // alongside the run instead of stalling the inbox.
+                        let side = side.clone();
+                        tokio::spawn(async move {
+                            let event = match side.side_ask(&text).await {
+                                Ok(answer) => AgentEvent::SideAnswer {
+                                    text: answer.text,
+                                    usage: answer.usage,
+                                },
+                                Err(e) => AgentEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            };
+                            let _ = reply.send(event);
+                        });
+                    }
+                    // A mutation cannot apply mid-run (it needs `&mut Agent`), but
+                    // its contract is "next run": acknowledge now and re-queue it
+                    // as a `Tell` so it is applied silently at the run boundary —
+                    // instead of leaving the ask to time out (item-41 ASK_TIMEOUT).
+                    Message::Ask {
+                        from,
+                        request:
+                            req @ (Request::SetModel { .. }
+                            | Request::SetEffort { .. }
+                            | Request::SetPlanMode { .. }),
+                        reply,
+                    } => {
+                        let _ = reply.send(AgentEvent::Ack);
+                        deferred.push_back(Message::Tell { from, request: req });
                     }
                     other => deferred.push_back(other),
                 }
@@ -1263,5 +1312,178 @@ mod tests {
             "{texts:?}"
         );
         assert!(!texts.iter().any(|t| t.contains("let me in")), "{texts:?}");
+    }
+
+    #[tokio::test]
+    async fn side_ask_is_answered_mid_run() {
+        // Run one blocks in the gate (turn 1), so the actor is mid-run when the
+        // side ask arrives; it must be answered without waiting for the run.
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        // The side ask's own model call (empty tool list) pops this.
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("aside".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        // Run one, turn 2, after the gate releases.
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // run one is inside the tool, still in flight
+
+        // Answered now, not after the run: `ask` returns before we release.
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle.ask(Request::SideAsk { text: "why?".into() }),
+        )
+        .await
+        .expect("the side ask must not wait for the run")
+        .unwrap();
+        assert!(
+            matches!(&reply, AgentEvent::SideAnswer { text, .. } if text == "aside"),
+            "{reply:?}"
+        );
+
+        release.notify_one();
+        wait_for_end(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn get_history_is_answered_mid_run_from_the_snapshot() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap();
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), handle.ask(Request::GetHistory))
+            .await
+            .expect("history must not wait for the run")
+            .unwrap();
+        let AgentEvent::History { messages } = reply else {
+            panic!("expected History, got {reply:?}");
+        };
+        assert!(
+            messages.iter().any(|m| m.as_text() == "a"),
+            "the mid-run snapshot carries the submit: {messages:?}"
+        );
+
+        release.notify_one();
+        wait_for_end(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn a_deferred_command_is_acked_before_the_run_ends() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        for text in ["turn two", "run two"] {
+            rec.push(vec![
+                LlmStreamEvent::TextDelta(text.into()),
+                LlmStreamEvent::Done {
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                },
+            ]);
+        }
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        let handle =
+            SessionActor::spawn(Agent::new(agent_config(fake_stream_fn(&rec), vec![gate])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap();
+
+        // Acked now (mid-run), not left to time out; applied at the run boundary.
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle.ask(Request::SetModel { model: "m2".into() }),
+        )
+        .await
+        .expect("a deferred command must be acked, not hang")
+        .unwrap();
+        assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
+
+        release.notify_one();
+        wait_for_end(&mut rx).await; // run one ends on m1
+
+        handle.send(Request::Submit { text: "b".into() }).unwrap();
+        wait_for_end(&mut rx).await; // run two
+        assert_eq!(
+            rec.models(),
+            ["m1", "m1", "m2"],
+            "the swap applied after the run, not before"
+        );
     }
 }

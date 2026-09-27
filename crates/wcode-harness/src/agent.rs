@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use futures::StreamExt as _;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::{self, CompactOutcome, CompactionPolicy};
@@ -66,6 +67,10 @@ pub struct Agent {
     follow_tx: UnboundedSender<AgentMessage>,
     follow_rx: Option<UnboundedReceiver<AgentMessage>>,
     cancel: CancellationToken,
+    /// The context snapshot the run republishes at each turn boundary (see
+    /// `LoopConfig::ctx_snapshot`); [`Agent::side_handle`] clones it so the actor
+    /// can answer a mid-run read without the `&mut` the run holds.
+    ctx_snapshot: watch::Sender<Vec<AgentMessage>>,
 }
 
 impl Agent {
@@ -82,6 +87,10 @@ impl Agent {
             .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+        // Seeded with the initial context so a read before the first turn sees
+        // it; `run_loop` republishes at each boundary. `send_replace` is
+        // infallible even with no receivers, so only the sender is held.
+        let (ctx_snapshot, _ctx_rx) = watch::channel(cfg.context.clone());
         // An empty working_dir means "process cwd" (the historical default).
         let working_dir = if cfg.working_dir.as_os_str().is_empty() {
             default_working_dir()
@@ -107,6 +116,7 @@ impl Agent {
             follow_tx,
             follow_rx: Some(follow_rx),
             cancel: CancellationToken::new(),
+            ctx_snapshot,
         }
     }
 
@@ -225,6 +235,10 @@ impl Agent {
         }
         self.ctx.push(user);
 
+        // Cover the window between the submit and the first turn boundary: a
+        // read arriving before the loop's first publish still sees the question.
+        let _ = self.ctx_snapshot.send_replace(self.ctx.clone());
+
         let steering = self.steer_rx.take().expect("steer_rx present between runs");
         let follow_ups = self
             .follow_rx
@@ -243,6 +257,7 @@ impl Agent {
             max_turns: self.max_turns,
             parallel: self.parallel_tools,
             compaction: self.compaction,
+            ctx_snapshot: self.ctx_snapshot.clone(),
             session: self.session.as_mut(),
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
@@ -314,28 +329,22 @@ impl Agent {
     /// retry/idle-timeout the configured `stream_fn` adapter applies internally,
     /// exactly as [`crate::compaction::summarize`] does. No cancel path in v1.
     pub async fn side_ask(&self, text: &str) -> Result<SideAnswer, LoopError> {
-        let mut msgs = self.ctx.clone();
-        msgs.push(AgentMessage::user_text(frame_btw(text)));
-        let mut stream = (self.stream_fn)(&msgs, &self.system, &[], &self.llm);
-        let mut out = String::new();
-        let mut usage = None;
-        while let Some(ev) = stream.next().await {
-            match ev {
-                LlmStreamEvent::TextDelta(delta) => out.push_str(&delta),
-                LlmStreamEvent::Done { usage: u, .. } => {
-                    usage = u;
-                    break;
-                }
-                LlmStreamEvent::Error { message, .. } => return Err(LoopError::Stream(message)),
-                _ => {}
-            }
-        }
-        let text = out.trim().to_string();
-        if text.is_empty() {
-            return Err(LoopError::Stream("side answer produced no text".to_string()));
-        }
-        Ok(SideAnswer { text, usage })
+        side_ask_with(&self.stream_fn, &self.ctx, &self.system, &self.llm, text).await
     }
+
+    /// A read-only handle the actor takes *before* a run borrows the agent, so a
+    /// mid-run `GetHistory`/`SideAsk` is answered from the context snapshot
+    /// `run_loop` republishes each turn, instead of waiting for the whole run.
+    /// See [`SideHandle`].
+    pub fn side_handle(&self) -> SideHandle {
+        SideHandle {
+            stream_fn: Arc::clone(&self.stream_fn),
+            system: self.system.clone(),
+            llm: self.llm.clone(),
+            ctx: self.ctx_snapshot.clone(),
+        }
+    }
+
     /// Summarize the older part of the conversation in place: keep the newest
     /// messages per [`CompactionPolicy`] and replace the rest with a single
     /// summary message. `instructions` focuses the summary (the
@@ -373,6 +382,67 @@ impl Agent {
 pub struct SideAnswer {
     pub text: String,
     pub usage: Option<Usage>,
+}
+
+/// A read-only view of an [`Agent`] the actor can mine *while a run holds the
+/// agent's `&mut`. It carries the same clones the run uses (`stream_fn`/
+/// `system`/`llm`) plus the context snapshot `run_loop` republishes each turn,
+/// so a mid-run `GetHistory`/`SideAsk` is answered from the latest completed
+/// turns instead of waiting for the whole run to finish.
+#[derive(Clone)]
+pub struct SideHandle {
+    stream_fn: StreamFn,
+    system: String,
+    llm: LlmOpts,
+    ctx: watch::Sender<Vec<AgentMessage>>,
+}
+
+impl SideHandle {
+    /// The latest turn-boundary context snapshot, owned (`send_replace` keeps
+    /// the value even with no receivers, so a read after the run still sees it).
+    pub fn history(&self) -> Vec<AgentMessage> {
+        self.ctx.subscribe().borrow().to_vec()
+    }
+
+    /// Answer `text` tool-free from the latest snapshot; semantics match
+    /// [`Agent::side_ask`].
+    pub async fn side_ask(&self, text: &str) -> Result<SideAnswer, LoopError> {
+        side_ask_with(&self.stream_fn, &self.history(), &self.system, &self.llm, text).await
+    }
+}
+
+/// The shared body of a side ask: frame `text` as a tool-free aside, run the raw
+/// `stream_fn` once with an EMPTY tool list, and fold `TextDelta` → text until
+/// `Done` (capturing `usage`). [`Agent::side_ask`] passes `&self.ctx`;
+/// [`SideHandle::side_ask`] passes the latest mid-run snapshot.
+async fn side_ask_with(
+    stream_fn: &StreamFn,
+    ctx: &[AgentMessage],
+    system: &str,
+    llm: &LlmOpts,
+    text: &str,
+) -> Result<SideAnswer, LoopError> {
+    let mut msgs = ctx.to_vec();
+    msgs.push(AgentMessage::user_text(frame_btw(text)));
+    let mut stream = (stream_fn)(&msgs, system, &[], llm);
+    let mut out = String::new();
+    let mut usage = None;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            LlmStreamEvent::TextDelta(delta) => out.push_str(&delta),
+            LlmStreamEvent::Done { usage: u, .. } => {
+                usage = u;
+                break;
+            }
+            LlmStreamEvent::Error { message, .. } => return Err(LoopError::Stream(message)),
+            _ => {}
+        }
+    }
+    let text = out.trim().to_string();
+    if text.is_empty() {
+        return Err(LoopError::Stream("side answer produced no text".to_string()));
+    }
+    Ok(SideAnswer { text, usage })
 }
 
 /// Frame a raw `/btw` question so the model knows it is a tool-free aside: the

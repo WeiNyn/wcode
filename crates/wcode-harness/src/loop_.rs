@@ -52,6 +52,10 @@ pub struct LoopConfig<'a> {
     /// When to auto-summarize the older prefix, and how much recent context to
     /// keep (see [`crate::compaction`]).
     pub compaction: CompactionPolicy,
+    /// A read-only window onto the run's context. The loop republishes the whole
+    /// `ctx` at each turn boundary (see `run_loop`) so the actor can answer a
+    /// mid-run `GetHistory`/`SideAsk` without the `&mut` the run holds.
+    pub ctx_snapshot: tokio::sync::watch::Sender<Vec<AgentMessage>>,
     /// Optional session to persist each produced message to as it is pushed
     /// into context — incremental, so a crash mid-run loses at most the
     /// in-flight message instead of the whole turn.
@@ -195,6 +199,11 @@ pub async fn run_loop(
                     }
                 }
             }
+
+            // Turn boundary: republish the prepared context so a mid-run read
+            // (`GetHistory`/`SideAsk`) sees the latest completed turns, not the
+            // run's start — the loop is the only holder of `ctx`.
+            let _ = cfg.ctx_snapshot.send_replace(ctx.clone());
 
             let mut content: Vec<ContentBlock> = Vec::new();
             let mut captured: Option<StopReason> = None;
@@ -963,6 +972,7 @@ mod cancel_in_tool_tests {
     fn config(tool: Tool, cancel: CancellationToken, stream_fn: StreamFn) -> LoopConfig<'static> {
         let (_steer_tx, steering) = mpsc::unbounded_channel();
         let (_follow_tx, follow_ups) = mpsc::unbounded_channel();
+        let (ctx_snapshot, _ctx_rx) = tokio::sync::watch::channel(Vec::new());
         LoopConfig {
             system: String::new(),
             tools: vec![tool],
@@ -976,6 +986,7 @@ mod cancel_in_tool_tests {
             max_turns: DEFAULT_MAX_TURNS,
             parallel: false,
             compaction: CompactionPolicy::default(),
+            ctx_snapshot,
             session: None,
         }
     }

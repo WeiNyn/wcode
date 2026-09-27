@@ -218,6 +218,7 @@ struct TestSetup {
 fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
     let (steer_tx, steering) = mpsc::unbounded_channel();
     let (follow_tx, follow_ups) = mpsc::unbounded_channel();
+    let (ctx_snapshot, _ctx_rx) = tokio::sync::watch::channel(Vec::new());
     TestSetup {
         cfg: LoopConfig {
             system: "sys".into(),
@@ -236,6 +237,7 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
             parallel: true,
             compaction: CompactionPolicy::default(),
+            ctx_snapshot,
         },
         steer_tx,
         follow_tx,
@@ -1522,6 +1524,7 @@ async fn a_steer_at_the_tool_free_boundary_starts_a_second_turn() {
 
     let (steer_tx, steering) = mpsc::unbounded_channel();
     let (_follow_tx, follow_ups) = mpsc::unbounded_channel();
+    let (ctx_snapshot, _ctx_rx) = tokio::sync::watch::channel(Vec::new());
 
     // Queue the steer on the FIRST stream call: turn 1's turn-start drain has
     // already run, so only the tail can pick it up.
@@ -1564,6 +1567,7 @@ async fn a_steer_at_the_tool_free_boundary_starts_a_second_turn() {
         max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
         parallel: true,
         compaction: CompactionPolicy::default(),
+        ctx_snapshot,
     };
 
     let mut ctx = vec![AgentMessage::user_text("hi")];

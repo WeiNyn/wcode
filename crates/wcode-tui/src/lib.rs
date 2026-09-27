@@ -476,10 +476,22 @@ async fn recv_opt(
     }
 }
 
-/// The budget for a side ask (`/btw`, `/usage`, a model/effort swap). A
-/// hung-but-open backend must not wedge the UI's spinner forever (item-41
-/// residual); the bounded `Backend::ask_within` is the seam.
+/// The budget for an instant command ask (`/usage`, a model/effort swap, a plan
+/// toggle). A hung-but-open backend must not wedge the UI's spinner forever
+/// (item-41 residual); the bounded `Backend::ask_within` is the seam.
 const ASK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The budget for an ask that is itself a model call (`/btw`, `/compact`): a
+/// full turn can take well over the instant-command budget.
+const ASK_TIMEOUT_LONG: Duration = Duration::from_secs(300);
+
+/// The right budget for `request` (see the two constants above).
+fn ask_budget(request: &Request) -> Duration {
+    match request {
+        Request::SideAsk { .. } | Request::Compact { .. } => ASK_TIMEOUT_LONG,
+        _ => ASK_TIMEOUT,
+    }
+}
 
 /// Ask one surface and feed the reply back as an app event, tagged with that
 /// surface's id. Runs off the main loop, so a slow reply never blocks input.
@@ -489,7 +501,8 @@ fn spawn_ask(
     reply_tx: &mpsc::UnboundedSender<AppEvent>,
     request: Request,
 ) {
-    spawn_ask_within(id, backend, reply_tx, request, ASK_TIMEOUT)
+    let budget = ask_budget(&request);
+    spawn_ask_within(id, backend, reply_tx, request, budget)
 }
 
 /// [`spawn_ask`] with an explicit bound — split out so a test can drive the
@@ -555,6 +568,26 @@ mod tests {
     use wcode_harness::loop_::DEFAULT_MAX_TURNS;
     use wcode_harness::message::AgentMessage;
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
+
+    #[test]
+    fn ask_budget_is_long_only_for_model_call_asks() {
+        // `/btw` and `/compact` are themselves model calls; everything else is
+        // an instant command.
+        assert_eq!(
+            ask_budget(&Request::SideAsk { text: "x".into() }),
+            ASK_TIMEOUT_LONG
+        );
+        assert_eq!(
+            ask_budget(&Request::Compact { instructions: None }),
+            ASK_TIMEOUT_LONG
+        );
+        assert_eq!(ask_budget(&Request::GetHistory), ASK_TIMEOUT);
+        assert_eq!(
+            ask_budget(&Request::SetModel { model: "m".into() }),
+            ASK_TIMEOUT
+        );
+        assert_eq!(ask_budget(&Request::SetPlanMode { on: true }), ASK_TIMEOUT);
+    }
 
     /// A live, never-streaming session backend — enough to answer `GetHistory`.
     fn backend() -> Backend {
@@ -689,7 +722,9 @@ mod tests {
             &asked,
             &backend,
             &tx,
-            Request::GetHistory,
+            // `Compact` (unlike `GetHistory`) is still deferred mid-run, so on a
+            // run that never ends it is never answered — the timeout must fire.
+            Request::Compact { instructions: None },
             Duration::from_millis(50),
         );
 
