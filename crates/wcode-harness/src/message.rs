@@ -109,6 +109,29 @@ impl AgentMessage {
     }
 }
 
+/// The text of the most recent `Assistant` message, if any — a compact "what it
+/// last said" for a status read (see `crate::protocol::Request::Status`). Joins
+/// the assistant's `Text` blocks with newlines; `None` when there is no assistant
+/// message or its text is blank.
+pub fn last_assistant_text(messages: &[AgentMessage]) -> Option<String> {
+    let message = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m, AgentMessage::Assistant { .. }))?;
+    let AgentMessage::Assistant { content, .. } = message else {
+        return None;
+    };
+    let text = content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

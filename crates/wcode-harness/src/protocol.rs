@@ -260,12 +260,18 @@ pub enum Request {
     /// Ask a side question (`/btw`): answer `text` tool-free, from the current
     /// context, WITHOUT recording it. A read — carries user content, names no
     /// `AgentMessage` (see the enum doc above). Reply:
-    /// [`AgentEvent::SideAnswer`]. A `SideAsk` arriving mid-run is deferred to
-    /// the next turn boundary (like any other inbox request), not refused.
+    /// [`AgentEvent::SideAnswer`]. A `SideAsk` arriving mid-run is answered from
+    /// the latest turn-boundary snapshot (like `GetHistory`), not refused.
     SideAsk { text: String },
     /// Read back the conversation so far. Reply:
     /// [`AgentEvent::History`].
     GetHistory,
+
+    /// A compact read of the session's latest activity — the text of its most
+    /// recent assistant message — WITHOUT shipping the transcript (unlike
+    /// [`Request::GetHistory`]). A `member`-style peek: the reply is one small
+    /// string, not the whole history. Reply: [`AgentEvent::Status`].
+    Status,
 
     /// Ask the **transport** for the sessions a server serves — serve order,
     /// root first. The one request that names no `Agent` method: an in-process
@@ -397,6 +403,7 @@ mod tests {
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
         roundtrip(Request::SideAsk { text: "why?".into() }, "side_ask");
+        roundtrip(Request::Status, "status");
         roundtrip(Request::ListSessions, "list_sessions");
         roundtrip(
             Request::Define {
@@ -447,6 +454,7 @@ mod tests {
         assert!(is_inbound(&Request::Wake { content: "x".into() }));
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
         assert!(!is_inbound(&Request::GetHistory));
+        assert!(!is_inbound(&Request::Status));
         assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
         assert!(!is_inbound(&Request::SetPlanMode { on: true }));
         assert!(!is_inbound(&Request::Cancel));

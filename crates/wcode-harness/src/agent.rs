@@ -404,6 +404,15 @@ impl SideHandle {
         self.ctx.subscribe().borrow().to_vec()
     }
 
+    /// The latest snapshot's last-assistant text — a compact status read
+    /// (`crate::protocol::Request::Status`) that borrows the watch value instead
+    /// of cloning the whole transcript.
+    pub fn last_assistant_text(&self) -> Option<String> {
+        let rx = self.ctx.subscribe();
+        let messages = rx.borrow();
+        crate::message::last_assistant_text(&messages[..])
+    }
+
     /// Answer `text` tool-free from the latest snapshot; semantics match
     /// [`Agent::side_ask`].
     pub async fn side_ask(&self, text: &str) -> Result<SideAnswer, LoopError> {

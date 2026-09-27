@@ -277,6 +277,7 @@ fn tag(e: &AgentEvent) -> &'static str {
         AgentEvent::Stopped { .. } => "stopped",
         AgentEvent::SideAnswer { .. } => "side_answer",
         AgentEvent::History { .. } => "history",
+        AgentEvent::Status { .. } => "status",
         AgentEvent::Sessions { .. } => "sessions",
         AgentEvent::Spawned { .. } => "spawned",
         AgentEvent::Todo { .. } => "todo",

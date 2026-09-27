@@ -163,7 +163,13 @@ pub enum AgentEvent {
     History {
         messages: Vec<AgentMessage>,
     },
-    /// Reply: the sessions a server serves, in serve order (root first), each
+    /// Reply: a compact status — the text of the session's most recent assistant
+    /// message — answering a [`crate::protocol::Request::Status`]. Never streamed
+    /// (see [`AgentEvent::Ack`]); one small string, not the transcript.
+    Status {
+        last_assistant_text: Option<String>,
+    },
+    /// Reply: the sessions a server serves, in order (root first), each
     /// with the model the server knows for it ([`crate::protocol::SessionInfo`]).
     /// Answers a [`crate::protocol::Request::ListSessions`]. Never streamed (see
     /// [`AgentEvent::Ack`]).
@@ -314,6 +320,12 @@ mod tests {
                 messages: vec![AgentMessage::user_text("hi")],
             },
             "history",
+        );
+        roundtrip(
+            AgentEvent::Status {
+                last_assistant_text: Some("last said".into()),
+            },
+            "status",
         );
         roundtrip(
             AgentEvent::MessageReceived {

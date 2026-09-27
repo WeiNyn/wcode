@@ -22,7 +22,7 @@ use wcode_harness::agent::{Agent, AgentConfig};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::hooks::{Hooks, HooksSet, ReadOnlyHooks};
 use wcode_harness::loop_::DEFAULT_MAX_TURNS;
-use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
@@ -459,7 +459,7 @@ impl Hooks for ReportBack {
         // comes. Forward the final reply verbatim ONLY on a clean `Stop` — on
         // any other ending (or an empty reply) synthesize a status line, so a
         // run that pushed no assistant cannot forward a PRIOR run's stale reply.
-        let content = match (stop, last_assistant_text(ctx)) {
+        let content = match (stop, wcode_harness::message::last_assistant_text(ctx)) {
             (StopReason::Stop, Some(text)) => text,
             _ => report_for_stop(&self.me, stop),
         };
@@ -489,27 +489,6 @@ fn report_for_stop(me: &SessionId, stop: StopReason) -> String {
         StopReason::MaxTurns => "stopped at the turn limit before a final reply",
     };
     format!("⚠ {me}: {why} — no result; the task may be incomplete")
-}
-
-/// The text of the last assistant message, if the run ended with one (a run
-/// that stopped on a bare tool call has none).
-pub(crate) fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
-    let message = ctx
-        .iter()
-        .rev()
-        .find(|m| matches!(m, AgentMessage::Assistant { .. }))?;
-    let AgentMessage::Assistant { content, .. } = message else {
-        return None;
-    };
-    let text = content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.trim().is_empty()).then_some(text)
 }
 
 /// The root session's A2A wiring: the address book, the factory, and the root's
@@ -721,6 +700,7 @@ mod tests {
     use std::time::Duration;
 
     use wcode_harness::event::AgentEvent;
+    use wcode_harness::message::ContentBlock;
     use wcode_harness::protocol::Request;
     use wcode_harness::streamfn::{LlmEndpoint, LlmProfile, LlmProvider, LlmStream, ModelProfiles};
 
@@ -1578,6 +1558,8 @@ mod tests {
         let o = orchestrator();
         let root: Vec<String> = o.tools().iter().map(|t| t.name().to_string()).collect();
         assert!(root.contains(&"task".to_string()), "root tools: {root:?}");
+        // `member` is root-only too: only the orchestrator inspects/stops peers.
+        assert!(root.contains(&"member".to_string()), "root tools: {root:?}");
 
         let defaults: Vec<String> =
             default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new())
@@ -1585,8 +1567,8 @@ mod tests {
             .map(|t| t.name().to_string())
             .collect();
         assert!(
-            !defaults.contains(&"task".to_string()),
-            "the default set must not offer `task`: {defaults:?}"
+            !defaults.contains(&"task".to_string()) && !defaults.contains(&"member".to_string()),
+            "the default set must not offer `task`/`member`: {defaults:?}"
         );
     }
 }

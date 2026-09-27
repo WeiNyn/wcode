@@ -1,9 +1,9 @@
 //! The `member` tool: inspect or stop a teammate mid-run (§10.1).
 //!
-//! The kernel answers `GetHistory`/`SideAsk` from a turn-boundary snapshot while
-//! a run is in flight, and services `Cancel` immediately — so all three ops work
+//! The kernel answers `Status`/`SideAsk` from a turn-boundary snapshot while a
+//! run is in flight, and services `Cancel` immediately — so all three ops work
 //! while the member is thinking or inside a tool call, without waiting for its
-//! run to end.
+//! run to end. `Status` is a lean read (one string), not the whole transcript.
 
 use std::time::{Duration, Instant};
 
@@ -14,11 +14,11 @@ use wcode_harness::protocol::{MemberState, Request, SessionId};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 use wcode_protocol::{AskError, Registry};
 
-use crate::agents::{Phonebook, last_assistant_text};
+use crate::agents::Phonebook;
 use crate::tools::message::address;
 
-/// Budget for `status` — a `GetHistory` read, answered from the member's latest
-/// turn snapshot even while it runs. Instant in practice.
+/// Budget for `status` — a lean `Request::Status` read, answered from the
+/// member's latest turn snapshot even while it runs. Instant in practice.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Budget for `ask` — the member's own model call.
 const ASK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -67,12 +67,9 @@ impl Member {
             Ok(backend) => backend,
             Err(e) => return error(format!("cannot reach {to}: {e}")),
         };
-        match backend
-            .ask_within(Request::GetHistory, STATUS_TIMEOUT)
-            .await
-        {
-            Ok(AgentEvent::History { messages }) => {
-                let work = last_assistant_text(&messages)
+        match backend.ask_within(Request::Status, STATUS_TIMEOUT).await {
+            Ok(AgentEvent::Status { last_assistant_text }) => {
+                let work = last_assistant_text
                     .unwrap_or_else(|| "(no completed work yet)".to_string());
                 ToolOutput {
                     output: format!("[{state}] {to} · {work}"),

@@ -434,6 +434,9 @@ async fn dispatch(
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },
+        Request::Status => AgentEvent::Status {
+            last_assistant_text: crate::message::last_assistant_text(agent.messages()),
+        },
         // A served peer is defined by a socket server's injected handler; an
         // in-process session has no factory, so it can only refuse.
         Request::Define { .. } => AgentEvent::Error {
@@ -529,6 +532,15 @@ async fn run(
                         ..
                     } => {
                         let _ = reply.send(AgentEvent::History { messages: side.history() });
+                    }
+                    Message::Ask {
+                        request: Request::Status,
+                        reply,
+                        ..
+                    } => {
+                        let _ = reply.send(AgentEvent::Status {
+                            last_assistant_text: side.last_assistant_text(),
+                        });
                     }
                     Message::Ask {
                         request: Request::SideAsk { text },
@@ -1485,5 +1497,64 @@ mod tests {
             ["m1", "m1", "m2"],
             "the swap applied after the run, not before"
         );
+    }
+
+    #[tokio::test]
+    async fn ask_status_is_answered_mid_run_from_the_snapshot() {
+        // A lean `Status` (no transcript): the member's last assistant text,
+        // answered while a run is in flight from the turn-boundary snapshot.
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        // Seed an assistant so the mid-run snapshot has a "last work".
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![gate]);
+        cfg.context = vec![AgentMessage::Assistant {
+            content: vec![crate::message::ContentBlock::Text {
+                text: "seeded work".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }];
+        let handle = SessionActor::spawn(Agent::new(cfg));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // run is inside the tool
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), handle.ask(Request::Status))
+            .await
+            .expect("status must not wait for the run")
+            .unwrap();
+        let AgentEvent::Status { last_assistant_text } = reply else {
+            panic!("expected Status, got {reply:?}");
+        };
+        assert_eq!(last_assistant_text.as_deref(), Some("seeded work"));
+
+        release.notify_one();
+        wait_for_end(&mut rx).await;
     }
 }
