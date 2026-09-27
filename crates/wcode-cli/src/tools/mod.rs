@@ -9,6 +9,7 @@ pub mod edit;
 pub mod edits;
 pub mod find;
 pub mod grep;
+pub mod member;
 pub mod message;
 pub mod peers;
 pub mod read;

@@ -234,7 +234,12 @@ the composed system prompt (instructions included) and exits — no model needed
 
 With `--agents` and a `[team]`, wcode spawns each member at startup and the
 root's system prompt gains a `# Your team` block listing them by name (and role);
-members are addressed by name with `message`. A `[team]` without `--agents` is an
+members are addressed by name with `message`. The root also gets `member`:
+`op = "status"` peeks a member's last completed work (no model call), `op = "ask"`
+puts a tool-free question to the member's own model, and `op = "cancel"` stops its
+in-flight run — all three work while the member is mid-run (a read comes from its
+last turn boundary, a cancel takes effect without waiting for the run to end). A
+`[team]` without `--agents` is an
 error, and a served `--owner` worker never sees the block. An
 `[orchestrator] guidelines` string (also requiring `--agents`) is appended as a
 `# Orchestrator workflow` section after the team roster, so the workflow can

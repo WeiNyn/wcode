@@ -35,6 +35,7 @@ use crate::session_groups::{self, SessionGroup};
 use crate::tasks::TaskList;
 use crate::tools::background::Background;
 use crate::tools::default_tools;
+use crate::tools::member::Member;
 use crate::tools::message::Message;
 use crate::tools::spawn::Spawn;
 
@@ -492,7 +493,7 @@ fn report_for_stop(me: &SessionId, stop: StopReason) -> String {
 
 /// The text of the last assistant message, if the run ended with one (a run
 /// that stopped on a bare tool call has none).
-fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
+pub(crate) fn last_assistant_text(ctx: &[AgentMessage]) -> Option<String> {
     let message = ctx
         .iter()
         .rev()
@@ -560,6 +561,11 @@ impl Orchestrator {
             erased(crate::tools::peers::Peers::new(
                 self.phonebook.clone(),
                 self.registry.clone(),
+            )),
+            erased(Member::new(
+                self.registry.clone(),
+                self.id.clone(),
+                self.phonebook.clone(),
             )),
             // The plan — root-only: only the root holds this tool set.
             erased(crate::tools::task::Task::new(
