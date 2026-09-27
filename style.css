@@ -115,9 +115,16 @@ section { margin-top: 2.75rem; }
 .stats b { display: block; font-size: 1.55rem; line-height: 1.25; color: var(--accent); }
 .stats span { color: var(--muted); font-size: 0.8rem; }
 
-/* Tool table */
-.tools table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
-.tools th, .tools td { text-align: left; vertical-align: top; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
-.tools th { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+/* Tables (tools + comparison) */
+table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
 .tools td:first-child { color: var(--fg); }
 .tools td:last-child { color: var(--muted); }
+
+/* The comparison: accent the "wcode" column */
+.compare td:first-child { color: var(--muted); white-space: nowrap; }
+.compare th:last-child, .compare td:last-child { color: var(--fg); }
+.compare th:last-child { color: var(--accent); }
+.compare p { color: var(--muted); }
+.compare .note { font-size: 0.9rem; }

@@ -3,31 +3,36 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>wcode — a small, token-lean, team-first coding agent for the terminal</title>
+    <title>wcode — a team- and workflow-first coding agent for the terminal</title>
     <meta
       name="description"
-      content="wcode is a minimal terminal coding agent: a ~10k-line Rust kernel over any OpenAI-compatible endpoint, token-lean by design (content-addressed edits, bounded output, compaction), and built for agent teams and workflows."
+      content="wcode is a terminal coding agent built around teams and workflows: declare a team and a task DAG, then peek at, ask, or stop any member live — instead of firing off an opaque subagent and waiting for one answer. A ~10k-line Rust kernel over any OpenAI-compatible endpoint."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
     <main>
-      <!-- Hero: the three ideas, up front -->
+      <!-- Hero: teams & workflows, up front -->
       <header class="hero">
         <h1>wcode</h1>
         <p class="pitch">
-          A minimal, pi-like coding agent for the terminal —
-          <strong>small</strong>, <strong>token-lean</strong>, and
-          <strong>team-first</strong>.
+          A coding agent for the terminal, built around
+          <strong>teams</strong> and <strong>workflows</strong> — not a single
+          agent that fires off opaque subagents.
+        </p>
+        <p class="built-on">
+          Declare a team and a task DAG; the orchestrator delegates, and every
+          member stays <strong>addressable and controllable live</strong> — peek
+          at its work, ask it a question, or stop it, without waiting for it to
+          finish.
         </p>
         <p class="built-on">
           Four Rust crates, ~52,000 lines: a <strong>~10k-line kernel</strong>
-          (<code>wcode-harness</code> — event loop, tool dispatch, hooks, JSONL
-          sessions), a socket protocol (<code>wcode-protocol</code>), a
-          full-screen TUI (<code>wcode-tui</code>), and a thin CLI
-          (<code>wcode-cli</code>). One binary over any OpenAI-compatible
-          endpoint.
+          (<code>wcode-harness</code>), a socket protocol
+          (<code>wcode-protocol</code>), a full-screen TUI
+          (<code>wcode-tui</code>), and a thin CLI (<code>wcode-cli</code>). One
+          binary over any OpenAI-compatible endpoint.
         </p>
         <p class="cta">
           <a class="btn" href="#install">Install</a>
@@ -35,7 +40,6 @@
         </p>
       </header>
 
-      <!-- By the numbers (verifiable, not marketing) -->
       <section class="stats" aria-label="by the numbers">
         <div><b>4</b><span>crates</span></div>
         <div><b>~52k</b><span>lines of Rust</span></div>
@@ -45,41 +49,127 @@
         <div><b>MIT</b><span>licensed</span></div>
       </section>
 
-      <!-- The main idea (README: philosophy + design + team) -->
-      <section class="pillars">
-        <h2>Three ideas, taken seriously</h2>
+      <!-- The focus: teams & workflows -->
+      <section id="teams" class="focus">
+        <h2>Teams and workflows, first-class</h2>
         <ul class="grid">
           <li>
-            <h3><span class="num">1</span>Simple</h3>
+            <h3>Declare the team</h3>
             <p>
-              One small kernel (<code>wcode-harness</code>): an event loop, tool
-              dispatch, hooks, JSONL sessions — and a thin CLI on top. Absent by
-              design: MCP, a subagent framework, permission prompts, behavior
-              config. Policy lives in code, via <code>Hooks</code>.
+              <code>[team]</code> names your members at startup — or
+              <code>spawn</code> one at runtime. Each gets its own
+              <code>model</code>, <code>role</code>, <code>tools</code>,
+              <code>read_only</code>, <code>effort</code>, and even its own
+              provider. Address a member by name with <code>message</code>;
+              <code>peers</code> lists the roster with live state.
             </p>
           </li>
           <li>
-            <h3><span class="num">2</span>Token-minimal, built in</h3>
+            <h3>Declare the workflow</h3>
             <p>
-              Content-addressed <code>read</code>/<code>edit</code> — a line's
-              5-char anchor is its address, so old code is never re-typed.
-              <code>bash</code> spills large output to a file and returns a
-              bounded preview. Auto-compaction keeps the window lean, and an
-              <code>rtk</code> hook can proxy shell output. Fewer tokens, less
-              context drift.
+              <code>[workflow]</code> is a real <strong>task DAG</strong>, not a
+              to-do list: nodes with <code>deps</code> edges, <code>gate</code>
+              nodes, and rework caps. A scheduler dispatches ready nodes, and a
+              gate's <code>reject</code> re-opens the work it judges — so
+              "review it" is an enforced edge, not a prompt.
             </p>
           </li>
           <li>
-            <h3><span class="num">3</span>Teams &amp; workflows first</h3>
+            <h3>Stay in control</h3>
             <p>
-              Spawn named members, <code>message</code> them by name, and
-              <code>member</code> them to peek at — or stop — a run mid-flight. A
-              real task DAG with gates, dependency edges, and rework caps.
-              Declare the whole team and workflow in <code>[team]</code> /
-              <code>[workflow]</code>. Each member is its own surface in the TUI.
+              The <code>member</code> tool works <strong>mid-run</strong>:
+              <code>status</code> peeks a member's last completed work,
+              <code>ask</code> puts a question to it, and <code>cancel</code>
+              stops it — all without waiting for its turn to end. The
+              orchestrator never blocks on a worker.
             </p>
           </li>
         </ul>
+      </section>
+
+      <!-- The benefit, spelled out -->
+      <section class="compare">
+        <h2>A team, not a subagent</h2>
+        <p>
+          A typical agent spawns a subagent for a task and blocks until it
+          returns one string — you can't see it, steer it, or stop it, and the
+          plan is whatever the model improvised. wcode makes every worker a
+          first-class member of a declared team.
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>a normal subagent flow</th>
+              <th>wcode</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>while it runs</td>
+              <td>a black box — you wait for one return value</td>
+              <td><code>member status</code> peeks its work, <code>ask</code> questions it, <code>cancel</code> stops it</td>
+            </tr>
+            <tr>
+              <td>control</td>
+              <td>none — no interrupt, no redirect</td>
+              <td><code>message</code> steers it at the next turn; <code>member cancel</code> kills a stuck run</td>
+            </tr>
+            <tr>
+              <td>the plan</td>
+              <td>improvised by the model, unenforced</td>
+              <td>a declared <strong>task DAG</strong> — <code>deps</code> edges, gates, rework caps, a scheduler</td>
+            </tr>
+            <tr>
+              <td>verification</td>
+              <td>a hope in the prompt ("please review")</td>
+              <td>a <strong>gate edge</strong> — a <code>reject</code> re-opens the work; a hook refuses an unverified completion</td>
+            </tr>
+            <tr>
+              <td>blocking</td>
+              <td>the parent turn blocks until it returns</td>
+              <td><strong>async</strong> — the orchestrator keeps going and is woken by the worker's report (even on failure)</td>
+            </tr>
+            <tr>
+              <td>the worker</td>
+              <td>inherits everything; context discarded</td>
+              <td>own model / role / tools / read-only / effort / <strong>provider</strong>; a <strong>persistent</strong> session</td>
+            </tr>
+            <tr>
+              <td>where it runs</td>
+              <td>in-process only</td>
+              <td>in-process <strong>or</strong> across a socket — a member on another machine is reached the same way</td>
+            </tr>
+            <tr>
+              <td>in the UI</td>
+              <td>one collapsed tool result</td>
+              <td>its <strong>own surface</strong> + a live sidebar row (state + current action)</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="note">
+          A single agent is still one flag away — teams are opt-in
+          (<code>--agents</code>).
+        </p>
+      </section>
+
+      <!-- Example session: an orchestrator delegating -->
+      <section aria-label="example session">
+        <h2>An orchestrator, delegating</h2>
+        <div class="term">
+          <div class="term-bar"><span></span><span></span><span></span></div>
+          <pre><code><span class="p">$</span> wcode --agents --config .wcode/team.toml
+<span class="dim"># your team · explorer (read-only) · builder · reviewer</span>
+
+<span class="p">❯</span> implement the retry policy, then have it reviewed
+<span class="dim">⚙ message(explorer) → "map the retry seam"          ✓ done</span>
+<span class="dim">⚙ task(create) #1 explore → #2 implement → #3 verify</span>
+<span class="dim">⚙ message(builder)  → "#2 implement"                ● running</span>
+<span class="dim">⚙ member(builder)   → "what are you on?"            ✓ 1 line</span>
+<span class="dim">⚙ message(reviewer) → "#3 review the diff"          ○ queued</span>
+
+<span class="dim">read · grep/find · bash · edit — content-addressed, token-lean</span></code></pre>
+        </div>
       </section>
 
       <!-- What's in the box -->
@@ -89,21 +179,29 @@
           <li>
             <h3>Full-screen TUI</h3>
             <p>
-              Three bands — transcript, input, status. Streaming markdown
-              (CommonMark + GFM, syntax-highlighted), a 7-theme catalog with a
-              <code>Plain→Named→Indexed→Rgb</code> color ladder, browse mode,
-              drag-to-select, and a live team sidebar. It's a
-              <code>wcode-protocol</code> client, so it drives a local or a
-              socket session identically.
+              Each member is its <strong>own surface</strong>, with a live
+              sidebar (state + current action). Streaming markdown (CommonMark +
+              GFM, syntax-highlighted), a 7-theme catalog, browse mode, and
+              drag-to-select. A <code>wcode-protocol</code> client, so a local or
+              socket session is driven identically.
             </p>
           </li>
           <li>
-            <h3>Sessions that persist</h3>
+            <h3>Persistent sessions</h3>
             <p>
-              Every conversation is a JSONL file: resume it, group a whole team's
-              sessions together, and search across all of them with
-              <code>session_search</code>. One-shot <code>-p</code>, an
-              interactive line REPL, or the TUI — the same session.
+              Every conversation is a JSONL file. A team's sessions persist as a
+              <strong>group</strong> and resume together, and
+              <code>session_search</code> reads across all of them. One-shot
+              <code>-p</code>, a line REPL, or the TUI — the same session.
+            </p>
+          </li>
+          <li>
+            <h3>Token-minimal by design</h3>
+            <p>
+              Content-addressed <code>read</code>/<code>edit</code> — a line's
+              5-char anchor is its address, so old code is never re-typed.
+              <code>bash</code> spills large output to a file and returns a
+              bounded preview. Auto-compaction keeps the window lean.
             </p>
           </li>
           <li>
@@ -125,43 +223,16 @@
             </p>
           </li>
           <li>
-            <h3>Extensible by code</h3>
+            <h3>Small, and extensible by code</h3>
             <p>
-              A tool is a <code>TypedTool</code> (typed args + a JSON schema). A
-              policy is a <code>Hooks</code> impl — a reason from
-              <code>before_tool_call</code> blocks the call and feeds it back to
-              the model. A provider is a <code>StreamFn</code>. No config needed.
-            </p>
-          </li>
-          <li>
-            <h3>Any endpoint</h3>
-            <p>
-              Speaks the OpenAI chat-completions wire, with a Responses-wire
-              path. Retry/backoff on transient errors, a stream-stall timeout,
-              and keyless local endpoints (Ollama, llama.cpp, vLLM) out of the
-              box.
+              One kernel (<code>wcode-harness</code>) — no MCP, no permission
+              prompts, no behavior config. A tool is a <code>TypedTool</code>, a
+              policy is a <code>Hooks</code> impl, a provider is a
+              <code>StreamFn</code>. Any OpenAI-compatible endpoint, keyless
+              local included.
             </p>
           </li>
         </ul>
-      </section>
-
-      <!-- Example session: an orchestrator delegating -->
-      <section aria-label="example session">
-        <h2>An orchestrator, delegating</h2>
-        <div class="term">
-          <div class="term-bar"><span></span><span></span><span></span></div>
-          <pre><code><span class="p">$</span> wcode --agents --config .wcode/team.toml
-<span class="dim"># your team · explorer (read-only) · builder · reviewer</span>
-
-<span class="p">❯</span> implement the retry policy, then have it reviewed
-<span class="dim">⚙ message(explorer) → "map the retry seam"          ✓ done</span>
-<span class="dim">⚙ task(create) #1 explore → #2 implement → #3 verify</span>
-<span class="dim">⚙ message(builder)  → "#2 implement"                ● running</span>
-<span class="dim">⚙ member(builder)   → "what are you on?"            ✓ 1 line</span>
-<span class="dim">⚙ message(reviewer) → "#3 review the diff"          ○ queued</span>
-
-<span class="dim">read · grep/find · bash · edit — content-addressed, token-lean</span></code></pre>
-        </div>
       </section>
 
       <!-- The tool set -->
