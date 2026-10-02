@@ -15,6 +15,7 @@ use wcode_protocol::Backend;
 
 mod agents;
 mod config;
+mod frontmatter;
 mod instructions;
 mod repl;
 mod rtk;

@@ -247,13 +247,11 @@ fn load_skill(path: &Path) -> Result<Skill, String> {
 
 /// Parse the leading `---` YAML frontmatter block.
 fn parse_frontmatter(text: &str) -> Result<Frontmatter, String> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let rest = text
-        .strip_prefix("---\r\n")
-        .or_else(|| text.strip_prefix("---\n"))
-        .ok_or("missing frontmatter (no leading `---`)")?;
-    let end = rest.find("\n---").ok_or("unterminated frontmatter")?;
-    serde_yaml_ng::from_str(&rest[..end]).map_err(|e| format!("invalid YAML: {e}"))
+    // The delimiter split lives in [`crate::frontmatter`] (shared with
+    // `agent_files.rs`); a SKILL.md's body is its own document, read on
+    // demand by the `read` tool, so it is discarded here.
+    let yaml = crate::frontmatter::frontmatter(text)?;
+    serde_yaml_ng::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))
 }
 
 /// A skill name: 1..=64 chars of `[a-z0-9-]`, no leading/trailing/consecutive
