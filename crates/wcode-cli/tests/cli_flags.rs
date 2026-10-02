@@ -145,6 +145,13 @@ fn a_project_team_auto_enables_agents_without_the_flag() {
         !stderr.contains("requires --agents"),
         "agents must auto-enable from the team: {stderr}"
     );
+    // The team actually spawned: `team: <names>` on stdout proves agents mode
+    // turned on (a team-less run prints no such line).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("team: explorer"),
+        "the team must be instantiated: {stdout}"
+    );
 }
 
 /// A temp cwd shipping an agent `.md` (and a temp `$HOME`). `toml`, when
@@ -202,4 +209,72 @@ fn no_project_config_disables_agent_md_discovery() {
     let dir = project_with_agent_md("");
     let stdout = dump_prompt(&dir, &["--no-project-config"]);
     assert!(!stdout.contains("# Your team"), "{stdout}");
+}
+
+/// A temp `$HOME` whose GLOBAL `~/.config/wcode/config.toml` carries one
+/// `[[team]]` member (layer 1 — never gated by `--no-project-config`).
+fn global_team_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/wcode");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        "[[team]]\nname = \"explorer\"\nrole = \"global recon\"\n",
+    )
+    .unwrap();
+    home
+}
+
+#[test]
+fn no_project_config_keeps_the_global_team_and_auto_enables_agents() {
+    let home = global_team_home();
+    let cwd = tempfile::tempdir().unwrap(); // no project config at all
+
+    // Observable (a): the GLOBAL team still loads under the opt-out — it renders.
+    let prompt = Command::new(env!("CARGO_BIN_EXE_wcode"))
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env_remove("WCODE_PROJECT_CONFIG")
+        .env_remove("WCODE_CONFIG")
+        .args(["--no-project-config", "--dump-system-prompt"])
+        .output()
+        .expect("spawn the wcode binary");
+    let stdout = String::from_utf8_lossy(&prompt.stdout);
+    assert!(
+        stdout.contains("# Your team"),
+        "the global [team] must survive --no-project-config: {stdout}"
+    );
+    assert!(stdout.contains("- explorer — global recon"), "{stdout}");
+
+    // Observable (b): it still auto-enables agents, so the `[team] requires
+    // --agents` guard does NOT fire. A control run with a team-less global config
+    // would exit 2 — here the run proceeds to the (refused) provider.
+    let run = Command::new(env!("CARGO_BIN_EXE_wcode"))
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env("WCODE_RETRY_MAX", "0")
+        .env_remove("WCODE_PROJECT_CONFIG")
+        .env_remove("WCODE_CONFIG")
+        .args([
+            "--no-project-config",
+            "--no-session",
+            "-p",
+            "hi",
+            "--model",
+            "test",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+        ])
+        .output()
+        .expect("spawn the wcode binary");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_ne!(
+        run.status.code(),
+        Some(2),
+        "the [team]-requires--agents guard fired: {stderr}"
+    );
+    assert!(
+        !stderr.contains("requires --agents"),
+        "the global [team] must auto-enable agents: {stderr}"
+    );
 }

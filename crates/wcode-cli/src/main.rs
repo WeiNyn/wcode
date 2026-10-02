@@ -602,7 +602,6 @@ fn load_config_raw(args: &mut Args) -> Config {
     }
     // D-B1: a non-empty folded `[team]` auto-enables agents mode, so `wcode`
     // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
-    // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
     args.agents |= !cfg.team.is_empty();
     cfg
 }
