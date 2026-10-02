@@ -59,8 +59,10 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
-   --no-project-config  ignore ./.wcode/config.toml + ./.wcode/team.toml and
-                        ./.wcode/agents/*.md (also WCODE_PROJECT_CONFIG=off)
+   --no-project-config  disable ALL auto-discovery: ./.wcode/{config,team}.toml,
+                        ./.wcode/agents/, and ~/.config/wcode/agents/ (also
+                        WCODE_PROJECT_CONFIG=off) — only the global config.toml
+                        and an explicit --config load
   --dump-system-prompt  print the composed system prompt and exit
   --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
@@ -115,7 +117,7 @@ env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
 env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
-env: WCODE_PROJECT_CONFIG=off disables auto-discovery of ./.wcode/{config,team}.toml and ./.wcode/agents/*.md
+env: WCODE_PROJECT_CONFIG=off disables ALL auto-discovery (./.wcode/{config,team}.toml, ./.wcode/agents/, ~/.config/wcode/agents/)
 env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
@@ -155,9 +157,10 @@ struct Args {
     /// `--agents`: register the `spawn` tool so this session can spawn worker
     /// agents (A2A, §10.1).
     agents: bool,
-    /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable auto-discovery
-    /// of `./.wcode/config.toml`, `./.wcode/team.toml`, and `./.wcode/agents/*.md`
-    /// (D-A5). Only the global config + the explicit `--config` overlay load.
+    /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable all
+    /// auto-discovery — the project `./.wcode/{config,team}.toml` + `.wcode/agents/`
+    /// and the global `~/.config/wcode/agents/` (D-A5). Only the global
+    /// `config.toml` + the explicit `--config` overlay load.
     no_project_config: bool,
     /// `--peer <name>=<socket>`: register a remote peer (a served session) so
     /// A2A messages reach it over its socket (§8, S4-4). Repeatable.

@@ -112,7 +112,8 @@ name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
 link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
 
-# A preset team the orchestrator starts with (requires --agents). One [[team]]
+# A preset team the orchestrator starts with (a non-empty [team] auto-enables
+# agents — no --agents needed). One [[team]]
 # entry per member; names are unique (a duplicate fails the load loudly). Keys:
 #   name      (required) the member's address, unique
 #   role      extra system-prompt text (`# Role`) appended to the worker blurb

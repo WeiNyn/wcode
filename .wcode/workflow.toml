@@ -1,5 +1,6 @@
 # .wcode/workflow.toml — wcode's feature pipeline (a [workflow] plan template).
-# Self-contained: use it as the single --config overlay, driving it with a task:
+# Self-contained (in this repo the project overlays auto-fold ahead of it): use
+# it as the explicit --config overlay, driving it with a task:
 #
 #   wcode --agents --config .wcode/workflow.toml --task "add dark mode"
 #   WCODE_CONFIG=.wcode/workflow.toml wcode --agents --task "add dark mode"
