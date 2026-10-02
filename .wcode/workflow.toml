@@ -16,7 +16,9 @@
 #
 #   explore → sketch → review-sketch → implement → verify → publish → ci
 #
-# Only one overlay is honored (--config beats WCODE_CONFIG), so this file is
+# Overlays fold over the global config — auto-discovered ./.wcode/config.toml,
+# then ./.wcode/team.toml, then the explicit --config/WCODE_CONFIG on top — so
+# this file is
 # self-contained: the dev team (the same members as .wcode/team.toml), the
 # orchestrator guidance, and the [tools] the explorer needs — plus the [workflow]
 # graph. {{task}} is substituted into node titles only (scripts are never

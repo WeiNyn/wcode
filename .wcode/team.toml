@@ -1,6 +1,7 @@
-# wcode's own development team (F3c). Overlay only — it adds the team,
-# orchestrator guidelines, and tools below on top of your global
-# ~/.config/wcode/config.toml (provider/model stay there). Use it via:
+# wcode's own development team (F3c). This repo auto-discovers it: it adds the
+# team, orchestrator guidelines, and tools below on top of your global
+# ~/.config/wcode/config.toml (provider/model stay there), so `wcode` (or
+# `wcode --agents`) starts the team with no flags. Elsewhere, load it via:
 #   wcode --agents --config .wcode/team.toml
 #   WCODE_CONFIG=.wcode/team.toml wcode --agents
 #
