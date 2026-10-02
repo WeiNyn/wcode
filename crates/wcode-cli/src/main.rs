@@ -13,6 +13,7 @@ use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, rig_stream_fn};
 use wcode_protocol::Backend;
 
+mod agent_files;
 mod agents;
 mod config;
 mod frontmatter;
@@ -586,7 +587,21 @@ fn load_config_raw(args: &mut Args) -> Config {
             }
         };
     }
+    // D-C2: fold discovered `.md` members UNDER the TOML `[team]` (a TOML member
+    // of the same name wins, so it is never overwritten). `discover` already
+    // returns project `.md`s ahead of global ones. `--no-project-config` skips
+    // the whole `.wcode/agents/` scan too.
+    if project {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let home = config_dir();
+        for member in agent_files::discover(&cwd, home.as_deref()) {
+            if !cfg.team.iter().any(|t| t.name == member.name) {
+                cfg.team.push(member);
+            }
+        }
+    }
     // D-B1: a non-empty folded `[team]` auto-enables agents mode, so `wcode`
+    // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
     // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
     args.agents |= !cfg.team.is_empty();
     cfg

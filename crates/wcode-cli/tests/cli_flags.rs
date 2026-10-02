@@ -146,3 +146,60 @@ fn a_project_team_auto_enables_agents_without_the_flag() {
         "agents must auto-enable from the team: {stderr}"
     );
 }
+
+/// A temp cwd shipping an agent `.md` (and a temp `$HOME`). `toml`, when
+/// non-empty, is written to `.wcode/team.toml` so a TOML/`.md` collision can be
+/// exercised.
+fn project_with_agent_md(toml: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let wcode = dir.path().join(".wcode");
+    let agents = wcode.join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("explorer.md"),
+        "---\nname: explorer\ndescription: recon\n---\nrecon body\n",
+    )
+    .unwrap();
+    if !toml.is_empty() {
+        std::fs::write(wcode.join("team.toml"), toml).unwrap();
+    }
+    dir
+}
+
+fn dump_prompt(dir: &tempfile::TempDir, extra: &[&str]) -> String {
+    let mut args: Vec<&str> = extra.to_vec();
+    args.push("--dump-system-prompt");
+    let output = Command::new(env!("CARGO_BIN_EXE_wcode"))
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env_remove("WCODE_PROJECT_CONFIG")
+        .env_remove("WCODE_CONFIG")
+        .args(&args)
+        .output()
+        .expect("spawn the wcode binary");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn an_agent_md_is_discovered_into_the_team() {
+    let dir = project_with_agent_md("");
+    let stdout = dump_prompt(&dir, &[]);
+    assert!(stdout.contains("# Your team"), "{stdout}");
+    // Body → role (D-C4), rendered on the roster line.
+    assert!(stdout.contains("- explorer — recon body"), "{stdout}");
+}
+
+#[test]
+fn a_toml_team_member_beats_a_same_named_agent_md() {
+    let dir = project_with_agent_md("[[team]]\nname = \"explorer\"\nrole = \"from-toml\"\n");
+    let stdout = dump_prompt(&dir, &[]);
+    assert!(stdout.contains("from-toml"), "the TOML member must win: {stdout}");
+    assert!(!stdout.contains("recon body"), "the same-named .md must lose: {stdout}");
+}
+
+#[test]
+fn no_project_config_disables_agent_md_discovery() {
+    let dir = project_with_agent_md("");
+    let stdout = dump_prompt(&dir, &["--no-project-config"]);
+    assert!(!stdout.contains("# Your team"), "{stdout}");
+}
