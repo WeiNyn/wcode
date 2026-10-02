@@ -42,7 +42,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -57,6 +57,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
+   --no-project-config  ignore ./.wcode/config.toml + ./.wcode/team.toml and
+                        ./.wcode/agents/*.md (also WCODE_PROJECT_CONFIG=off)
   --dump-system-prompt  print the composed system prompt and exit
   --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
@@ -70,6 +72,9 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    -h, --help         show this help
 
 config: ~/.config/wcode/config.toml
+  (project overlays auto-discovered: ./.wcode/config.toml, then
+   ./.wcode/team.toml, then agent .md files under ./.wcode/agents/;
+   --config layers on top; --no-project-config opts out)
   model = \"...\"      (required)
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
@@ -108,6 +113,7 @@ env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
 env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
+env: WCODE_PROJECT_CONFIG=off disables auto-discovery of ./.wcode/{config,team}.toml and ./.wcode/agents/*.md
 env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
@@ -147,6 +153,10 @@ struct Args {
     /// `--agents`: register the `spawn` tool so this session can spawn worker
     /// agents (A2A, §10.1).
     agents: bool,
+    /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable auto-discovery
+    /// of `./.wcode/config.toml`, `./.wcode/team.toml`, and `./.wcode/agents/*.md`
+    /// (D-A5). Only the global config + the explicit `--config` overlay load.
+    no_project_config: bool,
     /// `--peer <name>=<socket>`: register a remote peer (a served session) so
     /// A2A messages reach it over its socket (§8, S4-4). Repeatable.
     peers: Vec<String>,
@@ -250,6 +260,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--detect-endpoint" => a.detect_endpoint = true,
             "--dump-config" => a.dump_config = true,
             "--no-skills" => a.no_skills = true,
+            "--no-project-config" => a.no_project_config = true,
             "--sequential" => a.sequential = true,
             "--agents" => a.agents = true,
             "--peer" => {
@@ -458,16 +469,41 @@ fn config_dump(cfg: &Config) -> String {
 fn redact_key(key: Option<&str>) -> &'static str {
     if key.is_some() { "(set)" } else { "(none)" }
 }
-fn load_config_raw(args: &Args) -> Config {
+fn load_config_raw(args: &mut Args) -> Config {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
-    // `--config` / `WCODE_CONFIG`: an overlay file deep-merged over the global
-    // config (flag beats env; an empty env var is ignored).
+    // D-A5: `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables ALL
+    // `./.wcode/` auto-discovery — config.toml, team.toml, and agent `.md`s.
+    let project = !project_config_opt_out(
+        args.no_project_config,
+        std::env::var("WCODE_PROJECT_CONFIG").ok().as_deref(),
+    );
+    // `--config` / `WCODE_CONFIG`: an explicit overlay deep-merged on TOP of
+    // the global config and any auto-discovered project overlays (flag beats
+    // env; an empty env var is ignored). A missing explicit file is fatal.
     let env_overlay = std::env::var("WCODE_CONFIG").ok();
-    let overlay = resolve_overlay(args.config.as_deref(), env_overlay.as_deref());
-    let loaded = match overlay.as_deref() {
-        Some(path) => Config::load_with(Some(Path::new(path))),
-        None => Config::load(),
+    let explicit = resolve_overlay(args.config.as_deref(), env_overlay.as_deref());
+    // Auto-discovered project overlays (D-A1/D-A2), working dir only, in
+    // order: config.toml then team.toml (team overwrites config). A missing
+    // one is skipped silently inside `load_paths` (D-A4) — no `.exists()` here.
+    let auto: Vec<PathBuf> = if project {
+        [".wcode/config.toml", ".wcode/team.toml"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // The global config is always layer 1; the auto-discovered project overlays
+    // (D-A2) and the explicit overlay fold on top. With no auto paths this is
+    // exactly the single-overlay `load`/`load_with` path.
+    let loaded = if auto.is_empty() {
+        match explicit.as_deref() {
+            Some(path) => Config::load_with(Some(Path::new(path))),
+            None => Config::load(),
+        }
+    } else {
+        Config::load_with_overlays(explicit.as_deref().map(Path::new), &auto)
     };
     let mut cfg = match loaded {
         Ok(c) => c,
@@ -549,6 +585,9 @@ fn load_config_raw(args: &Args) -> Config {
             }
         };
     }
+    // D-B1: a non-empty folded `[team]` auto-enables agents mode, so `wcode`
+    // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
+    args.agents |= !cfg.team.is_empty();
     cfg
 }
 
@@ -802,6 +841,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     &[],
                     None,
                     None,
+                    args.no_project_config,
                     args.owner.as_deref(),
                     args.name.as_deref(),
                     None,
@@ -1549,6 +1589,7 @@ async fn dispatch(
                         &llm,
                         session_path.as_deref(),
                         args.agents,
+                        args.no_project_config,
                         args.config.as_deref(),
                         args.owner.as_deref(),
                         args.name.as_deref(),
@@ -1570,6 +1611,7 @@ async fn dispatch(
                         session_path.as_deref(),
                         no_session,
                         args.agents,
+                        args.no_project_config,
                         args.config.as_deref(),
                         args.owner.as_deref(),
                         args.name.as_deref(),
@@ -1586,6 +1628,7 @@ async fn dispatch(
                         Some(&path),
                         false,
                         args.agents,
+                        args.no_project_config,
                         args.config.as_deref(),
                         args.owner.as_deref(),
                         args.name.as_deref(),
@@ -1600,6 +1643,7 @@ async fn dispatch(
                     repl::exec_self(&repl::new_session_args(
                         &llm,
                         args.agents,
+                        args.no_project_config,
                         args.config.as_deref(),
                         args.owner.as_deref(),
                         args.name.as_deref(),
@@ -1629,6 +1673,7 @@ async fn dispatch(
             root.team,
             root.guidelines,
             args.config.as_deref(),
+            args.no_project_config,
             args.owner.as_deref(),
             args.name.as_deref(),
             orchestrator,
@@ -1653,7 +1698,7 @@ async fn main() {
     // optional endpoint detection, the provider diagnostic, and finally the
     // launch provider. Detection runs HERE so `to_llm_opts` captures the
     // detected base (a post-`settle_provider` set would be reverted).
-    let mut cfg = load_config_raw(&args);
+    let mut cfg = load_config_raw(&mut args);
     if detect_opt_in(&args) && cfg.base_url.is_none() && !selected_model_pins_base(&cfg) {
         match detect_endpoint().await {
             Some(url) => {
@@ -1727,6 +1772,13 @@ async fn main() {
         bg,
     )
     .await;
+}
+
+/// True when project-config auto-discovery is disabled: the `--no-project-config`
+/// flag wins, and an empty/whitespace `WCODE_PROJECT_CONFIG` counts as UNSET
+/// (mirrors `resolve_overlay`'s env handling). `off`/`false`/`0` disable (D-A5).
+fn project_config_opt_out(flag: bool, env: Option<&str>) -> bool {
+    flag || matches!(env.map(str::trim), Some("off" | "false" | "0"))
 }
 
 /// The config overlay path: the `--config` flag beats `WCODE_CONFIG`; an empty
@@ -2159,6 +2211,29 @@ mod tests {
         assert!(a.dump_config);
         assert!(!Args::default().detect_endpoint);
         assert!(!Args::default().dump_config);
+    }
+
+    #[test]
+    fn parse_no_project_config_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--no-project-config"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.no_project_config);
+        assert!(!Args::default().no_project_config);
+    }
+
+    #[test]
+    fn project_config_opt_out_matrix() {
+        // The flag wins outright.
+        assert!(project_config_opt_out(true, None));
+        assert!(project_config_opt_out(true, Some("on")));
+        // The env opt-out words (trimmed); an empty/absent value does NOT opt out.
+        for off in ["off", "false", "0", " off "] {
+            assert!(project_config_opt_out(false, Some(off)), "{off:?} opts out");
+        }
+        for on in [None, Some(""), Some("on"), Some("true"), Some("1")] {
+            assert!(!project_config_opt_out(false, on), "{on:?} keeps discovery");
+        }
     }
 
     #[test]

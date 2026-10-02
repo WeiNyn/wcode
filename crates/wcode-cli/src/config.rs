@@ -946,7 +946,7 @@ pub fn config_dir() -> Option<PathBuf> {
 
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
-        Self::load_with(None)
+        Self::load_with_overlays(None, &[])
     }
 
     /// Load the global `config.toml`, then optionally deep-merge an overlay file
@@ -956,12 +956,29 @@ impl Config {
     /// overrides without clobbering its siblings. A missing or unparseable
     /// overlay is a hard error; only a missing *global* file counts as absent.
     pub fn load_with(overlay: Option<&Path>) -> Result<Config, ConfigError> {
-        Self::load_paths(Self::default_path().as_deref(), overlay)
+        Self::load_with_overlays(overlay, &[])
     }
 
-    /// Load `global` (if present), then deep-merge `overlay` on top. Split out so
-    /// tests can point both at temp files.
-    fn load_paths(global: Option<&Path>, overlay: Option<&Path>) -> Result<Config, ConfigError> {
+    /// Load the global config, then fold `auto` (in order) and the `explicit`
+    /// overlay on top of it (project-team-loading D-A1..D-A4). Later entries win
+    /// per key — tables recurse, a scalar or array is replaced wholesale
+    /// ([`merge_values`], unchanged). Only a missing *global* file counts as
+    /// absent; a missing `auto` entry is skipped silently; a missing `explicit`
+    /// overlay is a hard error. The `merge` `[team]`/`[workflow]` validation runs
+    /// on the folded file.
+    pub fn load_with_overlays(
+        explicit: Option<&Path>,
+        auto: &[PathBuf],
+    ) -> Result<Config, ConfigError> {
+        Self::load_paths(Self::default_path().as_deref(), explicit, auto)
+    }
+    /// Load `global` (if present), fold `auto` then `explicit` on top, and merge
+    /// the environment. Split out so tests can point the files at temp paths.
+    fn load_paths(
+        global: Option<&Path>,
+        explicit: Option<&Path>,
+        auto: &[PathBuf],
+    ) -> Result<Config, ConfigError> {
         let base = match global.map(std::fs::read_to_string) {
             Some(Ok(text)) => Some(
                 toml::from_str::<toml::Value>(&text)
@@ -972,29 +989,51 @@ impl Config {
             Some(Err(e)) => return Err(ConfigError::Io(format!("config read error: {e}"))),
             None => None,
         };
-        let value = match overlay {
-            Some(path) => {
-                let text = std::fs::read_to_string(path).map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        ConfigError::Io(format!("config overlay not found: {}", path.display()))
-                    } else {
+        let mut value = base.unwrap_or_else(|| toml::Value::Table(toml::Table::new()));
+        // Auto-discovered overlays, in order (D-A2: team over config). A missing
+        // auto file is skipped silently (D-A4); a read/parse error still surfaces.
+        for path in auto {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let over = toml::from_str::<toml::Value>(&text).map_err(|e| {
                         ConfigError::Io(format!(
-                            "config overlay read error ({}): {e}",
+                            "config overlay parse error ({}): {e}",
                             path.display()
                         ))
-                    }
-                })?;
-                let over = toml::from_str::<toml::Value>(&text).map_err(|e| {
+                    })?;
+                    value = merge_values(value, over);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(ConfigError::Io(format!(
+                        "config overlay read error ({}): {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        // The explicit `--config`/`WCODE_CONFIG` overlay layers on top and,
+        // unlike an auto file, a missing one is a hard error (D-A3, unchanged).
+        if let Some(path) = explicit {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    ConfigError::Io(format!("config overlay not found: {}", path.display()))
+                } else {
                     ConfigError::Io(format!(
-                        "config overlay parse error ({}): {e}",
+                        "config overlay read error ({}): {e}",
                         path.display()
                     ))
-                })?;
-                merge_values(base.unwrap_or_else(|| toml::Value::Table(toml::Table::new())), over)
-            }
-            None => base.unwrap_or_else(|| toml::Value::Table(toml::Table::new())),
-        };
-        // The post-overlay file is what a `MissingModel` rescue must carry.
+                }
+            })?;
+            let over = toml::from_str::<toml::Value>(&text).map_err(|e| {
+                ConfigError::Io(format!(
+                    "config overlay parse error ({}): {e}",
+                    path.display()
+                ))
+            })?;
+            value = merge_values(value, over);
+        }
+        // The post-fold file is what a `MissingModel` rescue must carry.
         let file = FileConfig::deserialize(value)
             .map_err(|e| ConfigError::Io(format!("config parse error: {e}")))?;
         merge(EnvLike::from_env(), file)
@@ -1764,7 +1803,7 @@ name = "reviewer"
         )
         .unwrap();
 
-        let cfg = Config::load_paths(Some(&global), Some(&overlay)).unwrap();
+        let cfg = Config::load_paths(Some(&global), Some(&overlay), &[]).unwrap();
         // Provider/model come from the global file, untouched by the overlay.
         assert_eq!(cfg.model, "g");
         assert_eq!(cfg.base_url.as_deref(), Some("http://g"));
@@ -1783,7 +1822,7 @@ name = "reviewer"
         let global = dir.path().join("config.toml");
         std::fs::write(&global, "model = \"g\"\n").unwrap();
         let missing = dir.path().join("nope.toml");
-        let err = Config::load_paths(Some(&global), Some(&missing)).unwrap_err();
+        let err = Config::load_paths(Some(&global), Some(&missing), &[]).unwrap_err();
         let ConfigError::Io(msg) = &err else {
             panic!("wrong error: {err:?}")
         };
@@ -1800,7 +1839,7 @@ name = "reviewer"
         let overlay = dir.path().join("team.toml");
         std::fs::write(&global, "base_url = \"http://g\"\n").unwrap();
         std::fs::write(&overlay, "[[team]]\nname = \"a\"\n").unwrap();
-        let err = Config::load_paths(Some(&global), Some(&overlay)).unwrap_err();
+        let err = Config::load_paths(Some(&global), Some(&overlay), &[]).unwrap_err();
         let ConfigError::MissingModel(file) = &err else {
             panic!("wrong error: {err:?}")
         };
@@ -1809,6 +1848,99 @@ name = "reviewer"
             file.team.len(),
             1,
             "the overlay team survives into the rescue file"
+        );
+    }
+
+    // --- PART A: ordered overlay fold (project-team-loading D-A1..D-A4) ---------
+
+    #[test]
+    fn auto_overlays_fold_in_order_with_the_last_writer_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let team = dir.path().join("team.toml");
+        std::fs::write(
+            &config,
+            "model = \"m\"\nbase_url = \"http://first\"\n[tools]\nfind = true\n",
+        )
+        .unwrap();
+        std::fs::write(&team, "base_url = \"http://second\"\n[tools]\ngrep = true\n").unwrap();
+
+        let cfg = Config::load_paths(None, None, &[config, team]).unwrap();
+        // The scalar is last-writer-wins across the folded overlays...
+        assert_eq!(cfg.model, "m");
+        assert_eq!(cfg.base_url.as_deref(), Some("http://second"));
+        // ...while a table recurses: the earlier overlay's sibling key survives.
+        assert!(
+            cfg.tools.find,
+            "the earlier overlay's [tools] sibling survives"
+        );
+        assert!(cfg.tools.grep);
+    }
+
+    #[test]
+    fn team_toml_overrides_config_toml_in_one_fold() {
+        // The real shape: an auto `[[team]]` replaces the earlier auto `[[team]]`
+        // wholesale (not concatenated) — D-A2.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let team = dir.path().join("team.toml");
+        std::fs::write(&config, "model = \"m\"\n[[team]]\nname = \"from-config\"\n").unwrap();
+        std::fs::write(&team, "[[team]]\nname = \"from-team\"\n").unwrap();
+
+        let cfg = Config::load_paths(None, None, &[config, team]).unwrap();
+        assert_eq!(cfg.team.len(), 1);
+        assert_eq!(cfg.team[0].name, "from-team");
+    }
+
+    #[test]
+    fn a_missing_auto_overlay_is_skipped_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let missing = dir.path().join("team.toml");
+        std::fs::write(&config, "model = \"m\"\n").unwrap();
+
+        let cfg = Config::load_paths(None, None, &[config, missing]).unwrap();
+        assert_eq!(cfg.model, "m");
+    }
+
+    #[test]
+    fn a_missing_explicit_overlay_beside_auto_is_still_a_hard_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let missing = dir.path().join("nope.toml");
+        std::fs::write(&config, "model = \"m\"\n").unwrap();
+
+        let err = Config::load_paths(None, Some(&missing), &[config]).unwrap_err();
+        let ConfigError::Io(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("overlay not found"), "{msg}");
+    }
+
+    #[test]
+    fn missing_model_rescue_carries_the_post_fold_file() {
+        // A missing `model` anywhere: the rescue must carry the file after BOTH
+        // the auto fold and the explicit overlay.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let explicit = dir.path().join("extra.toml");
+        std::fs::write(
+            &config,
+            "base_url = \"http://g\"\n[[team]]\nname = \"a\"\n",
+        )
+        .unwrap();
+        std::fs::write(&explicit, "[orchestrator]\nguidelines = \"do\"\n").unwrap();
+
+        let err = Config::load_paths(None, Some(&explicit), &[config]).unwrap_err();
+        let ConfigError::MissingModel(file) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert_eq!(file.base_url.as_deref(), Some("http://g"));
+        assert_eq!(file.team.len(), 1, "the auto-fold team survives the rescue");
+        assert_eq!(
+            file.orchestrator.guidelines.as_deref(),
+            Some("do"),
+            "the explicit overlay survives the rescue"
         );
     }
 }

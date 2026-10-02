@@ -385,11 +385,13 @@ pub fn build_agent(
 /// Re-exec argv for `/reload`: resume the session (or `--no-session`) and
 /// forward the effective LLM opts so flag overrides survive the re-exec
 /// (the session only records model/effort *changes*, not launch flags).
+#[allow(clippy::too_many_arguments)]
 pub fn reload_args(
     llm: &LlmOpts,
     session: Option<&Path>,
     no_session: bool,
     agents: bool,
+    no_project_config: bool,
     config: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
@@ -401,7 +403,7 @@ pub fn reload_args(
         args.push("--resume".to_string());
         args.push(p.display().to_string());
     }
-    push_launch_args(&mut args, llm, agents, config, owner, name);
+    push_launch_args(&mut args, llm, agents, no_project_config, config, owner, name);
     args
 }
 
@@ -412,12 +414,13 @@ pub fn reload_args(
 pub fn new_session_args(
     llm: &LlmOpts,
     agents: bool,
+    no_project_config: bool,
     config: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    push_launch_args(&mut args, llm, agents, config, owner, name);
+    push_launch_args(&mut args, llm, agents, no_project_config, config, owner, name);
     args
 }
 
@@ -428,6 +431,7 @@ fn push_launch_args(
     args: &mut Vec<String>,
     llm: &LlmOpts,
     agents: bool,
+    no_project_config: bool,
     config: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
@@ -460,6 +464,12 @@ fn push_launch_args(
     // satisfy the `[team] requires --agents` guard (D16).
     if agents {
         args.push("--agents".to_string());
+    }
+    // Forward the auto-discovery opt-out so a `--no-project-config` run
+    // re-execs the same way (D-A5); discovery itself re-runs from the
+    // inherited cwd + `WCODE_PROJECT_CONFIG`.
+    if no_project_config {
+        args.push("--no-project-config".to_string());
     }
     // Forward a flag-supplied config overlay; a `WCODE_CONFIG` overlay survives
     // on its own (the environment is inherited across the re-exec).
@@ -520,6 +530,7 @@ pub async fn reload(
     session: Option<&Path>,
     no_session: bool,
     agents: bool,
+    no_project_config: bool,
     overlay: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
@@ -565,7 +576,7 @@ pub async fn reload(
             return;
         }
     }
-    let args = reload_args(llm, session, no_session, agents, overlay, owner, name);
+    let args = reload_args(llm, session, no_session, agents, no_project_config, overlay, owner, name);
     println!("reloading {} ...", exe.display());
     let _ = io::stdout().flush();
     exec_self(&args);
@@ -607,6 +618,7 @@ pub fn print_relaunch(
     llm: &LlmOpts,
     session: Option<&Path>,
     agents: bool,
+    no_project_config: bool,
     overlay: Option<&str>,
     owner: Option<&str>,
     name: Option<&str>,
@@ -614,7 +626,7 @@ pub fn print_relaunch(
     let Some(session) = session else {
         return;
     };
-    let args = reload_args(llm, Some(session), false, agents, overlay, owner, name);
+    let args = reload_args(llm, Some(session), false, agents, no_project_config, overlay, owner, name);
     println!("resume: {}", relaunch_line(&args));
 }
 
@@ -719,6 +731,7 @@ pub async fn run(
     team: &[TeamMember],
     guidelines: Option<&str>,
     overlay: Option<&str>,
+    no_project_config: bool,
     owner: Option<&str>,
     name: Option<&str>,
     orchestrator: Option<crate::agents::Orchestrator>,
@@ -1125,7 +1138,18 @@ pub async fn run(
                 println!("{DIM}/reload (rebuild + re-exec) is unavailable over a socket{RESET}")
             }
             Some(Command::Reload { no_session }) => {
-reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overlay, owner, name, Some(&in_flight)).await
+reload(
+                    &llm,
+                    session_path.as_deref(),
+                    no_session,
+                    orchestrator.is_some(),
+                    no_project_config,
+                    overlay,
+                    owner,
+                    name,
+                    Some(&in_flight),
+                )
+                .await
             }
             Some(Command::Btw(q)) => {
                 if q.trim().is_empty() {
@@ -1233,6 +1257,7 @@ reload(&llm, session_path.as_deref(), no_session, orchestrator.is_some(), overla
         &llm,
         session_path.as_deref(),
         orchestrator.is_some(),
+        no_project_config,
         overlay,
         owner,
         name,
@@ -1776,7 +1801,7 @@ mod tests {
             model_profiles: wcode_harness::streamfn::ModelProfiles::default(),
         };
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None),
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, false, None, None, None),
             vec![
                 "--resume",
                 "/s/a.jsonl",
@@ -1824,6 +1849,7 @@ mod tests {
             Some(Path::new("/s/a.jsonl")),
             false,
             false,
+            false,
             None,
             None,
             None,
@@ -1852,11 +1878,11 @@ mod tests {
         };
         // explicit flag wins, even with a session open
         assert_eq!(
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true, false, None, None, None)[..2],
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), true, false, false, None, None, None)[..2],
             ["--no-session".to_string(), "--model".to_string()],
         );
         // no session file: fresh start, cleared effort round-trips as "-"
-        let args = reload_args(&llm, None, false, false, None, None, None);
+        let args = reload_args(&llm, None, false, false, false, None, None, None);
         assert_eq!(args[0], "--no-session");
         assert!(args.windows(2).any(|w| w == ["--effort", "-"]));
         assert!(args.windows(2).any(|w| w == ["--endpoint", "chat"]));
@@ -1874,6 +1900,7 @@ mod tests {
         let args = new_session_args(
             &llm,
             true,
+            false,
             Some(".wcode/team.toml"),
             Some("127.0.0.1:9"),
             Some("w1"),
@@ -1908,11 +1935,46 @@ mod tests {
             ..LlmOpts::default()
         };
         // An orchestrator survives a re-exec (`--agents` forwarded)...
-        let with = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, true, None, None, None);
+        let with = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, true, false, None, None, None);
         assert!(with.iter().any(|a| a == "--agents"), "{with:?}");
         // ...a plain session does not grow the flag.
-        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None);
+        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, false, None, None, None);
         assert!(!without.iter().any(|a| a == "--agents"), "{without:?}");
+    }
+
+    #[test]
+    fn reload_args_forwards_no_project_config_only_when_set() {
+        let llm = LlmOpts {
+            model: "m".to_string(),
+            ..LlmOpts::default()
+        };
+        // The auto-discovery opt-out survives a re-exec (`--no-project-config`)...
+        let with = reload_args(
+            &llm,
+            Some(Path::new("/s/a.jsonl")),
+            false,
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
+        assert!(with.iter().any(|a| a == "--no-project-config"), "{with:?}");
+        // ...a plain session does not grow the flag.
+        let without = reload_args(
+            &llm,
+            Some(Path::new("/s/a.jsonl")),
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !without.iter().any(|a| a == "--no-project-config"),
+            "{without:?}"
+        );
     }
 
     #[test]
@@ -1927,6 +1989,7 @@ mod tests {
             Some(Path::new("/s/a.jsonl")),
             false,
             false,
+            false,
             Some(".wcode/team.toml"),
             None,
             None,
@@ -1937,7 +2000,7 @@ mod tests {
             "{with:?}"
         );
         // ...with no overlay, no `--config` is emitted.
-        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None);
+        let without = reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, false, None, None, None);
         assert!(!without.iter().any(|a| a == "--config"), "{without:?}");
     }
 
@@ -1954,6 +2017,7 @@ mod tests {
             Some(Path::new("/s/a.jsonl")),
             false,
             true,
+            false,
             None,
             Some("agent:root"),
             Some("w1"),
@@ -1965,7 +2029,7 @@ mod tests {
         assert!(with.windows(2).any(|w| w == ["--name", "w1"]), "{with:?}");
         // A plain session grows neither flag.
         let without =
-            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, None, None, None);
+            reload_args(&llm, Some(Path::new("/s/a.jsonl")), false, false, false, None, None, None);
         assert!(!without.iter().any(|a| a == "--owner"), "{without:?}");
         assert!(!without.iter().any(|a| a == "--name"), "{without:?}");
     }
