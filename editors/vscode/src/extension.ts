@@ -22,27 +22,28 @@ import {
   appendUser,
   HydratedSet,
   initialState,
-  memberViews,
   planModePending,
   planModeRevert,
   reduce,
+  sidebarTree,
   target as setTarget,
   targetLabel,
-  type RosterItem,
+  type MemberNode,
+  type SidebarNode,
   type ViewState,
 } from "./reducer.ts";
-import { RosterProvider } from "./roster.ts";
+import { SidebarProvider } from "./roster.ts";
 import { WcodeSession, type CrashInfo, type SessionState } from "./session.ts";
 import { isUnsupportedStdio, unsupportedStdioMessage } from "./startup.ts";
-import type { AgentEvent, RawFrame } from "./protocol.ts";
+import type { AgentEvent, RawFrame, TodoItem } from "./protocol.ts";
 
 let session: WcodeSession | undefined;
 let viewState: ViewState = initialState();
 let output: vscode.OutputChannel | undefined;
 let status: vscode.StatusBarItem | undefined;
 let extensionUri: vscode.Uri | undefined;
-let roster: RosterProvider | undefined;
-let treeView: vscode.TreeView<RosterItem> | undefined;
+let sidebar: SidebarProvider | undefined;
+let treeView: vscode.TreeView<SidebarNode> | undefined;
 /** Session ids whose `GetHistory` has been asked for (once each, per child). */
 let hydrated = new HydratedSet();
 /** The last non-empty editor selection — STICKY (survives focus moving to the webview). */
@@ -59,14 +60,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output, status);
   registerDiffProvider(context, logLine);
 
-  roster = new RosterProvider();
-  treeView = vscode.window.createTreeView("wcode.members", { treeDataProvider: roster });
-  context.subscriptions.push(roster, treeView);
+  sidebar = new SidebarProvider();
+  treeView = vscode.window.createTreeView("wcode.members", { treeDataProvider: sidebar });
+  context.subscriptions.push(sidebar, treeView);
   // Keyboard navigation retargets too; `focusMember` is idempotent, so the
   // `TreeItem.command` (a click) and this do not double-work.
   context.subscriptions.push(
     treeView.onDidChangeSelection((event) => {
-      const id = event.selection[0]?.id;
+      const id = memberIdOf(event.selection[0]);
       if (id !== undefined) focusMember(id);
     }),
   );
@@ -96,9 +97,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("wcode.member.focus", (id?: unknown) => {
       if (typeof id === "string") focusMember(id);
     }),
-    vscode.commands.registerCommand("wcode.member.peek", (item?: RosterItem) => void peekMember(item?.id)),
-    vscode.commands.registerCommand("wcode.member.ask", (item?: RosterItem) => void askMember(item?.id)),
-    vscode.commands.registerCommand("wcode.member.stop", (item?: RosterItem) => stopMember(item?.id)),
+    vscode.commands.registerCommand("wcode.member.peek", (node?: MemberNode) => void peekMember(node?.row.id)),
+    vscode.commands.registerCommand("wcode.member.ask", (node?: MemberNode) => void askMember(node?.row.id)),
+    vscode.commands.registerCommand("wcode.member.stop", (node?: MemberNode) => stopMember(node?.row.id)),
     vscode.commands.registerCommand("wcode.plan.toggle", () => togglePlan()),
   );
 }
@@ -153,7 +154,7 @@ async function startSession(): Promise<void> {
     // reply) — the key every per-session arm writes.
     viewState = reduce(viewState, event, frame.session);
     ensureTarget();
-    pushRoster();
+    pushSidebar();
     if (event.type === "spawned") revealMember(event.worker);
     // `message_end` (and the other settled events) always send the final state.
     panel.update(viewState, isSettled(event));
@@ -228,7 +229,7 @@ async function restartSession(): Promise<void> {
 /** Retarget the panel at a member (and hydrate that member's transcript). */
 function focusMember(id: string): void {
   viewState = setTarget(viewState, id);
-  pushRoster();
+  pushSidebar();
   const panel = ChatPanel.currentPanel();
   if (panel && panel.currentTarget !== id) {
     panel.setTarget(id); // fires `onTarget`, which hydrates
@@ -301,9 +302,23 @@ function togglePlan(): void {
 
 /* ------------------------------------------------------------------ roster */
 
-/** Push the roster to the tree (it dedupes; no polling, no refresh command). */
-function pushRoster(): void {
-  roster?.set(memberViews(viewState.members));
+/** Push the sidebar sections to the tree (it dedupes; no polling, no refresh). */
+function pushSidebar(): void {
+  sidebar?.set(sidebarTree(viewState.members, tasksTodos()));
+}
+
+/**
+ * The Tasks section shows the ROOT session's plan — the sidebar is durable and does
+ * NOT retarget, so it is the OVERALL plan, not the panel's `targeted` member.
+ */
+function tasksTodos(): TodoItem[] {
+  const root = viewState.members.find((m) => m.isRoot) ?? viewState.members[0];
+  return root === undefined ? [] : viewState.todos[root.id] ?? [];
+}
+
+/** The member id a tree node carries (a section / todo node carries none). */
+function memberIdOf(node: SidebarNode | undefined): string | undefined {
+  return node !== undefined && node.kind === "member" ? node.row.id : undefined;
 }
 
 /** The first roster arrival picks a target, so the panel is never unattached. */
@@ -316,7 +331,7 @@ function ensureTarget(): void {
 
 /** Reveal a newly spawned member — without stealing focus or selection. */
 function revealMember(id: string): void {
-  const item = roster?.find(id);
+  const item = sidebar?.find(id);
   if (item === undefined || treeView === undefined) return;
   void treeView.reveal(item, { select: false, focus: false });
 }

@@ -20,6 +20,7 @@ import type {
   MemberState,
   StopReason,
   TodoItem,
+  TodoStatus,
 } from "./protocol.ts";
 
 export type BlockKind = "user" | "assistant" | "notice" | "error" | "btw" | "tool";
@@ -549,4 +550,99 @@ function textOf(content: ContentBlock[]): string {
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+/** One Tasks row, ready for the tree. Pure. */
+export interface TodoView {
+  /** The item text (the draft spans the row). */
+  label: string;
+  status: TodoStatus;
+}
+
+/**
+ * Map the todo list to rows (draft `.todo`). Pure — the icon comes from
+ * `todoIconSpec(status)` at render time, not a per-row glyph field (a native
+ * `TreeItem` has no class slot).
+ */
+export function todoViews(todos: TodoItem[]): TodoView[] {
+  return todos.map((todo) => ({ label: todo.content, status: todo.status }));
+}
+
+/**
+ * A codicon id + theme-color id per `TodoStatus` (the Tasks rows). Pure.
+ *   completed   -> { icon: "check", color: "charts.green" }
+ *   in_progress -> { icon: "play", color: "charts.blue" }   // the one accent; the
+ *     draft's `doing` box is UNCOLORED — tinting the active task is an ACCEPTED
+ *     divergence.
+ *   pending     -> { icon: "circle-outline", color: "descriptionForeground" }
+ */
+export function todoIconSpec(status: TodoStatus): IconSpec {
+  switch (status) {
+    case "completed":
+      return { icon: "check", color: "charts.green" };
+    case "in_progress":
+      return { icon: "play", color: "charts.blue" };
+    default:
+      return { icon: "circle-outline", color: "descriptionForeground" };
+  }
+}
+
+/** The sidebar tree's node union (ONE view, collapsible section roots). */
+export type SidebarNode = SectionNode | MemberNode | TodoNode;
+
+/** A collapsible section root (draft `.side-head` Team / Tasks). */
+export interface SectionNode {
+  kind: "section";
+  /** A stable id so VS Code REMEMBERS the collapse state across repaints. */
+  id: string; // "section:team" | "section:tasks"
+  label: string; // "Team" | "Tasks"
+  /** The dim right-hand text (draft `.side-head .meta`) — the Tasks `☑ done/total`. */
+  description?: string; // todoBadge(todos) for Tasks; undefined for Team
+  children: SidebarNode[];
+}
+
+/** A member row (the roster, unchanged — `memberViews`). */
+export interface MemberNode {
+  kind: "member";
+  row: RosterItem;
+}
+
+/** A Tasks row. */
+export interface TodoNode {
+  kind: "todo";
+  /** `${sectionId}:${index}` — todos carry no id on the wire. */
+  id: string;
+  row: TodoView;
+}
+
+/**
+ * Build the two section roots from the roster + ONE session's todos. Pure.
+ *   Team  = SectionNode("section:team", "Team", children = memberViews(members))
+ *           — the roster, root first; present when `members.length > 0`.
+ *   Tasks = SectionNode("section:tasks", "Tasks", description = todoBadge(todos),
+ *           children = todoViews(todos)) — present ONLY when `todos.length > 0`
+ *           (an empty Tasks section is noise).
+ * When there are NO members AND NO todos, return `[]` — otherwise an always-present
+ * Team root would keep the tree non-empty and VS Code's `viewsWelcome` empty state
+ * (`No session. Run wcode: Start Session`) would never render.
+ */
+export function sidebarTree(members: SessionMember[], todos: TodoItem[]): SectionNode[] {
+  const sections: SectionNode[] = [];
+  if (members.length > 0) {
+    sections.push({
+      kind: "section",
+      id: "section:team",
+      label: "Team",
+      children: memberViews(members).map((row): MemberNode => ({ kind: "member", row })),
+    });
+  }
+  if (todos.length > 0) {
+    sections.push({
+      kind: "section",
+      id: "section:tasks",
+      label: "Tasks",
+      description: todoBadge(todos),
+      children: todoViews(todos).map((row, index): TodoNode => ({ kind: "todo", id: `section:tasks:${index}`, row })),
+    });
+  }
+  return sections;
 }
