@@ -217,6 +217,7 @@ async function restartSession(): Promise<void> {
   viewState = initialState();
   reviewVerdicts = {};
   controller?.update(viewState, true);
+  controller?.setMode("all"); // the mode RESETS on a fresh child
   await startSession();
 }
 

@@ -16,7 +16,7 @@
 import { memberGlyph, sidebarRails, todoGlyph, type RosterItem, type SidebarRails } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
-import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview } from "../webview.ts";
+import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
 import {
   classNames,
   composerControls,
@@ -55,6 +55,11 @@ app.innerHTML = [
   '  <div class="r1"></div>',
   '  <div class="r2"></div>',
   "</header>",
+  '<div id="modes" class="modes" role="group" aria-label="View mode">',
+  '  <button id="mAll" type="button" aria-pressed="true">All</button>',
+  '  <button id="mFocus" type="button" aria-pressed="false">Focus</button>',
+  "</div>",
+  '<div id="ribbon" class="focusbar" aria-live="polite"></div>',
   '<div class="content">',
   '  <aside id="side" class="side" aria-label="Team and tasks"></aside>',
   '  <section class="main">',
@@ -77,6 +82,9 @@ app.innerHTML = [
   "</div>",
 ].join("\n");
 const pheadEl = requireEl("phead");
+const mAllEl = requireEl("mAll");
+const mFocusEl = requireEl("mFocus");
+const ribbonEl = requireEl("ribbon");
 
 const transcriptEl = requireEl("transcript");
 const sideEl = requireEl("side");
@@ -477,21 +485,59 @@ function renderGroup(group: WorkingGroup): HTMLElement {
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
+  app.dataset.mode = snapshot.mode; // drives `#app[data-mode]` (the ribbon's visibility)
   renderHeader(state, session);
+  // The target chip would falsely claim the merged transcript is one member's: hide the
+  // whole wrap in All mode on EVERY render (the header's early-return keeps stale DOM).
+  const targetWrap = pheadEl.querySelector<HTMLElement>(".target-wrap");
+  if (targetWrap !== null) targetWrap.hidden = snapshot.mode === "all";
   renderRails(state);
   renderComposer(state, snapshot.context);
+  updateModes(snapshot.mode);
+  renderRibbon(state, snapshot.mode);
   lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
     transcriptEl.appendChild(renderStateCard(state, session));
   } else {
-    for (const turn of turns(state.blocks)) transcriptEl.appendChild(renderTurn(turn));
+    const member = snapshot.mode === "all" ? memberOf(state) : undefined;
+    for (const turn of turns(state.blocks, member)) transcriptEl.appendChild(renderTurn(turn));
     // The working group is a transcript-TAIL region, NOT nested in a turn: it is
     // LIVE roster state (from `members`), not per-turn block data.
     const group = workingGroup(state.members, state.target?.id ?? null);
     if (group.count > 0) transcriptEl.appendChild(renderGroup(group));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+/* ------------------------------------------------------------------- mode */
+
+function updateModes(mode: ViewMode): void {
+  mAllEl.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
+  mFocusEl.setAttribute("aria-pressed", mode === "focus" ? "true" : "false");
+}
+
+function renderRibbon(state: RenderedState, mode: ViewMode): void {
+  ribbonEl.textContent = "";
+  if (mode !== "focus") return; // `#app[data-mode]` governs the display; stay empty in All
+  ribbonEl.appendChild(document.createTextNode("Focus: "));
+  ribbonEl.appendChild(el("b", null, state.target?.label ?? "wcode"));
+  ribbonEl.appendChild(document.createTextNode(" · showing only this member's activity"));
+  const showAll = el("button", "btn link", "Show all");
+  showAll.setAttribute("type", "button");
+  showAll.addEventListener("click", () => post({ kind: "set-mode", mode: "all" }));
+  ribbonEl.appendChild(showAll);
+}
+
+/** Resolve a block's `origin` to the member that labels its turn (All mode). */
+function memberOf(state: RenderedState): (origin: string | undefined) => { name: string; isRoot: boolean } | undefined {
+  return (origin) => {
+    if (origin === undefined) return undefined;
+    const member = state.members.find((m) => m.id === origin);
+    return member === undefined
+      ? undefined
+      : { name: member.isRoot ? "orchestrator" : member.label, isRoot: member.isRoot };
+  };
 }
 
 /* ---------------------------------------------------------------- composer */
@@ -621,6 +667,8 @@ cattachEl.addEventListener("click", () => {
   attached = true;
   rerender();
 });
+mAllEl.addEventListener("click", () => post({ kind: "set-mode", mode: "all" }));
+mFocusEl.addEventListener("click", () => post({ kind: "set-mode", mode: "focus" }));
 cancelBtn.addEventListener("click", () => {
   post({ kind: "cancel" });
 });

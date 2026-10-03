@@ -42,6 +42,8 @@ export interface RenderedBlock {
   html: string;
   live: boolean;
   from?: string;
+  /** The session id this block came from (All mode labels the turn by it). */
+  origin?: string;
   tool?: RenderedTool;
 }
 
@@ -170,4 +172,19 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * ALL-mode: every session's blocks, concatenated in ROSTER order (root first), each tagged
+ * with its `origin`. Pure.
+ *
+ * ORDERING (honest limitation): the reducer keeps NO global timestamps, so a true
+ * time-INTERLEAVE is impossible without a protocol change (plan §4.2 forbids one). The merge
+ * is per-session CONTIGUOUS runs in roster order — a member's conversation appears as one
+ * stretch, NOT woven by time. A future timestamp on a block would fix it.
+ */
+export function renderMerged(state: ViewState): RenderedBlock[] {
+  return state.members.flatMap((member) =>
+    transcriptOf(state, member.id).map((block) => ({ ...renderBlock(block), origin: member.id })),
+  );
 }

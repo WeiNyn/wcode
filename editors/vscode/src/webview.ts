@@ -36,6 +36,9 @@ export interface SelectionContext {
   endLine: number;
 }
 
+/** The client-local view mode: `all` = the merged transcript; `focus` = the target. */
+export type ViewMode = "all" | "focus";
+
 /** host → webview. Full snapshots only — there is no append/diff fast path. */
 export type ToWebview = {
   kind: "state";
@@ -45,6 +48,8 @@ export type ToWebview = {
   context: SelectionContext | null;
   /** Per-callId review verdicts. Host-local (like `context`); JSON-safe. */
   verdicts: Record<string, Verdict>;
+  /** The client-local view mode (all = the merged transcript; focus = the target). */
+  mode: ViewMode;
 };
 
 /** webview → host. */
@@ -57,6 +62,7 @@ export type FromWebview =
   | { kind: "toggle-plan" }
   | { kind: "focus-member"; id: string }
   | { kind: "review"; callId: string; verdict: "accept" | "reject" }
+  | { kind: "set-mode"; mode: ViewMode }
   /** The webview's script has run and it is ready to receive a snapshot. */
   | { kind: "ready" };
 
@@ -86,6 +92,10 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
       return { kind: "toggle-plan" };
     case "focus-member":
       return typeof message.id === "string" ? { kind: "focus-member", id: message.id } : null;
+    case "set-mode":
+      return message.mode === "all" || message.mode === "focus"
+        ? { kind: "set-mode", mode: message.mode }
+        : null;
     case "review":
       return typeof message.callId === "string" && (message.verdict === "accept" || message.verdict === "reject")
         ? { kind: "review", callId: message.callId, verdict: message.verdict }
@@ -124,6 +134,7 @@ export function parseToWebview(raw: unknown): ToWebview | null {
 
   const context = parseContext(message.context);
   const verdicts = parseVerdicts(message.verdicts);
+  const mode = message.mode === "all" ? "all" : "focus";
 
   return {
     kind: "state",
@@ -131,6 +142,7 @@ export function parseToWebview(raw: unknown): ToWebview | null {
     session: { id: info.id as string | null, state: info.state, stderrTail: info.stderrTail },
     context,
     verdicts,
+    mode,
   };
 }
 

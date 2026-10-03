@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { renderState } from "./render.ts";
+import { renderMerged, renderState, type RenderedState } from "./render.ts";
 import type { ViewState } from "./reducer.ts";
 import type { Verdict } from "./review.ts";
 import {
@@ -11,6 +11,7 @@ import {
   type SelectionContext,
   type Throttle,
   type ToWebview,
+  type ViewMode,
 } from "./webview.ts";
 
 /**
@@ -114,6 +115,8 @@ export class SurfaceController {
   private context: SelectionContext | null = null;
   private verdicts: Record<string, Verdict> = {};
   private target: string | null = null;
+  /** The client-local view mode (shared by every host; resets on restart). */
+  private mode: ViewMode = "all";
 
   constructor(extensionUri: vscode.Uri, handlers: SurfaceHandlers, state: ViewState) {
     this.mediaRoot = vscode.Uri.joinPath(extensionUri, "media");
@@ -187,6 +190,12 @@ export class SurfaceController {
     return this.target;
   }
 
+  /** Flip the view mode (all / focus) and repaint every attached host immediately. */
+  setMode(mode: ViewMode): void {
+    this.mode = mode;
+    this.push(true);
+  }
+
   dispose(): void {
     this.throttle.dispose();
     for (const host of [...this.hosts]) this.detach(host);
@@ -197,23 +206,39 @@ export class SurfaceController {
   /** Send a snapshot (throttled, or immediately). Held until a host reports `ready`. */
   private push(immediate: boolean): void {
     if (this.ready.size === 0) return; // a fresh host gets the state on its `ready`
-    const rendered = renderState(this.state, this.target);
+    const rendered = this.snapshot();
     if (immediate) this.throttle.flush(rendered);
     else this.throttle.push(rendered);
   }
 
+  /**
+   * Build a MODE-AWARE snapshot. `push` AND the `ready` arm both use it — a host that readies
+   * while mode="all" must not receive the Focus transcript. `broadcast` receives an
+   * already-built `RenderedState` and only TAGS the mode, so it does NOT call this.
+   */
+  private snapshot(): RenderedState {
+    const base = renderState(this.state, this.target);
+    return this.mode === "all" ? { ...base, blocks: renderMerged(this.state) } : base;
+  }
+
   /** The throttle's sink: build the message ONCE and post it to every READY host. */
-  private broadcast(state: ReturnType<typeof renderState>): void {
-    const message: ToWebview = {
+  private broadcast(state: RenderedState): void {
+    const message = this.message(state);
+    for (const host of this.hosts) {
+      if (this.ready.has(host)) host.post(message);
+    }
+  }
+
+  /** The wire message for one rendered snapshot (the mode is TAGGED here, not built). */
+  private message(state: RenderedState): ToWebview {
+    return {
       kind: "state",
       state,
       session: this.session,
       context: this.context,
       verdicts: this.verdicts,
+      mode: this.mode,
     };
-    for (const host of this.hosts) {
-      if (this.ready.has(host)) host.post(message);
-    }
   }
 
   private onMessage(host: SurfaceHost, raw: unknown): void {
@@ -222,13 +247,8 @@ export class SurfaceController {
     switch (message.kind) {
       case "ready":
         this.ready.add(host);
-        host.post({
-          kind: "state",
-          state: renderState(this.state, this.target),
-          session: this.session,
-          context: this.context,
-          verdicts: this.verdicts,
-        });
+        // Route through the SAME builder so a ready host never bypasses the mode.
+        host.post(this.message(this.snapshot()));
         break;
       case "submit":
         this.handlers.onSubmit(message.text, this.target);
@@ -250,9 +270,14 @@ export class SurfaceController {
         break;
       case "focus-member":
         this.handlers.onFocusMember(message.id);
+        // A rail row / the header menu RETARGETS and, from All, switches to Focus.
+        if (this.mode === "all") this.setMode("focus");
         break;
       case "review":
         this.handlers.onReview(message.callId, message.verdict);
+        break;
+      case "set-mode":
+        this.setMode(message.mode);
         break;
     }
   }

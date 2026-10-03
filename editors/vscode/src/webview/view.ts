@@ -158,18 +158,24 @@ export interface Turn {
  * Group `blocks` into turns (draft `.transcript` children). Pure.
  *
  * A `user` block opens a "you" turn holding just it; every following
- * `assistant`/`tool`/`notice`/`btw` block accumulates into ONE "wcode" turn
- * (draft: thinking + tools + reply are one unit). Leading non-user blocks open a
- * "wcode" turn. A turn containing an `error` block is role "err". The draft's
- * `.who .stamp` ("09:41") has NO source on the wire — omitted.
+ * `assistant`/`tool`/`notice`/`btw` block accumulates into ONE "wcode" turn. A turn ALSO
+ * starts on an `origin` CHANGE (All mode's merged blocks: an origin change IS a run
+ * boundary, so every turn has exactly one origin and first-block labelling is correct).
+ * A turn containing an `error` block is role "err". `memberOf` (All mode) resolves an origin
+ * to the member that labels the turn; absent ⇒ the current `who("wcode")`.
  */
-export function turns(blocks: RenderedBlock[]): Turn[] {
+export function turns(
+  blocks: RenderedBlock[],
+  memberOf?: (origin: string | undefined) => { name: string; isRoot: boolean } | undefined,
+): Turn[] {
   const grouped: Turn[] = [];
   for (const block of blocks) {
     const last = grouped[grouped.length - 1];
     const opensYou = block.kind === "user";
-    if (opensYou || last === undefined || last.role === "you") {
-      grouped.push({ role: opensYou ? "you" : "wcode", who: who(opensYou), blocks: [block] });
+    // A NEW turn starts on a `user` block OR an ORIGIN change (the merged run boundary).
+    const startsRun = last === undefined || last.blocks[last.blocks.length - 1]?.origin !== block.origin;
+    if (opensYou || last === undefined || last.role === "you" || startsRun) {
+      grouped.push({ role: opensYou ? "you" : "wcode", who: who(opensYou, memberOf?.(block.origin)), blocks: [block] });
     } else {
       last.blocks.push(block);
     }
@@ -182,10 +188,13 @@ export function turns(blocks: RenderedBlock[]): Turn[] {
   return grouped;
 }
 
-function who(isYou: boolean): Turn["who"] {
-  return isYou
-    ? { className: "who you", avatar: "Y", name: "you" }
-    : { className: "who wcode", avatar: "❯", name: "wcode" };
+/** The `.who` line: you / the root's `❯` / a member's initial (All mode). Pure. */
+function who(isYou: boolean, member?: { name: string; isRoot: boolean }): Turn["who"] {
+  if (isYou) return { className: "who you", avatar: "Y", name: "you" };
+  if (member === undefined || member.isRoot) {
+    return { className: "who wcode", avatar: "❯", name: member?.name ?? "wcode" };
+  }
+  return { className: "who wcode", avatar: member.name.charAt(0).toUpperCase(), name: member.name };
 }
 
 /** One empty/error state card (draft States `.statecard`). */

@@ -279,7 +279,14 @@ test("classNames composes the content-element classes", () => {
 /* --------------------------------------------------------- parseToWebview */
 
 test("parseToWebview accepts a well-formed snapshot", () => {
-  const message: ToWebview = { kind: "state", state: idle(), session: session(), context: null, verdicts: {} };
+  const message: ToWebview = {
+    kind: "state",
+    state: idle(),
+    session: session(),
+    context: null,
+    verdicts: {},
+    mode: "focus",
+  };
   const parsed = parseToWebview(message);
   assert.ok(parsed);
   assert.equal(parsed.kind, "state");
@@ -299,6 +306,10 @@ test("parseToWebview accepts a well-formed snapshot", () => {
   const bad = parseToWebview({ ...message, verdicts: { t1: "bogus" } });
   assert.ok(bad, "the snapshot survives a bad verdict");
   assert.deepEqual(bad.verdicts, {}, "a bad verdict degrades to {}, not a drop");
+
+  // `mode` is LENIENT (like `context`/`verdicts`): anything but "all" degrades to "focus".
+  assert.equal(parseToWebview({ ...message, mode: "all" })?.mode, "all");
+  assert.equal(parseToWebview({ ...message, mode: "bogus" })?.mode, "focus");
 
   // LENIENT (M1): a non-conforming context degrades to null and the snapshot SURVIVES.
   const lenient = parseToWebview({ ...message, context: "x" });
@@ -416,4 +427,48 @@ test("workingGroup: the root reads as 'orchestrator' when it is NOT the target",
   ];
   const group = workingGroup(members, "agent:w1");
   assert.equal(group.rows[0].name, "orchestrator");
+});
+test("turns: WITHOUT a resolver (Focus), labels stay you/wcode", () => {
+  const t = turns([
+    { kind: "user", html: "hi", live: false },
+    { kind: "assistant", html: "", live: false },
+  ]);
+  assert.equal(t[0].who.name, "you");
+  assert.equal(t[1].who.name, "wcode");
+  assert.equal(t[1].who.avatar, "❯");
+});
+
+test("turns: WITH a resolver (All), a non-user turn is labeled by its origin member", () => {
+  const blocks: RenderedBlock[] = [
+    { kind: "assistant", html: "", live: false, origin: "agent:w1" },
+    { kind: "tool", html: "", live: false, origin: "agent:w1" },
+  ];
+  const t = turns(blocks, (origin) => (origin === "agent:w1" ? { name: "explorer", isRoot: false } : undefined));
+  assert.equal(t.length, 1, "one contiguous member run");
+  assert.equal(t[0].who.name, "explorer");
+  assert.equal(t[0].who.avatar, "E");
+  assert.equal(t[0].who.className, "who wcode");
+
+  // A1/R1: a ROOT origin keeps the `❯` avatar (the resolver carries `isRoot`).
+  const rootTurn = turns(
+    [{ kind: "assistant", html: "", live: false, origin: "root-1" }],
+    (o) => (o === "root-1" ? { name: "orchestrator", isRoot: true } : undefined),
+  );
+  assert.equal(rootTurn[0].who.avatar, "❯");
+  assert.equal(rootTurn[0].who.name, "orchestrator");
+});
+
+test("turns: an ORIGIN change starts a NEW turn (mixed-origin adjacency)", () => {
+  const blocks: RenderedBlock[] = [
+    { kind: "assistant", html: "", live: false, origin: "agent:w1" },
+    { kind: "assistant", html: "", live: false, origin: "agent:w2" }, // NO user text between
+  ];
+  const members: Record<string, { name: string; isRoot: boolean }> = {
+    "agent:w1": { name: "explorer", isRoot: false },
+    "agent:w2": { name: "developer", isRoot: false },
+  };
+  const t = turns(blocks, (origin) => (origin === undefined ? undefined : members[origin]));
+  assert.equal(t.length, 2, "TWO turns, one per origin — NOT one collapsed turn");
+  assert.equal(t[0].who.name, "explorer");
+  assert.equal(t[1].who.name, "developer");
 });

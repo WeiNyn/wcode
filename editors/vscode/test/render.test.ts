@@ -5,8 +5,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { AgentEvent } from "../src/protocol.ts";
-import { appendUser, initialState, reduce, type ViewState } from "../src/reducer.ts";
-import { escapeHtml, renderBlock, renderState, toolSummary } from "../src/render.ts";
+import { appendUser, initialState, reduce, type SessionMember, type ViewState } from "../src/reducer.ts";
+import { escapeHtml, renderBlock, renderMerged, renderState, toolSummary } from "../src/render.ts";
 
 const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -135,4 +135,22 @@ test("a live assistant block's thinking fold is open; a settled one is not", () 
   });
   assert.doesNotMatch(done.html, / open>/);
   assert.match(done.html, /<details class="fold thought">/);
+});
+test("renderMerged concatenates per-session blocks in ROSTER order, tagged by origin", () => {
+  const members: SessionMember[] = [
+    { id: "root-1", label: "root-1", state: "running", isRoot: true },
+    { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
+  ];
+  let state: ViewState = { ...initialState(), members };
+  state = appendUser(state, "hello", "root-1");
+  state = appendUser(state, "another", "root-1");
+  state = appendUser(state, "on it", "agent:w1");
+
+  // LIMITATION pinned by the test: no global timestamps exist, so the merge cannot weave
+  // the members by time — it is per-session CONTIGUOUS runs in roster order.
+  assert.deepEqual(
+    renderMerged(state).map((b) => b.origin),
+    ["root-1", "root-1", "agent:w1"],
+    "contiguous per-session runs in roster order — NOT time-interleaved",
+  );
 });
