@@ -239,6 +239,17 @@ export function seedFromHistory(state: ViewState, messages: AgentMessage[]): Vie
   return { ...state, transcript, status: { ...state.status, contextUsed } };
 }
 
+/**
+ * Optimistic echo of the user's own submitted text. The session streams only
+ * the assistant's reply — a `Submit`'s text never comes back as an event (the
+ * TUI echoes locally too) — so without this the user's message would vanish
+ * from the transcript the moment they press Enter.
+ */
+export function appendUser(state: ViewState, text: string): ViewState {
+  if (text.trim() === "") return state;
+  return { ...state, transcript: [...state.transcript, { kind: "user", text }] };
+}
+
 /* ------------------------------------------------------------------ helpers */
 
 function withStatus(state: ViewState, patch: Partial<ViewStatus>): ViewState {

@@ -6,20 +6,28 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// The reducer must stay pure: no host and no I/O. That is what lets `npm test` drive
-// it with no VS Code and no display, and it is what keeps I/O out of the view model.
-// A structural guard is needed because such an import slips through every behavioural
-// test — nothing observable changes until the import is actually used.
-test("reducer.ts imports no host and no I/O", () => {
-  const src = readFileSync(resolve(here, "../src/reducer.ts"), "utf8");
+// These modules must stay pure: no host and no I/O. That is what lets `npm test`
+// drive them with no VS Code and no display, and it is what keeps I/O out of the
+// view model and the host-side rendering.
+// A structural guard is needed because such an import slips through every
+// behavioural test — nothing observable changes until the import is used.
+//
+// `render.ts` may import a relative markdown module (a pure library); it must
+// not import `vscode` or a `node:` builtin. `webview.ts` is even stricter: it
+// imports only types (its `SessionState` comes in via `import type`, erased at
+// runtime).
+for (const file of ["reducer.ts", "render.ts", "webview.ts"]) {
+  test(`${file} imports no host and no I/O`, () => {
+    const src = readFileSync(resolve(here, "../src", file), "utf8");
 
-  assert.match(src, /^\s*import\s+type\b/m, "expected at least one `import type`");
+    assert.match(src, /^\s*import\s+type\b/m, "expected at least one `import type`");
 
-  // Whole-file rather than line-by-line, so a wrapped import, a dynamic `import()`
-  // and an `export … from` are all caught, not just the tidy one-line form.
-  assert.doesNotMatch(
-    src,
-    /\b(?:from|import|require)\s*\(?\s*["'](?:vscode|node:)/,
-    "reducer.ts must import neither the host nor an I/O module",
-  );
-});
+    // Whole-file rather than line-by-line, so a wrapped import, a dynamic
+    // `import()` and an `export … from` are all caught, not just the tidy form.
+    assert.doesNotMatch(
+      src,
+      /\b(?:from|import|require)\s*\(?\s*["'](?:vscode|node:)/,
+      `${file} must import neither the host nor an I/O module`,
+    );
+  });
+}

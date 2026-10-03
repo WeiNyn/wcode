@@ -1,0 +1,365 @@
+/* The wcode chat panel. Zero remote assets: only VS Code theme variables and
+   the bundled media/chat.js. The palette follows the editor theme, so the panel
+   reads as part of VS Code rather than a foreign surface. */
+
+:root {
+  --wc-gap: 10px;
+  --wc-radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+  font-family: var(--vscode-font-family, ui-sans-serif, system-ui, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ------------------------------------------------------------------ status */
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  flex: 0 0 auto;
+}
+
+.status-sep {
+  opacity: 0.5;
+}
+
+.status-session {
+  font-family: var(--vscode-editor-font-family, monospace);
+  opacity: 0.85;
+}
+
+.status-error {
+  color: var(--vscode-errorForeground);
+}
+
+.status-running {
+  color: var(--vscode-charts-yellow, #d29922);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--vscode-descriptionForeground);
+}
+
+.dot-ready {
+  background: var(--vscode-charts-green, #3fb950);
+}
+
+.dot-starting {
+  background: var(--vscode-charts-yellow, #d29922);
+}
+
+.dot-crashed {
+  background: var(--vscode-errorForeground, #f85149);
+}
+
+.stderr-block {
+  flex-basis: 100%;
+  margin-top: 4px;
+}
+
+.stderr {
+  margin: 4px 0 0;
+  padding: 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.1));
+  border-radius: var(--wc-radius);
+  color: var(--vscode-errorForeground);
+}
+
+/* -------------------------------------------------------------- transcript */
+
+.transcript {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--wc-gap);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.block .role {
+  font-size: 0.78em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+}
+
+.block .body {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.block.user .body {
+  white-space: pre-wrap;
+}
+
+.block.user .body,
+.block.error .body,
+.block.notice .body {
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.08));
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: var(--wc-radius);
+  padding: 6px 10px;
+}
+
+.block.error .body {
+  border-left-color: var(--vscode-errorForeground, #f85149);
+  color: var(--vscode-errorForeground);
+}
+
+.block.btw .body,
+.block.notice .body {
+  color: var(--vscode-descriptionForeground);
+}
+
+.block.assistant.live .body::after {
+  content: "▌";
+  margin-left: 2px;
+  animation: wc-blink 1.1s steps(1) infinite;
+  color: var(--vscode-charts-blue, #58a6ff);
+}
+
+@keyframes wc-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .block.assistant.live .body::after {
+    animation: none;
+  }
+}
+
+.block .body pre {
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  border-radius: var(--wc-radius);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+.block .body code {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.block .body table {
+  border-collapse: collapse;
+}
+
+.block .body th,
+.block .body td {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding: 3px 8px;
+}
+
+details.thinking {
+  margin: 4px 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+}
+
+details.thinking > summary {
+  cursor: pointer;
+}
+
+.tool-call {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+}
+
+/* ------------------------------------------------------------------- tools */
+
+.block.tool {
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding-left: 8px;
+}
+
+.block.tool.error {
+  border-left-color: var(--vscode-errorForeground, #f85149);
+}
+
+.tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tool-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 2px 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+}
+
+.tool-name {
+  color: var(--vscode-charts-blue, #58a6ff);
+}
+
+.tool-summary {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.block.tool.error .tool-summary {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-dur {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+}
+
+.tool-diff {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: var(--wc-radius);
+  color: var(--vscode-descriptionForeground);
+  padding: 1px 6px;
+  font-size: 0.8em;
+}
+
+.tool-diff:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tool-body .tool-output {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  border-radius: var(--wc-radius);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+}
+
+/* --------------------------------------------------------------- empty state */
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  padding: 24px;
+}
+
+.empty-title {
+  margin: 0 0 4px;
+  font-size: 1.05em;
+  color: var(--vscode-foreground);
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+/* ---------------------------------------------------------------- composer */
+
+.composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#input {
+  width: 100%;
+  resize: none;
+  min-height: 2.2em;
+  max-height: 160px;
+  padding: 8px 10px;
+  border-radius: var(--wc-radius);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  line-height: 1.4;
+}
+
+#input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border: none;
+  border-radius: var(--wc-radius);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.btn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.btn:hover {
+  opacity: 0.9;
+}
+
+.hint {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.82em;
+}
