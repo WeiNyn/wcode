@@ -54,6 +54,7 @@ test("tool blocks render a collapsed summary and flag a diff", () => {
   const edit = tools[1].tool;
   assert.equal(edit?.summary, "src/f.rs", "an empty output falls back to the path");
   assert.equal(edit?.hasDiff, true, "the P2 diff hook sees the diff");
+  assert.equal(edit?.diff, "@@ -1 +1 @@\n-a\n+b\n", "the raw diff crosses the wire for P4 + the +N −M count");
 });
 
 test("user, error and notice text is escaped, never rendered as HTML", () => {
@@ -95,4 +96,26 @@ test("toolSummary clips, and names running / error", () => {
 
 test("escapeHtml covers the four dangerous characters", () => {
   assert.equal(escapeHtml('&<>"'), "&amp;&lt;&gt;&quot;");
+});
+
+test("a thinking block renders as the draft's folded `thought` row", () => {
+  const block = renderBlock({
+    kind: "assistant",
+    content: [{ type: "thinking", text: "weighing it" }],
+  });
+  assert.match(block.html, /<details class="fold thought">/);
+  assert.match(block.html, /<span class="tname">thought<\/span>/);
+  assert.match(block.html, /weighing it/);
+  assert.doesNotMatch(block.html, /class="thinking"/, "the old fold class is gone");
+});
+
+test("a fenced code block renders as a titled `.code` card", () => {
+  const block = renderBlock({
+    kind: "assistant",
+    content: [{ type: "text", text: "```ts\nconst x = 1;\n```" }],
+  });
+  assert.match(block.html, /<div class="code">/);
+  assert.match(block.html, /<div class="chead"><span>ts<\/span><\/div>/);
+  assert.match(block.html, /<pre class="pre">const x = 1;\n<\/pre>/);
+  assert.ok(!block.html.includes("hljs"), "no highlighting in P1");
 });

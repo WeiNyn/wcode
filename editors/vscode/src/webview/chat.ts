@@ -6,15 +6,16 @@
  * that snapshot — it never parses markdown, never loads a remote resource, and
  * only talks to the host over `postMessage`.
  *
- * The PURE half lives in `./view.ts` (`stateLabel`, `statusSegments`,
- * `emptyKind`, `toggleExpanded`, `classNames`) and `../webview.ts`
+ * The PURE half lives in `./view.ts` (`stateLabel`, `panelHeader`, `turns`,
+ * `diffStat`, `emptySpec`, `emptyKind`, `toggleExpanded`, `classNames`) and
+ * `../webview.ts`
  * (`parseToWebview`), both of which plain node can drive. What remains here is
  * DOM-bound: element construction, scroll glue, the click/keydown handlers, and
  * `acquireVsCodeApi()`.
  */
-import type { RenderedBlock, RenderedState } from "../render.ts";
+import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type ToWebview } from "../webview.ts";
-import { classNames, emptyKind, statusSegments, toggleExpanded } from "./view.ts";
+import { classNames, diffStat, emptyKind, emptySpec, panelHeader, toggleExpanded, turns, type Turn } from "./view.ts";
 
 /** The webview global; not in `@types/vscode` (it is injected by the host). */
 interface VsCodeApi {
@@ -31,20 +32,25 @@ const vscode = acquireVsCodeApi();
 
 const app = requireEl("app");
 app.innerHTML = [
-  '<header id="status" class="status"></header>',
-  '<main id="transcript" class="transcript"></main>',
+  '<header id="phead" class="phead">',
+  '  <div class="r1"></div>',
+  '  <div class="r2"></div>',
+  "</header>",
+  '<main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
   '<footer id="composer" class="composer">',
+  '  <div class="ctx-chips" aria-label="Attached context"></div>',
   '  <textarea id="input" rows="1" spellcheck="false"',
   '    placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
-  '  <div class="composer-actions">',
+  '  <div class="ctoolbar">',
+  '    <span class="spacer"></span>',
+  '    <span id="hint" class="hint">Enter to send</span>',
   '    <button id="send" class="btn primary">Send</button>',
-  '    <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)">Cancel</button>',
-  '    <span id="hint" class="hint">Enter to send · Shift+Enter newline · Esc cancel</span>',
+  '    <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)">Stop</button>',
   "  </div>",
   "</footer>",
 ].join("\n");
+const pheadEl = requireEl("phead");
 
-const statusEl = requireEl("status");
 const transcriptEl = requireEl("transcript");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
@@ -86,124 +92,127 @@ function rerender(): void {
   if (lastState !== null) render(lastState);
 }
 
-/* ------------------------------------------------------------------- status */
+/* ------------------------------------------------------------------ header */
 
-function renderStatus(state: RenderedState, session: PanelSessionInfo): void {
-  statusEl.textContent = "";
-  for (const segment of statusSegments(state, session)) {
-    statusEl.appendChild(el("span", segment.className, segment.text));
-  }
-  if (session.state === "crashed" && session.stderrTail !== "") {
-    const details = el("details", "stderr-block");
-    details.appendChild(el("summary", null, "wcode stderr (tail)"));
-    details.appendChild(el("pre", "stderr", session.stderrTail));
-    statusEl.appendChild(details);
-  }
+function renderHeader(state: RenderedState, session: PanelSessionInfo): void {
+  const { r1, r2 } = panelHeader(state, session);
+  const row1 = el("div", "r1");
+  const row2 = el("div", "r2");
+  // Every cell is a plain span: the target chip is INERT here (retarget is P3).
+  for (const cell of r1) row1.appendChild(el("span", cell.className, cell.text));
+  for (const cell of r2) row2.appendChild(el("span", cell.className, cell.text));
+  pheadEl.textContent = "";
+  pheadEl.append(row1, row2);
 }
 
-/* ------------------------------------------------------------------- blocks */
+/* -------------------------------------------------------------- transcript */
 
-function renderEmpty(state: RenderedState, session: PanelSessionInfo): HTMLElement {
-  const wrap = el("div", "empty");
-  switch (emptyKind(state, session)) {
-    case "crashed":
-      wrap.appendChild(el("p", "empty-title", "wcode crashed."));
-      wrap.appendChild(el("p", "empty-sub", "Run “wcode: Restart” to try again."));
-      break;
-    case "starting":
-      wrap.appendChild(el("p", "empty-title", "Starting wcode…"));
-      break;
-    case "stopped":
-      wrap.appendChild(el("p", "empty-title", "wcode is stopped."));
-      wrap.appendChild(el("p", "empty-sub", "Run “wcode: Start Session”."));
-      break;
-    case "working":
-      wrap.appendChild(el("p", "empty-title", "Working…"));
-      break;
-    default:
-      wrap.appendChild(el("p", "empty-title", "No messages yet."));
-      wrap.appendChild(el("p", "empty-sub", "Type below and press Enter."));
+function renderStateCard(state: RenderedState, session: PanelSessionInfo): HTMLElement {
+  const spec = emptySpec(emptyKind(state, session));
+  const card = el("div", "statecard");
+  const body = el("div", "sc-body");
+
+  const title = el("p", "empty-title");
+  if (spec.spin) {
+    const spin = el("span", "spin", "⠋");
+    spin.setAttribute("aria-hidden", "true");
+    title.appendChild(spin);
+    title.appendChild(document.createTextNode(" "));
   }
-  return wrap;
+  title.appendChild(document.createTextNode(spec.title));
+  body.appendChild(title);
+  body.appendChild(el("p", "empty-sub", spec.sub));
+  if (spec.stderr && session.stderrTail !== "") {
+    body.appendChild(el("pre", "stderr", session.stderrTail));
+  }
+
+  card.appendChild(body);
+  return card;
 }
 
-function blockShell(block: RenderedBlock, role: string | null): HTMLElement {
-  const wrap = el("div", classNames(block));
-  if (role !== null) wrap.appendChild(el("div", "role", role));
-  const body = el("div", "body");
-  body.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
-  wrap.appendChild(body);
-  return wrap;
+function blockShell(block: RenderedBlock): HTMLElement {
+  // ONE element: `classNames` already names the content element ("body" /
+  // "body notice" / …), so there is no outer wrap + nested `.body`. No `.role`
+  // line either — the `.who` line is per-TURN now.
+  const node = el("div", classNames(block));
+  node.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
+  return node;
 }
 
-function renderTool(block: RenderedBlock): HTMLElement {
+function renderToolFold(block: RenderedBlock): HTMLElement {
   const tool = block.tool;
-  if (tool === undefined) return el("div", "block tool");
+  if (tool === undefined) return el("details", "fold tool");
   const isOpen = expanded.has(tool.callId);
-  const wrap = el("div", classNames(block, isOpen));
 
-  const head = el("div", "tool-head");
-  const toggle = el("button", "tool-toggle");
-  toggle.appendChild(el("span", "chev", isOpen ? "▾" : "▸"));
-  toggle.appendChild(el("span", "tool-name", `⚙ ${tool.name}`));
-  toggle.appendChild(el("span", "tool-summary", tool.summary));
-  if (typeof tool.durationMs === "number") {
-    toggle.appendChild(el("span", "tool-dur", `${tool.durationMs}ms`));
-  }
-  toggle.addEventListener("click", () => {
+  const details = el("details", classNames(block, isOpen));
+  if (isOpen) details.setAttribute("open", "");
+
+  const summary = el("summary", null);
+  summary.appendChild(el("span", "chev"));
+  summary.appendChild(el("span", "tname", `⚙ ${tool.name}`));
+  summary.appendChild(el("span", "tsum", tool.summary));
+  const meta = toolMeta(tool);
+  if (meta !== null) summary.appendChild(meta);
+  // We drive the fold from the `expanded` set (so it survives a re-render):
+  // suppress the native toggle, flip the set, repaint.
+  summary.addEventListener("click", (event) => {
+    event.preventDefault();
     expanded = toggleExpanded(expanded, tool.callId);
     rerender();
   });
-  head.appendChild(toggle);
+  details.appendChild(summary);
 
-  // P2: enabled iff there is a diff. A `path` with NO diff (a write that changed
-  // no line) must not offer a button that opens nothing.
-  if (tool.hasDiff) {
-    const diff = el("button", "tool-diff", "show diff");
-    diff.addEventListener("click", () => {
-      post({ kind: "open-diff", callId: tool.callId });
-    });
-    head.appendChild(diff);
-  }
-  wrap.appendChild(head);
-
-  if (isOpen) {
-    const body = el("div", "tool-body");
-    body.innerHTML = tool.outputHtml;
-    wrap.appendChild(body);
-  }
-  return wrap;
+  const inner = el("div", "inner");
+  inner.innerHTML = tool.outputHtml; // P4: the diff `.code` preview
+  details.appendChild(inner);
+  return details;
 }
 
-function renderBlock(block: RenderedBlock): HTMLElement {
-  switch (block.kind) {
-    case "user":
-      return blockShell(block, "you");
-    case "assistant":
-      return blockShell(block, "wcode");
-    case "error":
-      return blockShell(block, "error");
-    case "btw":
-      return blockShell(block, "btw");
-    case "tool":
-      return renderTool(block);
-    default:
-      // A notice carries its sender when it is inter-agent traffic
-      // (`message_received`): without this the block has no role line and the
-      // reader cannot tell who spoke.
-      return blockShell(block, block.from ?? null);
+/** The tool head's `+N −M · 38ms` meta, or null when it has neither. */
+function toolMeta(tool: RenderedTool): HTMLElement | null {
+  const meta = el("span", "tmeta");
+  const stat = typeof tool.diff === "string" && tool.diff !== "" ? diffStat(tool.diff) : null;
+  const hasStat = stat !== null && (stat.added > 0 || stat.removed > 0);
+  if (stat !== null && stat.added > 0) meta.appendChild(el("span", "add", `+${stat.added}`));
+  if (stat !== null && stat.removed > 0) {
+    if (stat.added > 0) meta.appendChild(document.createTextNode(" "));
+    meta.appendChild(el("span", "del", `−${stat.removed}`));
   }
+  if (typeof tool.durationMs === "number") {
+    if (hasStat) meta.appendChild(document.createTextNode(" · "));
+    meta.appendChild(document.createTextNode(`${tool.durationMs}ms`));
+  }
+  return meta.childNodes.length > 0 ? meta : null;
+}
+
+function renderTurn(turn: Turn): HTMLElement {
+  const wrap = el("div", `turn ${turn.role}`);
+  const rail = el("div", "rail");
+  rail.setAttribute("aria-hidden", "true");
+  wrap.appendChild(rail);
+
+  const content = el("div", null);
+  const who = el("div", turn.who.className);
+  who.appendChild(el("span", "av", turn.who.avatar));
+  who.appendChild(el("span", "name", turn.who.name)); // no `.stamp` — no time on the wire
+  content.appendChild(who);
+  for (const block of turn.blocks) {
+    content.appendChild(block.kind === "tool" ? renderToolFold(block) : blockShell(block));
+  }
+
+  wrap.appendChild(content);
+  return wrap;
 }
 
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
-  renderStatus(state, session);
+  renderHeader(state, session);
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
-    transcriptEl.appendChild(renderEmpty(state, session));
+    transcriptEl.appendChild(renderStateCard(state, session));
   } else {
-    for (const block of state.blocks) transcriptEl.appendChild(renderBlock(block));
+    for (const turn of turns(state.blocks)) transcriptEl.appendChild(renderTurn(turn));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }

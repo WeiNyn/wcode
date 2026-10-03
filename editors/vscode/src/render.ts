@@ -28,6 +28,12 @@ export interface RenderedTool {
   durationMs?: number;
   /** P2 hook: a diff is available, so a "show diff" control may appear. */
   hasDiff: boolean;
+  /**
+   * The raw wcode presentation diff, so the webview counts `+N −M` itself
+   * (`view.ts::diffStat`) and P4's in-panel review has the body. Omitted when
+   * there is no diff (mirrors the `hasDiff` gate).
+   */
+  diff?: string;
 }
 
 /** One transcript block, pre-rendered. */
@@ -127,7 +133,7 @@ function renderContent(content: ContentBlock[]): string {
         break;
       case "thinking":
         parts.push(
-          `<details class="thinking"><summary>thinking</summary>${renderMarkdown(block.text)}</details>`,
+          `<details class="fold thought"><summary><span class="chev"></span><span class="tname">thought</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
         );
         break;
       case "tool_call":
@@ -151,6 +157,7 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
     path: tool.path,
     durationMs: tool.durationMs,
     hasDiff: typeof tool.diff === "string" && tool.diff !== "",
+    diff: tool.diff,
   };
 }
 

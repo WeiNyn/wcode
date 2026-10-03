@@ -15,8 +15,16 @@ test("html:false escapes raw HTML instead of passing it through", () => {
   assert.match(html, /&lt;img/);
 });
 
-test("fenced code renders (without token highlighting in P1)", () => {
+test("fenced code renders as a titled `.code` card (no highlighting in P1)", () => {
   const html = renderMarkdown("```js\nconst x = 1;\n```");
-  assert.match(html, /<pre><code class="language-js">/);
+  assert.match(html, /<div class="code"><div class="chead"><span>js<\/span><\/div><pre class="pre">/);
+  assert.match(html, /const x = 1;\n<\/pre><\/div>/);
   assert.ok(!html.includes("hljs"), "no highlighting in P1");
+});
+
+test("a fence with no language gets a blank header, and the code is escaped", () => {
+  const html = renderMarkdown("```\n<b>x</b>\n```");
+  assert.match(html, /<div class="chead"><span><\/span><\/div>/);
+  assert.ok(!html.includes("<b>x</b>"), "the code is escaped, never raw");
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
 });

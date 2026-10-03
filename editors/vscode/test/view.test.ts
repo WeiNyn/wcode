@@ -4,7 +4,16 @@ import { test } from "node:test";
 import { initialState, reduce, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
 import { parseToWebview, type PanelSessionInfo, type ToWebview } from "../src/webview.ts";
-import { classNames, emptyKind, stateLabel, statusSegments, toggleExpanded } from "../src/webview/view.ts";
+import {
+  classNames,
+  diffStat,
+  emptyKind,
+  emptySpec,
+  panelHeader,
+  stateLabel,
+  toggleExpanded,
+  turns,
+} from "../src/webview/view.ts";
 
 const idle = (): RenderedState => renderState(initialState());
 
@@ -15,7 +24,7 @@ const session = (over: Partial<PanelSessionInfo> = {}): PanelSessionInfo => ({
   ...over,
 });
 
-/* ------------------------------------------------------------------- status */
+/* ------------------------------------------------------------------- header */
 
 test("stateLabel names every FSM state", () => {
   assert.equal(stateLabel("ready"), "ready");
@@ -24,26 +33,61 @@ test("stateLabel names every FSM state", () => {
   assert.equal(stateLabel("stopped"), "stopped");
 });
 
-test("statusSegments: dot, state, separator, session id", () => {
-  const segments = statusSegments(idle(), session());
+test("panelHeader: dot, state, separator, session id", () => {
+  const { r1 } = panelHeader(idle(), session());
   assert.deepEqual(
-    segments.map((s) => s.className),
-    ["dot dot-ready", "status-state", "status-sep", "status-session"],
+    r1.slice(0, 4).map((c) => c.className),
+    ["dot dot-ready", "seg state", "sep", "seg mono"],
   );
   assert.deepEqual(
-    segments.map((s) => s.text),
+    r1.slice(0, 4).map((c) => c.text),
     ["", "ready", "·", "root-1"],
   );
 });
 
-test("statusSegments: an unknown session id reads as 'no session yet'", () => {
-  const segments = statusSegments(idle(), session({ id: null }));
-  assert.equal(segments[3].text, "no session yet");
+test("panelHeader: an unknown session id reads as 'no session yet'", () => {
+  const { r1 } = panelHeader(idle(), session({ id: null }));
+  assert.ok(r1.some((c) => c.className === "seg mono" && c.text === "no session yet"));
 });
 
-test("statusSegments appends running, context and the last error", () => {
-  const running = renderState(reduce(initialState(), { type: "agent_start" }));
-  const withCtx = renderState(
+test("panelHeader: r1 carries target, plan, running and error cells", () => {
+  const state: ViewState = {
+    ...initialState(),
+    // `renderState` overwrites `running` PER-TARGET: the member's `state` is the
+    // liveness fact. Input `running: false` below pins that the cell comes from it.
+    members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true, model: "sonnet" }],
+    targeted: "root-1",
+    status: { running: false, planMode: true, contextUsed: 42, lastError: "boom" },
+  };
+  const { r1 } = panelHeader(renderState(state, "root-1"), session());
+
+  // The target must ALWAYS be visible — an invisible target is the worst
+  // failure mode of a re-targeting panel (P3). It is an INERT span.
+  assert.ok(r1.some((c) => c.className === "target" && c.text.includes("orchestrator")));
+  assert.ok(r1.some((c) => c.className === "pchip plan" && c.text === "plan"));
+  assert.ok(r1.some((c) => c.className === "seg running" && c.text === "running…"));
+  assert.ok(r1.some((c) => c.className === "seg error" && c.text === "boom"));
+});
+
+test("panelHeader: r2 carries the target's model, ctx and the member count", () => {
+  const state: ViewState = {
+    ...initialState(),
+    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet" }],
+    targeted: "root-1",
+    status: { running: false, planMode: false, contextUsed: 42 },
+  };
+  const { r2 } = panelHeader(renderState(state, "root-1"), session());
+
+  // The model comes from the TARGETED member — `ViewStatus.model` is dead.
+  assert.ok(r2.some((c) => c.text === "sonnet"));
+  assert.ok(r2.some((c) => c.className === "seg ctx" && c.text === "ctx 42"));
+  assert.ok(r2.some((c) => c.className === "spacer"));
+  assert.ok(r2.some((c) => c.className === "seg" && c.text === "1 members"));
+});
+
+test("panelHeader: ctx is the numerator only — no gauge, no denominator", () => {
+  // No context window is on the wire, so there is NO `▰▰▰▱▱ N / M` gauge.
+  const state = renderState(
     reduce(reduce(initialState(), { type: "agent_start" }), {
       type: "turn_end",
       message: {
@@ -54,58 +98,103 @@ test("statusSegments appends running, context and the last error", () => {
       },
     }),
   );
-  const withError = renderState(
-    reduce(reduce(initialState(), { type: "agent_start" }), { type: "error", message: "boom" }),
-  );
-
-  assert.ok(statusSegments(running, session()).some((s) => s.className === "status-running"));
-  assert.ok(statusSegments(withCtx, session()).some((s) => s.text === "ctx 42"));
-  assert.ok(statusSegments(withError, session()).some((s) => s.text === "boom"));
-  assert.ok(!statusSegments(idle(), session()).some((s) => s.className === "status-running"));
+  const { r1, r2 } = panelHeader(state, session());
+  for (const cell of [...r1, ...r2]) {
+    assert.ok(!cell.text.includes("▰"), `no gauge glyph in "${cell.text}"`);
+    assert.ok(!cell.text.includes("/"), `no denominator in "${cell.text}"`);
+  }
+  assert.ok(r2.some((c) => c.className === "seg ctx" && c.text === "ctx 42"));
 });
 
-/* -------------------------------------------------------------- the target */
+test("panelHeader: the plan chip appears only when plan mode is on", () => {
+  const off = renderState(initialState(), null);
+  assert.ok(!panelHeader(off, session()).r1.some((c) => c.className === "pchip plan"));
+  const on = renderState({ ...initialState(), status: { running: false, planMode: true } }, null);
+  assert.ok(panelHeader(on, session()).r1.some((c) => c.className === "pchip plan" && c.text === "plan"));
+});
 
-test("the status strip names the target, so a retarget is visible", () => {
-  // The worst failure mode of a re-targeting panel is an invisible target: the
-  // user cannot tell whose transcript they are reading.
+test("panelHeader: running is per-target (the roster's liveness fact)", () => {
   const state: ViewState = {
     ...initialState(),
     members: [
       { id: "root-1", label: "root-1", state: "idle", isRoot: true },
-      { id: "agent:w1", label: "w1", state: "running", isRoot: false, liveAction: "edit src/f.rs" },
+      { id: "agent:w1", label: "w1", state: "running", isRoot: false },
     ],
     targeted: "root-1",
   };
+  const root = panelHeader(renderState(state, "root-1"), session());
+  const member = panelHeader(renderState(state, "agent:w1"), session());
 
-  const root = renderState(state, "root-1");
-  const member = renderState(state, "agent:w1");
-  assert.equal(root.target?.label, "orchestrator", "the root reads as orchestrator");
-  assert.equal(member.target?.label, "w1");
+  assert.ok(!root.r1.some((c) => c.className === "seg running"));
+  assert.ok(member.r1.some((c) => c.className === "seg running"));
 
-  const rootSegments = statusSegments(root, session());
-  const memberSegments = statusSegments(member, session());
-  assert.ok(rootSegments.some((s) => s.className === "status-target" && s.text === "orchestrator"));
-  assert.ok(memberSegments.some((s) => s.className === "status-target" && s.text === "w1"));
-  assert.ok(!memberSegments.some((s) => s.text === "orchestrator"), "the target segment CHANGED");
-
-  // `running` is per-target (the roster's MemberState), so the member shows it
-  // and the idle root does not.
-  assert.ok(memberSegments.some((s) => s.className === "status-running"));
-  assert.ok(!rootSegments.some((s) => s.className === "status-running"));
-
-  console.log("status strip (headless):");
-  for (const [name, view] of [["root-1", root], ["agent:w1", member]] as const) {
-    const text = statusSegments(view, session()).map((s) => s.text).join(" ");
-    console.log(`  target ${name.padEnd(9)} -> ${text}`);
-  }
+  // The target cell CHANGED — assert the retarget is visible.
+  assert.ok(root.r1.some((c) => c.className === "target" && c.text.includes("orchestrator")));
+  assert.ok(member.r1.some((c) => c.className === "target" && c.text.includes("w1")));
+  assert.ok(!member.r1.some((c) => c.text.includes("orchestrator")));
 });
 
-test("the plan chip appears only when plan mode is on", () => {
-  const off = renderState(initialState(), null);
-  assert.ok(!statusSegments(off, session()).some((s) => s.className === "status-plan"));
-  const on = renderState({ ...initialState(), status: { running: false, planMode: true } }, null);
-  assert.ok(statusSegments(on, session()).some((s) => s.className === "status-plan" && s.text === "plan"));
+/* ------------------------------------------------------------------- turns */
+
+function aTool(isError = false): RenderedBlock {
+  return {
+    kind: "tool",
+    html: "",
+    live: false,
+    tool: {
+      callId: "t1",
+      name: "edit",
+      summary: "s",
+      outputHtml: "",
+      outputText: "",
+      done: true,
+      isError,
+      hasDiff: false,
+    },
+  };
+}
+
+test("turns: a user block opens a you turn; the rest fold into one wcode turn", () => {
+  const grouped = turns([
+    { kind: "user", html: "hi", live: false },
+    { kind: "assistant", html: "…", live: false },
+    aTool(),
+  ]);
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0].role, "you");
+  assert.equal(grouped[0].who.className, "who you");
+  assert.equal(grouped[0].who.avatar, "Y");
+  assert.deepEqual(grouped[0].blocks.map((b) => b.kind), ["user"]);
+  assert.equal(grouped[1].role, "wcode");
+  assert.equal(grouped[1].who.className, "who wcode");
+  assert.equal(grouped[1].who.avatar, "❯");
+  assert.deepEqual(grouped[1].blocks.map((b) => b.kind), ["assistant", "tool"]);
+});
+
+test("turns: a leading non-user block opens a wcode turn", () => {
+  const grouped = turns([{ kind: "notice", html: "x", live: false }]);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].role, "wcode");
+});
+
+test("turns: a turn containing an error block is role 'err'", () => {
+  const grouped = turns([{ kind: "error", html: "boom", live: false }]);
+  assert.equal(grouped[0].role, "err");
+  assert.equal(grouped[0].who.className, "who wcode", "an err turn still reads as wcode");
+});
+
+/* ---------------------------------------------------------------- diffStat */
+
+test("diffStat counts single-hunk body lines and skips the @@ header", () => {
+  const diff = "@@ -40,6 +40,9 @@\n ctx\n-old\n+new1\n+new2\n ctx2\n";
+  assert.deepEqual(diffStat(diff), { added: 2, removed: 1 });
+});
+
+test("diffStat: the truncation tail is not counted, and junk is zero", () => {
+  const truncated = "@@ -1,1 +1,1 @@\n-a\n+b\n… (+37 more lines)";
+  assert.deepEqual(diffStat(truncated), { added: 1, removed: 1 });
+  assert.deepEqual(diffStat(""), { added: 0, removed: 0 });
+  assert.deepEqual(diffStat("not a diff"), { added: 0, removed: 0 });
 });
 
 /* -------------------------------------------------------------- empty states */
@@ -116,6 +205,24 @@ test("emptyKind picks the deliberate empty state", () => {
   assert.equal(emptyKind(idle(), session({ state: "stopped" })), "stopped");
   assert.equal(emptyKind(renderState(reduce(initialState(), { type: "agent_start" })), session()), "working");
   assert.equal(emptyKind(idle(), session()), "idle");
+});
+
+test("emptyKind: 'no-session' when the child never handed us a root session", () => {
+  // The panel starts `{ id: null, state: "stopped" }`; that reads as
+  // "No session.", not "Stopped" (a session that had run keeps its id).
+  assert.equal(emptyKind(idle(), session({ id: null })), "no-session");
+  assert.equal(emptyKind(idle(), session({ id: null, state: "stopped" })), "no-session");
+  assert.equal(emptyKind(idle(), session()), "idle");
+});
+
+test("emptySpec names copy for all six states", () => {
+  assert.equal(emptySpec("crashed").title, "wcode crashed.");
+  assert.equal(emptySpec("crashed").stderr, true);
+  assert.equal(emptySpec("starting").spin, true);
+  assert.equal(emptySpec("idle").spin, false);
+  assert.equal(emptySpec("no-session").sub, 'Run "wcode: Start Session".');
+  assert.equal(emptySpec("stopped").sub, 'Run "wcode: Start Session" to resume.');
+  assert.equal(emptySpec("idle").stderr, false);
 });
 
 /* ------------------------------------------------------------ expand / class */
@@ -130,29 +237,17 @@ test("toggleExpanded adds and removes, and never mutates the input set", () => {
   assert.deepEqual([...closed], []);
 });
 
-test("classNames composes the block classes", () => {
-  const tool = (isError: boolean): RenderedBlock => ({
-    kind: "tool",
-    html: "",
-    live: false,
-    tool: {
-      callId: "t1",
-      name: "edit",
-      summary: "s",
-      outputHtml: "",
-      outputText: "",
-      done: true,
-      isError,
-      hasDiff: true,
-    },
-  });
-  assert.equal(classNames(tool(false)), "block tool");
-  assert.equal(classNames(tool(false), true), "block tool expanded");
-  assert.equal(classNames(tool(true)), "block tool error");
-  assert.equal(classNames({ kind: "assistant", html: "", live: true }), "block assistant live");
-  assert.equal(classNames({ kind: "assistant", html: "", live: false }), "block assistant");
-  assert.equal(classNames({ kind: "user", html: "", live: false }), "block user");
-  assert.equal(classNames({ kind: "notice", html: "", live: false }), "block notice");
+test("classNames composes the content-element classes", () => {
+  assert.equal(classNames(aTool(false)), "fold tool");
+  assert.equal(classNames(aTool(false), true), "fold tool open");
+  assert.equal(classNames(aTool(true)), "fold tool error");
+  assert.equal(classNames(aTool(true), true), "fold tool error open");
+  assert.equal(classNames({ kind: "assistant", html: "", live: true }), "body live");
+  assert.equal(classNames({ kind: "assistant", html: "", live: false }), "body");
+  assert.equal(classNames({ kind: "user", html: "", live: false }), "body");
+  assert.equal(classNames({ kind: "notice", html: "", live: false }), "body notice");
+  assert.equal(classNames({ kind: "error", html: "", live: false }), "body error");
+  assert.equal(classNames({ kind: "btw", html: "", live: false }), "body btw");
 });
 
 /* --------------------------------------------------------- parseToWebview */
