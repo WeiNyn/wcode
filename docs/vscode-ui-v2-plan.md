@@ -72,8 +72,13 @@ V2 is the architectural core; V4/V5 carry the wire additions.
    `WebviewPanel` from the same `media/*` + contract. The native tree is retired.
 2. **All mode is a client-side merge** over the existing per-session transcripts —
    no protocol change (the extension already folds every session's events).
-3. **Run-following folds keep a user override:** a fold auto-opens while live and
-   auto-collapses once done; a manual toggle wins until the next state change.
+3. **Run-following folds:** a **tool** fold auto-opens while running and collapses
+   once done, with a manual override that wins until the next state change (the
+   override records the phase it was made in, so it expires at the running→done
+   transition; a done fold's override sticks). A **thinking** fold auto-opens while
+   its assistant block is live and collapses when done, with **no** manual override
+   — the block is host-rendered and replaced on every update, so a client toggle
+   could not survive; the auto behaviour is the whole feature there.
 4. **The `/` menu is client-side**, routing to the pickers and the existing host
    commands; the pickers reuse the one overlay component.
 5. **`/resume` cwd-filter + preview land in the CLI first** (the TUI benefits),
