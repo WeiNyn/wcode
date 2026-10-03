@@ -6,10 +6,13 @@ import { renderState, type RenderedBlock, type RenderedState } from "../src/rend
 import { parseToWebview, type PanelSessionInfo, type ToWebview } from "../src/webview.ts";
 import {
   classNames,
+  composerControls,
+  composeSubmit,
   diffStat,
   emptyKind,
   emptySpec,
   panelHeader,
+  selectionRef,
   stateLabel,
   toggleExpanded,
   turns,
@@ -253,13 +256,27 @@ test("classNames composes the content-element classes", () => {
 /* --------------------------------------------------------- parseToWebview */
 
 test("parseToWebview accepts a well-formed snapshot", () => {
-  const message: ToWebview = { kind: "state", state: idle(), session: session() };
+  const message: ToWebview = { kind: "state", state: idle(), session: session(), context: null };
   const parsed = parseToWebview(message);
   assert.ok(parsed);
   assert.equal(parsed.kind, "state");
   assert.equal(parsed.session.id, "root-1");
   assert.equal(parsed.session.state, "ready");
   assert.deepEqual(parsed.state.blocks, []);
+  assert.equal(parsed.context, null, "no context ⇒ null");
+
+  const withCtx = parseToWebview({ ...message, context: { path: "src/a.rs", startLine: 3, endLine: 5 } });
+  assert.deepEqual(withCtx?.context, { path: "src/a.rs", startLine: 3, endLine: 5 });
+
+  // LENIENT (M1): a non-conforming context degrades to null and the snapshot SURVIVES.
+  const lenient = parseToWebview({ ...message, context: "x" });
+  assert.ok(lenient, "the snapshot survives a wrong-typed context");
+  assert.equal(lenient.context, null);
+  assert.equal(
+    parseToWebview({ ...message, context: { path: "a.rs" } })?.context,
+    null,
+    "a partial context also degrades to null",
+  );
 });
 
 test("parseToWebview rejects junk and malformed snapshots", () => {
@@ -299,4 +316,29 @@ test("parseToWebview rejects junk and malformed snapshots", () => {
     null,
     "no stderrTail",
   );
+});
+/* --------------------------------------------------------------- composer */
+
+test("composerControls: mode reflects planMode, model is the target member's", () => {
+  const state: ViewState = {
+    ...initialState(),
+    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet" }],
+    targeted: "root-1",
+    status: { running: false, planMode: true },
+  };
+  assert.equal(composerControls(renderState(state, "root-1")).mode, "Plan");
+  assert.equal(composerControls(renderState(state, "root-1")).model, "sonnet");
+  // No target / no model ⇒ Act, and model null (never an em-dash).
+  assert.equal(composerControls(renderState(initialState(), null)).mode, "Act");
+  assert.equal(composerControls(renderState(initialState(), null)).model, null);
+});
+
+test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {
+  assert.equal(selectionRef({ path: "src/panel.ts", startLine: 88, endLine: 104 }), "@src/panel.ts#L88-104");
+  assert.equal(selectionRef({ path: "a.rs", startLine: 12, endLine: 12 }), "@a.rs#L12-12");
+});
+
+test("composeSubmit prepends the ref, else passes the text through", () => {
+  assert.equal(composeSubmit("hi", null), "hi");
+  assert.equal(composeSubmit("hi", { path: "src/p.ts", startLine: 1, endLine: 2 }), "@src/p.ts#L1-2\n\nhi");
 });

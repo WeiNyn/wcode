@@ -7,7 +7,7 @@
  */
 import type { RenderedBlock, RenderedState } from "../render.ts";
 import type { SessionState } from "../session.ts";
-import type { PanelSessionInfo } from "../webview.ts";
+import type { PanelSessionInfo, SelectionContext } from "../webview.ts";
 
 /** The FSM state as the user reads it. */
 export function stateLabel(state: SessionState): string {
@@ -258,4 +258,52 @@ export function diffStat(diff: string): { added: number; removed: number } {
     else if (line.startsWith("-")) removed += 1;
   }
   return { added, removed };
+}
+/**
+ * The composer's non-text controls. Pure.
+ *   mode  = `state.status.planMode` ? "Plan" : "Act"
+ *   model = the TARGETED member's `model` — the SAME lookup `panelHeader`'s r2 does
+ *           (`SessionMember.model` IS set; `ViewStatus.model` is dead) — or null.
+ * Effort and a context WINDOW are not on the wire, so neither appears here
+ * (plan §6 — the gauge and the model picker are deferred).
+ */
+export interface ComposerControls {
+  /** `Mode: Plan` / `Mode: Act` — reflects `status.planMode`. */
+  mode: "Plan" | "Act";
+  /** The TARGETED member's model, or null (READ-ONLY; no picker). */
+  model: string | null;
+}
+
+export function composerControls(state: RenderedState): ComposerControls {
+  const model = state.members.find((member) => member.id === state.target?.id)?.model;
+  return {
+    mode: state.status.planMode ? "Plan" : "Act",
+    model: model !== undefined && model !== "" ? model : null,
+  };
+}
+
+/**
+ * The composer chip text AND the submit prefix for one selection. Pure — ONE
+ * function, ONE form, so the RENDERED chip and the SUBMITTED reference are
+ * IDENTICAL (no drift between what you see and what is sent):
+ *   `@{path}#L{startLine}-{endLine}`   e.g. `@src/panel.ts#L88-104`
+ * 1-based inclusive; a single line prints `#L12-12`. The `L` is kept and
+ * JUSTIFIED: it matches VS Code's own `path#L12` link syntax, so `#L88-104`
+ * reads as a line range at a glance; the draft chip drops the `L`, but chip==ref
+ * is worth more than matching a prototype's decoration.
+ *
+ * The reference is OUR text convention — `Submit{text}` is a free string the
+ * model reads, so neither the host nor the CLI parses it.
+ */
+export function selectionRef(context: SelectionContext): string {
+  return `@${context.path}#L${context.startLine}-${context.endLine}`;
+}
+
+/**
+ * The text actually submitted: the reference line, a blank line, then the user's
+ * text when a context is attached; else the text verbatim. Pure.
+ *   `@src/panel.ts#L88-104\n\n<text>`
+ */
+export function composeSubmit(text: string, context: SelectionContext | null): string {
+  return context === null ? text : `${selectionRef(context)}\n\n${text}`;
 }

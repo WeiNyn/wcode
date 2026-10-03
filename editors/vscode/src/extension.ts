@@ -16,6 +16,7 @@ import * as vscode from "vscode";
 
 import { clearDiffs, openDiff, registerDiffProvider } from "./diffProvider.ts";
 import { ChatPanel, type PanelHandlers } from "./panel.ts";
+import type { SelectionContext } from "./webview.ts";
 import {
   appendUser,
   HydratedSet,
@@ -43,6 +44,8 @@ let roster: RosterProvider | undefined;
 let treeView: vscode.TreeView<RosterItem> | undefined;
 /** Session ids whose `GetHistory` has been asked for (once each, per child). */
 let hydrated = new HydratedSet();
+/** The last non-empty editor selection — STICKY (survives focus moving to the webview). */
+let lastSelection: SelectionContext | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionUri = context.extensionUri;
@@ -62,6 +65,21 @@ export function activate(context: vscode.ExtensionContext): void {
     treeView.onDidChangeSelection((event) => {
       const id = event.selection[0]?.id;
       if (id !== undefined) focusMember(id);
+    }),
+  );
+
+  // The selection is STICKY: `undefined` (focus moved to the webview/terminal)
+  // KEEPS the last selection — clearing there is the bug that makes the chip
+  // vanish as you go to type.
+  context.subscriptions.push(
+    vscode.window.onDidChangeTextEditorSelection((event) => {
+      lastSelection = selectionOf(event.textEditor);
+      ChatPanel.currentPanel()?.setContext(lastSelection);
+    }),
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor === undefined) return;
+      lastSelection = selectionOf(editor);
+      ChatPanel.currentPanel()?.setContext(lastSelection);
     }),
   );
 
@@ -93,6 +111,10 @@ export function deactivate(): Thenable<void> | undefined {
 async function startSession(): Promise<void> {
   const channel = ensureOutput();
   const panel = ChatPanel.createOrShow(requireExtensionUri(), panelHandlers(), viewState);
+  // Seed the chip ONCE when the panel opens; the listeners keep it in sync after.
+  const editor = vscode.window.activeTextEditor;
+  if (editor !== undefined) lastSelection = selectionOf(editor);
+  panel.setContext(lastSelection);
 
   if (session && (session.state === "ready" || session.state === "starting")) {
     channel.appendLine("session already running");
@@ -355,6 +377,7 @@ function panelHandlers(): PanelHandlers {
     onTarget: (target: string | null) => {
       if (target !== null) hydrate(target);
     },
+    onTogglePlan: () => togglePlan(),
   };
 }
 
@@ -402,6 +425,20 @@ function resolveBinary(): string {
 
 function workspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+/** The active editor's selection as a `SelectionContext`, or null when empty. */
+function selectionOf(editor: vscode.TextEditor): SelectionContext | null {
+  if (editor.selection.isEmpty) return null;
+  const { start, end } = editor.selection;
+  const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  const path = folder
+    ? vscode.workspace.asRelativePath(editor.document.uri, false)
+    : editor.document.uri.fsPath;
+  // VS Code's `end` is EXCLUSIVE: a selection ending at column 0 does NOT cover
+  // that line, so the last covered line is `end.line` (not `end.line + 1`).
+  const lastLine = end.character === 0 && end.line > start.line ? end.line : end.line + 1;
+  return { path, startLine: start.line + 1, endLine: lastLine }; // 1-based inclusive
 }
 
 function requireExtensionUri(): vscode.Uri {

@@ -19,6 +19,7 @@ import {
   parseFromWebview,
   realScheduler,
   type PanelSessionInfo,
+  type SelectionContext,
   type Throttle,
   type ToWebview,
 } from "./webview.ts";
@@ -36,6 +37,8 @@ export interface PanelHandlers {
   onRevealFile(path: string, line?: number): void;
   /** The user picked a member: the host hydrates that session's transcript. */
   onTarget(target: string | null): void;
+  /** The composer's `Mode:` control — flip plan-mode (extension.ts `togglePlan`). */
+  onTogglePlan(): void;
 }
 
 export class ChatPanel {
@@ -48,6 +51,12 @@ export class ChatPanel {
 
   private state: ViewState;
   private session: PanelSessionInfo = { id: null, state: "stopped", stderrTail: "" };
+  /**
+   * The selection the composer may attach — STICKY: the host keeps the last
+   * non-empty selection; clears only on `×` (webview) or an empty editor
+   * selection. Not per-target, so it survives a retarget.
+   */
+  private context: SelectionContext | null = null;
   private webviewReady = false;
   private pendingState: ViewState | null = null;
   /** The member whose surface is shown; every send is addressed there. */
@@ -112,6 +121,12 @@ export class ChatPanel {
     this.flush();
   }
 
+  /** Record the active editor's selection (host-global; NOT per-target). */
+  setContext(context: SelectionContext | null): void {
+    this.context = context;
+    this.flush();
+  }
+
   /**
    * Point the surface at a member (null = the root) and hydrate it. A retarget
    * only changes WHICH per-session transcript is rendered — nothing is lost.
@@ -159,7 +174,7 @@ export class ChatPanel {
   }
 
   private post(state: ReturnType<typeof renderState>): void {
-    const message: ToWebview = { kind: "state", state, session: this.session };
+    const message: ToWebview = { kind: "state", state, session: this.session, context: this.context };
     void this.panel.webview.postMessage(message);
   }
 
@@ -187,6 +202,9 @@ export class ChatPanel {
         break;
       case "reveal-file":
         this.handlers.onRevealFile(message.path, message.line);
+        break;
+      case "toggle-plan":
+        this.handlers.onTogglePlan();
         break;
     }
   }

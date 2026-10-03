@@ -23,6 +23,7 @@ test("parseFromWebview accepts the well-formed messages", () => {
     path: "a.rs",
     line: undefined,
   });
+  assert.deepEqual(parseFromWebview({ kind: "toggle-plan" }), { kind: "toggle-plan" });
 });
 
 test("parseFromWebview rejects junk and empty input", () => {

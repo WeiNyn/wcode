@@ -22,8 +22,27 @@ export interface PanelSessionInfo {
   stderrTail: string;
 }
 
+/**
+ * The active editor's selection. HOST-derived: the selection is NOT a kernel
+ * field and never crosses the protocol — it is a host-local view input.
+ */
+export interface SelectionContext {
+  /** Workspace-relative path (fs path when outside a workspace folder). */
+  path: string;
+  /** 1-based inclusive first line. */
+  startLine: number;
+  /** 1-based inclusive last line. */
+  endLine: number;
+}
+
 /** host → webview. Full snapshots only — there is no append/diff fast path. */
-export type ToWebview = { kind: "state"; state: RenderedState; session: PanelSessionInfo };
+export type ToWebview = {
+  kind: "state";
+  state: RenderedState;
+  session: PanelSessionInfo;
+  /** The editor selection the composer may attach, or null. Host-local. */
+  context: SelectionContext | null;
+};
 
 /** webview → host. */
 export type FromWebview =
@@ -32,6 +51,7 @@ export type FromWebview =
   | { kind: "steer"; text: string }
   | { kind: "open-diff"; callId: string }
   | { kind: "reveal-file"; path: string; line?: number }
+  | { kind: "toggle-plan" }
   /** The webview's script has run and it is ready to receive a snapshot. */
   | { kind: "ready" };
 
@@ -57,6 +77,8 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
       return { kind: "ready" };
     case "open-diff":
       return typeof message.callId === "string" ? { kind: "open-diff", callId: message.callId } : null;
+    case "toggle-plan":
+      return { kind: "toggle-plan" };
     case "reveal-file":
       return typeof message.path === "string"
         ? { kind: "reveal-file", path: message.path, line: typeof message.line === "number" ? message.line : undefined }
@@ -89,15 +111,32 @@ export function parseToWebview(raw: unknown): ToWebview | null {
   if (!(info.id === null || typeof info.id === "string")) return null;
   if (typeof info.stderrTail !== "string") return null;
 
+  const context = parseContext(message.context);
+
   return {
     kind: "state",
     state: state as RenderedState,
     session: { id: info.id as string | null, state: info.state, stderrTail: info.stderrTail },
+    context,
   };
 }
 
 function isSessionState(value: string): value is SessionState {
   return value === "stopped" || value === "starting" || value === "ready" || value === "crashed";
+}
+
+/**
+ * Narrow an untrusted `context` to a `SelectionContext`, or `null`. LENIENT: the
+ * selection is NOT load-bearing, so an absent / null / wrong-typed / partial value
+ * degrades to `null` and the WHOLE snapshot is kept — a reject here would drop the
+ * transcript for a decoration, the wrong trade.
+ */
+function parseContext(raw: unknown): SelectionContext | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const context = raw as Record<string, unknown>;
+  if (typeof context.path !== "string") return null;
+  if (typeof context.startLine !== "number" || typeof context.endLine !== "number") return null;
+  return { path: context.path, startLine: context.startLine, endLine: context.endLine };
 }
 
 /* ------------------------------------------------------------------ throttle */

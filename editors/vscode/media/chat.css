@@ -522,7 +522,7 @@ textarea#input:focus {
   flex: 1;
 }
 
-/* Reserved for the P2 composer controls (attach / commands / mode / model). */
+/* The composer toolbar controls (mode/model ship in P2; `＋` / `/` are deferred). */
 .tool-btn {
   font: inherit;
   font-size: 12px;
@@ -576,4 +576,61 @@ textarea#input:focus {
   .spin {
     animation: none;
   }
+}
+
+
+/* ------------------------------------------------ composer control states */
+
+.ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-textCodeBlock-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  padding: 1px 4px 1px 7px;
+}
+
+.ctx .mono {
+  color: inherit;
+}
+
+.ctx .x {
+  background: none;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+
+.ctx .x:hover {
+  color: var(--vscode-foreground);
+}
+
+.ctx .x:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.tool-btn.model {
+  cursor: default; /* read-only display, not a button */
+}
+
+.tool-btn.model:hover {
+  background: none;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The active (Plan) state mirrors the header's `.pchip.plan` — one visual language. */
+.tool-btn.mode[aria-pressed="true"] {
+  color: var(--vscode-charts-purple);
+}
+
+.tool-btn:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }

@@ -14,8 +14,20 @@
  * `acquireVsCodeApi()`.
  */
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
-import { parseToWebview, type FromWebview, type PanelSessionInfo, type ToWebview } from "../webview.ts";
-import { classNames, diffStat, emptyKind, emptySpec, panelHeader, toggleExpanded, turns, type Turn } from "./view.ts";
+import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview } from "../webview.ts";
+import {
+  classNames,
+  composerControls,
+  composeSubmit,
+  diffStat,
+  emptyKind,
+  emptySpec,
+  panelHeader,
+  selectionRef,
+  toggleExpanded,
+  turns,
+  type Turn,
+} from "./view.ts";
 
 /** The webview global; not in `@types/vscode` (it is injected by the host). */
 interface VsCodeApi {
@@ -38,10 +50,13 @@ app.innerHTML = [
   "</header>",
   '<main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
   '<footer id="composer" class="composer">',
-  '  <div class="ctx-chips" aria-label="Attached context"></div>',
+  '  <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
   '  <textarea id="input" rows="1" spellcheck="false"',
   '    placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
   '  <div class="ctoolbar">',
+  '    <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
+  '    <button id="cmode" class="tool-btn mode" type="button"></button>',
+  '    <span id="cmodel" class="tool-btn model"></span>',
   '    <span class="spacer"></span>',
   '    <span id="hint" class="hint">Enter to send</span>',
   '    <button id="send" class="btn primary">Send</button>',
@@ -55,11 +70,22 @@ const transcriptEl = requireEl("transcript");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
 const cancelBtn = requireEl("cancel");
+const cmodeEl = requireEl("cmode");
+const cmodelEl = requireEl("cmodel");
+const cattachEl = requireEl("cattach");
+const ctxChipsEl = requireEl("ctx-chips");
 
 /** callIds whose tool output is expanded (survives a re-render). */
 let expanded: ReadonlySet<string> = new Set();
 /** The last snapshot, so expand/collapse can re-render without the host. */
 let lastState: ToWebview | null = null;
+
+/** Does a context chip ride into the next submit? (webview-local, like `expanded`). */
+let attached = true;
+/** The selection from the LAST snapshot (for `composeSubmit` at submit time). */
+let lastContext: SelectionContext | null = null;
+/** The last rendered selection ref, so a NEW selection re-arms the chip. */
+let lastRef: string | null = null;
 
 /* ----------------------------------------------------------------- utilities */
 
@@ -208,6 +234,7 @@ function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
   renderHeader(state, session);
+  renderComposer(state, snapshot.context);
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
     transcriptEl.appendChild(renderStateCard(state, session));
@@ -215,6 +242,42 @@ function render(snapshot: ToWebview): void {
     for (const turn of turns(state.blocks)) transcriptEl.appendChild(renderTurn(turn));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+/* ---------------------------------------------------------------- composer */
+
+function renderComposer(state: RenderedState, context: SelectionContext | null): void {
+  const ref = context === null ? null : selectionRef(context);
+  // A NEW selection re-arms the chip: selecting again always re-attaches.
+  if (ref !== lastRef) {
+    attached = true;
+    lastRef = ref;
+  }
+  lastContext = context;
+
+  ctxChipsEl.textContent = "";
+  if (context !== null && attached) ctxChipsEl.appendChild(ctxChip(context));
+
+  const { mode, model } = composerControls(state);
+  cmodeEl.textContent = `Mode: ${mode}`;
+  cmodeEl.setAttribute("aria-pressed", mode === "Plan" ? "true" : "false");
+  // Render NOTHING when there is no model — no em-dash placeholder.
+  cmodelEl.textContent = model === null ? "" : `Model: ${model}`;
+  cmodelEl.hidden = model === null;
+}
+
+function ctxChip(context: SelectionContext): HTMLElement {
+  const chip = el("span", "ctx");
+  chip.appendChild(el("span", "mono", selectionRef(context)));
+  const dismiss = el("button", "x", "×");
+  dismiss.setAttribute("type", "button");
+  dismiss.setAttribute("aria-label", "Remove the attached selection");
+  dismiss.addEventListener("click", () => {
+    attached = false;
+    rerender();
+  });
+  chip.appendChild(dismiss);
+  return chip;
 }
 
 /* -------------------------------------------------------------------- input */
@@ -229,7 +292,7 @@ function autoGrow(): void {
 function submit(): void {
   const text = inputEl.value;
   if (text.trim() === "") return;
-  post({ kind: "submit", text });
+  post({ kind: "submit", text: composeSubmit(text, attached ? lastContext : null) });
   inputEl.value = "";
   autoGrow();
   inputEl.focus();
@@ -246,6 +309,14 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
   }
 });
 sendBtn.addEventListener("click", submit);
+// The mode control: post and let the HOST flip plan-mode; the next snapshot
+// reflects it (no optimistic flip here).
+cmodeEl.addEventListener("click", () => post({ kind: "toggle-plan" }));
+// Re-attach the same selection the chip was dismissed from.
+cattachEl.addEventListener("click", () => {
+  attached = true;
+  rerender();
+});
 cancelBtn.addEventListener("click", () => {
   post({ kind: "cancel" });
 });
