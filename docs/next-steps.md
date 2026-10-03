@@ -60,6 +60,7 @@ the boxes as each task completes and keep the status table current.
 | 51 | Workflow task injection: `--task` (`WCODE_TASK`) + `{{task}}` node titles, headless run (see [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md)) | ☑ landed — `2cd53c7` (P1 schema), `4a4a891` (plan), `452c196` (P2+P3 CLI/guards/headless), `c26c590` (P3 fold: wall-clock `--timeout`, summary on every exit, `changed()`-Err) |
 | 52 | Project team loading: auto-discovered `.wcode/config.toml` + `team.toml` (team > config; `--config` on top) + markdown agent files (`.wcode/agents/*.md`) + team auto-enables agents (see [`project-team-loading.md`](project-team-loading.md)) | ☑ shipped — `ccf6e17` (overlay fold + `--no-project-config`), `6c79445` (frontmatter extraction), `1b3802f` (`.wcode/agents/*.md` discovery + auto-agents), `53a70c3` (opt-out hardening); second-layer APPROVED; docs in this commit |
 | 53 | VS Code extension: P0-P4 (see [`vscode-extension-plan.md`](vscode-extension-plan.md)) | ◐ P0-P3 shipped, each second-layer APPROVED — `7762120` (`serve --stdio`), `efaf67a`/`05baf91` (spine + panel), `20b8ac9` (diffs), P3 (team surface). P4 (per-edit approval) not started — optional; the plan-gate already covers the flow |
+| 54 | VS Code surface UI/UX rework (see [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md)) | ◐ design locked (P1–P6); P1 not started |
 
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`
