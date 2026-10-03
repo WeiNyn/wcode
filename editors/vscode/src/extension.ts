@@ -30,7 +30,8 @@ import {
   type ViewState,
 } from "./reducer.ts";
 import { RosterProvider } from "./roster.ts";
-import { WcodeSession, type SessionState } from "./session.ts";
+import { WcodeSession, type CrashInfo, type SessionState } from "./session.ts";
+import { isUnsupportedStdio, unsupportedStdioMessage } from "./startup.ts";
 import type { AgentEvent, RawFrame } from "./protocol.ts";
 
 let session: WcodeSession | undefined;
@@ -140,9 +141,17 @@ async function startSession(): Promise<void> {
     }
     panel.setSession({ state });
   });
-  next.on("crash", (info: { stderrTail: string }) => {
+  next.on("crash", (info: CrashInfo) => {
     channel.appendLine("session crashed");
     if (info.stderrTail !== "") channel.appendLine(info.stderrTail);
+    // The first-run case: an older `wcode` on PATH rejects `--stdio`. Say what
+    // is wrong, WHICH binary, and both ways out — in the existing crash surface.
+    if (isUnsupportedStdio(info.code, info.stderrTail)) {
+      const message = unsupportedStdioMessage(binary);
+      channel.appendLine(message);
+      panel.setSession({ state: "crashed", stderrTail: message });
+      return;
+    }
     panel.setSession({ state: "crashed", stderrTail: info.stderrTail });
   });
 

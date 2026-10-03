@@ -1,0 +1,72 @@
+error: unexpected argument: --stdio
+
+wcode — minimal coding agent
+
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
+
+  -p <prompt>        run once with <prompt>, print the reply, exit
+  --resume [path]    resume a session (default: latest in the session dir)
+  --no-session       don't record a session file
+   --model <id>       override the configured model
+   --base-url <url>   override the configured base URL
+   --config <path>    overlay config file, deep-merged over the global config (also WCODE_CONFIG)
+   --endpoint <e>     override the configured endpoint (chat|responses)
+   --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
+   --list-models      list models from GET {base_url}/models and exit
+   --sequential       run tool calls one at a time (default: independent calls in a
+                      batch run in parallel)
+   --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
+   --no-skills        don't discover skills (SKILL.md)
+  --dump-system-prompt  print the composed system prompt and exit
+  --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
+  --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
+  serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
+  --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
+  --task <text>      run a [workflow] headless on <text> (requires [workflow]
+                     and --agents; WCODE_TASK is the fallback)
+  --timeout <secs>   cap the headless run (0/absent = no cap)
+  --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
+   -V, --version      show version
+   -h, --help         show this help
+
+config: ~/.config/wcode/config.toml
+  model = "..."      (required)
+  base_url = "..."   (optional, any OpenAI-compatible endpoint)
+  api_key = "..."    (optional)
+  endpoint = "..."   (optional, chat|responses, default chat)
+  effort = "..."     (optional, free-style reasoning effort, omitted = not sent)
+
+  [models."<id>"]     (optional; overrides the DEFAULT provider for that model id)
+  endpoint = "..."    (optional; chat|responses — overrides the default endpoint)
+  base_url = "..."    (optional; overrides the default base_url)
+  api_key = "..."    (optional; overrides the default api_key)
+
+  [hooks]
+  rtk = "..."        (optional, auto|true|false; route bash output through the rtk proxy to cut tokens)
+
+  [tools]
+  grep = "..."       (optional, true|false; register the grep tool. Off by default — bash can search)
+  find = "..."       (optional, true|false; register the find tool. Off by default — bash can list files)
+
+  [instructions]
+  file = "..."       (optional; load exactly this file instead of discovery. "off" disables)
+  names = [...]      (optional; candidate names to discover per directory. Default: AGENTS.override.md, AGENTS.md, CLAUDE.md)
+  global = true      (optional; also load the candidate file from ~/.config/wcode. Default true)
+
+  [skills]
+  enabled = true     (optional; discover SKILL.md packages. Default true)
+  dirs = [...]       (optional; extra skill roots, scanned first)
+  disabled = [...]   (optional; skill names to skip)
+
+  [retry]
+  max = 3            (optional; retry transient connect errors this many times; 0 disables)
+  base_ms = 500      (optional; base backoff for the first retry)
+  cap_ms = 8000      (optional; cap on a single backoff wait)
+env: WCODE_BASE_URL and WCODE_API_KEY override the toml globals (the DEFAULT provider); a [models.<id>] entry overrides it for that id; OPENAI_API_KEY is a key fallback
+env: WCODE_ENDPOINT overrides the toml endpoint; WCODE_EFFORT overrides the toml effort; a [models.<id>] entry overrides the default for that id
+env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
+env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
+env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or "off")
+env: WCODE_SKILLS discovers skills from extra roots, or "off" disables
+env: WCODE_TASK supplies --task when the flag is absent
+env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table

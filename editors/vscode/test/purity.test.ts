@@ -16,11 +16,23 @@ const here = dirname(fileURLToPath(import.meta.url));
 // not import `vscode` or a `node:` builtin. `webview.ts` is even stricter: it
 // imports only types (its `SessionState` comes in via `import type`, erased at
 // runtime).
-for (const file of ["reducer.ts", "render.ts", "webview.ts", "diff.ts", "webview/view.ts"]) {
+for (const file of [
+  "reducer.ts",
+  "render.ts",
+  "webview.ts",
+  "diff.ts",
+  "startup.ts",
+  "webview/view.ts",
+]) {
   test(`${file} imports no host and no I/O`, () => {
     const src = readFileSync(resolve(here, "../src", file), "utf8");
 
-    assert.match(src, /^\s*import\s+type\b/m, "expected at least one `import type`");
+    // A module that imports anything must use `import type` for its types (Node's
+    // strip-only mode erases those, but not a value import of a type). A module
+    // with NO imports (`startup.ts`) has nothing to check here.
+    if (/^\s*import\b/m.test(src)) {
+      assert.match(src, /^\s*import\s+type\b/m, "an importing module must use `import type` for types");
+    }
 
     // Whole-file rather than line-by-line, so a wrapped import, a dynamic
     // `import()` and an `export … from` are all caught, not just the tidy form.

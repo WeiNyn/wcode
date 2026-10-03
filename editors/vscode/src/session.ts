@@ -23,10 +23,19 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 import { PROTOCOL_VERSION } from "./protocol.ts";
+import { isUnsupportedStdio } from "./startup.ts";
 import type { AgentEvent, RawFrame, Request } from "./protocol.ts";
 
 /** `frame.rs` `MAX_FRAME_BYTES` — the same 16 MiB line cap the server enforces. */
 export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
+/**
+ * How much stderr we keep. BOTH ends: a startup failure (an older `wcode`
+ * rejecting `--stdio`) prints its error FIRST, a mid-run failure prints it LAST —
+ * a tail-only buffer drops the startup evidence behind a 72-line usage dump.
+ */
+const STDERR_HEAD_LINES = 10;
+const STDERR_TAIL_LINES = 40;
 
 /** The lifecycle FSM. */
 export type SessionState = "stopped" | "starting" | "ready" | "crashed";
@@ -135,7 +144,9 @@ export class WcodeSession extends EventEmitter {
   private readonly pending = new Map<number, Pending>();
   private rootId: string | null = null;
   private restarts = 0;
+  private readonly stderrHead: string[] = [];
   private readonly stderrTail: string[] = [];
+  private stderrCount = 0;
   private stopping = false;
   private readyTimer: NodeJS.Timeout | null = null;
   private readonly readyWaiters: Array<() => void> = [];
@@ -243,7 +254,9 @@ export class WcodeSession extends EventEmitter {
   private spawnOnce(): void {
     this.setState("starting");
     this.carry = "";
+    this.stderrHead.length = 0;
     this.stderrTail.length = 0;
+    this.stderrCount = 0;
     this.rootId = null;
 
     let child: ChildProcessWithoutNullStreams;
@@ -282,10 +295,21 @@ export class WcodeSession extends EventEmitter {
     for (const line of chunk.split("\n")) {
       const trimmed = line.trimEnd();
       if (trimmed === "") continue;
+      this.stderrCount += 1;
+      if (this.stderrHead.length < STDERR_HEAD_LINES) this.stderrHead.push(trimmed);
       this.stderrTail.push(trimmed);
-      if (this.stderrTail.length > 40) this.stderrTail.shift();
+      if (this.stderrTail.length > STDERR_TAIL_LINES) this.stderrTail.shift();
       this.emit("stderr", trimmed);
     }
+  }
+
+  /**
+   * The stderr we kept: the head (a startup failure) plus the tail (a mid-run
+   * one), elided in the middle only when something was actually dropped.
+   */
+  private stderrText(): string {
+    if (this.stderrCount <= this.stderrTail.length) return this.stderrTail.join("\n");
+    return [...this.stderrHead, "…", ...this.stderrTail].join("\n");
   }
 
   private dispatch(frame: RawFrame): void {
@@ -330,8 +354,17 @@ export class WcodeSession extends EventEmitter {
     this.emit("crash", {
       code,
       signal,
-      stderrTail: this.stderrTail.join("\n"),
+      stderrTail: this.stderrText(),
     } satisfies CrashInfo);
+    // A binary that does not support `serve --stdio` is older than this
+    // extension: respawning it cannot help, and a crash loop only obscures the
+    // real message. Report once and stay crashed (the host surfaces it).
+    if (isUnsupportedStdio(code, this.stderrText())) {
+      this.logger.error(
+        `wcode at ${this.options.binary} does not support \`serve --stdio\`; not restarting`,
+      );
+      return;
+    }
     if (this.restarts < this.maxRestarts) {
       const delay = this.backoffMs[this.restarts] ?? this.backoffMs[this.backoffMs.length - 1] ?? 2000;
       this.restarts += 1;
@@ -362,7 +395,7 @@ export class WcodeSession extends EventEmitter {
   private fail(err: Error): void {
     this.clearReadyTimer();
     this.setState("crashed");
-    this.emit("crash", { code: null, signal: null, stderrTail: this.stderrTail.join("\n") } satisfies CrashInfo);
+    this.emit("crash", { code: null, signal: null, stderrTail: this.stderrText() } satisfies CrashInfo);
     this.startReject = null;
     void err;
   }
