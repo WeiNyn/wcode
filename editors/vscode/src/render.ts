@@ -63,7 +63,7 @@ export interface RenderedState {
 
 /**
  * Render the full view state FOR A TARGET member (default: the state's own).
- * Pure. The transcript/todos come from that session's key, so a retarget only
+ * Pure. The transcript comes from that session's key, so a retarget only
  * changes what is rendered — nothing is lost.
  */
 export function renderState(state: ViewState, target: string | null = state.targeted): RenderedState {
@@ -71,11 +71,18 @@ export function renderState(state: ViewState, target: string | null = state.targ
   return {
     blocks: blocks.map(renderBlock),
     members: state.members,
-    todos: target === null ? [] : state.todos[target] ?? [],
+    // The rail is DURABLE (it does not retarget), so it shows the ROOT session's plan.
+    todos: rootTodos(state),
     // `running` is PER-TARGET: the roster's `MemberState` is the liveness fact.
     status: { ...state.status, running: targetRunning(state, target) },
     target: target === null ? null : { id: target, label: targetLabel(state, target) },
   };
+}
+
+/** The ROOT session's todos — the rail's durable plan (it does not retarget). Pure. */
+function rootTodos(state: ViewState): TodoItem[] {
+  const root = state.members.find((member) => member.isRoot) ?? state.members[0];
+  return root === undefined ? [] : state.todos[root.id] ?? [];
 }
 
 function targetRunning(state: ViewState, target: string | null): boolean {

@@ -15,16 +15,14 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onView:wcode.members",
+    "onView:wcode.surface",
     "onCommand:wcode.start",
     "onCommand:wcode.stop",
     "onCommand:wcode.restart",
     "onCommand:wcode.openDiff",
     "onCommand:wcode.member.focus",
-    "onCommand:wcode.member.peek",
-    "onCommand:wcode.member.ask",
-    "onCommand:wcode.member.stop",
-    "onCommand:wcode.plan.toggle"
+    "onCommand:wcode.plan.toggle",
+    "onCommand:wcode.openInEditor"
   ],
   "contributes": {
     "viewsContainers": {
@@ -39,17 +37,12 @@
     "views": {
       "wcode": [
         {
-          "id": "wcode.members",
-          "name": "Team"
+          "id": "wcode.surface",
+          "name": "wcode",
+          "type": "webview"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "wcode.members",
-        "contents": "No session. Run [wcode: Start Session](command:wcode.start)."
-      }
-    ],
     "commands": [
       {
         "command": "wcode.start",
@@ -86,28 +79,17 @@
       {
         "command": "wcode.plan.toggle",
         "title": "wcode: Toggle Plan Mode"
+      },
+      {
+        "command": "wcode.openInEditor",
+        "title": "wcode: Open in Editor"
       }
     ],
     "menus": {
-      "view/item/context": [
-        {
-          "command": "wcode.member.peek",
-          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/",
-          "group": "inline"
-        },
-        {
-          "command": "wcode.member.ask",
-          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/"
-        },
-        {
-          "command": "wcode.member.stop",
-          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/"
-        }
-      ],
       "view/title": [
         {
-          "command": "wcode.plan.toggle",
-          "when": "view == wcode.members",
+          "command": "wcode.openInEditor",
+          "when": "view == wcode.surface",
           "group": "navigation"
         }
       ]

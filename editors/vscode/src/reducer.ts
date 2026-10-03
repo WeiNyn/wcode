@@ -348,25 +348,6 @@ export function memberViews(members: SessionMember[]): RosterItem[] {
   }));
 }
 
-/** A codicon id + theme-color id per `MemberState` (the TUI's glyph map). Pure. */
-export interface IconSpec {
-  icon: string;
-  color: string;
-}
-
-export function memberIconSpec(state: MemberState): IconSpec {
-  switch (state) {
-    case "running":
-      return { icon: "circle-filled", color: "charts.green" };
-    case "done":
-      return { icon: "check", color: "charts.blue" };
-    case "failed":
-      return { icon: "error", color: "charts.red" };
-    default:
-      return { icon: "circle-outline", color: "descriptionForeground" };
-  }
-}
-
 /** The `☑ done/total` badge for a todo list. Pure. */
 export function todoBadge(todos: TodoItem[]): string {
   const done = todos.filter((todo) => todo.status === "completed").length;
@@ -551,7 +532,7 @@ function textOf(content: ContentBlock[]): string {
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
-/** One Tasks row, ready for the tree. Pure. */
+/** One Tasks row, ready for the rail. Pure. */
 export interface TodoView {
   /** The item text (the draft spans the row). */
   label: string;
@@ -559,90 +540,59 @@ export interface TodoView {
 }
 
 /**
- * Map the todo list to rows (draft `.todo`). Pure — the icon comes from
- * `todoIconSpec(status)` at render time, not a per-row glyph field (a native
- * `TreeItem` has no class slot).
+ * Map the todo list to rows (draft `.todo`). Pure — the box glyph comes from
+ * `todoGlyph(status)` at render time, not a per-row field.
  */
 export function todoViews(todos: TodoItem[]): TodoView[] {
   return todos.map((todo) => ({ label: todo.content, status: todo.status }));
 }
 
+/** The webview's team+tasks rail (draft `.side`). Pure. */
+export interface SidebarRails {
+  /** The Team rows (the same shape as `memberViews`). */
+  team: RosterItem[];
+  /** The Tasks section: the `☑ done/total` badge + rows. */
+  tasks: { badge: string; rows: TodoView[] };
+}
+
 /**
- * A codicon id + theme-color id per `TodoStatus` (the Tasks rows). Pure.
- *   completed   -> { icon: "check", color: "charts.green" }
- *   in_progress -> { icon: "play", color: "charts.blue" }   // the one accent; the
- *     draft's `doing` box is UNCOLORED — tinting the active task is an ACCEPTED
- *     divergence.
- *   pending     -> { icon: "circle-outline", color: "descriptionForeground" }
+ * Build the rail model from the roster + ONE session's todos. Pure.
+ *   team  = memberViews(members)
+ *   tasks = { badge: todoBadge(todos), rows: todoViews(todos) }
+ * The webview renders it DIRECTLY (no native tree, no `SidebarNode`).
  */
-export function todoIconSpec(status: TodoStatus): IconSpec {
+export function sidebarRails(members: SessionMember[], todos: TodoItem[]): SidebarRails {
+  return {
+    team: memberViews(members),
+    tasks: { badge: todoBadge(todos), rows: todoViews(todos) },
+  };
+}
+
+/** The draft's `.todo .box` glyph + row class per `TodoStatus`. Pure. */
+export function todoGlyph(status: TodoStatus): { glyph: string; className: string } {
   switch (status) {
     case "completed":
-      return { icon: "check", color: "charts.green" };
+      return { glyph: "☑", className: "done" };
     case "in_progress":
-      return { icon: "play", color: "charts.blue" };
+      return { glyph: "▸", className: "doing" };
     default:
-      return { icon: "circle-outline", color: "descriptionForeground" };
+      return { glyph: "☐", className: "" };
   }
-}
-
-/** The sidebar tree's node union (ONE view, collapsible section roots). */
-export type SidebarNode = SectionNode | MemberNode | TodoNode;
-
-/** A collapsible section root (draft `.side-head` Team / Tasks). */
-export interface SectionNode {
-  kind: "section";
-  /** A stable id so VS Code REMEMBERS the collapse state across repaints. */
-  id: string; // "section:team" | "section:tasks"
-  label: string; // "Team" | "Tasks"
-  /** The dim right-hand text (draft `.side-head .meta`) — the Tasks `☑ done/total`. */
-  description?: string; // todoBadge(todos) for Tasks; undefined for Team
-  children: SidebarNode[];
-}
-
-/** A member row (the roster, unchanged — `memberViews`). */
-export interface MemberNode {
-  kind: "member";
-  row: RosterItem;
-}
-
-/** A Tasks row. */
-export interface TodoNode {
-  kind: "todo";
-  /** `${sectionId}:${index}` — todos carry no id on the wire. */
-  id: string;
-  row: TodoView;
 }
 
 /**
- * Build the two section roots from the roster + ONE session's todos. Pure.
- *   Team  = SectionNode("section:team", "Team", children = memberViews(members))
- *           — the roster, root first; present when `members.length > 0`.
- *   Tasks = SectionNode("section:tasks", "Tasks", description = todoBadge(todos),
- *           children = todoViews(todos)) — present ONLY when `todos.length > 0`
- *           (an empty Tasks section is noise).
- * When there are NO members AND NO todos, return `[]` — otherwise an always-present
- * Team root would keep the tree non-empty and VS Code's `viewsWelcome` empty state
- * (`No session. Run wcode: Start Session`) would never render.
+ * The draft's `.roster .glyph` glyph + class per `MemberState` (the TUI vocabulary).
+ * The webview CANNOT use a codicon id, so the rail renders text. Pure.
  */
-export function sidebarTree(members: SessionMember[], todos: TodoItem[]): SectionNode[] {
-  const sections: SectionNode[] = [];
-  if (members.length > 0) {
-    sections.push({
-      kind: "section",
-      id: "section:team",
-      label: "Team",
-      children: memberViews(members).map((row): MemberNode => ({ kind: "member", row })),
-    });
+export function memberGlyph(state: MemberState): { glyph: string; className: string } {
+  switch (state) {
+    case "running":
+      return { glyph: "⠋", className: "g-run" };
+    case "done":
+      return { glyph: "✓", className: "g-done" };
+    case "failed":
+      return { glyph: "✗", className: "g-err" };
+    default:
+      return { glyph: "○", className: "g-idle" };
   }
-  if (todos.length > 0) {
-    sections.push({
-      kind: "section",
-      id: "section:tasks",
-      label: "Tasks",
-      description: todoBadge(todos),
-      children: todoViews(todos).map((row, index): TodoNode => ({ kind: "todo", id: `section:tasks:${index}`, row })),
-    });
-  }
-  return sections;
 }

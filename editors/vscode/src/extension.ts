@@ -5,18 +5,20 @@
  * `wcode serve --stdio` child; `wcode.stop` stops it; `wcode.restart` restarts.
  * The OutputChannel stays for diagnostics (every frame, every stderr line).
  *
- * P3: the sidebar is a CONTROL SURFACE. The roster is pushed (never polled) and
- * a member's row retargets the panel; every send is addressed to the member's
- * session id, which the server demuxes against its live roster. The verbs are
- * the `member` tool's — peek = `Status`, ask = `SideAsk` (no turn), stop =
- * `Cancel` — plus the composer's `Submit`/`Interrupt` and `SetPlanMode`.
+ * V2: ONE dockable surface — a `WebviewView` (sidebar/panel) + an editor `WebviewPanel`,
+ * both fed by the one `SurfaceController`. Every send is addressed to a member's session
+ * id, which the server demuxes against its live roster. The team + tasks render INSIDE
+ * the surface; the `member` verbs (peek = `Status`, ask = `SideAsk`, stop = `Cancel`) are
+ * INERT until a rail-row menu lands — plus `Submit`/`Interrupt` and `SetPlanMode`.
  */
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 
 import { clearDiffs, openDiff, registerDiffProvider, revertDiff } from "./diffProvider.ts";
 import { setVerdict, type Verdict } from "./review.ts";
-import { ChatPanel, type PanelHandlers } from "./panel.ts";
+import { ChatPanel } from "./panel.ts";
+import { SurfaceController, type SurfaceHandlers } from "./surface.ts";
+import { SurfaceViewProvider } from "./webviewView.ts";
 import type { SelectionContext } from "./webview.ts";
 import {
   appendUser,
@@ -25,25 +27,20 @@ import {
   planModePending,
   planModeRevert,
   reduce,
-  sidebarTree,
   target as setTarget,
   targetLabel,
-  type MemberNode,
-  type SidebarNode,
   type ViewState,
 } from "./reducer.ts";
-import { SidebarProvider } from "./roster.ts";
 import { WcodeSession, type CrashInfo, type SessionState } from "./session.ts";
 import { isUnsupportedStdio, unsupportedStdioMessage } from "./startup.ts";
-import type { AgentEvent, RawFrame, TodoItem } from "./protocol.ts";
+import type { AgentEvent, RawFrame } from "./protocol.ts";
 
 let session: WcodeSession | undefined;
 let viewState: ViewState = initialState();
 let output: vscode.OutputChannel | undefined;
 let status: vscode.StatusBarItem | undefined;
 let extensionUri: vscode.Uri | undefined;
-let sidebar: SidebarProvider | undefined;
-let treeView: vscode.TreeView<SidebarNode> | undefined;
+let controller: SurfaceController | undefined;
 /** Session ids whose `GetHistory` has been asked for (once each, per child). */
 let hydrated = new HydratedSet();
 /** The last non-empty editor selection — STICKY (survives focus moving to the webview). */
@@ -60,16 +57,15 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(output, status);
   registerDiffProvider(context, logLine);
 
-  sidebar = new SidebarProvider();
-  treeView = vscode.window.createTreeView("wcode.members", { treeDataProvider: sidebar });
-  context.subscriptions.push(sidebar, treeView);
-  // Keyboard navigation retargets too; `focusMember` is idempotent, so the
-  // `TreeItem.command` (a click) and this do not double-work.
+  const surface = new SurfaceController(context.extensionUri, surfaceHandlers(), viewState);
+  controller = surface;
+  // ONE view provider (the dockable sidebar/panel home) + an editor-tab host command.
   context.subscriptions.push(
-    treeView.onDidChangeSelection((event) => {
-      const id = memberIdOf(event.selection[0]);
-      if (id !== undefined) focusMember(id);
-    }),
+    vscode.window.registerWebviewViewProvider("wcode.surface", new SurfaceViewProvider(surface)),
+    surface,
+    vscode.commands.registerCommand("wcode.openInEditor", () =>
+      ChatPanel.createOrShow(requireExtensionUri(), surface),
+    ),
   );
 
   // The selection is STICKY: `undefined` (focus moved to the webview/terminal)
@@ -78,12 +74,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection((event) => {
       lastSelection = selectionOf(event.textEditor);
-      ChatPanel.currentPanel()?.setContext(lastSelection);
+      controller?.setContext(lastSelection);
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor === undefined) return;
       lastSelection = selectionOf(editor);
-      ChatPanel.currentPanel()?.setContext(lastSelection);
+      controller?.setContext(lastSelection);
     }),
   );
 
@@ -97,15 +93,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("wcode.member.focus", (id?: unknown) => {
       if (typeof id === "string") focusMember(id);
     }),
-    vscode.commands.registerCommand("wcode.member.peek", (node?: MemberNode) => void peekMember(node?.row.id)),
-    vscode.commands.registerCommand("wcode.member.ask", (node?: MemberNode) => void askMember(node?.row.id)),
-    vscode.commands.registerCommand("wcode.member.stop", (node?: MemberNode) => stopMember(node?.row.id)),
+    // INERT until a rail-row menu lands (a follow-up): they took a tree element before,
+    // so with no menu there is no id to pass — a palette call is a silent no-op.
+    vscode.commands.registerCommand("wcode.member.peek", () => void peekMember(undefined)),
+    vscode.commands.registerCommand("wcode.member.ask", () => void askMember(undefined)),
+    vscode.commands.registerCommand("wcode.member.stop", () => stopMember(undefined)),
     vscode.commands.registerCommand("wcode.plan.toggle", () => togglePlan()),
   );
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  ChatPanel.disposeCurrent();
+  controller?.dispose();
   clearDiffs();
   return session?.stop();
 }
@@ -114,15 +112,14 @@ export function deactivate(): Thenable<void> | undefined {
 
 async function startSession(): Promise<void> {
   const channel = ensureOutput();
-  const panel = ChatPanel.createOrShow(requireExtensionUri(), panelHandlers(), viewState);
-  // Seed the chip ONCE when the panel opens; the listeners keep it in sync after.
+  // Seed the chip ONCE when the surface opens; the listeners keep it in sync after.
   const editor = vscode.window.activeTextEditor;
   if (editor !== undefined) lastSelection = selectionOf(editor);
-  panel.setContext(lastSelection);
+  controller?.setContext(lastSelection);
 
   if (session && (session.state === "ready" || session.state === "starting")) {
     channel.appendLine("session already running");
-    panel.reveal();
+    controller?.reveal();
     return;
   }
 
@@ -132,7 +129,7 @@ async function startSession(): Promise<void> {
   } catch (err) {
     const message = errMessage(err);
     channel.appendLine(`error: ${message}`);
-    panel.setSession({ state: "crashed", stderrTail: message });
+    controller?.setSession({ state: "crashed", stderrTail: message });
     void vscode.window.showErrorMessage(`wcode: ${message}`);
     return;
   }
@@ -145,7 +142,7 @@ async function startSession(): Promise<void> {
   });
   session = next;
   hydrated.reset();
-  panel.setSession({ id: null, state: next.state, stderrTail: "" });
+  controller?.setSession({ id: null, state: next.state, stderrTail: "" });
 
   next.on("event", (event: AgentEvent, frame: RawFrame) => {
     const correlation = typeof frame.reply_to === "number" ? ` (reply_to ${frame.reply_to})` : "";
@@ -154,10 +151,9 @@ async function startSession(): Promise<void> {
     // reply) — the key every per-session arm writes.
     viewState = reduce(viewState, event, frame.session);
     ensureTarget();
-    pushSidebar();
-    if (event.type === "spawned") revealMember(event.worker);
+    // The rail renders INSIDE the surface from the snapshot — no separate sidebar push.
     // `message_end` (and the other settled events) always send the final state.
-    panel.update(viewState, isSettled(event));
+    controller?.update(viewState, isSettled(event));
   });
   next.on("stderr", (line: string) => channel.appendLine(`stderr: ${line}`));
   next.on("state", (state: SessionState) => {
@@ -165,7 +161,7 @@ async function startSession(): Promise<void> {
       status.text = `wcode: ${state}`;
       status.show();
     }
-    panel.setSession({ state });
+    controller?.setSession({ state });
   });
   next.on("crash", (info: CrashInfo) => {
     channel.appendLine("session crashed");
@@ -175,10 +171,10 @@ async function startSession(): Promise<void> {
     if (isUnsupportedStdio(info.code, info.stderrTail)) {
       const message = unsupportedStdioMessage(binary);
       channel.appendLine(message);
-      panel.setSession({ state: "crashed", stderrTail: message });
+      controller?.setSession({ state: "crashed", stderrTail: message });
       return;
     }
-    panel.setSession({ state: "crashed", stderrTail: info.stderrTail });
+    controller?.setSession({ state: "crashed", stderrTail: info.stderrTail });
   });
 
   try {
@@ -186,7 +182,7 @@ async function startSession(): Promise<void> {
   } catch (err) {
     const message = errMessage(err);
     channel.appendLine(`failed to start: ${message}`);
-    panel.setSession({ state: "crashed", stderrTail: message });
+    controller?.setSession({ state: "crashed", stderrTail: message });
     void vscode.window.showErrorMessage(
       `wcode failed to start (${message}). Set "wcode.path" or put wcode on PATH.`,
     );
@@ -194,7 +190,7 @@ async function startSession(): Promise<void> {
   }
 
   channel.appendLine(`ready — root session ${next.rootSessionId}`);
-  panel.setSession({ id: next.rootSessionId, state: next.state });
+  controller?.setSession({ id: next.rootSessionId, state: next.state });
   // The seeded push has already folded, so the target is the root.
   if (viewState.targeted !== null) hydrate(viewState.targeted);
 }
@@ -210,7 +206,7 @@ async function stopSession(): Promise<void> {
   // A restart spawns a fresh child; the before-images belong to the old one.
   clearDiffs();
   reviewVerdicts = {};
-  ChatPanel.currentPanel()?.setSession({ state: "stopped" });
+  controller?.setSession({ state: "stopped" });
 }
 
 async function restartSession(): Promise<void> {
@@ -220,7 +216,7 @@ async function restartSession(): Promise<void> {
   // nothing about.
   viewState = initialState();
   reviewVerdicts = {};
-  ChatPanel.currentPanel()?.update(viewState, true);
+  controller?.update(viewState, true);
   await startSession();
 }
 
@@ -229,10 +225,9 @@ async function restartSession(): Promise<void> {
 /** Retarget the panel at a member (and hydrate that member's transcript). */
 function focusMember(id: string): void {
   viewState = setTarget(viewState, id);
-  pushSidebar();
-  const panel = ChatPanel.currentPanel();
-  if (panel && panel.currentTarget !== id) {
-    panel.setTarget(id); // fires `onTarget`, which hydrates
+  const surface = controller;
+  if (surface && surface.currentTarget !== id) {
+    surface.setTarget(id); // fires `onTarget`, which hydrates
     return;
   }
   hydrate(id);
@@ -289,51 +284,25 @@ function togglePlan(): void {
   if (!session) return;
   const on = !viewState.status.planMode;
   viewState = planModePending(viewState, on);
-  ChatPanel.currentPanel()?.update(viewState, true);
-  const target = ChatPanel.currentPanel()?.currentTarget ?? undefined;
+  controller?.update(viewState, true);
+  const target = controller?.currentTarget ?? undefined;
   try {
     session.send({ type: "set_plan_mode", on }, target);
   } catch (err) {
     viewState = planModeRevert(viewState);
-    ChatPanel.currentPanel()?.update(viewState, true);
+    controller?.update(viewState, true);
     ensureOutput().appendLine(`plan toggle failed: ${errMessage(err)}`);
   }
 }
 
 /* ------------------------------------------------------------------ roster */
 
-/** Push the sidebar sections to the tree (it dedupes; no polling, no refresh). */
-function pushSidebar(): void {
-  sidebar?.set(sidebarTree(viewState.members, tasksTodos()));
-}
-
-/**
- * The Tasks section shows the ROOT session's plan — the sidebar is durable and does
- * NOT retarget, so it is the OVERALL plan, not the panel's `targeted` member.
- */
-function tasksTodos(): TodoItem[] {
-  const root = viewState.members.find((m) => m.isRoot) ?? viewState.members[0];
-  return root === undefined ? [] : viewState.todos[root.id] ?? [];
-}
-
-/** The member id a tree node carries (a section / todo node carries none). */
-function memberIdOf(node: SidebarNode | undefined): string | undefined {
-  return node !== undefined && node.kind === "member" ? node.row.id : undefined;
-}
-
-/** The first roster arrival picks a target, so the panel is never unattached. */
+/** The first roster arrival picks a target, so the surface is never unattached. */
 function ensureTarget(): void {
   if (viewState.targeted !== null) return;
   const root = viewState.members.find((m) => m.isRoot) ?? viewState.members[0];
   if (root === undefined) return;
   focusMember(root.id);
-}
-
-/** Reveal a newly spawned member — without stealing focus or selection. */
-function revealMember(id: string): void {
-  const item = sidebar?.find(id);
-  if (item === undefined || treeView === undefined) return;
-  void treeView.reveal(item, { select: false, focus: false });
 }
 
 /** Ask a member for its history — ONCE per session, addressed to ITS id. */
@@ -351,7 +320,7 @@ function hydrate(id: string): void {
 
 /* ------------------------------------------------------------------ panel io */
 
-function panelHandlers(): PanelHandlers {
+function surfaceHandlers(): SurfaceHandlers {
   return {
     onSubmit: (text: string, target: string | null) => {
       const channel = ensureOutput();
@@ -368,7 +337,7 @@ function panelHandlers(): PanelHandlers {
         // The session streams only the assistant's reply; echo the user locally
         // into THAT member's transcript.
         viewState = appendUser(viewState, text, address);
-        ChatPanel.currentPanel()?.update(viewState, true);
+        controller?.update(viewState, true);
         session.send({ type: "submit", text }, address);
       } catch (err) {
         channel.appendLine(`submit failed: ${errMessage(err)}`);
@@ -413,20 +382,20 @@ function panelHandlers(): PanelHandlers {
  * only when a write SUCCEEDED — the panel never claims a write that did not happen.
  */
 async function reviewChange(callId: string, verdict: "accept" | "reject"): Promise<void> {
-  const panel = ChatPanel.currentPanel();
+  const surface = controller;
   if (verdict === "accept") {
     reviewVerdicts = setVerdict(reviewVerdicts, callId, "accepted");
-    panel?.setVerdicts(reviewVerdicts);
+    surface?.setVerdicts(reviewVerdicts);
     return;
   }
   // Reject = reverse-apply the tool's diff to the CURRENT file and write the before-image.
   const ok = await revertDiff(viewState, workspaceRoot(), callId, logLine);
   if (ok) {
     reviewVerdicts = setVerdict(reviewVerdicts, callId, "rejected");
-    panel?.setVerdicts(reviewVerdicts);
+    surface?.setVerdicts(reviewVerdicts);
   }
   // !ok: `revertDiff` already warned + logged (the file moved on -> reverseApply is
-  // null); the verdict stays "pending", so the panel never claims a write that did not.
+  // null); the verdict stays "pending", so the surface never claims a write that did not.
 }
 
 async function revealFile(path: string, line?: number): Promise<void> {

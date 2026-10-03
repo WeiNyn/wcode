@@ -8,16 +8,15 @@ import type { AgentEvent, AgentMessage, TodoItem } from "../src/protocol.ts";
 import {
   HydratedSet,
   initialState,
+  memberGlyph,
   reduce,
   seedFromHistory,
-  sidebarTree,
+  sidebarRails,
   todoBadge,
-  todoIconSpec,
+  todoGlyph,
   todoViews,
   transcriptOf,
-  type MemberNode,
   type SessionMember,
-  type TodoNode,
   type ViewState,
 } from "../src/reducer.ts";
 
@@ -212,7 +211,7 @@ test("HydratedSet: a session is hydrated ONCE (a second retarget must not re-ask
   assert.equal(hydrated.size, 0);
   assert.equal(hydrated.claim("agent:w1"), true, "a restart re-asks");
 });
-/* ------------------------------------------------------- the sidebar tree */
+/* ------------------------------------------------------------------- rail */
 
 test("todoViews maps each todo to a {label,status} row", () => {
   const todos: TodoItem[] = [
@@ -227,49 +226,38 @@ test("todoViews maps each todo to a {label,status} row", () => {
   ]);
 });
 
-test("todoIconSpec names a codicon + color per status", () => {
-  assert.deepEqual(todoIconSpec("completed"), { icon: "check", color: "charts.green" });
-  assert.deepEqual(todoIconSpec("in_progress"), { icon: "play", color: "charts.blue" });
-  assert.deepEqual(todoIconSpec("pending"), { icon: "circle-outline", color: "descriptionForeground" });
-});
-
-test("sidebarTree: a Team root (when members exist) + a Tasks root (only when non-empty)", () => {
+test("sidebarRails: team rows + the tasks badge/rows", () => {
   const members: SessionMember[] = [
     { id: "root-1", label: "root-1", state: "running", isRoot: true, model: "opus" },
     { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
   ];
-
-  // B1: NO members and NO todos -> `[]`, so the `viewsWelcome` empty state renders.
-  assert.deepEqual(sidebarTree([], []), []);
-
-  const teamOnly = sidebarTree(members, []);
-  assert.equal(teamOnly.length, 1, "no Tasks root when there are no todos");
-  assert.equal(teamOnly[0].id, "section:team");
-  assert.equal(teamOnly[0].label, "Team");
-  assert.equal(teamOnly[0].description, undefined, "the Team root has no badge");
-  assert.equal(teamOnly[0].children.length, 2, "memberViews are the Team rows");
-  const teamChild0 = teamOnly[0].children[0] as MemberNode;
-  assert.equal(teamChild0.row.label, "orchestrator", "the root reads as orchestrator");
-
-  const withTodos = sidebarTree(members, [
-    { content: "x", status: "completed" },
-    { content: "y", status: "pending" },
+  const todos: TodoItem[] = [
+    { content: "a", status: "completed" },
+    { content: "b", status: "pending" },
+  ];
+  const rails = sidebarRails(members, todos);
+  assert.equal(rails.team.length, 2);
+  assert.equal(rails.team[0].label, "orchestrator", "the root reads as orchestrator");
+  assert.equal(rails.team[0].model, "opus");
+  assert.equal(rails.tasks.badge, "☑ 1/2");
+  assert.deepEqual(rails.tasks.rows, [
+    { label: "a", status: "completed" },
+    { label: "b", status: "pending" },
   ]);
-  assert.equal(withTodos.length, 2);
-  assert.equal(withTodos[1].id, "section:tasks");
-  assert.equal(withTodos[1].label, "Tasks");
-  assert.equal(withTodos[1].description, "☑ 1/2", "the Tasks badge");
-  assert.equal(withTodos[1].children.length, 2);
-  const taskChild0 = withTodos[1].children[0] as TodoNode;
-  assert.equal(taskChild0.id, "section:tasks:0");
-  assert.equal(taskChild0.row.label, "x");
+  assert.deepEqual(sidebarRails([], []).tasks, { badge: "☑ 0/0", rows: [] });
 });
 
-test("sidebarTree: the Tasks root appears alone when there are no members", () => {
-  const tasksOnly = sidebarTree([], [{ content: "t", status: "in_progress" }]);
-  assert.equal(tasksOnly.length, 1, "no Team root when there are no members");
-  assert.equal(tasksOnly[0].id, "section:tasks");
-  assert.equal(tasksOnly[0].children.length, 1);
+test("todoGlyph maps each status to the draft's box + row class", () => {
+  assert.deepEqual(todoGlyph("completed"), { glyph: "☑", className: "done" });
+  assert.deepEqual(todoGlyph("in_progress"), { glyph: "▸", className: "doing" });
+  assert.deepEqual(todoGlyph("pending"), { glyph: "☐", className: "" });
+});
+
+test("memberGlyph maps each MemberState to the TUI glyph + class", () => {
+  assert.deepEqual(memberGlyph("running"), { glyph: "⠋", className: "g-run" });
+  assert.deepEqual(memberGlyph("done"), { glyph: "✓", className: "g-done" });
+  assert.deepEqual(memberGlyph("failed"), { glyph: "✗", className: "g-err" });
+  assert.deepEqual(memberGlyph("idle"), { glyph: "○", className: "g-idle" });
 });
 
 test("todoBadge counts completed over total", () => {

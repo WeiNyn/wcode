@@ -13,6 +13,7 @@
  * DOM-bound: element construction, scroll glue, the click/keydown handlers, and
  * `acquireVsCodeApi()`.
  */
+import { memberGlyph, sidebarRails, todoGlyph, type RosterItem, type SidebarRails } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview } from "../webview.ts";
@@ -54,25 +55,31 @@ app.innerHTML = [
   '  <div class="r1"></div>',
   '  <div class="r2"></div>',
   "</header>",
-  '<main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
-  '<footer id="composer" class="composer">',
-  '  <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
-  '  <textarea id="input" rows="1" spellcheck="false"',
-  '    placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
-  '  <div class="ctoolbar">',
-  '    <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
-  '    <button id="cmode" class="tool-btn mode" type="button"></button>',
-  '    <span id="cmodel" class="tool-btn model"></span>',
-  '    <span class="spacer"></span>',
-  '    <span id="hint" class="hint">Enter to send</span>',
-  '    <button id="send" class="btn primary">Send</button>',
-  '    <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)">Stop</button>',
-  "  </div>",
-  "</footer>",
+  '<div class="content">',
+  '  <aside id="side" class="side" aria-label="Team and tasks"></aside>',
+  '  <section class="main">',
+  '    <main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
+  '    <footer id="composer" class="composer">',
+  '      <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
+  '      <textarea id="input" rows="1" spellcheck="false"',
+  '        placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
+  '      <div class="ctoolbar">',
+  '        <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
+  '        <button id="cmode" class="tool-btn mode" type="button"></button>',
+  '        <span id="cmodel" class="tool-btn model"></span>',
+  '        <span class="spacer"></span>',
+  '        <span id="hint" class="hint">Enter to send</span>',
+  '        <button id="send" class="btn primary">Send</button>',
+  '        <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)">Stop</button>',
+  '      </div>',
+  '    </footer>',
+  '  </section>',
+  "</div>",
 ].join("\n");
 const pheadEl = requireEl("phead");
 
 const transcriptEl = requireEl("transcript");
+const sideEl = requireEl("side");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
 const cancelBtn = requireEl("cancel");
@@ -471,6 +478,7 @@ function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
   renderHeader(state, session);
+  renderRails(state);
   renderComposer(state, snapshot.context);
   lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
@@ -520,6 +528,60 @@ function ctxChip(context: SelectionContext): HTMLElement {
   });
   chip.appendChild(dismiss);
   return chip;
+}
+
+/* ------------------------------------------------------------------- rail */
+
+function renderRails(state: RenderedState): void {
+  // The rail is DURABLE: the roster + the ROOT session's plan (the OVERALL plan, NOT the
+  // shown member's) — `state.todos` is the root's (render.ts).
+  const rails = sidebarRails(state.members, state.todos);
+  sideEl.textContent = "";
+  sideEl.appendChild(teamSection(rails.team, state.target?.id ?? null));
+  if (rails.tasks.rows.length > 0) sideEl.appendChild(tasksSection(rails.tasks));
+}
+
+function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
+  const box = el("div", null);
+  const head = el("div", "side-head");
+  head.appendChild(el("span", null, "Team"));
+  head.appendChild(el("span", "spacer"));
+  box.appendChild(head);
+  const list = el("ul", "roster");
+  for (const row of rows) {
+    const glyph = memberGlyph(row.state);
+    const item = el("li", row.id === targetId ? "sel" : null);
+    item.appendChild(el("span", `glyph ${glyph.className}`, glyph.glyph));
+    const who = el("span", "who");
+    who.appendChild(el("b", null, row.label));
+    who.appendChild(el("span", "meta", row.model ?? (row.isRoot ? "root" : "")));
+    item.appendChild(who);
+    item.appendChild(el("span", "act-line", row.liveAction ?? row.state));
+    // A rail row click RETARGETS — the same P3 path the header chip's menu uses.
+    item.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
+    list.appendChild(item);
+  }
+  box.appendChild(list);
+  return box;
+}
+
+function tasksSection(tasks: SidebarRails["tasks"]): HTMLElement {
+  const box = el("div", null);
+  const head = el("div", "side-head");
+  head.appendChild(el("span", null, "Tasks"));
+  head.appendChild(el("span", "spacer"));
+  head.appendChild(el("span", "seg", tasks.badge));
+  box.appendChild(head);
+  const list = el("ul", "todo");
+  for (const row of tasks.rows) {
+    const glyph = todoGlyph(row.status);
+    const item = el("li", glyph.className === "" ? null : glyph.className);
+    item.appendChild(el("span", "box", glyph.glyph));
+    item.appendChild(el("span", null, row.label));
+    list.appendChild(item);
+  }
+  box.appendChild(list);
+  return box;
 }
 
 /* -------------------------------------------------------------------- input */

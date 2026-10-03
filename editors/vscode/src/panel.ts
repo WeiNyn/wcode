@@ -1,262 +1,93 @@
 /**
- * The webview chat panel — the only place the message contract meets `vscode`.
+ * The editor-tab host of the shared surface — V2.
  *
- * Security posture (sketch §4): `enableScripts` only, a strict CSP with **no
- * remote origins** (`default-src 'none'`; only the bundled `media/*` via
- * `webview.cspSource`), `localResourceRoots` limited to `media/`, and
+ * The CONTROLLER (`surface.ts`) owns the state, the throttle and the message contract;
+ * this is only the `WebviewPanel` half: create the tab, wrap it in a `WebviewPanelHost`,
+ * attach it. The docked home is a `WebviewView` (`webviewView.ts`). The editor tab is a
+ * singleton host.
+ *
+ * Security posture: `enableScripts` only, a strict CSP with no remote origins (the
+ * shared `surfaceHtml`), `localResourceRoots` limited to `media/`, and
  * `retainContextWhenHidden` so the transcript survives a tab switch.
- *
- * The webview is a pure renderer: the host renders markdown (`render.ts`) and
- * posts `RenderedState` snapshots, coalesced by a throttle so a fast stream
- * cannot flood it.
  */
 import * as vscode from "vscode";
 
-import { renderState } from "./render.ts";
-import type { ViewState } from "./reducer.ts";
-import type { Verdict } from "./review.ts";
-import {
-  createThrottle,
-  parseFromWebview,
-  realScheduler,
-  type PanelSessionInfo,
-  type SelectionContext,
-  type Throttle,
-  type ToWebview,
-} from "./webview.ts";
-
-/** ~30 ms: coalesce a fast token stream into at most ~33 posts/s. */
-export const THROTTLE_MS = 30;
-
-/** What the panel calls back into the host for. */
-export interface PanelHandlers {
-  /** `target` is the member the composer is addressed to (null = the root). */
-  onSubmit(text: string, target: string | null): void;
-  onCancel(target: string | null): void;
-  onSteer(text: string, target: string | null): void;
-  onOpenDiff(callId: string): void;
-  onRevealFile(path: string, line?: number): void;
-  /** The user picked a member: the host hydrates that session's transcript. */
-  onTarget(target: string | null): void;
-  /** The composer's `Mode:` control — flip plan-mode (extension.ts `togglePlan`). */
-  onTogglePlan(): void;
-  /** The header target chip picked a member: retarget + hydrate. */
-  onFocusMember(id: string): void;
-  /** The change review: `callId` + intent. The host settles it (Reject writes). */
-  onReview(callId: string, verdict: "accept" | "reject"): void;
-}
+import type { SurfaceController, SurfaceHost } from "./surface.ts";
+import type { ToWebview } from "./webview.ts";
 
 export class ChatPanel {
   private static current: ChatPanel | undefined;
 
   private readonly panel: vscode.WebviewPanel;
-  private readonly throttle: Throttle;
-  private readonly handlers: PanelHandlers;
-  private readonly disposables: vscode.Disposable[] = [];
 
-  private state: ViewState;
-  private session: PanelSessionInfo = { id: null, state: "stopped", stderrTail: "" };
-  /**
-   * The selection the composer may attach — STICKY: the host keeps the last
-   * non-empty selection; clears only on `×` (webview) or an empty editor
-   * selection. Not per-target, so it survives a retarget.
-   */
-  private context: SelectionContext | null = null;
-  /** Per-callId review verdicts (host-local; carried on every snapshot). */
-  private verdicts: Record<string, Verdict> = {};
-  private webviewReady = false;
-  private pendingState: ViewState | null = null;
-  /** The member whose surface is shown; every send is addressed there. */
-  private target: string | null = null;
-
-  private constructor(
-    panel: vscode.WebviewPanel,
-    mediaRoot: vscode.Uri,
-    handlers: PanelHandlers,
-    state: ViewState,
-  ) {
+  private constructor(panel: vscode.WebviewPanel) {
     this.panel = panel;
-    this.handlers = handlers;
-    this.state = state;
-    // The panel starts attached to whatever the state was already pointed at.
-    this.target = state.targeted;
-    this.throttle = createThrottle(THROTTLE_MS, (rendered) => this.post(rendered), realScheduler);
-
-    this.panel.webview.html = renderHtml(this.panel.webview, mediaRoot);
-    this.disposables.push(
-      this.panel.webview.onDidReceiveMessage((raw: unknown) => this.onMessage(raw)),
-      this.panel.onDidDispose(() => this.dispose()),
-    );
   }
 
-  /** Create the panel, or reveal the existing one. */
-  static createOrShow(extensionUri: vscode.Uri, handlers: PanelHandlers, state: ViewState): ChatPanel {
+  /** Open (or reveal) the surface as an editor tab, attached to the shared controller. */
+  static createOrShow(extensionUri: vscode.Uri, controller: SurfaceController): ChatPanel {
     if (ChatPanel.current) {
-      ChatPanel.current.state = state;
-      ChatPanel.current.panel.reveal(vscode.ViewColumn.Beside, true);
-      ChatPanel.current.flush();
+      ChatPanel.current.reveal();
       return ChatPanel.current;
     }
     const mediaRoot = vscode.Uri.joinPath(extensionUri, "media");
     const panel = vscode.window.createWebviewPanel(
-      "wcode.chat",
+      "wcode.surface",
       "wcode",
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-      {
-        enableScripts: true,
-        localResourceRoots: [mediaRoot],
-        retainContextWhenHidden: true,
-      },
+      { enableScripts: true, localResourceRoots: [mediaRoot], retainContextWhenHidden: true },
     );
-    ChatPanel.current = new ChatPanel(panel, mediaRoot, handlers, state);
-    return ChatPanel.current;
-  }
-
-  update(state: ViewState, immediate = false): void {
-    this.state = state;
-    if (!this.webviewReady) {
-      this.pendingState = state;
-      return;
-    }
-    if (immediate) this.flush();
-    else this.throttle.push(renderState(state, this.target));
-  }
-
-  /** Update the status strip (session id / FSM / stderr tail). */
-  setSession(info: Partial<PanelSessionInfo>): void {
-    this.session = { ...this.session, ...info };
-    this.flush();
-  }
-
-  /** Record the active editor's selection (host-global; NOT per-target). */
-  setContext(context: SelectionContext | null): void {
-    this.context = context;
-    this.flush();
-  }
-
-  /** Record the settled verdicts and repaint. */
-  setVerdicts(verdicts: Record<string, Verdict>): void {
-    this.verdicts = verdicts;
-    this.flush();
-  }
-
-  /**
-   * Point the surface at a member (null = the root) and hydrate it. A retarget
-   * only changes WHICH per-session transcript is rendered — nothing is lost.
-   */
-  setTarget(id: string | null): void {
-    if (this.target === id) return;
-    this.target = id;
-    this.handlers.onTarget(id);
-    this.flush();
-  }
-
-  get currentTarget(): string | null {
-    return this.target;
+    const host = new WebviewPanelHost(panel, mediaRoot);
+    controller.attach(host);
+    const created = new ChatPanel(panel);
+    // The host detach is wired by `attach`; this only clears the singleton.
+    panel.onDidDispose(() => {
+      if (ChatPanel.current === created) ChatPanel.current = undefined;
+    });
+    ChatPanel.current = created;
+    return created;
   }
 
   reveal(): void {
     this.panel.reveal(vscode.ViewColumn.Beside, true);
   }
 
-  /** The open panel, if any (the extension drives it from its event handlers). */
-  static currentPanel(): ChatPanel | undefined {
-    return ChatPanel.current;
-  }
-
-  /** Dispose the singleton, if any (extension `deactivate`). */
-  static disposeCurrent(): void {
-    ChatPanel.current?.dispose();
-  }
-
   dispose(): void {
     if (ChatPanel.current === this) ChatPanel.current = undefined;
-    this.throttle.dispose();
-    for (const disposable of this.disposables.splice(0)) disposable.dispose();
     this.panel.dispose();
-  }
-
-  /* ---------------------------------------------------------------- private */
-
-  private flush(): void {
-    if (!this.webviewReady) {
-      this.pendingState = this.state;
-      return;
-    }
-    this.throttle.flush(renderState(this.state, this.target));
-  }
-
-  private post(state: ReturnType<typeof renderState>): void {
-    const message: ToWebview = {
-      kind: "state",
-      state,
-      session: this.session,
-      context: this.context,
-      verdicts: this.verdicts,
-    };
-    void this.panel.webview.postMessage(message);
-  }
-
-  private onMessage(raw: unknown): void {
-    const message = parseFromWebview(raw);
-    if (message === null) return;
-    switch (message.kind) {
-      case "ready":
-        this.webviewReady = true;
-        this.state = this.pendingState ?? this.state;
-        this.pendingState = null;
-        this.flush();
-        break;
-      case "submit":
-        this.handlers.onSubmit(message.text, this.target);
-        break;
-      case "steer":
-        this.handlers.onSteer(message.text, this.target);
-        break;
-      case "cancel":
-        this.handlers.onCancel(this.target);
-        break;
-      case "open-diff":
-        this.handlers.onOpenDiff(message.callId);
-        break;
-      case "reveal-file":
-        this.handlers.onRevealFile(message.path, message.line);
-        break;
-      case "toggle-plan":
-        this.handlers.onTogglePlan();
-        break;
-      case "focus-member":
-        this.handlers.onFocusMember(message.id);
-        break;
-      case "review":
-        this.handlers.onReview(message.callId, message.verdict);
-        break;
-    }
   }
 }
 
-/** The panel document: strict CSP, no remote resources, one bundled script. */
-function renderHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): string {
-  const script = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, "chat.js"));
-  const style = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, "chat.css"));
-  const csp = [
-    "default-src 'none'",
-    `img-src ${webview.cspSource}`,
-    `style-src ${webview.cspSource}`,
-    `script-src ${webview.cspSource}`,
-  ].join("; ");
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="${csp}" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="${style}" />
-    <title>wcode</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script src="${script}"></script>
-  </body>
-</html>`;
+/** A `SurfaceHost` over a `vscode.WebviewPanel` (the editor-tab home). */
+class WebviewPanelHost implements SurfaceHost {
+  constructor(
+    private readonly panel: vscode.WebviewPanel,
+    mediaRoot: vscode.Uri,
+  ) {
+    this.panel.webview.options = { enableScripts: true, localResourceRoots: [mediaRoot] };
+  }
+
+  get webview(): vscode.Webview {
+    return this.panel.webview;
+  }
+
+  get visible(): boolean {
+    return this.panel.visible;
+  }
+
+  reveal(): void {
+    this.panel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  post(message: ToWebview): void {
+    void this.panel.webview.postMessage(message);
+  }
+
+  onMessage(listener: (raw: unknown) => void): vscode.Disposable {
+    return this.panel.webview.onDidReceiveMessage(listener);
+  }
+
+  onDispose(listener: () => void): vscode.Disposable {
+    return this.panel.onDidDispose(listener);
+  }
 }
