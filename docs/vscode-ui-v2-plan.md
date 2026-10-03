@@ -96,7 +96,7 @@ V2 is the architectural core; V4/V5 carry the wire additions.
 | phase | status |
 |---|---|
 | V1 | ☑ `3332998` — bordered tables + run-following folds; second-layer APPROVED (145 tests green) |
-| V2 | ☐ not started |
+| V2 | ☑ `7c29470` — one dockable surface (WebviewView + editor panel; tree retired); second-layer APPROVED (131 tests green) |
 | V3 | ☐ not started |
 | V4 | ☐ not started |
 | V5 | ☐ not started |
