@@ -873,3 +873,30 @@ textarea#input:focus {
 .review.rejected .reviewbar .badge {
   color: var(--vscode-errorForeground);
 }
+
+/* ---------------------------------------- bordered tables (v2, re-added) */
+
+.body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.94em;
+}
+
+.body th,
+.body td {
+  border: 1px solid var(--vscode-panel-border);
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.body th {
+  background: var(--vscode-textBlockQuote-background);
+  font-weight: 600;
+}
+
+/* ------------------------------------- the tool fold's running tag (v2) */
+
+.fold .running-tag {
+  color: var(--vscode-charts-yellow);
+  font-size: 11px;
+}

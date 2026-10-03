@@ -7,7 +7,7 @@
  * only talks to the host over `postMessage`.
  *
  * The PURE half lives in `./view.ts` (`stateLabel`, `panelHeader`, `turns`,
- * `diffStat`, `emptySpec`, `emptyKind`, `toggleExpanded`, `classNames`) and
+ * `diffStat`, `emptySpec`, `emptyKind`, `foldOpen`, `toggleFold`, `classNames`) and
  * `../webview.ts`
  * (`parseToWebview`), both of which plain node can drive. What remains here is
  * DOM-bound: element construction, scroll glue, the click/keydown handlers, and
@@ -23,11 +23,13 @@ import {
   diffStat,
   emptyKind,
   emptySpec,
+  foldOpen,
   panelHeader,
   selectionRef,
-  toggleExpanded,
+  toggleFold,
   turns,
   workingGroup,
+  type FoldOverrides,
   type HeaderCell,
   type Turn,
   type WorkingGroup,
@@ -79,8 +81,8 @@ const cmodelEl = requireEl("cmodel");
 const cattachEl = requireEl("cattach");
 const ctxChipsEl = requireEl("ctx-chips");
 
-/** callIds whose tool output is expanded (survives a re-render). */
-let expanded: ReadonlySet<string> = new Set();
+/** Per-callId tool-fold overrides (the user's manual toggle, keyed to its phase). */
+let foldOverrides: FoldOverrides = new Map();
 /** The last snapshot, so expand/collapse can re-render without the host. */
 let lastState: ToWebview | null = null;
 /** The last snapshot's verdicts, so a tool fold finds its verdict without a snapshot. */
@@ -313,10 +315,9 @@ function blockShell(block: RenderedBlock): HTMLElement {
 function renderToolFold(block: RenderedBlock): HTMLElement {
   const tool = block.tool;
   if (tool === undefined) return el("details", "fold tool");
-  const isOpen = expanded.has(tool.callId);
-
-  const details = el("details", classNames(block, isOpen));
-  if (isOpen) details.setAttribute("open", "");
+  const open = foldOpen(foldOverrides, tool.callId, tool.done); // override wins; else open while running
+  const details = el("details", classNames(block, open));
+  if (open) details.setAttribute("open", "");
 
   const summary = el("summary", null);
   summary.appendChild(el("span", "chev"));
@@ -324,11 +325,11 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   summary.appendChild(el("span", "tsum", tool.summary));
   const meta = toolMeta(tool);
   if (meta !== null) summary.appendChild(meta);
-  // We drive the fold from the `expanded` set (so it survives a re-render):
-  // suppress the native toggle, flip the set, repaint.
+  // We drive the fold from the override map (so it survives a stream re-render):
+  // suppress the native toggle, flip the override for this phase, repaint.
   summary.addEventListener("click", (event) => {
     event.preventDefault();
-    expanded = toggleExpanded(expanded, tool.callId);
+    foldOverrides = toggleFold(foldOverrides, tool.callId, tool.done);
     rerender();
   });
   details.appendChild(summary);
@@ -416,9 +417,14 @@ function toolMeta(tool: RenderedTool): HTMLElement | null {
     if (stat.added > 0) meta.appendChild(document.createTextNode(" "));
     meta.appendChild(el("span", "del", `−${stat.removed}`));
   }
-  if (typeof tool.durationMs === "number") {
+  if (tool.done) {
+    if (typeof tool.durationMs === "number") {
+      if (hasStat) meta.appendChild(document.createTextNode(" · "));
+      meta.appendChild(document.createTextNode(`${tool.durationMs}ms`));
+    }
+  } else {
     if (hasStat) meta.appendChild(document.createTextNode(" · "));
-    meta.appendChild(document.createTextNode(`${tool.durationMs}ms`));
+    meta.appendChild(el("span", "running-tag", "running…"));
   }
   return meta.childNodes.length > 0 ? meta : null;
 }

@@ -119,3 +119,20 @@ test("a fenced code block renders as a titled `.code` card", () => {
   assert.match(block.html, /<pre class="pre">const x = 1;\n<\/pre>/);
   assert.ok(!block.html.includes("hljs"), "no highlighting in P1");
 });
+
+test("a live assistant block's thinking fold is open; a settled one is not", () => {
+  const live = renderBlock({
+    kind: "assistant",
+    live: true,
+    content: [{ type: "thinking", text: "weighing options" }],
+  });
+  assert.match(live.html, /<details class="fold thought" open>/);
+
+  const done = renderBlock({
+    kind: "assistant",
+    live: false,
+    content: [{ type: "thinking", text: "weighing options" }],
+  });
+  assert.doesNotMatch(done.html, / open>/);
+  assert.match(done.html, /<details class="fold thought">/);
+});

@@ -121,14 +121,6 @@ export function emptyKind(state: RenderedState, session: PanelSessionInfo): Empt
   return state.status.running ? "working" : "idle";
 }
 
-/** The tool call's expansion toggle (a new set — the DOM keeps it immutable). */
-export function toggleExpanded(expanded: ReadonlySet<string>, callId: string): Set<string> {
-  const next = new Set(expanded);
-  if (next.has(callId)) next.delete(callId);
-  else next.add(callId);
-  return next;
-}
-
 /**
  * The content element's class list (draft `.body` / `details.fold.tool`).
  * `expanded` is only meaningful for a tool block — it is the fold's `open`.
@@ -365,4 +357,37 @@ export function workingGroup(members: SessionMember[], targetId: string | null):
     });
   }
   return { count: rows.length, rows };
+}
+
+/** A manual override of a tool fold, recorded for the PHASE it was made in. */
+export interface FoldOverride {
+  /** The tool's `done` value at the moment of the toggle. */
+  done: boolean;
+  /** The open state the user chose for that phase. */
+  open: boolean;
+}
+
+/** Per-callId tool-fold overrides. */
+export type FoldOverrides = ReadonlyMap<string, FoldOverride>;
+
+/**
+ * The open state of a TOOL fold. Pure.
+ *   - an override MADE IN THIS PHASE (`o.done === done`) WINS;
+ *   - otherwise the default: open while RUNNING (`!done`), collapsed when done.
+ * So `new Map()` yields `true` while running and `false` once done, and an override
+ * silently EXPIRES at the running -> done transition (the "next state change").
+ */
+export function foldOpen(overrides: FoldOverrides, callId: string, done: boolean): boolean {
+  const override = overrides.get(callId);
+  return override !== undefined && override.done === done ? override.open : !done;
+}
+
+/**
+ * Flip a tool fold and RECORD the user's choice for the CURRENT phase (a NEW map; the
+ * input is untouched). Pure. `done` is the tool's current flag.
+ */
+export function toggleFold(overrides: FoldOverrides, callId: string, done: boolean): Map<string, FoldOverride> {
+  const next = new Map(overrides);
+  next.set(callId, { done, open: !foldOpen(overrides, callId, done) });
+  return next;
 }

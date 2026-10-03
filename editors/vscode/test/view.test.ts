@@ -11,12 +11,14 @@ import {
   diffStat,
   emptyKind,
   emptySpec,
+  foldOpen,
   panelHeader,
   selectionRef,
   stateLabel,
-  toggleExpanded,
+  toggleFold,
   turns,
   workingGroup,
+  type FoldOverride,
 } from "../src/webview/view.ts";
 
 const idle = (): RenderedState => renderState(initialState());
@@ -235,14 +237,30 @@ test("emptySpec names copy for all six states", () => {
 
 /* ------------------------------------------------------------ expand / class */
 
-test("toggleExpanded adds and removes, and never mutates the input set", () => {
-  const original = new Set<string>();
-  const opened = toggleExpanded(original, "t1");
-  assert.deepEqual([...opened], ["t1"]);
-  assert.equal(original.size, 0, "the input set is untouched");
+test("foldOpen: auto-open while running, auto-collapse when done", () => {
+  const none = new Map<string, FoldOverride>();
+  assert.equal(foldOpen(none, "t1", false), true, "running -> open");
+  assert.equal(foldOpen(none, "t1", true), false, "done -> collapsed");
+});
 
-  const closed = toggleExpanded(opened, "t1");
-  assert.deepEqual([...closed], []);
+test("toggleFold records an override that wins in its phase", () => {
+  const none = new Map<string, FoldOverride>();
+  const closed = toggleFold(none, "t1", false); // the user closes a RUNNING fold
+  assert.equal(foldOpen(closed, "t1", false), false, "the override wins while running");
+  assert.equal(none.size, 0, "the input map is untouched");
+
+  const flipped = toggleFold(closed, "t1", false);
+  assert.equal(foldOpen(flipped, "t1", false), true, "toggling again re-opens it");
+});
+
+test("foldOpen: an override EXPIRES at the running -> done transition", () => {
+  const closed = toggleFold(new Map<string, FoldOverride>(), "t1", false); // closed while running
+  // the tool finishes: the override was made for the RUNNING phase, so it no longer applies
+  assert.equal(foldOpen(closed, "t1", true), false, "auto-collapse resumes (the next state change)");
+
+  // a toggle made on a DONE fold sticks (there is no further state change)
+  const openedDone = toggleFold(closed, "t1", true);
+  assert.equal(foldOpen(openedDone, "t1", true), true);
 });
 
 test("classNames composes the content-element classes", () => {

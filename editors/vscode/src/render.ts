@@ -87,7 +87,7 @@ function targetRunning(state: ViewState, target: string | null): boolean {
 export function renderBlock(block: Block): RenderedBlock {
   switch (block.kind) {
     case "assistant":
-      return { kind: "assistant", html: renderContent(block.content ?? []), live: block.live ?? false };
+      return { kind: "assistant", html: renderContent(block.content ?? [], block.live ?? false), live: block.live ?? false };
     case "tool":
       return { kind: "tool", html: "", live: false, tool: renderTool(block.tool) };
     case "user":
@@ -124,7 +124,7 @@ export function escapeHtml(text: string): string {
 
 /* ------------------------------------------------------------------ helpers */
 
-function renderContent(content: ContentBlock[]): string {
+function renderContent(content: ContentBlock[], live: boolean): string {
   const parts: string[] = [];
   for (const block of content) {
     switch (block.type) {
@@ -133,7 +133,7 @@ function renderContent(content: ContentBlock[]): string {
         break;
       case "thinking":
         parts.push(
-          `<details class="fold thought"><summary><span class="chev"></span><span class="tname">thought</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
+          `<details class="fold thought"${live ? " open" : ""}><summary><span class="chev"></span><span class="tname">thought</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
         );
         break;
       case "tool_call":
