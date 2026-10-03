@@ -131,6 +131,6 @@ Phases are independent commits; P1 is the foundation the rest extend.
 | P1 | ☑ `f276183` — panel shell + transcript + states; second-layer APPROVED (122 tests green) |
 | P2 | ☑ `ae10444` — composer controls (selection chip, Plan/Act mode, model); second-layer APPROVED (125 tests green) |
 | P3 | ☑ `b9ffdba` — working group + interactive target switcher; second-layer APPROVED (129 tests green) |
-| P4 | ☐ not started |
+| P4 | ☑ `38099bc` — in-panel change review (Accept/Reject, reverse-apply revert); second-layer APPROVED (137 tests green) |
 | P5 | ☐ not started |
 | P6 | ☐ not started (optional) |
