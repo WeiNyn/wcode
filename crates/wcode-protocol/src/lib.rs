@@ -30,14 +30,14 @@ pub use registry::{Registry, RouteError};
 
 #[cfg(unix)]
 mod client;
-#[cfg(unix)]
 mod server;
 #[cfg(unix)]
 mod socket;
 
 #[cfg(unix)]
 pub use client::{Client, FLUSH_TIMEOUT, flush_all};
+pub use server::{DefineArgs, DefineHandler, Root, Roster, serve_stream, serve_stdio};
 #[cfg(unix)]
-pub use server::{DefineArgs, DefineHandler, Root, Roster, serve, serve_at};
+pub use server::{serve, serve_at};
 #[cfg(unix)]
 pub use socket::{bind, connect};

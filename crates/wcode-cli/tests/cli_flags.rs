@@ -145,12 +145,12 @@ fn a_project_team_auto_enables_agents_without_the_flag() {
         !stderr.contains("requires --agents"),
         "agents must auto-enable from the team: {stderr}"
     );
-    // The team actually spawned: `team: <names>` on stdout proves agents mode
-    // turned on (a team-less run prints no such line).
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The team actually spawned: `team: <names>` on stderr proves agents mode
+    // turned on (a team-less run prints no such line). The diagnostic is stderr
+    // — stdout is reserved for the `--stdio` frame stream.
     assert!(
-        stdout.contains("team: explorer"),
-        "the team must be instantiated: {stdout}"
+        stderr.contains("team: explorer"),
+        "the team must be instantiated: {stderr}"
     );
 }
 

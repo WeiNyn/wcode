@@ -67,6 +67,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
   serve              own the session and serve it at --socket (default: ~/.config/wcode/wcode.sock)
+  --stdio            serve over stdin/stdout instead of a socket (implies `serve`; one client, any platform)
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --task <text>      run a [workflow] headless on <text> (requires [workflow]
                      and --agents; WCODE_TASK is the fallback)
@@ -176,6 +177,9 @@ struct Args {
     /// Connect to a session served elsewhere instead of running one locally.
     /// Connect to a session served elsewhere instead of running one locally.
     socket: Option<String>,
+    /// `--stdio`: serve the frame loop over stdin/stdout instead of a unix socket.
+    /// Implies `serve`; mutually exclusive with `--socket`. Cross-platform.
+    stdio: bool,
     /// `--tui`: force the full-screen TUI.
     tui: bool,
     /// `--no-tui`: force the line REPL (pipes/CI).
@@ -285,6 +289,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 i += 1;
             }
             "serve" => a.serve = true,
+            "--stdio" => { a.stdio = true; a.serve = true; }
             "--socket" => {
                 a.socket = Some(args.get(i).ok_or("--socket requires a path")?.clone());
                 i += 1;
@@ -293,6 +298,12 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--no-tui" => a.no_tui = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
+    }
+    if a.stdio && a.socket.is_some() {
+        return Err("--stdio has no socket path".into());
+    }
+    if a.stdio && a.owner.is_some() {
+        return Err("--owner reports back over a socket; it cannot be combined with --stdio".into());
     }
     Ok(Parsed::Args(a))
 }
@@ -1202,7 +1213,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             }
         }
         if !names.is_empty() {
-            println!(
+            eprintln!(
                 "team: {} (restored, {seeded} prior messages)",
                 names.join(", ")
             );
@@ -1234,7 +1245,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     }
     if args.owner.is_none() && !cfg.team.is_empty() && !setup.resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
-        println!("team: {}", names.join(", "));
+        eprintln!("team: {}", names.join(", "));
     }
     // Instantiate a `[workflow]` template AFTER the `[team]` loop (so member names
     // resolve) and BEFORE the scheduler spawn. Nodes are created in TOPOLOGICAL
@@ -1245,7 +1256,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         && let Some(workflow) = &cfg.workflow
     {
         let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
-        println!("workflow: {n} nodes");
+        eprintln!("workflow: {n} nodes");
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
     // `Runtime { .. }`, so it is live for one-shot / REPL / TUI alike. The
@@ -1340,69 +1351,85 @@ async fn serve(
     bg: Arc<Background>,
     orchestrator: &Option<crate::agents::Orchestrator>,
 ) -> ! {
+    // ── Transport-free setup: identical for the stdio and socket transports. ──
+    let session_id = SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
+    let handle = SessionActor::spawn(agent);
+    bg.bind(handle.clone());
+    if let Some(o) = orchestrator {
+        o.register_root(handle.clone());
+    }
+    // Serve the root first (labelled by its session id), then the live
+    // team: the registry's local sessions minus the root's own
+    // `agent:orchestrator` alias. The roster stays live, so a worker
+    // spawned at runtime is served without a restart.
+    // The registry the server reads each served session's model from, so
+    // its `Sessions` push names the models it knows (S2).
+    let registry = orchestrator
+        .as_ref()
+        .map(|o| o.registry().clone())
+        .unwrap_or_default();
+    // Record the **root**'s effective model too, keyed by the id the server
+    // pushes first — `session_id`, this agent's own session, *not* the
+    // registry's `agent:orchestrator` alias (a distinct id, never served).
+    // Only with `--agents`: without it there is no orchestrator and the
+    // registry stays a bare `Registry::default()`, so nothing is registered
+    // and a client falls back to its own model (acceptable).
+    if orchestrator.is_some() {
+        registry.set_model(session_id.clone(), llm.model.clone());
+    }
+    let roster = match orchestrator {
+        Some(o) => live_roster(o.registry(), o.id().clone()),
+        None => tokio::sync::watch::channel(Vec::new()).1,
+    };
+    let ids: Vec<String> = std::iter::once(session_id.to_string())
+        .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
+        .collect();
+    // With `--agents`, the served root can define workers for a peer:
+    // install the handler over this orchestrator's factory. Without it a
+    // `Define` is refused cleanly (the protocol default). The factory
+    // registers into the same registry the roster watches, so a defined
+    // worker is pushed to every client with no extra work.
+    let define = orchestrator.as_ref().map(|o| {
+        let o = o.clone();
+        std::sync::Arc::new(move |args: wcode_protocol::DefineArgs| {
+            o.spawn_worker(crate::agents::WorkerSpec {
+                name: args.name,
+                model: args.model,
+                system: args.role,
+                tools: args.tools,
+                base_url: args.base_url,
+                api_key: args.api_key,
+                read_only: args.read_only,
+                effort: args.effort.clone(),
+            })
+            .map(|worker| worker.id)
+        }) as wcode_protocol::DefineHandler
+    });
+    // stdout carries only `Frame` JSON on the stdio transport; every diagnostic
+    // is stderr. This announces what the server serves on either transport.
+    eprintln!("serving {} session(s): {}", ids.len(), ids.join(", "));
+
+    // `--stdio`: serve this one connection over stdin/stdout. The spawning
+    // client owns the process lifetime, so a clean EOF is a clean exit — no
+    // `Cancel` is synthesised (its events would go to a closed stream).
+    if args.stdio {
+        if let Err(e) =
+            wcode_protocol::serve_stdio(registry, roster, (session_id, handle), define).await
+        {
+            eprintln!("serve --stdio: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     #[cfg(unix)]
     {
-        let session_id = SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
         let path = args
             .socket
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(default_socket_path);
-        let handle = SessionActor::spawn(agent);
-        bg.bind(handle.clone());
-        if let Some(o) = orchestrator {
-            o.register_root(handle.clone());
-        }
-        // Serve the root first (labelled by its session id), then the live
-        // team: the registry's local sessions minus the root's own
-        // `agent:orchestrator` alias. The roster stays live, so a worker
-        // spawned at runtime is served without a restart.
-        // The registry the server reads each served session's model from, so
-        // its `Sessions` push names the models it knows (S2).
-        let registry = orchestrator
-            .as_ref()
-            .map(|o| o.registry().clone())
-            .unwrap_or_default();
-        // Record the **root**'s effective model too, keyed by the id the server
-        // pushes first — `session_id`, this agent's own session, *not* the
-        // registry's `agent:orchestrator` alias (a distinct id, never served).
-        // Only with `--agents`: without it there is no orchestrator and the
-        // registry stays a bare `Registry::default()`, so nothing is registered
-        // and a client falls back to its own model (acceptable).
-        if orchestrator.is_some() {
-            registry.set_model(session_id.clone(), llm.model.clone());
-        }
-        let roster = match orchestrator {
-            Some(o) => live_roster(o.registry(), o.id().clone()),
-            None => tokio::sync::watch::channel(Vec::new()).1,
-        };
-        let ids: Vec<String> = std::iter::once(session_id.to_string())
-            .chain(roster.borrow().iter().map(|(id, _)| id.to_string()))
-            .collect();
-        // With `--agents`, the served root can define workers for a peer:
-        // install the handler over this orchestrator's factory. Without it a
-        // `Define` is refused cleanly (the protocol default). The factory
-        // registers into the same registry the roster watches, so a defined
-        // worker is pushed to every client with no extra work.
-        let define = orchestrator.as_ref().map(|o| {
-            let o = o.clone();
-            std::sync::Arc::new(move |args: wcode_protocol::DefineArgs| {
-                o.spawn_worker(crate::agents::WorkerSpec {
-                    name: args.name,
-                    model: args.model,
-                    system: args.role,
-                    tools: args.tools,
-                    base_url: args.base_url,
-                    api_key: args.api_key,
-                    read_only: args.read_only,
-                    effort: args.effort.clone(),
-                })
-                .map(|worker| worker.id)
-            }) as wcode_protocol::DefineHandler
-        });
-        println!("serving session on {}", path.display());
-        println!("serving {} session(s): {}", ids.len(), ids.join(", "));
-        let _ = std::io::stdout().flush();
+        eprintln!("serving session on {}", path.display());
         if let Err(e) =
             wcode_protocol::serve_at(registry, roster, (session_id, handle), define, &path).await
         {
@@ -1413,7 +1440,7 @@ async fn serve(
     }
     #[cfg(not(unix))]
     {
-        eprintln!("error: `serve` is not supported on this platform");
+        eprintln!("error: `serve` needs a socket, which is unix-only; use `--stdio`");
         std::process::exit(2)
     }
 }
@@ -1823,6 +1850,7 @@ fn is_tty() -> bool {
 
 /// Default socket for `serve`/`--socket`: alongside the config, so both ends
 /// agree without an argument.
+#[cfg(unix)]
 fn default_socket_path() -> PathBuf {
     config_dir()
         .map(|d| d.join("wcode.sock"))
@@ -1833,7 +1861,6 @@ fn default_socket_path() -> PathBuf {
 /// (the root's own `agent:orchestrator` alias — the served root is labelled by
 /// its session id instead). Kept fresh, so a worker spawned at runtime is
 /// served without a restart.
-#[cfg(unix)]
 fn live_roster(
     registry: &wcode_protocol::Registry,
     exclude: SessionId,

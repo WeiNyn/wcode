@@ -20,8 +20,9 @@ use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 
-use tokio::io::{AsyncWrite, BufReader, BufWriter};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader, BufWriter};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use wcode_harness::actor::SessionHandle;
 use wcode_harness::event::AgentEvent;
@@ -80,6 +81,7 @@ pub type DefineHandler =
 ///
 /// `registry` is consulted (read-only) for each served session's model, so the
 /// roster this server pushes names models the server actually knows.
+#[cfg(unix)]
 pub async fn serve(
     registry: Registry,
     roster: Roster,
@@ -89,7 +91,7 @@ pub async fn serve(
 ) -> io::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
-        tokio::spawn(connection(
+        tokio::spawn(serve_stream(
             registry.clone(),
             roster.clone(),
             root.clone(),
@@ -100,6 +102,7 @@ pub async fn serve(
 }
 
 /// Bind `path`, then [`serve`].
+#[cfg(unix)]
 pub async fn serve_at(
     registry: Registry,
     roster: Roster,
@@ -111,14 +114,40 @@ pub async fn serve_at(
     serve(registry, roster, root, define, listener).await
 }
 
-async fn connection(
+/// Serve the frame loop over the process's own stdin/stdout — the `--stdio`
+/// transport (`docs/vscode-extension-plan.md` §3.1). **Exactly one client**:
+/// there is no listener, so no second connection is even expressible. Returns
+/// `Ok(())` when the client's stdin reaches EOF (clean shutdown; the spawning
+/// client owns the process lifetime).
+pub async fn serve_stdio(
+    registry: Registry,
+    roster: Roster,
+    root: Root,
+    define: Option<DefineHandler>,
+) -> io::Result<()> {
+    let stream = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
+    serve_stream(registry, roster, root, define, stream).await;
+    Ok(())
+}
+
+/// Drive **one** connection over any byte stream: the frame loop (read → demux
+/// → actor), the per-session [`fan`] tasks, the live roster push, and the
+/// request replies. Transport-free — the caller supplies the bytes. Returns
+/// when the peer's stream reaches a clean EOF (`read_frame` → `Ok(None)`) or
+/// the reader/writer errors.
+///
+/// The ONE unix assumption removed: `UnixStream::into_split` becomes
+/// `tokio::io::split`, which needs only `AsyncRead + AsyncWrite`.
+pub async fn serve_stream<S>(
     registry: Registry,
     mut roster: Roster,
     root: Root,
     define: Option<DefineHandler>,
-    stream: UnixStream,
-) {
-    let (read, write) = stream.into_split();
+    stream: S,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (read, write) = tokio::io::split(stream);
     let (out, out_rx) = mpsc::unbounded_channel::<Frame<AgentEvent>>();
     tokio::spawn(write_loop(write, out_rx));
 
@@ -379,5 +408,156 @@ where
         if write_frame(&mut write, &frame).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use wcode_harness::actor::SessionActor;
+    use wcode_harness::agent::{Agent, AgentConfig};
+    use wcode_harness::event::LlmStreamEvent;
+    use wcode_harness::message::StopReason;
+    use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
+
+    /// A root session whose model streams one text delta then stops — enough to
+    /// drive a real `Submit` turn over the transport. There is no shared
+    /// constructor to reuse (`registry.rs`'s `session_with` is private to its
+    /// own test module), so this is the minimal one, mirroring
+    /// `tests/roundtrip.rs`.
+    fn test_root() -> (Root, Registry) {
+        let script = Arc::new(Mutex::new(VecDeque::from([vec![
+            LlmStreamEvent::TextDelta("hi".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]])));
+        let stream_fn: StreamFn = Arc::new(move |_ctx, _sys, _tools, _opts| {
+            let events = script.lock().unwrap().pop_front().unwrap_or_default();
+            Box::pin(futures::stream::iter(events)) as LlmStream
+        });
+        let handle = SessionActor::spawn(Agent::new(AgentConfig {
+            system: "sys".into(),
+            tools: Vec::new(),
+            llm: LlmOpts {
+                model: "m".into(),
+                ..LlmOpts::default()
+            },
+            stream_fn,
+            hooks: wcode_harness::hooks::HooksSet::default(),
+            session: None,
+            context: Vec::new(),
+            working_dir: std::path::PathBuf::new(),
+            max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+            parallel_tools: true,
+            compaction: wcode_harness::compaction::CompactionPolicy::default(),
+            plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+        }));
+        ((SessionId::new("test"), handle), Registry::new())
+    }
+
+    /// A `serve_stream` driver over a fresh duplex pair, with an empty roster.
+    fn driver(server: tokio::io::DuplexStream) -> tokio::task::JoinHandle<()> {
+        let (root, registry) = test_root();
+        let roster: Roster = tokio::sync::watch::channel(Vec::new()).1;
+        tokio::spawn(serve_stream(registry, roster, root, None, server))
+    }
+
+    #[tokio::test]
+    async fn stdio_duplex_round_trips_submit_to_events() {
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let driver = driver(server);
+        let (cr, mut cw) = tokio::io::split(client);
+
+        let submit = Frame::new(1, SessionId::new("test"), Request::Submit { text: "hi".into() });
+        write_frame(&mut cw, &submit).await.unwrap();
+
+        // The NDJSON contract: every line is exactly one JSON object.
+        let mut reader = BufReader::new(cr);
+        let mut line = String::new();
+        let mut saw_message_end = false;
+        let mut saw_stopped = false;
+        for _ in 0..64 {
+            line.clear();
+            let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await
+                .expect("a frame in time")
+                .expect("read");
+            assert!(n > 0, "EOF before the run finished");
+            let value: serde_json::Value =
+                serde_json::from_str(line.trim()).expect("each line is one JSON object");
+            assert!(value.is_object(), "a frame is a flat JSON object");
+            match value["type"].as_str() {
+                Some("message_end") => saw_message_end = true,
+                Some("stopped") => {
+                    saw_stopped = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_message_end, "the Submit's streamed events arrived");
+        assert!(saw_stopped, "the run's correlated reply arrived");
+
+        // Dropping BOTH halves closes the duplex (tokio's `split` keeps the
+        // stream alive until the last half drops), so the driver sees a clean
+        // EOF and returns, no panic.
+        drop(cw);
+        drop(reader);
+        let joined = tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("driver ends on EOF");
+        assert!(joined.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_line_ends_the_connection() {
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let driver = driver(server);
+        let (_cr, mut cw) = tokio::io::split(client);
+
+        cw.write_all(b"not json\n").await.unwrap();
+        cw.flush().await.unwrap();
+
+        // `read_frame` yields `InvalidData`; the loop stops rather than hanging.
+        let joined = tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("driver stops, no hang");
+        assert!(joined.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_clean_eof_shuts_the_driver_down() {
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let driver = driver(server);
+        let (cr, mut cw) = tokio::io::split(client);
+
+        // A valid request gets a `Sessions` reply; then a clean EOF ends it.
+        let frame = Frame::new(1, SessionId::new("test"), Request::ListSessions);
+        write_frame(&mut cw, &frame).await.unwrap();
+
+        let mut reader = BufReader::new(cr);
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("a frame in time")
+            .expect("read");
+        assert!(n > 0);
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["type"], "sessions");
+
+        // Both halves must drop to close the duplex and reach a clean EOF.
+        drop(cw);
+        drop(reader);
+        let joined = tokio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("driver ends on EOF");
+        assert!(joined.is_ok());
     }
 }

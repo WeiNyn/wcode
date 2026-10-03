@@ -279,6 +279,7 @@ wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
 wcode --tui                  # force the full-screen TUI (default on a TTY)
 wcode --no-tui               # force the line REPL (pipes/CI)
+wcode serve --stdio          # serve the frame protocol over stdin/stdout (any platform; implies serve)
 ```
 
 The interactive path: with no `-p`, `wcode` starts a full-screen TUI when stdin
