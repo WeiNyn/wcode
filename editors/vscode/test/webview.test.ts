@@ -25,6 +25,16 @@ test("parseFromWebview accepts the well-formed messages", () => {
   });
   assert.deepEqual(parseFromWebview({ kind: "toggle-plan" }), { kind: "toggle-plan" });
   assert.deepEqual(parseFromWebview({ kind: "focus-member", id: "agent:w1" }), { kind: "focus-member", id: "agent:w1" });
+  assert.deepEqual(parseFromWebview({ kind: "review", callId: "t1", verdict: "accept" }), {
+    kind: "review",
+    callId: "t1",
+    verdict: "accept",
+  });
+  assert.deepEqual(parseFromWebview({ kind: "review", callId: "t1", verdict: "reject" }), {
+    kind: "review",
+    callId: "t1",
+    verdict: "reject",
+  });
 });
 
 test("parseFromWebview rejects junk and empty input", () => {
@@ -39,6 +49,9 @@ test("parseFromWebview rejects junk and empty input", () => {
   assert.equal(parseFromWebview({ kind: "reveal-file", line: 2 }), null, "no path");
   assert.equal(parseFromWebview({ kind: "focus-member" }), null, "no id");
   assert.equal(parseFromWebview({ kind: "focus-member", id: 7 }), null, "id not a string");
+  assert.equal(parseFromWebview({ kind: "review", callId: "t1" }), null, "no verdict");
+  assert.equal(parseFromWebview({ kind: "review", callId: "t1", verdict: "maybe" }), null, "bad verdict");
+  assert.equal(parseFromWebview({ kind: "review", verdict: "accept" }), null, "no callId");
 });
 
 /* ------------------------------------------------------------------- throttle */

@@ -14,6 +14,7 @@ import * as vscode from "vscode";
 
 import { renderState } from "./render.ts";
 import type { ViewState } from "./reducer.ts";
+import type { Verdict } from "./review.ts";
 import {
   createThrottle,
   parseFromWebview,
@@ -41,6 +42,8 @@ export interface PanelHandlers {
   onTogglePlan(): void;
   /** The header target chip picked a member: retarget + hydrate. */
   onFocusMember(id: string): void;
+  /** The change review: `callId` + intent. The host settles it (Reject writes). */
+  onReview(callId: string, verdict: "accept" | "reject"): void;
 }
 
 export class ChatPanel {
@@ -59,6 +62,8 @@ export class ChatPanel {
    * selection. Not per-target, so it survives a retarget.
    */
   private context: SelectionContext | null = null;
+  /** Per-callId review verdicts (host-local; carried on every snapshot). */
+  private verdicts: Record<string, Verdict> = {};
   private webviewReady = false;
   private pendingState: ViewState | null = null;
   /** The member whose surface is shown; every send is addressed there. */
@@ -129,6 +134,12 @@ export class ChatPanel {
     this.flush();
   }
 
+  /** Record the settled verdicts and repaint. */
+  setVerdicts(verdicts: Record<string, Verdict>): void {
+    this.verdicts = verdicts;
+    this.flush();
+  }
+
   /**
    * Point the surface at a member (null = the root) and hydrate it. A retarget
    * only changes WHICH per-session transcript is rendered — nothing is lost.
@@ -176,7 +187,13 @@ export class ChatPanel {
   }
 
   private post(state: ReturnType<typeof renderState>): void {
-    const message: ToWebview = { kind: "state", state, session: this.session, context: this.context };
+    const message: ToWebview = {
+      kind: "state",
+      state,
+      session: this.session,
+      context: this.context,
+      verdicts: this.verdicts,
+    };
     void this.panel.webview.postMessage(message);
   }
 
@@ -210,6 +227,9 @@ export class ChatPanel {
         break;
       case "focus-member":
         this.handlers.onFocusMember(message.id);
+        break;
+      case "review":
+        this.handlers.onReview(message.callId, message.verdict);
         break;
     }
   }

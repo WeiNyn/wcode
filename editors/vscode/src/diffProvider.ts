@@ -155,3 +155,71 @@ function resolvePath(root: string | undefined, toolPath: string | undefined): st
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * Reject a change: reverse-apply the tool's ONE-hunk diff to the CURRENT file and
+ * write the BEFORE image back. Returns true when the file was rewritten; false
+ * (with a warning + a log line) otherwise — NO partial write, ever.
+ *
+ * Reads and writes via `vscode.workspace.fs` (async; honours remote / virtual FS),
+ * not `node:fs`. Reuses `findToolBlock` + `resolvePath` + `reverseApply`. When
+ * `reverseApply` returns null (the file moved on / the patch is truncated / foreign)
+ * it does NOT write — a wrong revert is worse than a failed one.
+ *
+ * FRICTION: this is a REAL mutation of the user's file, and the write is NOT on the
+ * editor UNDO stack and does NOT coordinate with an open editor BUFFER (a dirty
+ * buffer could later re-save over it). The recovery path if a revert is ever wrong is
+ * SCM / git (`git checkout -- <file>`) — which is why the write happens ONLY when
+ * `reverseApply` is EXACT.
+ */
+export async function revertDiff(
+  state: ViewState,
+  workspaceRoot: string | undefined,
+  callId: string,
+  log: DiffLogger,
+): Promise<boolean> {
+  const block = findToolBlock(transcriptOf(state, state.targeted), callId);
+  const diff = block?.diff;
+  const toolPath = block?.path;
+  if (diff === undefined || diff === "" || toolPath === undefined) {
+    log(`wcode: no diff to revert for ${callId}`);
+    void vscode.window.showWarningMessage("wcode: that tool call has no change to revert.");
+    return false;
+  }
+
+  const resolved = resolvePath(workspaceRoot, toolPath);
+  if (resolved === undefined) {
+    log(`wcode: cannot resolve a path to revert for ${callId}`);
+    void vscode.window.showWarningMessage("wcode: this tool call names no file to revert.");
+    return false;
+  }
+
+  const uri = vscode.Uri.file(resolved);
+  let current: string;
+  try {
+    current = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+  } catch (err) {
+    log(`wcode: could not read ${resolved} to revert: ${messageOf(err)}`);
+    void vscode.window.showWarningMessage(`wcode: could not read ${resolved}.`);
+    return false;
+  }
+
+  const before = reverseApply(current, diff);
+  if (before === null) {
+    // The file moved on / the patch is truncated / foreign: do NOT guess.
+    log(`wcode: reverse-apply failed for ${resolved}; leaving the file unchanged`);
+    void vscode.window.showWarningMessage("wcode: could not revert (the file moved on). Nothing was written.");
+    return false;
+  }
+
+  try {
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(before, "utf8"));
+  } catch (err) {
+    log(`wcode: could not write ${resolved}: ${messageOf(err)}`);
+    void vscode.window.showWarningMessage(`wcode: could not write ${resolved}.`);
+    return false;
+  }
+
+  log(`wcode: reverted ${resolved}`);
+  return true;
+}

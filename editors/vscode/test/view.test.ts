@@ -261,7 +261,7 @@ test("classNames composes the content-element classes", () => {
 /* --------------------------------------------------------- parseToWebview */
 
 test("parseToWebview accepts a well-formed snapshot", () => {
-  const message: ToWebview = { kind: "state", state: idle(), session: session(), context: null };
+  const message: ToWebview = { kind: "state", state: idle(), session: session(), context: null, verdicts: {} };
   const parsed = parseToWebview(message);
   assert.ok(parsed);
   assert.equal(parsed.kind, "state");
@@ -269,9 +269,18 @@ test("parseToWebview accepts a well-formed snapshot", () => {
   assert.equal(parsed.session.state, "ready");
   assert.deepEqual(parsed.state.blocks, []);
   assert.equal(parsed.context, null, "no context ⇒ null");
+  assert.deepEqual(parsed.verdicts, {}, "no verdicts ⇒ {}");
 
   const withCtx = parseToWebview({ ...message, context: { path: "src/a.rs", startLine: 3, endLine: 5 } });
   assert.deepEqual(withCtx?.context, { path: "src/a.rs", startLine: 3, endLine: 5 });
+
+  const withV = parseToWebview({ ...message, verdicts: { t1: "accepted" } });
+  assert.deepEqual(withV?.verdicts, { t1: "accepted" });
+
+  // LENIENT (like `context`): a bad verdict degrades to `{}`; the snapshot SURVIVES.
+  const bad = parseToWebview({ ...message, verdicts: { t1: "bogus" } });
+  assert.ok(bad, "the snapshot survives a bad verdict");
+  assert.deepEqual(bad.verdicts, {}, "a bad verdict degrades to {}, not a drop");
 
   // LENIENT (M1): a non-conforming context degrades to null and the snapshot SURVIVES.
   const lenient = parseToWebview({ ...message, context: "x" });

@@ -14,6 +14,7 @@
  * `acquireVsCodeApi()`.
  */
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
+import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview } from "../webview.ts";
 import {
   classNames,
@@ -82,6 +83,8 @@ const ctxChipsEl = requireEl("ctx-chips");
 let expanded: ReadonlySet<string> = new Set();
 /** The last snapshot, so expand/collapse can re-render without the host. */
 let lastState: ToWebview | null = null;
+/** The last snapshot's verdicts, so a tool fold finds its verdict without a snapshot. */
+let lastVerdicts: Record<string, Verdict> = {};
 
 /** Does a context chip ride into the next submit? (webview-local, like `expanded`). */
 let attached = true;
@@ -331,9 +334,76 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   details.appendChild(summary);
 
   const inner = el("div", "inner");
-  inner.innerHTML = tool.outputHtml; // P4: the diff `.code` preview
+  const hunk = typeof tool.diff === "string" && tool.diff !== "" ? reviewHunk(tool.diff) : null;
+  inner.appendChild(hunk !== null ? reviewBlock(tool, hunk, verdictOf(lastVerdicts, tool.callId)) : rawOutput(tool));
   details.appendChild(inner);
   return details;
+}
+
+/** The plain output `<pre>` for a tool with no diff (the draft's `.fold .out`). */
+function rawOutput(tool: RenderedTool): HTMLElement {
+  return el("pre", "tool-output", tool.outputText);
+}
+
+/** The in-panel change review for ONE diff-bearing tool (draft Change review). */
+function reviewBlock(tool: RenderedTool, hunk: ReviewHunk, verdict: Verdict): HTMLElement {
+  const ui = verdictUi(verdict); // ONE source of truth: class + badge label
+  const settled = verdict !== "pending";
+  const wrap = el("div", ui.className === "" ? "review" : `review ${ui.className}`);
+
+  // The bar comes BEFORE the diff (the draft's order); the badge only when settled.
+  const bar = el("div", "reviewbar");
+  const stat = el("span", "stat");
+  stat.appendChild(el("b", null, tool.path ?? ""));
+  stat.appendChild(document.createTextNode(" · 1 change"));
+  bar.appendChild(stat);
+  bar.appendChild(el("span", "spacer"));
+  if (ui.label !== "") bar.appendChild(el("span", "badge", ui.label));
+  const open = el("button", "btn link", "Open native diff");
+  open.setAttribute("type", "button");
+  open.addEventListener("click", () => post({ kind: "open-diff", callId: tool.callId }));
+  bar.appendChild(open);
+  wrap.appendChild(bar);
+
+  const hunkEl = el("div", "hunk");
+  const head = el("div", "hhead");
+  head.appendChild(el("span", null, hunk.header));
+  head.appendChild(el("span", "spacer"));
+  head.appendChild(el("span", null, hunk.truncated ? "truncated" : ""));
+  hunkEl.appendChild(head);
+
+  const lines = el("div", "lines");
+  for (const line of hunk.lines) {
+    const row = el("div", `ln ${line.kind}`);
+    row.appendChild(el("span", "gutter", String(line.number)));
+    row.appendChild(el("span", "txt", line.text));
+    lines.appendChild(row);
+  }
+  hunkEl.appendChild(lines);
+
+  // The webview does NOT flip the verdict locally: the HOST owns it and the next
+  // snapshot settles it, so the buttons settle disabled only on a known verdict.
+  const actions = el("div", "hactions");
+  const accept = el("button", "btn primary", "Accept change");
+  accept.setAttribute("type", "button");
+  accept.disabled = settled;
+  accept.addEventListener("click", () => {
+    post({ kind: "review", callId: tool.callId, verdict: "accept" });
+    rerender();
+  });
+  const reject = el("button", "btn", "Reject change");
+  reject.setAttribute("type", "button");
+  reject.disabled = settled;
+  reject.addEventListener("click", () => {
+    post({ kind: "review", callId: tool.callId, verdict: "reject" });
+    rerender();
+  });
+  actions.appendChild(accept);
+  actions.appendChild(reject);
+  hunkEl.appendChild(actions);
+
+  wrap.appendChild(hunkEl);
+  return wrap;
 }
 
 /** The tool head's `+N −M · 38ms` meta, or null when it has neither. */
@@ -396,6 +466,7 @@ function render(snapshot: ToWebview): void {
   const stick = nearBottom();
   renderHeader(state, session);
   renderComposer(state, snapshot.context);
+  lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
     transcriptEl.appendChild(renderStateCard(state, session));

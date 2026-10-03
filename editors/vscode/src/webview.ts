@@ -10,6 +10,7 @@
  * pre-rendered `RenderedState` instead, so the webview stays dependency-free.
  */
 import type { RenderedState } from "./render.ts";
+import type { Verdict } from "./review.ts";
 import type { SessionState } from "./session.ts";
 
 /** What the panel knows about the child, for the status strip. */
@@ -42,6 +43,8 @@ export type ToWebview = {
   session: PanelSessionInfo;
   /** The editor selection the composer may attach, or null. Host-local. */
   context: SelectionContext | null;
+  /** Per-callId review verdicts. Host-local (like `context`); JSON-safe. */
+  verdicts: Record<string, Verdict>;
 };
 
 /** webview → host. */
@@ -53,6 +56,7 @@ export type FromWebview =
   | { kind: "reveal-file"; path: string; line?: number }
   | { kind: "toggle-plan" }
   | { kind: "focus-member"; id: string }
+  | { kind: "review"; callId: string; verdict: "accept" | "reject" }
   /** The webview's script has run and it is ready to receive a snapshot. */
   | { kind: "ready" };
 
@@ -82,6 +86,10 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
       return { kind: "toggle-plan" };
     case "focus-member":
       return typeof message.id === "string" ? { kind: "focus-member", id: message.id } : null;
+    case "review":
+      return typeof message.callId === "string" && (message.verdict === "accept" || message.verdict === "reject")
+        ? { kind: "review", callId: message.callId, verdict: message.verdict }
+        : null;
     case "reveal-file":
       return typeof message.path === "string"
         ? { kind: "reveal-file", path: message.path, line: typeof message.line === "number" ? message.line : undefined }
@@ -115,12 +123,14 @@ export function parseToWebview(raw: unknown): ToWebview | null {
   if (typeof info.stderrTail !== "string") return null;
 
   const context = parseContext(message.context);
+  const verdicts = parseVerdicts(message.verdicts);
 
   return {
     kind: "state",
     state: state as RenderedState,
     session: { id: info.id as string | null, state: info.state, stderrTail: info.stderrTail },
     context,
+    verdicts,
   };
 }
 
@@ -140,6 +150,21 @@ function parseContext(raw: unknown): SelectionContext | null {
   if (typeof context.path !== "string") return null;
   if (typeof context.startLine !== "number" || typeof context.endLine !== "number") return null;
   return { path: context.path, startLine: context.startLine, endLine: context.endLine };
+}
+
+/**
+ * Narrow untrusted `verdicts` to a `Record<string, Verdict>`. LENIENT like `context`:
+ * it is not load-bearing, so anything other than a plain object whose EVERY value is
+ * a known verdict degrades to `{}` and the WHOLE snapshot is kept.
+ */
+function parseVerdicts(raw: unknown): Record<string, Verdict> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, Verdict> = {};
+  for (const [callId, value] of Object.entries(raw)) {
+    if (value !== "pending" && value !== "accepted" && value !== "rejected") return {};
+    out[callId] = value;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ throttle */

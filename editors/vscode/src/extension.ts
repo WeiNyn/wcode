@@ -14,7 +14,8 @@
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 
-import { clearDiffs, openDiff, registerDiffProvider } from "./diffProvider.ts";
+import { clearDiffs, openDiff, registerDiffProvider, revertDiff } from "./diffProvider.ts";
+import { setVerdict, type Verdict } from "./review.ts";
 import { ChatPanel, type PanelHandlers } from "./panel.ts";
 import type { SelectionContext } from "./webview.ts";
 import {
@@ -46,6 +47,8 @@ let treeView: vscode.TreeView<RosterItem> | undefined;
 let hydrated = new HydratedSet();
 /** The last non-empty editor selection — STICKY (survives focus moving to the webview). */
 let lastSelection: SelectionContext | null = null;
+/** Per-callId review verdicts. Reset when a fresh child starts. */
+let reviewVerdicts: Record<string, Verdict> = {};
 
 export function activate(context: vscode.ExtensionContext): void {
   extensionUri = context.extensionUri;
@@ -205,6 +208,7 @@ async function stopSession(): Promise<void> {
   }
   // A restart spawns a fresh child; the before-images belong to the old one.
   clearDiffs();
+  reviewVerdicts = {};
   ChatPanel.currentPanel()?.setSession({ state: "stopped" });
 }
 
@@ -214,6 +218,7 @@ async function restartSession(): Promise<void> {
   // empty too — otherwise the panel shows a conversation the new session knows
   // nothing about.
   viewState = initialState();
+  reviewVerdicts = {};
   ChatPanel.currentPanel()?.update(viewState, true);
   await startSession();
 }
@@ -383,7 +388,30 @@ function panelHandlers(): PanelHandlers {
       // retarget to an empty transcript and waste a `get_history`).
       if (viewState.members.some((m) => m.id === id)) focusMember(id);
     },
+    onReview: (callId: string, verdict: "accept" | "reject") => void reviewChange(callId, verdict),
   };
+}
+
+/**
+ * Settle a change review. Accept is a NO-OP on disk (the edit already landed);
+ * Reject reverse-applies the diff and WRITES the before-image. The verdict is set
+ * only when a write SUCCEEDED — the panel never claims a write that did not happen.
+ */
+async function reviewChange(callId: string, verdict: "accept" | "reject"): Promise<void> {
+  const panel = ChatPanel.currentPanel();
+  if (verdict === "accept") {
+    reviewVerdicts = setVerdict(reviewVerdicts, callId, "accepted");
+    panel?.setVerdicts(reviewVerdicts);
+    return;
+  }
+  // Reject = reverse-apply the tool's diff to the CURRENT file and write the before-image.
+  const ok = await revertDiff(viewState, workspaceRoot(), callId, logLine);
+  if (ok) {
+    reviewVerdicts = setVerdict(reviewVerdicts, callId, "rejected");
+    panel?.setVerdicts(reviewVerdicts);
+  }
+  // !ok: `revertDiff` already warned + logged (the file moved on -> reverseApply is
+  // null); the verdict stays "pending", so the panel never claims a write that did not.
 }
 
 async function revealFile(path: string, line?: number): Promise<void> {

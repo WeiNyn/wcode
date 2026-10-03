@@ -21,6 +21,7 @@ for (const file of [
   "render.ts",
   "webview.ts",
   "diff.ts",
+  "review.ts",
   "startup.ts",
   "webview/view.ts",
 ]) {
