@@ -40,14 +40,14 @@ test("pipeline: real frames → reducer → HTML", { skip: !existsSync(binary), 
   let state: ViewState = initialState();
   const seen: string[] = [];
 
-  session.on("event", (event: AgentEvent, _frame: RawFrame) => {
+  session.on("event", (event: AgentEvent, frame: RawFrame) => {
     seen.push(event.type);
-    state = reduce(state, event);
+    state = reduce(state, event, frame.session);
   });
 
   await session.start();
   const reply = await session.ask({ type: "get_history" });
-  const rendered = renderState(state);
+  const rendered = renderState(state, state.targeted);
 
   console.log("pipeline (live):");
   console.log(`  binary         : ${binary}`);
@@ -76,10 +76,10 @@ test("pipeline: fixtures → reducer → HTML (printed)", () => {
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as AgentEvent);
-    for (const event of events) state = reduce(state, event);
+    for (const event of events) state = reduce(state, event, "root");
   }
 
-  const rendered = renderState(state);
+  const rendered = renderState(state, "root");
   const html = blocksToHtml(rendered);
   console.log("pipeline (fixtures) — rendered HTML:");
   console.log(html);

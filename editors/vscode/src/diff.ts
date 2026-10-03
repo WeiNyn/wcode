@@ -15,7 +15,7 @@
  *
  * Every case that cannot be determined returns `null` — never a guess.
  */
-import type { ToolBlock, ViewState } from "./reducer.ts";
+import type { Block, ToolBlock } from "./reducer.ts";
 
 /** The URI scheme a reconstructed before-image is served under. */
 export const DIFF_SCHEME = "wcode-diff";
@@ -102,19 +102,19 @@ export function reverseApply(currentText: string, unifiedDiff: string): string |
   return joinLines(spliced, file.eol, file.finalEol);
 }
 
-/** The tool block with this `call_id`, if the transcript still has it. */
-export function findToolBlock(state: ViewState, callId: string): ToolBlock | undefined {
-  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
-    const block = state.transcript[i];
+/** The tool block with this `call_id` in a transcript, if it is still there. */
+export function findToolBlock(blocks: Block[], callId: string): ToolBlock | undefined {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i];
     if (block.kind === "tool" && block.tool?.callId === callId) return block.tool;
   }
   return undefined;
 }
 
 /** The most recent tool call that carries a diff (the `wcode.openDiff` command). */
-export function lastDiffCallId(state: ViewState): string | undefined {
-  for (let i = state.transcript.length - 1; i >= 0; i -= 1) {
-    const block = state.transcript[i];
+export function lastDiffCallId(blocks: Block[]): string | undefined {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i];
     if (block.kind === "tool" && block.tool && block.tool.diff !== undefined && block.tool.diff !== "") {
       return block.tool.callId;
     }

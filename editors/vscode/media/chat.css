@@ -51,6 +51,15 @@ body {
   opacity: 0.85;
 }
 
+.status-target {
+  color: var(--vscode-charts-blue, #58a6ff);
+  font-weight: 600;
+}
+
+.status-plan {
+  color: var(--vscode-charts-purple, #d2a8ff);
+}
+
 .status-error {
   color: var(--vscode-errorForeground);
 }

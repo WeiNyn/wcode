@@ -188,7 +188,10 @@ function renderBlock(block: RenderedBlock): HTMLElement {
     case "tool":
       return renderTool(block);
     default:
-      return blockShell(block, null);
+      // A notice carries its sender when it is inter-agent traffic
+      // (`message_received`): without this the block has no role line and the
+      // reader cannot tell who spoke.
+      return blockShell(block, block.from ?? null);
   }
 }
 

@@ -11,6 +11,7 @@
  */
 import type { ContentBlock, TodoItem } from "./protocol.ts";
 import type { Block, SessionMember, ToolBlock, ViewState, ViewStatus } from "./reducer.ts";
+import { targetLabel, transcriptOf } from "./reducer.ts";
 import { renderMarkdown } from "./markdown.ts";
 
 /** A tool call, ready to render (collapsed summary + expandable output). */
@@ -38,24 +39,44 @@ export interface RenderedBlock {
   tool?: RenderedTool;
 }
 
+/** The member the panel is showing: its id (the routing key) and its display name. */
+export interface RenderedTarget {
+  id: string;
+  label: string;
+}
+
 /** The whole surface the webview paints. */
 export interface RenderedState {
   blocks: RenderedBlock[];
   members: SessionMember[];
   todos: TodoItem[];
   status: ViewStatus;
+  /** Whose transcript this is — always visible in the status strip. */
+  target: RenderedTarget | null;
 }
 
-/** Render the full view state. Pure. */
-export function renderState(state: ViewState): RenderedState {
+/**
+ * Render the full view state FOR A TARGET member (default: the state's own).
+ * Pure. The transcript/todos come from that session's key, so a retarget only
+ * changes what is rendered — nothing is lost.
+ */
+export function renderState(state: ViewState, target: string | null = state.targeted): RenderedState {
+  const blocks = transcriptOf(state, target);
   return {
-    blocks: state.transcript.map(renderBlock),
+    blocks: blocks.map(renderBlock),
     members: state.members,
-    todos: state.todos,
-    status: state.status,
+    todos: target === null ? [] : state.todos[target] ?? [],
+    // `running` is PER-TARGET: the roster's `MemberState` is the liveness fact.
+    status: { ...state.status, running: targetRunning(state, target) },
+    target: target === null ? null : { id: target, label: targetLabel(state, target) },
   };
 }
 
+function targetRunning(state: ViewState, target: string | null): boolean {
+  if (target === null) return state.status.running;
+  const member = state.members.find((m) => m.id === target);
+  return member ? member.state === "running" : state.status.running;
+}
 /** Render one block. Pure. */
 export function renderBlock(block: Block): RenderedBlock {
   switch (block.kind) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { initialState, reduce } from "../src/reducer.ts";
+import { initialState, reduce, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
 import { parseToWebview, type PanelSessionInfo, type ToWebview } from "../src/webview.ts";
 import { classNames, emptyKind, stateLabel, statusSegments, toggleExpanded } from "../src/webview/view.ts";
@@ -62,6 +62,50 @@ test("statusSegments appends running, context and the last error", () => {
   assert.ok(statusSegments(withCtx, session()).some((s) => s.text === "ctx 42"));
   assert.ok(statusSegments(withError, session()).some((s) => s.text === "boom"));
   assert.ok(!statusSegments(idle(), session()).some((s) => s.className === "status-running"));
+});
+
+/* -------------------------------------------------------------- the target */
+
+test("the status strip names the target, so a retarget is visible", () => {
+  // The worst failure mode of a re-targeting panel is an invisible target: the
+  // user cannot tell whose transcript they are reading.
+  const state: ViewState = {
+    ...initialState(),
+    members: [
+      { id: "root-1", label: "root-1", state: "idle", isRoot: true },
+      { id: "agent:w1", label: "w1", state: "running", isRoot: false, liveAction: "edit src/f.rs" },
+    ],
+    targeted: "root-1",
+  };
+
+  const root = renderState(state, "root-1");
+  const member = renderState(state, "agent:w1");
+  assert.equal(root.target?.label, "orchestrator", "the root reads as orchestrator");
+  assert.equal(member.target?.label, "w1");
+
+  const rootSegments = statusSegments(root, session());
+  const memberSegments = statusSegments(member, session());
+  assert.ok(rootSegments.some((s) => s.className === "status-target" && s.text === "orchestrator"));
+  assert.ok(memberSegments.some((s) => s.className === "status-target" && s.text === "w1"));
+  assert.ok(!memberSegments.some((s) => s.text === "orchestrator"), "the target segment CHANGED");
+
+  // `running` is per-target (the roster's MemberState), so the member shows it
+  // and the idle root does not.
+  assert.ok(memberSegments.some((s) => s.className === "status-running"));
+  assert.ok(!rootSegments.some((s) => s.className === "status-running"));
+
+  console.log("status strip (headless):");
+  for (const [name, view] of [["root-1", root], ["agent:w1", member]] as const) {
+    const text = statusSegments(view, session()).map((s) => s.text).join(" ");
+    console.log(`  target ${name.padEnd(9)} -> ${text}`);
+  }
+});
+
+test("the plan chip appears only when plan mode is on", () => {
+  const off = renderState(initialState(), null);
+  assert.ok(!statusSegments(off, session()).some((s) => s.className === "status-plan"));
+  const on = renderState({ ...initialState(), status: { running: false, planMode: true } }, null);
+  assert.ok(statusSegments(on, session()).some((s) => s.className === "status-plan" && s.text === "plan"));
 });
 
 /* -------------------------------------------------------------- empty states */

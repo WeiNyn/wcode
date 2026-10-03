@@ -210,13 +210,21 @@ Open:
   binary, P1 must choose between a prebuilt release binary (with `wcode.path` pointing
   at it) and requiring VS Build Tools. That is a distribution decision, not a code one
   — but it decides how the extension is installed.
+- **A message-loss window in `seedFromHistory`** (P3 review, residual, not a blocker).
+  The history replace keeps only `live` blocks, so a block committed between the
+  `get_history` request and its reply would be dropped. The history is taken at a **turn
+  boundary**, so any later message belongs to a turn that begins a whole LLM turn
+  afterwards — the reply wins, and losing a message needs sub-second user action inside a
+  local socket round trip. Named rather than fixed: eager hydration narrows the window
+  without closing it, and merging by content identity is fragile. **Revisit if the
+  transport stops being a local socket** — a daemon or a remote peer widens the window.
 
 ## 7. Progress
 
 | phase | status |
 |---|---|
-| P0 | ◐ implemented — builds, tests green, live smoke test passes; second-layer review pending |
-| P1 | ☐ |
-| P2 | ☐ |
-| P3 | ☐ |
-| P4 | ☐ (optional) |
+| P0 | ☑ `serve --stdio` — committed `7762120`; second-layer APPROVED |
+| P1 | ☑ spine + webview panel — `efaf67a`, `05baf91`; both APPROVED |
+| P2 | ☑ native diffs — `20b8ac9`; second-layer APPROVED |
+| P3 | ☑ team surface — approved; per-member transcripts, live roster, plan gate |
+| P4 | ☐ not started (optional) — see §6 |

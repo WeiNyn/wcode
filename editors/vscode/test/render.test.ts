@@ -10,19 +10,19 @@ import { escapeHtml, renderBlock, renderState, toolSummary } from "../src/render
 
 const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), "fixtures");
 
-function drive(name: string, state: ViewState = initialState()): ViewState {
+function drive(name: string, session = "root", state: ViewState = initialState()): ViewState {
   const events = readFileSync(resolve(fixturesDir, name), "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as AgentEvent);
   let next = state;
-  for (const event of events) next = reduce(next, event);
+  for (const event of events) next = reduce(next, event, session);
   return next;
 }
 
 test("an assistant message renders to markdown HTML, not raw text", () => {
   const state = drive("submit_stream.handwritten.ndjson");
-  const rendered = renderState(state);
+  const rendered = renderState(state, "root");
   const block = rendered.blocks[0];
   assert.equal(block.kind, "assistant");
   assert.equal(block.live, false);
@@ -35,13 +35,13 @@ test("a live assistant block is flagged (the webview paints the cursor)", () => 
     type: "message_start",
     message: { role: "assistant", content: [{ type: "text", text: "partial" }], stop_reason: "stop" },
   });
-  const block = renderState(state).blocks[0];
+  const block = renderState(state, "").blocks[0];
   assert.equal(block.live, true);
 });
 
 test("tool blocks render a collapsed summary and flag a diff", () => {
   const state = drive("tool_execution.handwritten.ndjson");
-  const tools = renderState(state).blocks.filter((b) => b.kind === "tool");
+  const tools = renderState(state, "root").blocks.filter((b) => b.kind === "tool");
   assert.equal(tools.length, 2);
 
   const bash = tools[0].tool;
@@ -57,14 +57,14 @@ test("tool blocks render a collapsed summary and flag a diff", () => {
 });
 
 test("user, error and notice text is escaped, never rendered as HTML", () => {
-  const withUser = appendUser(initialState(), "<script>alert(1)</script>");
-  const user = renderState(withUser).blocks[0];
+  const withUser = appendUser(initialState(), "<script>alert(1)</script>", "root");
+  const user = renderState(withUser, "root").blocks[0];
   assert.equal(user.kind, "user");
   assert.ok(!user.html.includes("<script"), "the raw tag must not survive");
   assert.match(user.html, /&lt;script&gt;/);
 
-  const withError = reduce(initialState(), { type: "error", message: '<img src=x onerror="x">' });
-  const error = renderState(withError).blocks[0];
+  const withError = reduce(initialState(), { type: "error", message: '<img src=x onerror="x">' }, "root");
+  const error = renderState(withError, "root").blocks[0];
   assert.equal(error.kind, "error");
   assert.ok(!error.html.includes("<img"));
 });

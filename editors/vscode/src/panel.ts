@@ -28,11 +28,14 @@ export const THROTTLE_MS = 30;
 
 /** What the panel calls back into the host for. */
 export interface PanelHandlers {
-  onSubmit(text: string): void;
-  onCancel(): void;
-  onSteer(text: string): void;
+  /** `target` is the member the composer is addressed to (null = the root). */
+  onSubmit(text: string, target: string | null): void;
+  onCancel(target: string | null): void;
+  onSteer(text: string, target: string | null): void;
   onOpenDiff(callId: string): void;
   onRevealFile(path: string, line?: number): void;
+  /** The user picked a member: the host hydrates that session's transcript. */
+  onTarget(target: string | null): void;
 }
 
 export class ChatPanel {
@@ -47,6 +50,8 @@ export class ChatPanel {
   private session: PanelSessionInfo = { id: null, state: "stopped", stderrTail: "" };
   private webviewReady = false;
   private pendingState: ViewState | null = null;
+  /** The member whose surface is shown; every send is addressed there. */
+  private target: string | null = null;
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -57,6 +62,8 @@ export class ChatPanel {
     this.panel = panel;
     this.handlers = handlers;
     this.state = state;
+    // The panel starts attached to whatever the state was already pointed at.
+    this.target = state.targeted;
     this.throttle = createThrottle(THROTTLE_MS, (rendered) => this.post(rendered), realScheduler);
 
     this.panel.webview.html = renderHtml(this.panel.webview, mediaRoot);
@@ -89,7 +96,6 @@ export class ChatPanel {
     return ChatPanel.current;
   }
 
-  /** Fold a new view state in (throttled; `immediate` for settled events). */
   update(state: ViewState, immediate = false): void {
     this.state = state;
     if (!this.webviewReady) {
@@ -97,13 +103,28 @@ export class ChatPanel {
       return;
     }
     if (immediate) this.flush();
-    else this.throttle.push(renderState(state));
+    else this.throttle.push(renderState(state, this.target));
   }
 
   /** Update the status strip (session id / FSM / stderr tail). */
   setSession(info: Partial<PanelSessionInfo>): void {
     this.session = { ...this.session, ...info };
     this.flush();
+  }
+
+  /**
+   * Point the surface at a member (null = the root) and hydrate it. A retarget
+   * only changes WHICH per-session transcript is rendered — nothing is lost.
+   */
+  setTarget(id: string | null): void {
+    if (this.target === id) return;
+    this.target = id;
+    this.handlers.onTarget(id);
+    this.flush();
+  }
+
+  get currentTarget(): string | null {
+    return this.target;
   }
 
   reveal(): void {
@@ -134,7 +155,7 @@ export class ChatPanel {
       this.pendingState = this.state;
       return;
     }
-    this.throttle.flush(renderState(this.state));
+    this.throttle.flush(renderState(this.state, this.target));
   }
 
   private post(state: ReturnType<typeof renderState>): void {
@@ -153,13 +174,13 @@ export class ChatPanel {
         this.flush();
         break;
       case "submit":
-        this.handlers.onSubmit(message.text);
+        this.handlers.onSubmit(message.text, this.target);
         break;
       case "steer":
-        this.handlers.onSteer(message.text);
+        this.handlers.onSteer(message.text, this.target);
         break;
       case "cancel":
-        this.handlers.onCancel();
+        this.handlers.onCancel(this.target);
         break;
       case "open-diff":
         this.handlers.onOpenDiff(message.callId);

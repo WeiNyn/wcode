@@ -21,7 +21,7 @@ import {
   reverseApply,
   tokenFromDiffPath,
 } from "./diff.ts";
-import type { ViewState } from "./reducer.ts";
+import { transcriptOf, type ViewState } from "./reducer.ts";
 
 /** A diagnostic sink (the extension's OutputChannel). */
 export type DiffLogger = (message: string) => void;
@@ -84,13 +84,14 @@ export async function openDiff(
   callId: string | undefined,
   log: DiffLogger,
 ): Promise<void> {
-  const id = callId ?? lastDiffCallId(state);
+  const blocks = transcriptOf(state, state.targeted);
+  const id = callId ?? lastDiffCallId(blocks);
   if (id === undefined) {
     void vscode.window.showInformationMessage("wcode: no diff to open yet.");
     return;
   }
 
-  const tool = findToolBlock(state, id);
+  const tool = findToolBlock(blocks, id);
   const diff = tool?.diff;
   if (tool === undefined || diff === undefined || diff === "") {
     void vscode.window.showWarningMessage("wcode: that tool call has no diff to open.");

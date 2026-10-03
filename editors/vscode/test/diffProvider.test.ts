@@ -9,7 +9,7 @@ import {
   lastDiffCallId,
   tokenFromDiffPath,
 } from "../src/diff.ts";
-import { initialState, reduce, type ViewState } from "../src/reducer.ts";
+import { initialState, reduce, transcriptOf, type ViewState } from "../src/reducer.ts";
 
 /* --------------------------------------------------------------- the registry */
 
@@ -88,14 +88,14 @@ function stateWithTools(): ViewState {
 }
 
 test("findToolBlock finds the call by call_id, and nothing for an unknown id", () => {
-  const state = stateWithTools();
-  assert.equal(findToolBlock(state, "t2")?.path, "src/f.rs");
-  assert.equal(findToolBlock(state, "t1")?.diff, undefined);
-  assert.equal(findToolBlock(state, "nope"), undefined);
+  const blocks = transcriptOf(stateWithTools(), "");
+  assert.equal(findToolBlock(blocks, "t2")?.path, "src/f.rs");
+  assert.equal(findToolBlock(blocks, "t1")?.diff, undefined);
+  assert.equal(findToolBlock(blocks, "nope"), undefined);
 });
 
 test("lastDiffCallId is the most recent call that has a diff", () => {
-  assert.equal(lastDiffCallId(stateWithTools()), "t2");
+  assert.equal(lastDiffCallId(transcriptOf(stateWithTools(), "")), "t2");
 
   // A `path` with NO diff (a write that changed no line) is not a diff.
   let state = stateWithTools();
@@ -108,7 +108,7 @@ test("lastDiffCallId is the most recent call that has a diff", () => {
     is_error: false,
     path: "src/g.rs",
   });
-  assert.equal(lastDiffCallId(state), "t2", "the diff-less write does not shadow t2");
+  assert.equal(lastDiffCallId(transcriptOf(state, "")), "t2", "the diff-less write does not shadow t2");
 
-  assert.equal(lastDiffCallId(initialState()), undefined, "no tools -> no diff");
+  assert.equal(lastDiffCallId(transcriptOf(initialState(), "")), undefined, "no tools -> no diff");
 });

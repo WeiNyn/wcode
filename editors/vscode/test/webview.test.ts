@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { initialState } from "../src/reducer.ts";
+import { initialState, target } from "../src/reducer.ts";
 import { renderState, type RenderedState } from "../src/render.ts";
 import { createThrottle, parseFromWebview, type Scheduler } from "../src/webview.ts";
 
@@ -78,7 +78,7 @@ function fakeClock(start = 1_000): FakeClock {
 function states(): RenderedState[] {
   return [
     renderState(initialState()),
-    renderState({ ...initialState(), todos: [{ content: "a", status: "pending" }] }),
+    renderState(target(initialState(), "agent:w1")),
     renderState({ ...initialState(), status: { running: true, planMode: false } }),
     renderState({ ...initialState(), status: { running: false, planMode: true } }),
   ];

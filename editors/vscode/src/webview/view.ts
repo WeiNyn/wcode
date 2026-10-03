@@ -37,6 +37,16 @@ export function statusSegments(state: RenderedState, session: PanelSessionInfo):
     { className: "status-sep", text: "·" },
     { className: "status-session", text: session.id ?? "no session yet" },
   ];
+  // WHOSE transcript this is — the target must always be visible (P3).
+  if (state.target !== null) {
+    segments.push(
+      { className: "status-sep", text: "·" },
+      { className: "status-target", text: state.target.label },
+    );
+  }
+  if (state.status.planMode) {
+    segments.push({ className: "status-sep", text: "·" }, { className: "status-plan", text: "plan" });
+  }
   if (state.status.running) {
     segments.push({ className: "status-sep", text: "·" }, { className: "status-running", text: "running…" });
   }

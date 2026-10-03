@@ -6,11 +6,15 @@
  * import — it takes a logger, and the extension host wires it up.
  *
  * Session addressing (hard rule, live-verified): the seeded `sessions` push on
- * connect names the ROOT session's real id, and every subsequent request is
- * addressed to it. Never the `"remote"` placeholder — it resolves only on a
- * single-session server (`server.rs` `live.is_empty()` fallback) and returns
- * `unknown session remote` as soon as a roster exists. Get it wrong and the
- * chat is silently empty.
+ * connect names the ROOT session's real id, and a request with no explicit
+ * `session` is addressed there. Never the `"remote"` placeholder — it resolves
+ * only on a single-session server (`server.rs` `live.is_empty()` fallback) and
+ * returns `unknown session remote` as soon as a roster exists. Get it wrong and
+ * the chat is silently empty.
+ *
+ * P3: `send`/`ask` take an optional session id, so a member surface addresses
+ * the id the roster names (`agent:<name>`) — the server demuxes `frame.session`
+ * against its live roster and routes to that member's actor.
  *
  * Keep stdin open for the session's life: a client that closes it can lose the
  * replies still in flight.
@@ -178,23 +182,28 @@ export class WcodeSession extends EventEmitter {
   }
 
   /**
-   * Mint an id, write one frame to the child's stdin, and return the id. Every
-   * request is addressed to the real root id — never `"remote"`.
+   * Mint an id, write one frame to the child's stdin, and return the id.
+   *
+   * `session` defaults to the root; a member surface passes the id the roster
+   * names (`agent:<name>`). Never `"remote"` or a stale root — the server
+   * demuxes `frame.session` against its live roster and answers
+   * `unknown session {id}` for anything else.
    */
-  send(request: Request): number {
+  send(request: Request, session?: string): number {
     if (!this.child) throw new Error("wcode session is not running");
-    if (!this.rootId) {
+    const address = session ?? this.rootId;
+    if (!address) {
       throw new Error("wcode session has no root id yet (the seeded `sessions` push has not arrived)");
     }
     const id = this.nextId++;
-    const frame = { v: PROTOCOL_VERSION, id, session: this.rootId, ...request };
+    const frame = { v: PROTOCOL_VERSION, id, session: address, ...request };
     this.child.stdin.write(`${JSON.stringify(frame)}\n`);
     return id;
   }
 
   /** Send and resolve on the frame whose `reply_to` is this request's id. */
-  ask(request: Request, timeoutMs = 30_000): Promise<AgentEvent> {
-    const id = this.send(request);
+  ask(request: Request, session?: string, timeoutMs = 30_000): Promise<AgentEvent> {
+    const id = this.send(request, session);
     return new Promise<AgentEvent>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);

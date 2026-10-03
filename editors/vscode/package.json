@@ -1,7 +1,7 @@
 {
   "name": "wcode-vscode",
   "displayName": "wcode",
-  "description": "wcode chat panel and native diffs — a client of `wcode serve --stdio`",
+  "description": "wcode team surface: chat panel, native diffs, and a live member sidebar",
   "version": "0.0.1",
   "private": true,
   "publisher": "wcode",
@@ -15,12 +15,41 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onView:wcode.members",
     "onCommand:wcode.start",
     "onCommand:wcode.stop",
     "onCommand:wcode.restart",
-    "onCommand:wcode.openDiff"
+    "onCommand:wcode.openDiff",
+    "onCommand:wcode.member.focus",
+    "onCommand:wcode.member.peek",
+    "onCommand:wcode.member.ask",
+    "onCommand:wcode.member.stop",
+    "onCommand:wcode.plan.toggle"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "wcode",
+          "title": "wcode",
+          "icon": "media/wcode.svg"
+        }
+      ]
+    },
+    "views": {
+      "wcode": [
+        {
+          "id": "wcode.members",
+          "name": "Members"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "wcode.members",
+        "contents": "No session. Run [wcode: Start Session](command:wcode.start)."
+      }
+    ],
     "commands": [
       {
         "command": "wcode.start",
@@ -37,8 +66,52 @@
       {
         "command": "wcode.openDiff",
         "title": "wcode: Open Diff"
+      },
+      {
+        "command": "wcode.member.focus",
+        "title": "wcode: Focus Member"
+      },
+      {
+        "command": "wcode.member.peek",
+        "title": "wcode: Peek Member"
+      },
+      {
+        "command": "wcode.member.ask",
+        "title": "wcode: Ask Member"
+      },
+      {
+        "command": "wcode.member.stop",
+        "title": "wcode: Stop Member"
+      },
+      {
+        "command": "wcode.plan.toggle",
+        "title": "wcode: Toggle Plan Mode"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "wcode.member.peek",
+          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/",
+          "group": "inline"
+        },
+        {
+          "command": "wcode.member.ask",
+          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/"
+        },
+        {
+          "command": "wcode.member.stop",
+          "when": "view == wcode.members && viewItem =~ /^wcode\\.(root|member)$/"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "wcode.plan.toggle",
+          "when": "view == wcode.members",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "wcode",
       "properties": {

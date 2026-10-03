@@ -4,9 +4,10 @@ A second **client** of the wcode kernel, never a second kernel: it spawns
 `wcode serve --stdio` and speaks the same frame protocol as the TUI
 (`docs/vscode-extension-plan.md` §3.2).
 
-**Status: P2 — native diffs.** Wire types, the stdio session, the pure reducer,
-host-side markdown rendering, the webview chat panel, and native diffs
-(reverse-apply the patch to reconstruct the pre-image; open on request).
+**Status: P3 — the team surface.** Wire types, the stdio session, the pure
+per-session reducer, host-side markdown rendering, the webview chat panel, native
+diffs, and a live member sidebar that is a **control surface** (peek/ask/stop a
+member, retarget the panel at it, toggle plan mode).
 
 ## Layout
 
@@ -15,20 +16,21 @@ host-side markdown rendering, the webview chat panel, and native diffs
 | `src/protocol.ts` | the wire types — the ONE place the serde tags live |
 | `src/session.ts` | `WcodeSession`: spawn, NDJSON splitter (stdout only), FSM, restart |
 | `src/reducer.ts` | the pure `(state, event) -> state` view model (no `vscode`) |
-| `src/render.ts` | pure `ViewState` → blocks + HTML (markdown rendered **here**) |
+| `src/render.ts` | pure `ViewState` → blocks + HTML **for a target member** |
+| `src/roster.ts` | the native `TreeView` (`RosterProvider`): push, never poll |
 | `src/diff.ts` | pure `reverseApply` (patch → pre-image), the before-token registry |
 | `src/diffProvider.ts` | the `wcode-diff:` provider + the click handler (**the only diff `vscode`**) |
 | `src/webview.ts` | the `ToWebview`/`FromWebview` unions, the payload parsers, the throttle |
 | `src/panel.ts` | `WebviewPanel`, CSP, `localResourceRoots`, `postMessage` wiring |
 | `src/markdown.ts` | `markdown-it` with `html: false` |
-| `src/extension.ts` | `activate`/`deactivate`, the four commands, an OutputChannel |
+| `src/extension.ts` | `activate`/`deactivate`, the commands, the roster wiring, an OutputChannel |
 | `src/webview/chat.ts` | the webview script **source** (typed, dependency-free) |
 | `src/webview/view.ts` | the webview's pure half (`stateLabel`, `statusSegments`, …) |
 | `media/chat.js` | the bundled webview script (esbuild IIFE; **generated**, gitignored) |
 | `media/chat.css` | the panel stylesheet (theme variables only; zero remote assets) |
 | `scripts/capture.mjs` | capture real frames into `test/fixtures/` |
 | `scripts/verify-diff-fixtures.mjs` | check the diff fixtures against the **compiled generator** |
-| `test/` | plain-node tests (protocol, splitter, reducer, render, webview, diff, pipeline, live) |
+| `test/` | plain-node tests (protocol, splitter, reducer, roster, render, webview, diff, routing, live) |
 
 `media/chat.js` is a **build artifact** of `src/webview/chat.ts`: esbuild cannot
 write a bundle over its own entry without nesting the IIFE on a rebuild, so the
@@ -49,8 +51,9 @@ The tests run under **plain `node --test`** with Node's built-in TypeScript
 type stripping — no `vscode`, no display, no Electron. That is why the sources
 avoid TS-only runtime syntax (no enums, no namespaces, no parameter properties),
 use `import type` for type-only imports, and keep the pure halves pure
-(`render.ts`, `diff.ts`, `webview/view.ts`) so `panel.ts`/`diffProvider.ts` are
-the only files that import `vscode`.
+(`reducer.ts`, `render.ts`, `diff.ts`, `webview/view.ts`, `webview.ts`). The only
+**non-entry** `vscode` importers are `panel.ts`, `roster.ts` and `diffProvider.ts`
+(`extension.ts` is the composition root).
 
 `DOM` is available in the **webview's** program only (`tsconfig.webview.json`);
 the host program excludes `src/webview`, so a stray `document`/`window` in a host
@@ -96,6 +99,27 @@ live tests skip (do not fail) when `target/debug/wcode` is absent.
    - A tool call that touched a file but changed **no line** shows **no** button:
      no diff is a normal case, not an error.
 
+8. **The sidebar.** Open the **wcode** container in the Activity Bar (the `❯_`
+   icon) → **Members**. The tree lists the served sessions: `orchestrator` (the
+   root) plus one row per worker, each with a state icon and, while it runs, the
+   action it is on.
+   - **Click a member** (or arrow to it): the panel **retargets** — the status
+     strip's target segment changes from `orchestrator` to that member's name,
+     and the transcript switches to *that member's* conversation (hydrated via
+     `GetHistory` addressed to its id). Nothing already streamed is lost.
+   - **Right-click a member → `wcode: Peek Member`**: a lean `Status` read — its
+     last work, no model call.
+   - **`wcode: Ask Member`**: a side question (`SideAsk`) — no turn, not
+     recorded.
+   - **`wcode: Stop Member`**: `Cancel`; the row settles to `done` via the pushed
+     roster.
+   - **Type in the composer**: the message is `Submit`ted **to the target
+     member**, and your text is echoed into that member's transcript.
+   - **`wcode: Toggle Plan Mode`** (the view's title button): optimistic, settled
+     on `Ack`, reverted on `Error`; the plan chip appears in the status strip.
+   - With **no session running**, the view shows *“No session. Run wcode: Start
+     Session.”* — never a blank tree.
+
 If no model/endpoint is configured, step 4 ends with the status strip reading
 `● crashed` and the child's **stderr tail** shown under it — that is the failure
 mode the status strip exists to make visible, not a silent empty panel.
@@ -107,7 +131,12 @@ mode the status strip exists to make visible, not a silent empty panel.
 and the committed fixtures; `reverseApply` round-tripping real generator patches
 to their pre-images on disk, and returning `null` on every undecidable patch; the
 NDJSON splitter; the `FromWebview`/`ToWebview` payload parsers; the throttle; and
-markdown escaping (`html: false`).
+markdown escaping (`html: false`); and, LIVE and **model-free**, that a request
+addressed to `agent:<name>` is **validated against the live roster** — the proof
+is the CONTROL (a bogus id refused with `unknown session …`); a real one is
+answered (`Status` correlated by `reply_to`, `SetPlanMode` → `Ack`, `Define` →
+`Spawned` growing the roster). The reply's own `session` field is an **echo** of
+the request, not evidence.
 
 **The diff fixtures are real generator output.** They are transcribed from
 `diff.rs`'s own tests and its construction, and
@@ -126,7 +155,17 @@ unexercised:
   title, the left/right URIs, and the provider resolving a token to the
   before-image. `reverseApply` (the hard part) is tested; the plumbing that
   hands its result to VS Code is not;
-- **the CSP as a live webview enforces it**, and **the CSS** (never painted).
+- **the CSP as a live webview enforces it**, and **the CSS** (never painted);
+- **the `TreeView` itself** — the icon/theme rendering, click-to-`command`,
+  `reveal`, the context menus and `viewsWelcome`. The provider's *pure* half
+  (`memberViews`, `memberIconSpec`) and the live roster it is fed are tested; the
+  VS Code tree that draws them is not;
+- **a real `Submit` turn IN A WORKER.** Every verified verb is **model-free**
+  (`Status`, `SetPlanMode`, `Define`); a `Submit` addressed to a member takes the
+  same `handle.ask` path, but no worker turn was ever run here, so "the composer
+  runs a turn in that member" remains **code-traced, not observed**. A busy
+  member's `Submit` **deferral** (queued to the next run boundary) is likewise
+  untraced.
 
 F5 in the Extension Development Host (the click-path above) is the only way to
 exercise them; treat it as an unrun step.
