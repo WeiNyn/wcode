@@ -1,0 +1,15 @@
+# Packaging: the VSIX ships only what the extension host loads at runtime.
+# `markdown-it` is BUNDLED into out/extension.js by esbuild, so node_modules is
+# not needed at runtime; the webview loads media/chat.js + media/chat.css.
+.vscode/**
+.vscode-test/**
+src/**
+scripts/**
+test/**
+node_modules/**
+out/**/*.map
+tsconfig*.json
+esbuild.mjs
+package-lock.json
+.gitignore
+*.vsix
