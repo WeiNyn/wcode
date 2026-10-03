@@ -132,5 +132,5 @@ Phases are independent commits; P1 is the foundation the rest extend.
 | P2 | ☑ `ae10444` — composer controls (selection chip, Plan/Act mode, model); second-layer APPROVED (125 tests green) |
 | P3 | ☑ `b9ffdba` — working group + interactive target switcher; second-layer APPROVED (129 tests green) |
 | P4 | ☑ `38099bc` — in-panel change review (Accept/Reject, reverse-apply revert); second-layer APPROVED (137 tests green) |
-| P5 | ☐ not started |
+| P5 | ☑ `5f6e81a` — sidebar Team + Tasks sections (one view, section roots); second-layer APPROVED (142 tests green) |
 | P6 | ☐ not started (optional) |
