@@ -129,7 +129,7 @@ Phases are independent commits; P1 is the foundation the rest extend.
 | phase | status |
 |---|---|
 | P1 | ☑ `f276183` — panel shell + transcript + states; second-layer APPROVED (122 tests green) |
-| P2 | ☐ not started |
+| P2 | ☑ `ae10444` — composer controls (selection chip, Plan/Act mode, model); second-layer APPROVED (125 tests green) |
 | P3 | ☐ not started |
 | P4 | ☐ not started |
 | P5 | ☐ not started |
