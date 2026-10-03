@@ -26,7 +26,10 @@ import {
   selectionRef,
   toggleExpanded,
   turns,
+  workingGroup,
+  type HeaderCell,
   type Turn,
+  type WorkingGroup,
 } from "./view.ts";
 
 /** The webview global; not in `@types/vscode` (it is injected by the host). */
@@ -87,6 +90,13 @@ let lastContext: SelectionContext | null = null;
 /** The last rendered selection ref, so a NEW selection re-arms the chip. */
 let lastRef: string | null = null;
 
+/** Is the header target menu open? (webview-local view state). */
+let menuOpen = false;
+/** The roving-tabindex item of the open menu. */
+let activeIndex = 0;
+/** The header's cell+menu signature; a matching snapshot skips the rebuild (B1). */
+let headerKey: string | null = null;
+
 /* ----------------------------------------------------------------- utilities */
 
 function requireEl(id: string): HTMLElement {
@@ -121,15 +131,147 @@ function rerender(): void {
 /* ------------------------------------------------------------------ header */
 
 function renderHeader(state: RenderedState, session: PanelSessionInfo): void {
+  const key = headerSignature(state, session);
+  if (key === headerKey) return; // same cells AND menu state: keep the SAME DOM (focus survives)
+  const hadFocus = pheadEl.contains(document.activeElement);
+  headerKey = key;
   const { r1, r2 } = panelHeader(state, session);
   const row1 = el("div", "r1");
   const row2 = el("div", "r2");
-  // Every cell is a plain span: the target chip is INERT here (retarget is P3).
-  for (const cell of r1) row1.appendChild(el("span", cell.className, cell.text));
+  for (const cell of r1) {
+    row1.appendChild(cell.interactive ? targetChip(cell, state) : el("span", cell.className, cell.text));
+  }
   for (const cell of r2) row2.appendChild(el("span", cell.className, cell.text));
   pheadEl.textContent = "";
   pheadEl.append(row1, row2);
+  // Focus restore: the old chip is gone after a rebuild; re-find the new one.
+  if (menuOpen) focusItem(activeIndex); // the menu reopened -> restore the roving item
+  else if (hadFocus) chipButton()?.focus();
 }
+
+/**
+ * The header's cell+menu signature. `renderHeader` rebuilds ONLY when it changes,
+ * so a token stream (which leaves the cells and the menu unchanged) keeps the SAME
+ * chip DOM — the open menu and its focus survive a streamed snapshot (B1).
+ */
+function headerSignature(state: RenderedState, session: PanelSessionInfo): string {
+  const { r1, r2 } = panelHeader(state, session);
+  const cells = [...r1, ...r2]
+    .map((cell) => `${cell.className}\u0001${cell.text}\u0001${cell.interactive ?? false}`)
+    .join("\u0002");
+  // The MENU state is part of the gate, or open/close would change nothing.
+  return `${cells}\u0002${menuOpen}\u0002${activeIndex}`;
+}
+
+/** The `.target` cell as a `<button>` + (when open) the member menu. */
+function targetChip(cell: HeaderCell, state: RenderedState): HTMLElement {
+  const wrap = el("span", "target-wrap");
+  const button = el("button", cell.className, cell.text); // class "target"
+  button.setAttribute("type", "button");
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", menuOpen ? "true" : "false");
+  button.addEventListener("click", () => (menuOpen ? closeMenu() : openMenu()));
+  wrap.appendChild(button);
+  if (menuOpen) wrap.appendChild(memberMenu(state));
+  return wrap;
+}
+
+/** The in-panel member list (draft: the chip's dropdown). */
+function memberMenu(state: RenderedState): HTMLElement {
+  const menu = el("div", "menu");
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Switch target member");
+  state.members.forEach((member, index) => {
+    const item = el("button", "item", member.isRoot ? "orchestrator" : member.label);
+    item.setAttribute("type", "button");
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = index === activeIndex ? 0 : -1; // ROVING tabindex: Tab LEAVES the menu
+    if (member.id === state.target?.id) item.setAttribute("aria-current", "true");
+    item.addEventListener("click", () => selectMember(member.id));
+    item.addEventListener("keydown", (event) => onMenuKey(event, index, state.members.length));
+    menu.appendChild(item);
+  });
+  return menu;
+}
+
+/** The chip button currently in the DOM, if any (re-found after a rebuild). */
+function chipButton(): HTMLElement | null {
+  return pheadEl.querySelector<HTMLElement>("button.target");
+}
+
+/** Focus the menu item at `index`. */
+function focusItem(index: number): void {
+  pheadEl.querySelectorAll<HTMLElement>(".menu .item")[index]?.focus();
+}
+
+/**
+ * Move the roving-tabindex position to `index` (so Tab / Shift+Tab behave) and
+ * focus that item. Keeping `activeIndex` and the DOM tabindex in step means the
+ * next snapshot's rebuild re-focuses the SAME item — `renderHeader` restores
+ * `focusItem(activeIndex)`, so an arrowed position survives a streamed snapshot.
+ */
+function moveTo(index: number): void {
+  activeIndex = index;
+  const items = pheadEl.querySelectorAll<HTMLElement>(".menu .item");
+  items.forEach((item, i) => {
+    item.tabIndex = i === index ? 0 : -1;
+  });
+  items[index]?.focus();
+}
+
+function openMenu(): void {
+  menuOpen = true;
+  activeIndex = 0;
+  rerender();
+  focusItem(0); // focus the first item
+}
+
+function closeMenu(): void {
+  menuOpen = false;
+  rerender();
+  chipButton()?.focus(); // return focus to the chip
+}
+
+function selectMember(id: string): void {
+  post({ kind: "focus-member", id });
+  closeMenu();
+}
+
+/** The APG Menu-Button keyboard pattern (mirrors the WAI-ARIA example). */
+function onMenuKey(event: KeyboardEvent, index: number, count: number): void {
+  switch (event.key) {
+    case "ArrowDown":
+      moveTo((index + 1) % count);
+      event.preventDefault();
+      break;
+    case "ArrowUp":
+      moveTo((index - 1 + count) % count);
+      event.preventDefault();
+      break;
+    case "Home":
+      moveTo(0);
+      event.preventDefault();
+      break;
+    case "End":
+      moveTo(count - 1);
+      event.preventDefault();
+      break;
+    case "Tab":
+      closeMenu(); // Tab LEAVES the menu (roving tabindex)
+      break;
+    case "Escape":
+      closeMenu(); // -> focus the chip
+      event.preventDefault();
+      break;
+  }
+}
+
+// Outside click closes the menu (a click INSIDE `.target-wrap` — the chip or an
+// item — is left to their own handlers).
+document.addEventListener("click", (event) => {
+  const target = event.target as Element | null;
+  if (menuOpen && target !== null && !target.closest(".target-wrap")) closeMenu();
+});
 
 /* -------------------------------------------------------------- transcript */
 
@@ -230,6 +372,25 @@ function renderTurn(turn: Turn): HTMLElement {
   return wrap;
 }
 
+/** The live subagent rows (draft `.group`): a transcript-tail region. */
+function renderGroup(group: WorkingGroup): HTMLElement {
+  const box = el("div", "group");
+  const head = el("div", "ghead");
+  const spin = el("span", "spin", "⠋");
+  spin.setAttribute("aria-hidden", "true");
+  head.appendChild(spin);
+  head.appendChild(el("span", null, `${group.count} member${group.count === 1 ? "" : "s"} working`));
+  box.appendChild(head);
+  for (const row of group.rows) {
+    const line = el("div", "running");
+    line.appendChild(el("span", `glyph ${row.running ? "g-run" : "g-idle"}`, "●")); // constant ●
+    line.appendChild(el("span", "who2", row.name));
+    if (row.action !== "") line.appendChild(el("span", "what", row.action));
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
@@ -240,6 +401,10 @@ function render(snapshot: ToWebview): void {
     transcriptEl.appendChild(renderStateCard(state, session));
   } else {
     for (const turn of turns(state.blocks)) transcriptEl.appendChild(renderTurn(turn));
+    // The working group is a transcript-TAIL region, NOT nested in a turn: it is
+    // LIVE roster state (from `members`), not per-turn block data.
+    const group = workingGroup(state.members, state.target?.id ?? null);
+    if (group.count > 0) transcriptEl.appendChild(renderGroup(group));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }

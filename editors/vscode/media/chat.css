@@ -111,7 +111,7 @@ body {
   border: 1px solid color-mix(in srgb, var(--wc-accent) 35%, transparent);
   border-radius: 999px;
   padding: 1px 9px 1px 7px;
-  cursor: default; /* inert — retarget is P3 */
+  cursor: pointer;
 }
 
 .pchip {
@@ -633,4 +633,113 @@ textarea#input:focus {
 .tool-btn:focus-visible {
   outline: 2px solid var(--vscode-focusBorder);
   outline-offset: 1px;
+}
+
+/* --------------------------------------------------- working group (P3) */
+
+.group {
+  border: 1px dashed var(--vscode-panel-border);
+  border-radius: var(--wc-radius);
+  padding: 7px 9px;
+  margin: 6px 0;
+}
+
+.group > .ghead {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 5px;
+}
+
+.running {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.running .who2 {
+  font-weight: 600;
+}
+
+.running .what {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+}
+
+.glyph {
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 700;
+}
+
+.g-run {
+  color: var(--wc-accent);
+}
+
+.g-idle {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ------------------------------------- interactive target chip + member menu */
+
+.target-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.target:hover {
+  background: color-mix(in srgb, var(--wc-accent) 20%, transparent);
+}
+
+.target:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.target[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--wc-accent) 24%, transparent);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: var(--wc-radius);
+  box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.menu .item {
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.menu .item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.menu .item:focus-visible {
+  background: var(--vscode-list-hoverBackground);
+  outline: none;
+}
+
+.menu .item[aria-current="true"] {
+  color: var(--wc-accent);
+  font-weight: 600;
 }

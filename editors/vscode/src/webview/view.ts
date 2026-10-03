@@ -5,6 +5,7 @@
  * everything here is a plain function over the snapshot, mirroring the
  * `render.ts`-pure / `panel.ts`-impure split on the host side.
  */
+import type { SessionMember } from "../reducer.ts";
 import type { RenderedBlock, RenderedState } from "../render.ts";
 import type { SessionState } from "../session.ts";
 import type { PanelSessionInfo, SelectionContext } from "../webview.ts";
@@ -32,6 +33,12 @@ export interface HeaderCell {
    */
   className: string;
   text: string;
+  /**
+   * True for the `.target` chip: the DOM builds a <button> + the member menu (P3).
+   * Absent/undefined = a plain <span>. The pure layer only MARKS the control;
+   * the webview wires the events.
+   */
+  interactive?: boolean;
 }
 
 /** The two glanceable rows of the header (draft `header.phead`). */
@@ -47,8 +54,9 @@ export interface PanelHeader {
  *
  * r1: a `dot dot-{session.state}`, `stateLabel(session.state)` as `seg state`,
  *     a `sep`, the session id (`seg mono`, "no session yet" when null), a `sep`,
- *     the target chip when `state.target !== null` — an INERT `target` <span>
- *     showing `❯ {label} ▾` (retarget is P3: NO handler, NO title), a
+ *     the target chip when `state.target !== null` — the `target` cell marked
+ *     `interactive: true` (P3): the webview builds a <button> + the member menu,
+ *     showing `❯ {label} ▾`, a
  *     `pchip plan` when `state.status.planMode`, then the running / error cells.
  * r2: the TARGET member's `model`, a `sep`, `seg ctx` (`ctx N` from
  *     `state.status.contextUsed`), a `spacer`, and `"{members.length} members"`.
@@ -70,7 +78,10 @@ export function panelHeader(state: RenderedState, session: PanelSessionInfo): Pa
     { className: "seg mono", text: session.id ?? "no session yet" },
   ];
   if (state.target !== null) {
-    r1.push({ className: "sep", text: "·" }, { className: "target", text: `❯ ${state.target.label} ▾` });
+    r1.push(
+      { className: "sep", text: "·" },
+      { className: "target", text: `❯ ${state.target.label} ▾`, interactive: true },
+    );
   }
   if (state.status.planMode) {
     r1.push({ className: "pchip plan", text: "plan" });
@@ -306,4 +317,52 @@ export function selectionRef(context: SelectionContext): string {
  */
 export function composeSubmit(text: string, context: SelectionContext | null): string {
   return context === null ? text : `${selectionRef(context)}\n\n${text}`;
+}
+/** One live subagent row (draft `.running`). */
+export interface WorkingRow {
+  id: string;
+  /** Display name; the ROOT reads as "orchestrator" (mirrors `reducer.displayLabel`). */
+  name: string;
+  /** True when the row's member is `state === "running"` (→ `.g-run`). */
+  running: boolean;
+  /** The dim right-hand text (draft `.running .what`) — the member's `liveAction`. */
+  action: string;
+}
+
+/** The live "N members working" box (draft `.group`). */
+export interface WorkingGroup {
+  count: number;
+  rows: WorkingRow[];
+}
+
+/**
+ * The members OTHER than the target that are active (draft `.group`). Pure, over
+ * `RenderedState.members` — the roster push and the `liveAction` events already
+ * reach the panel.
+ *
+ * A member is INCLUDED iff `id !== targetId` AND (`state === "running"` OR
+ * `liveAction !== undefined`). Order follows `members` (roster order, root first).
+ *   name    = member.isRoot ? "orchestrator" : member.label
+ *   running = member.state === "running"   (a row always renders `●`; this picks
+ *             `.g-run` / `.g-idle`; the animated `⠋` lives only in the `.ghead`)
+ *   action  = member.liveAction ?? ""      (empty ⇒ the DOM shows just the name)
+ *   count   = rows.length
+ *
+ * `liveAction` is CLEARED on `agent_end`, so a finished member drops out — correct,
+ * and why the predicate is NOT widened to done/failed. A `running` member that has
+ * not emitted a tool call yet has `action === ""`.
+ */
+export function workingGroup(members: SessionMember[], targetId: string | null): WorkingGroup {
+  const rows: WorkingRow[] = [];
+  for (const member of members) {
+    if (member.id === targetId) continue;
+    if (member.state !== "running" && member.liveAction === undefined) continue;
+    rows.push({
+      id: member.id,
+      name: member.isRoot ? "orchestrator" : member.label,
+      running: member.state === "running",
+      action: member.liveAction ?? "",
+    });
+  }
+  return { count: rows.length, rows };
 }

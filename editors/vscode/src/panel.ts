@@ -39,6 +39,8 @@ export interface PanelHandlers {
   onTarget(target: string | null): void;
   /** The composer's `Mode:` control — flip plan-mode (extension.ts `togglePlan`). */
   onTogglePlan(): void;
+  /** The header target chip picked a member: retarget + hydrate. */
+  onFocusMember(id: string): void;
 }
 
 export class ChatPanel {
@@ -205,6 +207,9 @@ export class ChatPanel {
         break;
       case "toggle-plan":
         this.handlers.onTogglePlan();
+        break;
+      case "focus-member":
+        this.handlers.onFocusMember(message.id);
         break;
     }
   }

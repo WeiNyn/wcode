@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { initialState, reduce, type ViewState } from "../src/reducer.ts";
+import { initialState, reduce, type SessionMember, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
 import { parseToWebview, type PanelSessionInfo, type ToWebview } from "../src/webview.ts";
 import {
@@ -16,6 +16,7 @@ import {
   stateLabel,
   toggleExpanded,
   turns,
+  workingGroup,
 } from "../src/webview/view.ts";
 
 const idle = (): RenderedState => renderState(initialState());
@@ -65,8 +66,10 @@ test("panelHeader: r1 carries target, plan, running and error cells", () => {
   const { r1 } = panelHeader(renderState(state, "root-1"), session());
 
   // The target must ALWAYS be visible — an invisible target is the worst
-  // failure mode of a re-targeting panel (P3). It is an INERT span.
-  assert.ok(r1.some((c) => c.className === "target" && c.text.includes("orchestrator")));
+  // failure mode of a re-targeting panel (P3). P3 marks it interactive.
+  assert.ok(
+    r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("orchestrator")),
+  );
   assert.ok(r1.some((c) => c.className === "pchip plan" && c.text === "plan"));
   assert.ok(r1.some((c) => c.className === "seg running" && c.text === "running…"));
   assert.ok(r1.some((c) => c.className === "seg error" && c.text === "boom"));
@@ -132,8 +135,10 @@ test("panelHeader: running is per-target (the roster's liveness fact)", () => {
   assert.ok(member.r1.some((c) => c.className === "seg running"));
 
   // The target cell CHANGED — assert the retarget is visible.
-  assert.ok(root.r1.some((c) => c.className === "target" && c.text.includes("orchestrator")));
-  assert.ok(member.r1.some((c) => c.className === "target" && c.text.includes("w1")));
+  assert.ok(
+    root.r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("orchestrator")),
+  );
+  assert.ok(member.r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("w1")));
   assert.ok(!member.r1.some((c) => c.text.includes("orchestrator")));
 });
 
@@ -341,4 +346,47 @@ test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {
 test("composeSubmit prepends the ref, else passes the text through", () => {
   assert.equal(composeSubmit("hi", null), "hi");
   assert.equal(composeSubmit("hi", { path: "src/p.ts", startLine: 1, endLine: 2 }), "@src/p.ts#L1-2\n\nhi");
+});
+/* -------------------------------------------------------- working group */
+
+test("workingGroup: other members that are running or carry a liveAction", () => {
+  const members: SessionMember[] = [
+    { id: "root-1", label: "root-1", state: "running", isRoot: true }, // the target: EXCLUDED
+    { id: "agent:w1", label: "w1", state: "running", isRoot: false, liveAction: "edit src/f.rs" },
+    { id: "agent:w2", label: "w2", state: "done", isRoot: false }, // finished: excluded
+    { id: "agent:w3", label: "w3", state: "idle", isRoot: false, liveAction: "grep onOpenDiff" },
+  ];
+  const group = workingGroup(members, "root-1");
+  assert.equal(group.count, 2);
+  assert.deepEqual(group.rows.map((r) => r.id), ["agent:w1", "agent:w3"]);
+  assert.equal(group.rows[0].name, "w1");
+  // No `glyph` field — a row always renders ●; `running` picks .g-run / .g-idle.
+  assert.equal(group.rows[0].running, true);
+  assert.equal(group.rows[0].action, "edit src/f.rs");
+  assert.equal(group.rows[1].running, false); // -> .g-idle; the glyph is still ●
+  assert.equal(group.rows[1].action, "grep onOpenDiff");
+});
+
+test("workingGroup: a running member with no liveAction still appears (empty action)", () => {
+  const members: SessionMember[] = [{ id: "agent:w1", label: "w1", state: "running", isRoot: false }];
+  const group = workingGroup(members, "root-1");
+  assert.equal(group.count, 1);
+  assert.equal(group.rows[0].action, "");
+});
+
+test("workingGroup is empty when no other member is active", () => {
+  const members: SessionMember[] = [
+    { id: "root-1", label: "root-1", state: "running", isRoot: true },
+    { id: "agent:w2", label: "w2", state: "done", isRoot: false },
+  ];
+  assert.deepEqual(workingGroup(members, "root-1"), { count: 0, rows: [] });
+});
+
+test("workingGroup: the root reads as 'orchestrator' when it is NOT the target", () => {
+  const members: SessionMember[] = [
+    { id: "root-1", label: "root-1", state: "running", isRoot: true },
+    { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
+  ];
+  const group = workingGroup(members, "agent:w1");
+  assert.equal(group.rows[0].name, "orchestrator");
 });

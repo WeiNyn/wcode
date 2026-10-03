@@ -52,6 +52,7 @@ export type FromWebview =
   | { kind: "open-diff"; callId: string }
   | { kind: "reveal-file"; path: string; line?: number }
   | { kind: "toggle-plan" }
+  | { kind: "focus-member"; id: string }
   /** The webview's script has run and it is ready to receive a snapshot. */
   | { kind: "ready" };
 
@@ -79,6 +80,8 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
       return typeof message.callId === "string" ? { kind: "open-diff", callId: message.callId } : null;
     case "toggle-plan":
       return { kind: "toggle-plan" };
+    case "focus-member":
+      return typeof message.id === "string" ? { kind: "focus-member", id: message.id } : null;
     case "reveal-file":
       return typeof message.path === "string"
         ? { kind: "reveal-file", path: message.path, line: typeof message.line === "number" ? message.line : undefined }

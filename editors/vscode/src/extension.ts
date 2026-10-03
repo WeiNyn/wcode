@@ -378,6 +378,11 @@ function panelHandlers(): PanelHandlers {
       if (target !== null) hydrate(target);
     },
     onTogglePlan: () => togglePlan(),
+    onFocusMember: (id: string) => {
+      // Defence-in-depth: ignore an id not in the roster (a bogus id would
+      // retarget to an empty transcript and waste a `get_history`).
+      if (viewState.members.some((m) => m.id === id)) focusMember(id);
+    },
   };
 }
 

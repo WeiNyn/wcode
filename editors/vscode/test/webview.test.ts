@@ -24,6 +24,7 @@ test("parseFromWebview accepts the well-formed messages", () => {
     line: undefined,
   });
   assert.deepEqual(parseFromWebview({ kind: "toggle-plan" }), { kind: "toggle-plan" });
+  assert.deepEqual(parseFromWebview({ kind: "focus-member", id: "agent:w1" }), { kind: "focus-member", id: "agent:w1" });
 });
 
 test("parseFromWebview rejects junk and empty input", () => {
@@ -36,6 +37,8 @@ test("parseFromWebview rejects junk and empty input", () => {
   assert.equal(parseFromWebview({ kind: "submit", text: "   " }), null, "blank text");
   assert.equal(parseFromWebview({ kind: "open-diff" }), null, "no callId");
   assert.equal(parseFromWebview({ kind: "reveal-file", line: 2 }), null, "no path");
+  assert.equal(parseFromWebview({ kind: "focus-member" }), null, "no id");
+  assert.equal(parseFromWebview({ kind: "focus-member", id: 7 }), null, "id not a string");
 });
 
 /* ------------------------------------------------------------------- throttle */
