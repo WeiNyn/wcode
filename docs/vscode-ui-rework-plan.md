@@ -84,7 +84,7 @@ session listing, a separate item.
 | phase | goal | touches | acceptance |
 |---|---|---|---|
 | **P1** | **Panel chrome + transcript + states.** The two-row header, the turn-railed transcript, folded thinking/tool rows with `+N −M · ms`, header-tagged code blocks, the six empty/error states — to the draft. | `webview/view.ts`, `render.ts`, `webview/chat.ts`, `media/chat.css`, their tests | visual parity with the draft's Chat + States screens against the existing snapshot; pure helpers unit-tested; no protocol change |
-| **P2** | **Composer control surface.** Context chips (`@file#line` from the editor selection), a `/` command menu, mode (Plan/Act) + model controls, the context gauge, Send/Stop. | `chat.ts`, `view.ts`, `media/chat.css`, `extension.ts` (selection → submit), `webview.ts` (new `FromWebview` arms) | a selection becomes a chip and rides into `Submit{text}`; mode flips plan-mode; gauge reflects `contextUsed` |
+| **P2** | **Composer control surface.** Context chips (`@file#line` from the editor selection) and a mode (Plan/Act) control mapping to plan-mode, plus a read-only model display. The context **gauge** (needs a context window) and a **model picker** (needs a selectable-model list) are NOT on the wire — deferred (see §6). | `chat.ts`, `view.ts`, `media/chat.css`, `extension.ts` (selection → submit), `webview.ts` (a new `FromWebview` arm) | a selection becomes a chip and rides into `Submit{text}`; the mode control flips plan-mode and reflects `status.planMode` |
 | **P3** | **Working group + target switcher.** The live subagent rows and the header target chip opening a member list. | `view.ts`, `chat.ts`, `media/chat.css` | a running member appears with its `liveAction`; the chip retargets (hydrating) |
 | **P4** | **Change review** (in-panel). A pure review model over a tool's diff; Accept keeps the applied edit, Reject reverts via `reverseApply`; "Open native diff" as the escape hatch. | new `src/review.ts` (+ tests), `chat.ts`, `media/chat.css`, `extension.ts` | a diff renders as a hunk; Accept is a no-op, Reject restores the before-image and says so |
 | **P5** | **Sidebar rework.** Team / Tasks sections to the draft; Sessions deferred to its own item. | `roster.ts`, `reducer.ts` (tree model), `package.json` | the tree shows sections + `☑ done/total`; still push-only |
@@ -116,6 +116,13 @@ Phases are independent commits; P1 is the foundation the rest extend.
 - **Not the workbench chrome** (activity bar, editor tabs, status bar) — VS Code's.
 - The Sessions sidebar section and the cache clock are **out of scope** here; they
   need new plumbing and get their own items if wanted.
+- **Deferred to a protocol item:** the header **context gauge** (`▰▰▰▱▱ N / M`) needs a
+  context window on the wire — `Usage.input_tokens` is the numerator only; the
+  kernel has `limits::model_limit` but never serializes it to clients. A **model
+  picker** (`Model: … ▾`) needs the selectable-model list, also not on the wire
+  (`SetModel` exists; the list does not). P2 ships the model as a **read-only**
+  display and the used-token count in the header; the gauge and the picker wait on
+  a small `Request`/event addition.
 
 ## 7. Progress
 
