@@ -20,5 +20,9 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // The webview is a different runtime (a browser frame, not the extension
+  // host). It gets `DOM` — and only it does — in tsconfig.webview.json, so a
+  // stray `document`/`window` in a host file is a COMPILE error here.
+  "exclude": ["src/webview"]
 }

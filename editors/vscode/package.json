@@ -1,7 +1,7 @@
 {
   "name": "wcode-vscode",
   "displayName": "wcode",
-  "description": "wcode chat panel — a client of `wcode serve --stdio` (P1: the spine, no webview yet)",
+  "description": "wcode chat panel and native diffs — a client of `wcode serve --stdio`",
   "version": "0.0.1",
   "private": true,
   "publisher": "wcode",
@@ -36,7 +36,7 @@
       },
       {
         "command": "wcode.openDiff",
-        "title": "wcode: Open Diff (P2)"
+        "title": "wcode: Open Diff"
       }
     ],
     "configuration": {
@@ -53,9 +53,10 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
     "capture": "node scripts/capture.mjs",
+    "verify:diff-fixtures": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/verify-diff-fixtures.mjs",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {

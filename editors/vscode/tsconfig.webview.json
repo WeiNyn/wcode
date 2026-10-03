@@ -1,0 +1,15 @@
+{
+  // The webview's own program: the panel runs in a browser frame, not in the
+  // extension host, so THIS is the only place `DOM` is available. The host
+  // program (tsconfig.json) excludes `src/webview` and has no DOM, so a stray
+  // `document`/`window` in a host file cannot typecheck.
+  //
+  // `src/webview/view.ts` is pure and is also pulled into the host program via
+  // `test/view.test.ts`; only `chat.ts` needs the DOM.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/webview"],
+  "exclude": []
+}

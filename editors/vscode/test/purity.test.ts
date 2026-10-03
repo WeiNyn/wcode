@@ -16,7 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // not import `vscode` or a `node:` builtin. `webview.ts` is even stricter: it
 // imports only types (its `SessionState` comes in via `import type`, erased at
 // runtime).
-for (const file of ["reducer.ts", "render.ts", "webview.ts"]) {
+for (const file of ["reducer.ts", "render.ts", "webview.ts", "diff.ts", "webview/view.ts"]) {
   test(`${file} imports no host and no I/O`, () => {
     const src = readFileSync(resolve(here, "../src", file), "utf8");
 

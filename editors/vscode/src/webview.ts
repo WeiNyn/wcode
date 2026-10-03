@@ -2,13 +2,14 @@
  * The webview ⇄ host message contract, and the small pure helpers around it.
  *
  * **Pure** — no `vscode` import — so plain node can test the union parsing and
- * the throttle. `panel.ts` is the only place these types meet `vscode`.
+ * the throttle. `panel.ts` is the only place these types meet `vscode`; the
+ * webview narrows the inbound side with `parseToWebview`.
  *
  * Divergence from the sketch, owned: the sketch's `ToWebview.state` carried the
  * raw `ViewState`; we render markdown in the host (`render.ts`) and carry the
  * pre-rendered `RenderedState` instead, so the webview stays dependency-free.
  */
-import type { RenderedBlock, RenderedState } from "./render.ts";
+import type { RenderedState } from "./render.ts";
 import type { SessionState } from "./session.ts";
 
 /** What the panel knows about the child, for the status strip. */
@@ -21,11 +22,8 @@ export interface PanelSessionInfo {
   stderrTail: string;
 }
 
-/** host → webview. */
-export type ToWebview =
-  | { kind: "state"; state: RenderedState; session: PanelSessionInfo }
-  | { kind: "append"; block: RenderedBlock }
-  | { kind: "diff"; callId: string; path: string; diff: string };
+/** host → webview. Full snapshots only — there is no append/diff fast path. */
+export type ToWebview = { kind: "state"; state: RenderedState; session: PanelSessionInfo };
 
 /** webview → host. */
 export type FromWebview =
@@ -66,6 +64,40 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
     default:
       return null;
   }
+}
+
+/**
+ * Narrow an untrusted `postMessage` payload to a `ToWebview`, or `null`. Pure —
+ * the webview trusts the host no more than the host trusts the webview (it
+ * indexes `state.blocks`).
+ */
+export function parseToWebview(raw: unknown): ToWebview | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const message = raw as Record<string, unknown>;
+  if (message.kind !== "state") return null;
+
+  const state = message.state;
+  if (state === null || typeof state !== "object") return null;
+  const rendered = state as Record<string, unknown>;
+  if (!Array.isArray(rendered.blocks)) return null;
+  if (rendered.status === null || typeof rendered.status !== "object") return null;
+
+  const session = message.session;
+  if (session === null || typeof session !== "object") return null;
+  const info = session as Record<string, unknown>;
+  if (typeof info.state !== "string" || !isSessionState(info.state)) return null;
+  if (!(info.id === null || typeof info.id === "string")) return null;
+  if (typeof info.stderrTail !== "string") return null;
+
+  return {
+    kind: "state",
+    state: state as RenderedState,
+    session: { id: info.id as string | null, state: info.state, stderrTail: info.stderrTail },
+  };
+}
+
+function isSessionState(value: string): value is SessionState {
+  return value === "stopped" || value === "starting" || value === "ready" || value === "crashed";
 }
 
 /* ------------------------------------------------------------------ throttle */

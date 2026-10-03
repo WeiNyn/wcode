@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 
+import { clearDiffs, openDiff, registerDiffProvider } from "./diffProvider.ts";
 import { ChatPanel, type PanelHandlers } from "./panel.ts";
 import { appendUser, initialState, reduce, type ViewState } from "./reducer.ts";
 import { WcodeSession, type SessionState } from "./session.ts";
@@ -31,19 +32,21 @@ export function activate(context: vscode.ExtensionContext): void {
   status.command = "wcode.restart";
   status.tooltip = "wcode session — click to restart";
   context.subscriptions.push(output, status);
+  registerDiffProvider(context, logLine);
 
   context.subscriptions.push(
     vscode.commands.registerCommand("wcode.start", () => void startSession()),
     vscode.commands.registerCommand("wcode.stop", () => void stopSession()),
     vscode.commands.registerCommand("wcode.restart", () => void restartSession()),
     vscode.commands.registerCommand("wcode.openDiff", () =>
-      void vscode.window.showInformationMessage("wcode: diffs land in P2."),
+      void openDiff(viewState, workspaceRoot(), undefined, logLine),
     ),
   );
 }
 
 export function deactivate(): Thenable<void> | undefined {
   ChatPanel.disposeCurrent();
+  clearDiffs();
   return session?.stop();
 }
 
@@ -125,6 +128,8 @@ async function stopSession(): Promise<void> {
     await current.stop();
     ensureOutput().appendLine("stopped");
   }
+  // A restart spawns a fresh child; the before-images belong to the old one.
+  clearDiffs();
   ChatPanel.currentPanel()?.setSession({ state: "stopped" });
 }
 
@@ -171,8 +176,8 @@ function panelHandlers(): PanelHandlers {
         ensureOutput().appendLine(`steer failed: ${errMessage(err)}`);
       }
     },
-    onOpenDiff: () => {
-      void vscode.window.showInformationMessage("wcode: diffs land in P2.");
+    onOpenDiff: (callId: string) => {
+      void openDiff(viewState, workspaceRoot(), callId, logLine);
     },
     onRevealFile: (path: string, line?: number) => {
       void revealFile(path, line);
@@ -234,6 +239,11 @@ function requireExtensionUri(): vscode.Uri {
 function ensureOutput(): vscode.OutputChannel {
   output ??= vscode.window.createOutputChannel("wcode");
   return output;
+}
+
+/** The diff feature's diagnostic sink (the same OutputChannel). */
+function logLine(message: string): void {
+  ensureOutput().appendLine(message);
 }
 
 function errMessage(err: unknown): string {
