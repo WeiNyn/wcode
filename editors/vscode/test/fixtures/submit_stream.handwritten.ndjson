@@ -1,0 +1,9 @@
+{"v":1,"id":0,"session":"root","type":"agent_start"}
+{"v":1,"id":0,"session":"root","type":"turn_start"}
+{"v":1,"id":0,"session":"root","type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":""}],"stop_reason":"stop"}}
+{"v":1,"id":0,"session":"root","type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}],"stop_reason":"stop"}}
+{"v":1,"id":0,"session":"root","type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"Hello there"}],"stop_reason":"stop"}}
+{"v":1,"id":0,"session":"root","type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello there"}],"stop_reason":"stop","usage":{"input_tokens":12,"output_tokens":3}}}
+{"v":1,"id":0,"session":"root","type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"Hello there"}],"stop_reason":"stop","usage":{"input_tokens":12,"output_tokens":3}}}
+{"v":1,"id":0,"session":"root","type":"agent_end"}
+{"v":1,"id":1,"reply_to":1,"session":"root","type":"stopped","stop_reason":"stop"}

@@ -1,0 +1,8 @@
+{"v":1,"id":0,"session":"root","type":"agent_start"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_start","call_id":"t1","name":"bash"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_update","call_id":"t1","name":"bash","partial":"line1\n"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_update","call_id":"t1","name":"bash","partial":"line2\n"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_end","call_id":"t1","name":"bash","output":"line1\nline2\nline3\n","is_error":false,"duration_ms":42}
+{"v":1,"id":0,"session":"root","type":"tool_execution_start","call_id":"t2","name":"edit"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_end","call_id":"t2","name":"edit","output":"","is_error":false,"diff":"@@ -1 +1 @@\n-a\n+b\n","path":"src/f.rs","duration_ms":7}
+{"v":1,"id":0,"session":"root","type":"agent_end"}

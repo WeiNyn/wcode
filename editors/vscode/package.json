@@ -1,0 +1,70 @@
+{
+  "name": "wcode-vscode",
+  "displayName": "wcode",
+  "description": "wcode chat panel — a client of `wcode serve --stdio` (P1: the spine, no webview yet)",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "wcode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=22.18"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:wcode.start",
+    "onCommand:wcode.stop",
+    "onCommand:wcode.restart",
+    "onCommand:wcode.openDiff"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "wcode.start",
+        "title": "wcode: Start Session"
+      },
+      {
+        "command": "wcode.stop",
+        "title": "wcode: Stop Session"
+      },
+      {
+        "command": "wcode.restart",
+        "title": "wcode: Restart"
+      },
+      {
+        "command": "wcode.openDiff",
+        "title": "wcode: Open Diff (P2)"
+      }
+    ],
+    "configuration": {
+      "title": "wcode",
+      "properties": {
+        "wcode.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `wcode` binary. Empty resolves `wcode` from `PATH`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "capture": "node scripts/capture.mjs"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

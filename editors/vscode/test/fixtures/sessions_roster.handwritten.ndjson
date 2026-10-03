@@ -1,0 +1,2 @@
+{"v":1,"id":0,"session":"root-1","type":"sessions","sessions":[{"id":"root-1","model":"m1","state":"idle"},{"id":"agent:w1","state":"idle"}]}
+{"v":1,"id":0,"session":"root-1","type":"spawned","worker":"agent:w2"}

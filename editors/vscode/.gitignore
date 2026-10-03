@@ -1,0 +1,6 @@
+# The repo root's .gitignore only covers /target; this tree is a sibling of the
+# Cargo workspace (not swept into it) and needs its own.
+node_modules/
+out/
+*.vsix
+*.tsbuildinfo
