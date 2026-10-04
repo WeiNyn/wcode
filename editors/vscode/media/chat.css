@@ -65,10 +65,11 @@ body {
 
 /* ------------------------------------------------------------------ header */
 
+/* The header is ONE row (draft `.bar`): identity · All/Focus seg · spacer · meter · ▾. */
 .phead {
   display: flex;
-  flex-direction: column;
-  gap: var(--wc-1);
+  align-items: center;
+  gap: var(--wc-2);
   padding: var(--wc-2) var(--wc-3);
   border-bottom: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
@@ -76,71 +77,29 @@ body {
   flex: 0 0 auto;
 }
 
-.phead .r1,
-.phead .r2 {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  flex-wrap: wrap;
-}
-
 .phead .spacer {
   flex: 1;
 }
 
-.sep {
-  color: var(--vscode-descriptionForeground);
-  opacity: 0.5;
+/* The identity: the state glyph, the target chip, and the state word. */
+.ident {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--wc-1);
+  min-width: 0;
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-  background: var(--vscode-descriptionForeground);
-}
-
-.dot-ready {
-  background: var(--vscode-charts-green);
-}
-
-.dot-starting {
-  background: var(--vscode-charts-yellow);
-}
-
-.dot-crashed {
-  background: var(--vscode-errorForeground);
-}
-
-.seg {
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wc-fs-ui);
-}
-
-.seg.state {
-  color: var(--vscode-foreground);
-}
-
-.seg.mono,
-.seg.ctx {
-  font-family: var(--vscode-editor-font-family);
-}
-
-.seg.running {
-  color: var(--vscode-charts-yellow);
-}
-
-.seg.error {
-  color: var(--vscode-errorForeground);
-}
-
-.target {
+/* The target chip (draft `.chip`) — the ONE interactive element in the header. */
+.chip {
   display: inline-flex;
   align-items: center;
   gap: var(--wc-1);
   font-size: var(--wc-fs-ui);
   font-weight: 600;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--wc-accent);
   background: color-mix(in srgb, var(--wc-accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--wc-accent) 35%, transparent);
@@ -149,17 +108,151 @@ body {
   cursor: pointer;
 }
 
-.pchip {
+/* All mode: the chip STAYS in the DOM but is hidden (the merged transcript is nobody's). */
+.chip[hidden] {
+  display: none;
+}
+
+.chip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.chip:hover {
+  background: color-mix(in srgb, var(--wc-accent) 20%, transparent);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.chip[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--wc-accent) 24%, transparent);
+}
+
+/* The state WORD — only starting/stopped/crashed; error-red on a crash. */
+.tag {
   font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-panel-border);
   border-radius: 999px;
   padding: 0 var(--wc-2);
+}
+
+.tag.error {
+  color: var(--vscode-errorForeground);
+  border-color: color-mix(in srgb, var(--vscode-errorForeground) 40%, transparent);
+}
+
+/* The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
+.seg {
+  display: inline-flex;
+  flex: 0 0 auto;
   border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.seg button {
+  font: inherit;
+  font-size: var(--wc-fs-ui);
+  padding: 0 var(--wc-3);
+  cursor: pointer;
+  background: none;
+  border: 0;
   color: var(--vscode-descriptionForeground);
 }
 
-.pchip.plan {
-  color: var(--vscode-charts-purple);
-  border-color: color-mix(in srgb, var(--vscode-charts-purple) 40%, transparent);
+.seg button:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.seg button[aria-pressed="true"] {
+  background: var(--wc-accent);
+  color: var(--vscode-button-foreground);
+}
+
+.seg button:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+/* The context meter — the TEXT `ctx N` (monochrome; the accent means "active now" only). */
+.meter {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--wc-1);
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-ui);
+  color: var(--vscode-foreground);
+}
+
+/* The `▾` disclosure button (draft `.more`) + its right-anchored popover. */
+.more-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.more {
+  font: inherit;
+  font-size: var(--wc-fs-meta);
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 var(--wc-1);
+  cursor: pointer;
+}
+
+.more:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.more:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.more[aria-expanded="true"] {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+/* The ▾ disclosure's rows (draft `.prow`) inside the shared `.menu` popover. */
+.menu .prow {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  gap: var(--wc-2);
+  align-items: baseline;
+  padding: var(--wc-1) var(--wc-2);
+}
+
+.menu .prow:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.menu .pk {
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+}
+
+.menu .pv {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-ui);
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+}
+
+/* The disclosure's popover anchors to the RIGHT edge; the chip's to the left. */
+.more-wrap .menu {
+  left: auto;
+  right: 0;
 }
 
 /* ----------------------------------------------------- transcript + turns */
@@ -723,7 +816,7 @@ textarea#input:focus {
   color: var(--vscode-descriptionForeground);
 }
 
-/* The active (Plan) state mirrors the header's `.pchip.plan` — one visual language. */
+/* The active (Plan) state of the composer's mode control. */
 .tool-btn.mode[aria-pressed="true"] {
   color: var(--vscode-charts-purple);
 }
@@ -796,25 +889,7 @@ textarea#input:focus {
 
 /* ------------------------------------- interactive target chip + member menu */
 
-.target-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.target:hover {
-  background: color-mix(in srgb, var(--wc-accent) 20%, transparent);
-}
-
-.target:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
-.target[aria-expanded="true"] {
-  background: color-mix(in srgb, var(--wc-accent) 24%, transparent);
-}
-
-/* L2a BORDERED: the ONE popover primitive (the target menu; V6 reuses it). */
+/* L2a BORDERED: the ONE popover (draft `.pop`) — the chip's member menu AND the ▾ disclosure. */
 .menu {
   position: absolute;
   top: calc(100% + var(--wc-1));
@@ -1139,6 +1214,13 @@ textarea#input:focus {
   flex: 1;
 }
 
+/* The Tasks count is a NUMBER, not a label: no uppercase, no tracking. */
+.side-head .count {
+  font-family: var(--vscode-editor-font-family);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .roster,
 .todo {
   list-style: none;
@@ -1299,60 +1381,3 @@ textarea#input:focus {
   }
 }
 
-/* -------------------------------------------- the All / Focus control (v3) */
-
-.modes {
-  display: inline-flex;
-  flex: 0 0 auto; /* NEVER shrink: a tall transcript must not crush this row's height */
-  align-self: flex-start; /* a flex-column child would otherwise stretch full width */
-  margin: var(--wc-1) var(--wc-3);
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.modes button {
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  padding: 0 var(--wc-3);
-  cursor: pointer;
-  background: none;
-  border: 0;
-  color: var(--vscode-descriptionForeground);
-}
-
-.modes button:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-.modes button[aria-pressed="true"] {
-  background: var(--wc-accent);
-  color: var(--vscode-button-foreground);
-}
-
-.modes button:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: -2px;
-}
-
-/* --------------------------------------------------- the focus ribbon (v3) */
-
-.focusbar {
-  display: none;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--wc-2);
-  padding: var(--wc-1) var(--wc-3);
-  border-bottom: 1px solid var(--vscode-panel-border);
-  font-size: var(--wc-fs-ui);
-  color: var(--vscode-descriptionForeground);
-}
-
-#app[data-mode="focus"] .focusbar {
-  display: flex;
-}
-
-.focusbar b {
-  color: var(--vscode-foreground);
-}

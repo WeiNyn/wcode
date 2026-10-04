@@ -36,6 +36,9 @@ import {
   workingGroup,
   type FoldOverrides,
   type HeaderCell,
+  type IdentCell,
+  type MoreCell,
+  type SegCell,
   type MemberSwatch,
   type Turn,
   type TurnMember,
@@ -57,15 +60,7 @@ const vscode = acquireVsCodeApi();
 
 const app = requireEl("app");
 app.innerHTML = [
-  '<header id="phead" class="phead">',
-  '  <div class="r1"></div>',
-  '  <div class="r2"></div>',
-  "</header>",
-  '<div id="modes" class="modes" role="group" aria-label="View mode">',
-  '  <button id="mAll" type="button" aria-pressed="true">All</button>',
-  '  <button id="mFocus" type="button" aria-pressed="false">Focus</button>',
-  "</div>",
-  '<div id="ribbon" class="focusbar" aria-live="polite"></div>',
+  '<header id="phead" class="phead" aria-label="Session"></header>',
   '<div class="content">',
   '  <aside id="side" class="side" aria-label="Team and tasks"></aside>',
   '  <section class="main">',
@@ -89,9 +84,6 @@ app.innerHTML = [
   "</div>",
 ].join("\n");
 const pheadEl = requireEl("phead");
-const mAllEl = requireEl("mAll");
-const mFocusEl = requireEl("mFocus");
-const ribbonEl = requireEl("ribbon");
 
 const transcriptEl = requireEl("transcript");
 const sideEl = requireEl("side");
@@ -119,7 +111,9 @@ let lastContext: SelectionContext | null = null;
 let lastRef: string | null = null;
 
 /** Is the header target menu open? (webview-local view state). */
-let menuOpen = false;
+/** Which header popover is open (webview-local view state): the target chip's menu
+ *  or the `▾` disclosure. Only ONE is ever open. */
+let popover: "target" | "more" | null = null;
 /** The roving-tabindex item of the open menu. */
 let activeIndex = 0;
 /** The header's cell+menu signature; a matching snapshot skips the rebuild (B1). */
@@ -162,62 +156,90 @@ function rerender(): void {
 
 /* ------------------------------------------------------------------ header */
 
-function renderHeader(state: RenderedState, session: PanelSessionInfo): void {
-  const key = headerSignature(state, session);
-  if (key === headerKey) return; // same cells AND menu state: keep the SAME DOM (focus survives)
-  const hadFocus = pheadEl.contains(document.activeElement);
+function renderHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): void {
+  const key = headerSignature(state, session, mode);
+  if (key === headerKey) return; // same cells AND popover state: keep the SAME DOM (focus survives)
+  const focus = focusedControl(); // capture BEFORE the wipe: a rebuild discards the header DOM
   headerKey = key;
-  const { r1, r2 } = panelHeader(state, session);
-  const row1 = el("div", "r1");
-  const row2 = el("div", "r2");
-  for (const cell of r1) {
-    row1.appendChild(cell.interactive ? targetChip(cell, state) : el("span", cell.className, cell.text));
-  }
-  for (const cell of r2) row2.appendChild(el("span", cell.className, cell.text));
+  const { cells } = panelHeader(state, session, mode);
   pheadEl.textContent = "";
-  pheadEl.append(row1, row2);
-  // Focus restore: the old chip is gone after a rebuild; re-find the new one.
-  if (menuOpen) focusItem(activeIndex); // the menu reopened -> restore the roving item
-  else if (hadFocus) chipButton()?.focus();
+  for (const cell of cells) pheadEl.appendChild(headerCellNode(cell, state));
+  // Focus restore: an open popover re-focuses its roving row; else the control that had it.
+  if (popover !== null) focusItem(activeIndex);
+  else if (focus !== null) pheadEl.querySelector<HTMLElement>(`[data-el="${focus}"]`)?.focus();
 }
 
 /**
- * The header's cell+menu signature. `renderHeader` rebuilds ONLY when it changes,
- * so a token stream (which leaves the cells and the menu unchanged) keeps the SAME
- * chip DOM — the open menu and its focus survive a streamed snapshot (B1).
+ * The header's cell + popover signature. `renderHeader` rebuilds ONLY when it changes,
+ * so a token stream (which leaves the cells and the popover unchanged) keeps the SAME
+ * chip DOM — the open popover and its focus survive a streamed snapshot.
  */
-function headerSignature(state: RenderedState, session: PanelSessionInfo): string {
-  const { r1, r2 } = panelHeader(state, session);
-  const cells = [...r1, ...r2]
-    .map((cell) => `${cell.className}\u0001${cell.text}\u0001${cell.interactive ?? false}`)
-    .join("\u0002");
-  // The MENU state is part of the gate, or open/close would change nothing.
-  return `${cells}\u0002${menuOpen}\u0002${activeIndex}`;
+function headerSignature(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): string {
+  const { cells } = panelHeader(state, session, mode);
+  const head = cells.map((cell) => JSON.stringify(cell)).join("\u0002");
+  // The POPOVER state is part of the gate, or open/close would change nothing.
+  return `${head}\u0002${popover ?? ""}\u0002${activeIndex}`;
 }
 
-/** The `.target` cell as a `<button>` + (when open) the member menu. */
-function targetChip(cell: HeaderCell, state: RenderedState): HTMLElement {
-  const wrap = el("span", "target-wrap");
-  const button = el("button", cell.className, cell.text); // class "target"
-  button.setAttribute("type", "button");
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", menuOpen ? "true" : "false");
-  button.addEventListener("click", () => (menuOpen ? closeMenu() : openMenu()));
-  wrap.appendChild(button);
-  if (menuOpen) wrap.appendChild(memberMenu(state));
+/** The `data-el` of the focused header control, captured before a rebuild wipes it. */
+function focusedControl(): string | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !pheadEl.contains(active)) return null;
+  return active.dataset.el ?? null;
+}
+
+/** One header cell as a DOM node (the pure cell list drives the paint). */
+function headerCellNode(cell: HeaderCell, state: RenderedState): HTMLElement {
+  switch (cell.kind) {
+    case "ident":
+      return identNode(cell, state);
+    case "seg":
+      return segNode(cell);
+    case "spacer":
+      return el("span", "spacer");
+    case "meter":
+      return el("span", "meter", cell.text);
+    case "more":
+      return moreNode(cell);
+  }
+}
+
+/** The identity (draft `.ident`): the state glyph, the target chip, the state word. */
+function identNode(cell: IdentCell, state: RenderedState): HTMLElement {
+  const ident = el("span", "ident");
+  const glyph = el("span", cell.glyphClass, cell.glyph);
+  glyph.title = cell.stateTitle;
+  glyph.setAttribute("aria-label", `Session state: ${cell.stateTitle}`);
+  ident.appendChild(glyph);
+  if (cell.chip !== null) ident.appendChild(chipNode(cell, state));
+  if (cell.word !== "") ident.appendChild(el("span", cell.word === "crashed" ? "tag error" : "tag", cell.word));
+  return ident;
+}
+
+/** The target chip (draft `.chip`) + (when open) the member menu. HIDDEN in All mode. */
+function chipNode(cell: IdentCell, state: RenderedState): HTMLElement {
+  const wrap = el("span", "chip-wrap");
+  const chip = el("button", "chip", cell.chip ?? "");
+  chip.setAttribute("type", "button");
+  chip.setAttribute("aria-haspopup", "menu");
+  chip.setAttribute("aria-expanded", popover === "target" ? "true" : "false");
+  chip.dataset.el = "chip";
+  chip.hidden = cell.chipHidden; // All mode hides it; the element stays (the menu survives)
+  chip.addEventListener("click", () => (popover === "target" ? closePopover() : openPopover("target")));
+  wrap.appendChild(chip);
+  if (popover === "target") wrap.appendChild(memberMenu(state));
   return wrap;
 }
 
-/** The in-panel member list (draft: the chip's dropdown). */
+/** The chip's dropdown: the roster, one `menuitem` per member (the ONE popover shell). */
 function memberMenu(state: RenderedState): HTMLElement {
-  const menu = el("div", "menu");
-  menu.setAttribute("role", "menu");
+  const menu = popoverShell();
   menu.setAttribute("aria-label", "Switch target member");
   state.members.forEach((member, index) => {
     const item = el("button", "item", member.isRoot ? "orchestrator" : member.label);
     item.setAttribute("type", "button");
     item.setAttribute("role", "menuitem");
-    item.tabIndex = index === activeIndex ? 0 : -1; // ROVING tabindex: Tab LEAVES the menu
+    item.tabIndex = index === activeIndex ? 0 : -1;
     if (member.id === state.target?.id) item.setAttribute("aria-current", "true");
     item.addEventListener("click", () => selectMember(member.id));
     item.addEventListener("keydown", (event) => onMenuKey(event, index, state.members.length));
@@ -226,47 +248,105 @@ function memberMenu(state: RenderedState): HTMLElement {
   return menu;
 }
 
-/** The chip button currently in the DOM, if any (re-found after a rebuild). */
-function chipButton(): HTMLElement | null {
-  return pheadEl.querySelector<HTMLElement>("button.target");
+/** The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
+function segNode(cell: SegCell): HTMLElement {
+  const seg = el("span", "seg");
+  seg.setAttribute("role", "group");
+  seg.setAttribute("aria-label", "View mode");
+  seg.appendChild(segButton("All", "all", cell.mode));
+  seg.appendChild(segButton("Focus", "focus", cell.mode));
+  return seg;
 }
 
-/** Focus the menu item at `index`. */
+function segButton(label: string, mode: ViewMode, current: ViewMode): HTMLElement {
+  const button = el("button", "seg-btn", label);
+  button.setAttribute("type", "button");
+  button.dataset.el = `seg-${mode}`;
+  button.setAttribute("aria-pressed", current === mode ? "true" : "false");
+  button.addEventListener("click", () => post({ kind: "set-mode", mode }));
+  return button;
+}
+
+/** The `▾` disclosure (draft `.more`): session + model behind the ONE popover. */
+function moreNode(cell: MoreCell): HTMLElement {
+  const wrap = el("span", "more-wrap");
+  const button = el("button", "more", "▾");
+  button.setAttribute("type", "button");
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", popover === "more" ? "true" : "false");
+  button.setAttribute("aria-label", "Session and model details");
+  button.title = "Session details";
+  button.dataset.el = "more";
+  button.addEventListener("click", () => (popover === "more" ? closePopover() : openPopover("more")));
+  wrap.appendChild(button);
+  if (popover === "more") wrap.appendChild(disclosurePopover(cell.rows));
+  return wrap;
+}
+
+/** The disclosure's rows (draft `.prow`) in the shared `.menu` popover shell. */
+function disclosurePopover(rows: MoreCell["rows"]): HTMLElement {
+  const menu = popoverShell();
+  menu.setAttribute("aria-label", "Session details");
+  rows.forEach((row, index) => {
+    const item = el("div", "prow");
+    item.setAttribute("role", "menuitem");
+    item.tabIndex = index === activeIndex ? 0 : -1;
+    item.appendChild(el("span", "pk", row.key));
+    item.appendChild(el("span", "pv", row.value));
+    item.addEventListener("keydown", (event) => onMenuKey(event, index, rows.length));
+    menu.appendChild(item);
+  });
+  return menu;
+}
+
+/** The ONE popover shell (draft `.pop`) — reused by the chip's menu AND the disclosure. */
+function popoverShell(): HTMLElement {
+  const menu = el("div", "menu");
+  menu.setAttribute("role", "menu");
+  return menu;
+}
+
+/** The focusable rows of the OPEN popover (only one popover is ever open). */
+function popoverRows(): HTMLElement[] {
+  return Array.from(pheadEl.querySelectorAll<HTMLElement>('.menu [role="menuitem"]'));
+}
+
+/** Focus the open popover's row at `index`. */
 function focusItem(index: number): void {
-  pheadEl.querySelectorAll<HTMLElement>(".menu .item")[index]?.focus();
+  popoverRows()[index]?.focus();
 }
 
 /**
- * Move the roving-tabindex position to `index` (so Tab / Shift+Tab behave) and
- * focus that item. Keeping `activeIndex` and the DOM tabindex in step means the
- * next snapshot's rebuild re-focuses the SAME item — `renderHeader` restores
- * `focusItem(activeIndex)`, so an arrowed position survives a streamed snapshot.
+ * Move the roving-tabindex position to `index` (so Tab / Shift+Tab behave) and focus
+ * that row. Keeping `activeIndex` and the DOM tabindex in step means the next
+ * snapshot's rebuild re-focuses the SAME row (`renderHeader` restores `focusItem`).
  */
 function moveTo(index: number): void {
   activeIndex = index;
-  const items = pheadEl.querySelectorAll<HTMLElement>(".menu .item");
-  items.forEach((item, i) => {
-    item.tabIndex = i === index ? 0 : -1;
+  const rows = popoverRows();
+  rows.forEach((row, i) => {
+    row.tabIndex = i === index ? 0 : -1;
   });
-  items[index]?.focus();
+  rows[index]?.focus();
 }
 
-function openMenu(): void {
-  menuOpen = true;
+function openPopover(which: "target" | "more"): void {
+  popover = which; // only ONE is ever open
   activeIndex = 0;
   rerender();
-  focusItem(0); // focus the first item
+  focusItem(0); // focus the first row
 }
 
-function closeMenu(): void {
-  menuOpen = false;
+function closePopover(): void {
+  const was = popover;
+  popover = null;
   rerender();
-  chipButton()?.focus(); // return focus to the chip
+  if (was !== null) pheadEl.querySelector<HTMLElement>(`[data-el="${was === "more" ? "more" : "chip"}"]`)?.focus();
 }
 
 function selectMember(id: string): void {
   post({ kind: "focus-member", id });
-  closeMenu();
+  closePopover();
 }
 
 /** The APG Menu-Button keyboard pattern (mirrors the WAI-ARIA example). */
@@ -289,20 +369,22 @@ function onMenuKey(event: KeyboardEvent, index: number, count: number): void {
       event.preventDefault();
       break;
     case "Tab":
-      closeMenu(); // Tab LEAVES the menu (roving tabindex)
+      closePopover(); // Tab LEAVES the popover (roving tabindex)
       break;
     case "Escape":
-      closeMenu(); // -> focus the chip
+      closePopover(); // -> focus the opener
       event.preventDefault();
       break;
   }
 }
 
-// Outside click closes the menu (a click INSIDE `.target-wrap` — the chip or an
-// item — is left to their own handlers).
+// Outside click closes the OPEN popover (a click INSIDE its wrap — the chip / ▾ or a
+// row — is left to their own handlers).
 document.addEventListener("click", (event) => {
-  const target = event.target as Element | null;
-  if (menuOpen && target !== null && !target.closest(".target-wrap")) closeMenu();
+  const node = event.target;
+  if (popover === null || !(node instanceof Element)) return;
+  const wrap = popover === "more" ? ".more-wrap" : ".chip-wrap";
+  if (!node.closest(wrap)) closePopover();
 });
 
 /* -------------------------------------------------------------- transcript */
@@ -506,16 +588,9 @@ function renderGroup(group: WorkingGroup): HTMLElement {
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
-  app.dataset.mode = snapshot.mode; // drives `#app[data-mode]` (the ribbon's visibility)
-  renderHeader(state, session);
-  // The target chip would falsely claim the merged transcript is one member's: hide the
-  // whole wrap in All mode on EVERY render (the header's early-return keeps stale DOM).
-  const targetWrap = pheadEl.querySelector<HTMLElement>(".target-wrap");
-  if (targetWrap !== null) targetWrap.hidden = snapshot.mode === "all";
+  renderHeader(state, session, snapshot.mode);
   renderRails(state);
   renderComposer(state, snapshot.context);
-  updateModes(snapshot.mode);
-  renderRibbon(state, snapshot.mode);
   lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
@@ -529,25 +604,6 @@ function render(snapshot: ToWebview): void {
     if (group.count > 0) transcriptEl.appendChild(renderGroup(group));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-}
-
-/* ------------------------------------------------------------------- mode */
-
-function updateModes(mode: ViewMode): void {
-  mAllEl.setAttribute("aria-pressed", mode === "all" ? "true" : "false");
-  mFocusEl.setAttribute("aria-pressed", mode === "focus" ? "true" : "false");
-}
-
-function renderRibbon(state: RenderedState, mode: ViewMode): void {
-  ribbonEl.textContent = "";
-  if (mode !== "focus") return; // `#app[data-mode]` governs the display; stay empty in All
-  ribbonEl.appendChild(document.createTextNode("Focus: "));
-  ribbonEl.appendChild(el("b", null, state.target?.label ?? "wcode"));
-  ribbonEl.appendChild(document.createTextNode(" · showing only this member's activity"));
-  const showAll = el("button", "btn link", "Show all");
-  showAll.setAttribute("type", "button");
-  showAll.addEventListener("click", () => post({ kind: "set-mode", mode: "all" }));
-  ribbonEl.appendChild(showAll);
 }
 
 /** Resolve a block's `origin` (or a peer's `from`) to the member that labels its turn. */
@@ -718,7 +774,7 @@ function tasksSection(tasks: SidebarRails["tasks"]): HTMLElement {
   const head = el("div", "side-head");
   head.appendChild(el("span", null, "Tasks"));
   head.appendChild(el("span", "spacer"));
-  head.appendChild(el("span", "seg", tasks.badge));
+  head.appendChild(el("span", "count", tasks.badge));
   box.appendChild(head);
   const list = el("ul", "todo");
   for (const row of tasks.rows) {
@@ -880,8 +936,6 @@ cattachEl.addEventListener("click", () => {
   attached = true;
   rerender();
 });
-mAllEl.addEventListener("click", () => post({ kind: "set-mode", mode: "all" }));
-mFocusEl.addEventListener("click", () => post({ kind: "set-mode", mode: "focus" }));
 cancelBtn.addEventListener("click", () => {
   post({ kind: "cancel" });
 });

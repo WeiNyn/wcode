@@ -5,10 +5,11 @@
  * everything here is a plain function over the snapshot, mirroring the
  * `render.ts`-pure / `panel.ts`-impure split on the host side.
  */
-import type { SessionMember } from "../reducer.ts";
+import type { MemberState } from "../protocol.ts";
+import { memberGlyph, type SessionMember } from "../reducer.ts";
 import type { RenderedBlock, RenderedState } from "../render.ts";
 import type { SessionState } from "../session.ts";
-import type { PanelSessionInfo, SelectionContext } from "../webview.ts";
+import type { PanelSessionInfo, SelectionContext, ViewMode } from "../webview.ts";
 
 /** The FSM state as the user reads it. */
 export function stateLabel(state: SessionState): string {
@@ -24,88 +25,135 @@ export function stateLabel(state: SessionState): string {
   }
 }
 
-/** One cell of the two-row panel header (draft `.phead .r1/.r2 > *`). */
-export interface HeaderCell {
-  /**
-   * The full class list, composed here so the webview paints dumb (mirrors the
-   * old `StatusSegment`): e.g. "dot dot-ready", "seg state", "target",
-   * "pchip plan", "sep", "spacer".
-   */
-  className: string;
-  text: string;
-  /**
-   * True for the `.target` chip: the DOM builds a <button> + the member menu (P3).
-   * Absent/undefined = a plain <span>. The pure layer only MARKS the control;
-   * the webview wires the events.
-   */
-  interactive?: boolean;
+/** One cell of the ONE-row panel header (draft `.bar > *`). */
+export type HeaderCell = IdentCell | SegCell | SpacerCell | MeterCell | MoreCell;
+
+/** The identity cell (draft `.ident`): the state glyph, the chip, the state word. */
+export interface IdentCell {
+  kind: "ident";
+  /** The state glyph: `⠋` running · `✓` done · `✗` failed · `○` idle. */
+  glyph: string;
+  /** The glyph's class list: `glyph g-run` (plus ` spin` while running). */
+  glyphClass: string;
+  /** The full state, carried on the glyph's `title`/`aria-label`. */
+  stateTitle: string;
+  /** The state WORD — only starting/stopped/crashed; "" for a healthy session. */
+  word: string;
+  /** The target chip's text (`❯ {label} ▾`), or null when there is no target. */
+  chip: string | null;
+  /** All mode hides the chip (the merged transcript is nobody's); KEPT in the DOM. */
+  chipHidden: boolean;
 }
 
-/** The two glanceable rows of the header (draft `header.phead`). */
+/** The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
+export interface SegCell {
+  kind: "seg";
+  mode: ViewMode;
+}
+
+/** Layout: the flexible gap between the identity and the meter. */
+export interface SpacerCell {
+  kind: "spacer";
+}
+
+/** The context meter — the TEXT `ctx N`; the window is not on the wire (no gauge). */
+export interface MeterCell {
+  kind: "meter";
+  text: string;
+}
+
+/** The `▾` disclosure (draft `.more`): session + model behind the ONE popover. */
+export interface MoreCell {
+  kind: "more";
+  /** The popover rows, in order. Effort is OMITTED while the wire lacks it. */
+  rows: Array<{ key: string; value: string }>;
+}
+
+/** The ONE glanceable row of the header (draft `header.bar`). */
 export interface PanelHeader {
-  /** `.r1`: dot · state · sep · session · sep · target-chip · plan-chip · running · error. */
-  r1: HeaderCell[];
-  /** draft `.r2`: model · sep · ctx · spacer · "N members". */
-  r2: HeaderCell[];
+  cells: HeaderCell[];
+}
+
+/** `42000` -> `"42k"`, `1500` -> `"1.5k"`, `2_000_000` -> `"2M"`; `<1000` verbatim. Pure. */
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 1000) return `${Math.trunc(n)}`;
+  const scaled = (value: number, suffix: string): string =>
+    `${value < 10 ? Number(value.toFixed(1)) : Math.round(value)}${suffix}`;
+  return n < 1_000_000 ? scaled(n / 1000, "k") : scaled(n / 1_000_000, "M");
+}
+
+/** The ROOT member — the merged transcript's identity (roster order, root first). Pure. */
+function rootMember(state: RenderedState): SessionMember | undefined {
+  return state.members.find((member) => member.isRoot) ?? state.members[0];
+}
+
+/** The member the header identifies: the TARGET in Focus, the ROOT in All. Pure. */
+function identityMember(state: RenderedState, mode: ViewMode): SessionMember | undefined {
+  if (mode === "all") return rootMember(state);
+  return state.members.find((member) => member.id === state.target?.id) ?? rootMember(state);
+}
+
+/** The identity glyph for one session + member, in the TUI's locked vocabulary. Pure. */
+function identityGlyph(
+  session: PanelSessionInfo,
+  member: SessionMember | undefined,
+): { glyph: string; className: string; stateTitle: string; spin: boolean } {
+  // The session FSM owns the terminal states; `ready` falls through to the member's
+  // own liveness. Either way the glyph IS `memberGlyph`'s (`reducer.ts:RNWdV`).
+  const state: MemberState =
+    session.state === "crashed"
+      ? "failed"
+      : session.state === "starting"
+        ? "running"
+        : session.state === "stopped"
+          ? "idle"
+          : member?.state ?? "idle";
+  const { glyph, className } = memberGlyph(state);
+  return {
+    glyph,
+    className,
+    stateTitle: session.state === "ready" ? state : session.state,
+    spin: state === "running",
+  };
 }
 
 /**
- * The header as two rows of cells (replaces the flat `statusSegments`). Pure.
+ * The header as ONE row of cells (draft `.bar`). Pure.
  *
- * r1: a `dot dot-{session.state}`, `stateLabel(session.state)` as `seg state`,
- *     a `sep`, the session id (`seg mono`, "no session yet" when null), a `sep`,
- *     the target chip when `state.target !== null` — the `target` cell marked
- *     `interactive: true` (P3): the webview builds a <button> + the member menu,
- *     showing `❯ {label} ▾`, a
- *     `pchip plan` when `state.status.planMode`, then the running / error cells.
- * r2: the TARGET member's `model`, a `sep`, `seg ctx` (`ctx N` from
- *     `state.status.contextUsed`), a `spacer`, and `"{members.length} members"`.
- *
- * `ViewStatus.model` is DEAD (declared, never set); `SessionMember.model` IS set,
- * so the model MUST come from the TARGETED member. Effort and a context window
- * are NOT on the wire, so the header shows the model and `ctx N` only — never a
- * `▰▰▰▱▱ N / M` gauge. The draft's `⧗ 4m` cache clock is not tracked; omitted.
- *
- * `running`/`error` are KEPT even though the draft's `.phead` omits them: the
- * panel surfaced both before, and the per-target `running` is the roster's
- * liveness fact — dropped, a stalled run would be invisible.
+ * In order: (1) the IDENTITY — the target's (Focus) or the root's (All) state glyph,
+ * plus the target chip (Focus only; `chipHidden` in All); (2) the All/Focus `.seg`;
+ * (3) a spacer; (4) the context meter as the TEXT `ctx N` (numerator only — the
+ * window is NOT on the wire, so there is never a `▰▰▰▱▱ N / M` gauge); (5) the `▾`
+ * disclosure, whose rows are the session id and the model (effort is omitted while
+ * the wire lacks it). The state WORD survives only for starting/stopped/crashed, and
+ * a `crashed` session reads `✗` (never a recoloured spinner).
  */
-export function panelHeader(state: RenderedState, session: PanelSessionInfo): PanelHeader {
-  const r1: HeaderCell[] = [
-    { className: `dot dot-${session.state}`, text: "" },
-    { className: "seg state", text: stateLabel(session.state) },
-    { className: "sep", text: "·" },
-    { className: "seg mono", text: session.id ?? "no session yet" },
+export function panelHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): PanelHeader {
+  const member = identityMember(state, mode);
+  const glyph = identityGlyph(session, member);
+  const cells: HeaderCell[] = [
+    {
+      kind: "ident",
+      glyph: glyph.glyph,
+      glyphClass: `glyph ${glyph.className}${glyph.spin ? " spin" : ""}`,
+      stateTitle: glyph.stateTitle,
+      word: session.state === "ready" ? "" : stateLabel(session.state),
+      chip: state.target !== null ? `❯ ${state.target.label} ▾` : null,
+      chipHidden: mode === "all",
+    },
+    { kind: "seg", mode },
+    { kind: "spacer" },
   ];
-  if (state.target !== null) {
-    r1.push(
-      { className: "sep", text: "·" },
-      { className: "target", text: `❯ ${state.target.label} ▾`, interactive: true },
-    );
-  }
-  if (state.status.planMode) {
-    r1.push({ className: "pchip plan", text: "plan" });
-  }
-  if (state.status.running) {
-    r1.push({ className: "sep", text: "·" }, { className: "seg running", text: "running…" });
-  }
-  if (state.status.lastError) {
-    r1.push({ className: "sep", text: "·" }, { className: "seg error", text: state.status.lastError });
-  }
-
-  const r2: HeaderCell[] = [];
-  const model = state.members.find((member) => member.id === state.target?.id)?.model;
-  if (model !== undefined && model !== "") {
-    r2.push({ className: "seg mono", text: model });
-  }
+  // (4) The context meter — the TEXT `ctx N` (the window is not on the wire).
   if (typeof state.status.contextUsed === "number") {
-    if (r2.length > 0) r2.push({ className: "sep", text: "·" });
-    r2.push({ className: "seg ctx", text: `ctx ${state.status.contextUsed}` });
+    cells.push({ kind: "meter", text: `ctx ${formatTokens(state.status.contextUsed)}` });
   }
-  r2.push({ className: "spacer", text: "" });
-  r2.push({ className: "seg", text: `${state.members.length} members` });
-
-  return { r1, r2 };
+  // (5) The ▾ disclosure: session + model (the effort row is omitted while absent).
+  const rows: Array<{ key: string; value: string }> = [{ key: "session", value: session.id ?? "no session yet" }];
+  const model = member?.model;
+  if (model !== undefined && model !== "") rows.push({ key: "model", value: model });
+  cells.push({ kind: "more", rows });
+  return { cells };
 }
 
 /** Which empty state to show (the transcript is empty). */

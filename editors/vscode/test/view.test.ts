@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { initialState, reduce, type SessionMember, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
-import { parseToWebview, type PanelSessionInfo, type ToWebview } from "../src/webview.ts";
+import { parseToWebview, type PanelSessionInfo, type ToWebview, type ViewMode } from "../src/webview.ts";
 import {
   classNames,
   composerControls,
@@ -12,6 +12,7 @@ import {
   emptyKind,
   emptySpec,
   foldOpen,
+  formatTokens,
   panelHeader,
   selectionRef,
   stateLabel,
@@ -22,6 +23,7 @@ import {
   memberSwatch,
   MEMBER_SWATCHES,
   type FoldOverride,
+  type IdentCell,
 } from "../src/webview/view.ts";
 
 const idle = (): RenderedState => renderState(initialState());
@@ -42,89 +44,110 @@ test("stateLabel names every FSM state", () => {
   assert.equal(stateLabel("stopped"), "stopped");
 });
 
-test("panelHeader: dot, state, separator, session id", () => {
-  const { r1 } = panelHeader(idle(), session());
-  assert.deepEqual(
-    r1.slice(0, 4).map((c) => c.className),
-    ["dot dot-ready", "seg state", "sep", "seg mono"],
-  );
-  assert.deepEqual(
-    r1.slice(0, 4).map((c) => c.text),
-    ["", "ready", "·", "root-1"],
-  );
-});
-
-test("panelHeader: an unknown session id reads as 'no session yet'", () => {
-  const { r1 } = panelHeader(idle(), session({ id: null }));
-  assert.ok(r1.some((c) => c.className === "seg mono" && c.text === "no session yet"));
-});
-
-test("panelHeader: r1 carries target, plan, running and error cells", () => {
+/** A ready session rendering ONE root member of `memberState`. */
+function headerState(memberState: SessionMember["state"], extra: Partial<ViewState> = {}): RenderedState {
   const state: ViewState = {
     ...initialState(),
-    // `renderState` overwrites `running` PER-TARGET: the member's `state` is the
-    // liveness fact. Input `running: false` below pins that the cell comes from it.
-    members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true, model: "sonnet" }],
+    members: [{ id: "root-1", label: "root-1", state: memberState, isRoot: true, model: "sonnet" }],
     targeted: "root-1",
-    status: { running: false, planMode: true, contextUsed: 42, lastError: "boom" },
+    ...extra,
   };
-  const { r1 } = panelHeader(renderState(state, "root-1"), session());
+  return renderState(state, "root-1");
+}
 
-  // The target must ALWAYS be visible — an invisible target is the worst
-  // failure mode of a re-targeting panel (P3). P3 marks it interactive.
-  assert.ok(
-    r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("orchestrator")),
+/** The identity cell of the ONE-row header (asserts cell 1 IS the identity). */
+function identOf(state: RenderedState, session: PanelSessionInfo, mode: ViewMode = "focus"): IdentCell {
+  const cell = panelHeader(state, session, mode).cells[0];
+  assert.equal(cell?.kind, "ident");
+  return cell as IdentCell;
+}
+
+test("panelHeader: ONE row — identity, All/Focus seg, spacer, ctx meter, ▾ disclosure", () => {
+  const state = headerState("idle", { status: { running: false, planMode: false, contextUsed: 42_000 } });
+  assert.deepEqual(
+    panelHeader(state, session(), "focus").cells.map((c) => c.kind),
+    ["ident", "seg", "spacer", "meter", "more"],
   );
-  assert.ok(r1.some((c) => c.className === "pchip plan" && c.text === "plan"));
-  assert.ok(r1.some((c) => c.className === "seg running" && c.text === "running…"));
-  assert.ok(r1.some((c) => c.className === "seg error" && c.text === "boom"));
+  // No `contextUsed` ⇒ no meter cell at all (the slot is conditional).
+  assert.deepEqual(
+    panelHeader(headerState("idle"), session(), "focus").cells.map((c) => c.kind),
+    ["ident", "seg", "spacer", "more"],
+  );
 });
 
-test("panelHeader: r2 carries the target's model, ctx and the member count", () => {
-  const state: ViewState = {
-    ...initialState(),
-    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet" }],
-    targeted: "root-1",
-    status: { running: false, planMode: false, contextUsed: 42 },
-  };
-  const { r2 } = panelHeader(renderState(state, "root-1"), session());
-
-  // The model comes from the TARGETED member — `ViewStatus.model` is dead.
-  assert.ok(r2.some((c) => c.text === "sonnet"));
-  assert.ok(r2.some((c) => c.className === "seg ctx" && c.text === "ctx 42"));
-  assert.ok(r2.some((c) => c.className === "spacer"));
-  assert.ok(r2.some((c) => c.className === "seg" && c.text === "1 members"));
+test("formatTokens: a k/M suffix, `<1000` verbatim", () => {
+  assert.equal(formatTokens(42), "42");
+  assert.equal(formatTokens(999), "999");
+  assert.equal(formatTokens(1_500), "1.5k");
+  assert.equal(formatTokens(42_000), "42k");
+  assert.equal(formatTokens(2_000_000), "2M");
+  assert.equal(formatTokens(20_000_000), "20M");
 });
 
-test("panelHeader: ctx is the numerator only — no gauge, no denominator", () => {
-  // No context window is on the wire, so there is NO `▰▰▰▱▱ N / M` gauge.
-  const state = renderState(
-    reduce(reduce(initialState(), { type: "agent_start" }), {
-      type: "turn_end",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: "x" }],
-        stop_reason: "stop",
-        usage: { input_tokens: 42, output_tokens: 1 },
-      },
-    }),
+test("panelHeader: the meter is the TEXT `ctx 42k` — no gauge, no denominator", () => {
+  const { cells } = panelHeader(
+    headerState("idle", { status: { running: false, planMode: false, contextUsed: 42_000 } }),
+    session(),
+    "focus",
   );
-  const { r1, r2 } = panelHeader(state, session());
-  for (const cell of [...r1, ...r2]) {
-    assert.ok(!cell.text.includes("▰"), `no gauge glyph in "${cell.text}"`);
-    assert.ok(!cell.text.includes("/"), `no denominator in "${cell.text}"`);
+  const meter = cells.find((c) => c.kind === "meter");
+  assert.equal(meter?.kind, "meter", "a meter cell is present");
+  assert.equal(meter?.kind === "meter" ? meter.text : "", "ctx 42k");
+  for (const cell of cells) {
+    const text = cell.kind === "meter" ? cell.text : "";
+    assert.ok(!text.includes("▰"), `no gauge glyph in "${text}"`);
+    assert.ok(!text.includes("/"), `no denominator in "${text}"`);
   }
-  assert.ok(r2.some((c) => c.className === "seg ctx" && c.text === "ctx 42"));
 });
 
-test("panelHeader: the plan chip appears only when plan mode is on", () => {
-  const off = renderState(initialState(), null);
-  assert.ok(!panelHeader(off, session()).r1.some((c) => c.className === "pchip plan"));
-  const on = renderState({ ...initialState(), status: { running: false, planMode: true } }, null);
-  assert.ok(panelHeader(on, session()).r1.some((c) => c.className === "pchip plan" && c.text === "plan"));
+test("panelHeader: the identity glyph — the member's liveness for `ready`, the FSM for terminal states", () => {
+  assert.equal(identOf(headerState("idle"), session()).glyph, "○");
+  assert.equal(identOf(headerState("running"), session()).glyph, "⠋");
+  assert.equal(identOf(headerState("done"), session()).glyph, "✓");
+  assert.equal(identOf(headerState("failed"), session()).glyph, "✗");
+  // The running glyph spins; a healthy session carries NO word.
+  assert.equal(identOf(headerState("running"), session()).glyphClass, "glyph g-run spin");
+  assert.equal(identOf(headerState("idle"), session()).word, "");
 });
 
-test("panelHeader: running is per-target (the roster's liveness fact)", () => {
+test("panelHeader: a crashed session reads `✗` + the word 'crashed' (never a spinner)", () => {
+  const crashed = identOf(headerState("idle"), session({ state: "crashed" }));
+  assert.equal(crashed.glyph, "✗");
+  assert.equal(crashed.glyphClass, "glyph g-err");
+  assert.equal(crashed.word, "crashed");
+  assert.equal(crashed.stateTitle, "crashed");
+});
+
+test("panelHeader: starting spins `⠋`, stopped is `○`; both carry their word", () => {
+  const starting = identOf(headerState("idle"), session({ state: "starting" }));
+  assert.equal(starting.glyph, "⠋");
+  assert.equal(starting.word, "starting");
+  const stopped = identOf(headerState("idle"), session({ state: "stopped" }));
+  assert.equal(stopped.glyph, "○");
+  assert.equal(stopped.word, "stopped");
+});
+
+test("panelHeader: Focus shows the TARGET member; All hides the chip and shows the ROOT glyph", () => {
+  const state: ViewState = {
+    ...initialState(),
+    members: [
+      { id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "m-root" },
+      { id: "agent:w1", label: "w1", state: "running", isRoot: false, model: "m-w1" },
+    ],
+    targeted: "agent:w1",
+  };
+  const rendered = renderState(state, "agent:w1");
+  const focus = identOf(rendered, session(), "focus");
+  assert.equal(focus.chip, "❯ w1 ▾");
+  assert.equal(focus.chipHidden, false);
+  assert.equal(focus.glyph, "⠋", "Focus reads the TARGET's glyph");
+  const all = identOf(rendered, session(), "all");
+  assert.equal(all.glyph, "○", "All reads the ROOT's glyph alone");
+  assert.equal(all.chip, "❯ w1 ▾", "the chip stays in the DOM…");
+  assert.equal(all.chipHidden, true, "…but is HIDDEN in All");
+});
+
+test("panelHeader: the identity glyph is the TARGET member's (a retarget changes it)", () => {
   const state: ViewState = {
     ...initialState(),
     members: [
@@ -133,18 +156,32 @@ test("panelHeader: running is per-target (the roster's liveness fact)", () => {
     ],
     targeted: "root-1",
   };
-  const root = panelHeader(renderState(state, "root-1"), session());
-  const member = panelHeader(renderState(state, "agent:w1"), session());
+  assert.equal(identOf(renderState(state, "root-1"), session()).glyph, "○");
+  const member = identOf(renderState(state, "agent:w1"), session());
+  assert.equal(member.glyph, "⠋");
+  assert.equal(member.chip, "❯ w1 ▾");
+});
 
-  assert.ok(!root.r1.some((c) => c.className === "seg running"));
-  assert.ok(member.r1.some((c) => c.className === "seg running"));
+test("panelHeader: the seg cell carries the mode (the ONE All/Focus control)", () => {
+  const focus = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "seg");
+  assert.equal(focus?.kind === "seg" ? focus.mode : null, "focus");
+  const all = panelHeader(headerState("idle"), session(), "all").cells.find((c) => c.kind === "seg");
+  assert.equal(all?.kind === "seg" ? all.mode : null, "all");
+});
 
-  // The target cell CHANGED — assert the retarget is visible.
-  assert.ok(
-    root.r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("orchestrator")),
+test("panelHeader: the ▾ disclosure carries the session id + model (no effort row)", () => {
+  const more = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "more");
+  assert.equal(more?.kind, "more");
+  assert.deepEqual(more?.kind === "more" ? more.rows : [], [
+    { key: "session", value: "root-1" },
+    { key: "model", value: "sonnet" },
+  ]);
+  // No session id ⇒ "no session yet"; no member ⇒ no model row at all.
+  const bare = panelHeader(renderState(initialState(), null), session({ id: null }), "focus").cells.find(
+    (c) => c.kind === "more",
   );
-  assert.ok(member.r1.some((c) => c.className === "target" && c.interactive === true && c.text.includes("w1")));
-  assert.ok(!member.r1.some((c) => c.text.includes("orchestrator")));
+  assert.equal(bare?.kind, "more");
+  assert.deepEqual(bare?.kind === "more" ? bare.rows : [], [{ key: "session", value: "no session yet" }]);
 });
 
 /* ------------------------------------------------------------------- turns */
