@@ -253,6 +253,20 @@ pub async fn serve_stream<S>(
             continue;
         }
 
+        // `ListModels` names no session either: answer it from the registry catalog
+        // (possibly EMPTY before the background fetch lands), with `reply_to`.
+        if matches!(body, Request::ListModels) {
+            let _ = out.send(Frame {
+                v: PROTOCOL_VERSION,
+                id,
+                reply_to: Some(id),
+                session,
+                sender: None,
+                body: AgentEvent::Models { models: registry.models() },
+            });
+            continue;
+        }
+
         // `Define` names no session either: the server answers it directly, via
         // the injected handler (or a clean error when none is installed). The
         // handler registers into the same registry the roster watches, so the
@@ -324,6 +338,16 @@ pub async fn serve_stream<S>(
         };
 
         let out = out.clone();
+        let registry = registry.clone();
+        // The mirror needs the request BEFORE `body` moves into `ask`, and the reply
+        // frame needs `session` AFTER the mirror, so capture both up front. `SetEffort
+        // { effort: None }` is a meaningful CLEAR, so match the VARIANT, not `is_some`.
+        let mirror: Option<(Option<String>, Option<String>)> = match &body {
+            Request::SetModel { model } => Some((Some(model.clone()), None)),
+            Request::SetEffort { effort } => Some((None, effort.clone())),
+            _ => None,
+        };
+        let session_for_reply = session.clone();
         tokio::spawn(async move {
             // A peer's frame carries its address in `from`; feed it to the
             // target so `before_inbound` and the sender tag see it (A2A).
@@ -332,11 +356,18 @@ pub async fn serve_stream<S>(
                 None => handle.ask(body).await,
             };
             if let Ok(reply) = reply {
+                // Mirror a live `SetModel`/`SetEffort` into the registry, so the next
+                // roster push names it (no re-publish for anything else).
+                match mirror {
+                    Some((Some(model), _)) => registry.set_model(session.clone(), model),
+                    Some((None, effort)) => registry.set_effort(session.clone(), effort),
+                    None => {}
+                }
                 let frame = Frame {
                     v: PROTOCOL_VERSION,
                     id,
                     reply_to: Some(id),
-                    session,
+                    session: session_for_reply,
                     sender: None,
                     body: reply,
                 };
@@ -364,7 +395,9 @@ fn roster_infos(
         .map(|id| {
             let model = registry.model_of(&id);
             let state = registry.state_of(&id);
-            SessionInfo { id, model, state }
+            let effort = registry.effort_of(&id);
+            let context_window = registry.window_of(&id);
+            SessionInfo { id, model, effort, context_window, state }
         })
         .collect()
 }
@@ -530,6 +563,73 @@ mod tests {
             .await
             .expect("driver stops, no hang");
         assert!(joined.is_ok());
+    }
+
+    /// Read one NDJSON frame into `line`, failing the test if none arrives.
+    async fn read_line<R>(reader: &mut BufReader<R>, line: &mut String)
+    where
+        R: AsyncRead + Unpin,
+    {
+        let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(line))
+            .await
+            .expect("a frame in time")
+            .expect("read");
+        assert!(n > 0, "a non-empty frame");
+    }
+
+    /// Parse one NDJSON line as a JSON object.
+    fn json(line: &str) -> serde_json::Value {
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_models_replies_with_the_registry_catalog() {
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let (root, registry) = test_root();
+        registry.set_models(vec!["m1".into(), "m2".into()]);
+        let roster: Roster = tokio::sync::watch::channel(Vec::new()).1;
+        let _driver = tokio::spawn(serve_stream(registry, roster, root, None, server));
+        let (cr, mut cw) = tokio::io::split(client);
+
+        let req = Frame::new(1, SessionId::new("test"), Request::ListModels);
+        write_frame(&mut cw, &req).await.unwrap();
+
+        // Frame 1 is the connection's seeded `sessions` push; frame 2 is the reply.
+        let mut reader = BufReader::new(cr);
+        let mut line = String::new();
+        read_line(&mut reader, &mut line).await;
+        assert_eq!(json(&line)["type"], "sessions");
+        line.clear();
+        read_line(&mut reader, &mut line).await;
+        let value = json(&line);
+        assert_eq!(value["type"], "models");
+        assert_eq!(value["reply_to"], 1);
+        assert_eq!(value["models"], serde_json::json!(["m1", "m2"]));
+    }
+
+    #[tokio::test]
+    async fn roster_carries_effort_and_window() {
+        let (server, client) = tokio::io::duplex(64 * 1024);
+        let (root, registry) = test_root();
+        let root_id = root.0.clone();
+        registry.set_model(root_id.clone(), "m1");
+        registry.set_effort(root_id.clone(), Some("high".into()));
+        registry.set_context_window(root_id.clone(), 200_000);
+        let roster: Roster = tokio::sync::watch::channel(Vec::new()).1;
+        let _driver = tokio::spawn(serve_stream(registry, roster, root, None, server));
+        let (cr, _cw) = tokio::io::split(client);
+
+        // The connection is SEEDED with a `sessions` push carrying the roster rows.
+        let mut reader = BufReader::new(cr);
+        let mut line = String::new();
+        read_line(&mut reader, &mut line).await;
+        let value = json(&line);
+        assert_eq!(value["type"], "sessions");
+        let row = &value["sessions"][0];
+        assert_eq!(row["id"], "test");
+        assert_eq!(row["model"], "m1");
+        assert_eq!(row["effort"], "high");
+        assert_eq!(row["context_window"], 200_000);
     }
 
     #[tokio::test]

@@ -169,6 +169,14 @@ pub enum AgentEvent {
     Status {
         last_assistant_text: Option<String>,
     },
+    /// Reply: the model catalog the provider advertises, answering a
+    /// [`crate::protocol::Request::ListModels`]. Never streamed (see
+    /// [`AgentEvent::Ack`]) — one reply, correlated by the transport, exactly
+    /// like [`AgentEvent::Sessions`]. Each entry is a bare model id; ordering
+    /// is the provider's (`streamfn::list_models`).
+    Models {
+        models: Vec<String>,
+    },
     /// Reply: the sessions a server serves, in order (root first), each
     /// with the model the server knows for it ([`crate::protocol::SessionInfo`]).
     /// Answers a [`crate::protocol::Request::ListSessions`]. Never streamed (see
@@ -328,6 +336,10 @@ mod tests {
             "status",
         );
         roundtrip(
+            AgentEvent::Models { models: vec!["m1".into(), "m2".into()] },
+            "models",
+        );
+        roundtrip(
             AgentEvent::MessageReceived {
                 from: crate::protocol::SessionId::new("user"),
                 content: "ping".into(),
@@ -341,11 +353,15 @@ mod tests {
                     crate::protocol::SessionInfo {
                         id: crate::protocol::SessionId::new("root"),
                         model: Some("m1".into()),
+                        effort: Some("high".into()),
+                        context_window: Some(200_000),
                         state: crate::protocol::MemberState::Idle,
                     },
                     crate::protocol::SessionInfo {
                         id: crate::protocol::SessionId::agent("w1"),
                         model: None,
+                        effort: None,
+                        context_window: None,
                         state: crate::protocol::MemberState::Idle,
                     },
                 ],

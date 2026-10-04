@@ -442,7 +442,7 @@ async fn dispatch(
         Request::Define { .. } => AgentEvent::Error {
             message: "agent definition is served, not in-process".into(),
         },
-        Request::ListSessions | Request::Unknown => AgentEvent::Ack,
+        Request::ListSessions | Request::ListModels | Request::Unknown => AgentEvent::Ack,
     };
 
     if let Some(reply) = reply {

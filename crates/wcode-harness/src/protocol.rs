@@ -177,6 +177,16 @@ pub struct SessionInfo {
     /// registered with its model); `None` for a peer whose model is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The session's effective reasoning effort, when the server knows one (a
+    /// worker set to `high`, a root launched `--effort xhigh`); `None` when
+    /// unset/inherited. Absent on the wire for an older peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The session's context window in tokens, when known (the root's
+    /// `limits::model_limit(base_url, model).context`, else
+    /// `limits::DEFAULT_CONTEXT_WINDOW`). The GAUGE's denominator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     /// Server-side liveness (see [`MemberState`] above). `#[serde(default)]`
     /// keeps an older peer's `SessionInfo` (no `state` key) round-tripping as
     /// `Idle`.
@@ -279,6 +289,13 @@ pub enum Request {
     /// (like [`Request::Unknown`]); a socket server intercepts it and replies
     /// [`AgentEvent::Sessions`].
     ListSessions,
+
+    /// Ask the **transport** for the model catalog the provider advertises
+    /// (`streamfn::list_models`). Mirrors [`Request::ListSessions`]: it names
+    /// no `Agent` method, so an in-process session answers it with
+    /// [`crate::event::AgentEvent::Ack`] (like [`Request::Unknown`]); a socket
+    /// server intercepts it and replies [`crate::event::AgentEvent::Models`].
+    ListModels,
 
     /// Define a worker **on a served peer** (§8, S4). Like [`Request::ListSessions`]
     /// it names no `Agent` method: a socket server intercepts it and asks an
@@ -405,6 +422,7 @@ mod tests {
         roundtrip(Request::SideAsk { text: "why?".into() }, "side_ask");
         roundtrip(Request::Status, "status");
         roundtrip(Request::ListSessions, "list_sessions");
+        roundtrip(Request::ListModels, "list_models");
         roundtrip(
             Request::Define {
                 name: Some("w1".into()),
@@ -434,6 +452,37 @@ mod tests {
     }
 
     #[test]
+    fn list_models_roundtrips_and_session_info_carries_effort_and_window() {
+        roundtrip(Request::ListModels, "list_models");
+
+        let info = SessionInfo {
+            id: SessionId::new("root"),
+            model: Some("m1".into()),
+            effort: Some("high".into()),
+            context_window: Some(200_000),
+            state: MemberState::Idle,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["effort"], "high");
+        assert_eq!(v["context_window"], 200_000);
+        assert_eq!(serde_json::from_value::<SessionInfo>(v).unwrap(), info);
+
+        // Absent effort/window round-trip to None (older peer / unset) ...
+        let bare: SessionInfo = serde_json::from_value(json!({"id": "w1"})).unwrap();
+        assert!(bare.effort.is_none() && bare.context_window.is_none());
+        // ... and `skip_serializing_if` keeps them OFF the wire when None.
+        let out = serde_json::to_value(SessionInfo {
+            id: SessionId::new("w1"),
+            model: None,
+            effort: None,
+            context_window: None,
+            state: MemberState::Idle,
+        })
+        .unwrap();
+        assert!(out.get("effort").is_none() && out.get("context_window").is_none());
+    }
+
+    #[test]
     fn legacy_verb_tags_deserialize_to_canonical_variants() {
         let steer: Request = serde_json::from_str(r#"{"type":"steer","content":"s"}"#).unwrap();
         assert_eq!(steer, Request::Interrupt { content: "s".into() });
@@ -459,6 +508,7 @@ mod tests {
         assert!(!is_inbound(&Request::SetPlanMode { on: true }));
         assert!(!is_inbound(&Request::Cancel));
         assert!(!is_inbound(&Request::ListSessions));
+        assert!(!is_inbound(&Request::ListModels));
         assert!(!is_inbound(&Request::Define {
             name: None,
             model: None,

@@ -71,6 +71,13 @@ struct Inner {
     /// `models`. Cheap: one entry per served session. `Idle` for a session the
     /// registry never watched, or an older peer (a `state`-less `SessionInfo`).
     states: Mutex<HashMap<SessionId, MemberState>>,
+    /// Each session's effective effort (see [`Registry::set_effort`]).
+    efforts: Mutex<HashMap<SessionId, Option<String>>>,
+    /// Each session's context window in tokens (see [`Registry::set_context_window`]).
+    windows: Mutex<HashMap<SessionId, u64>>,
+    /// The provider's advertised catalog — ONE value for the whole registry
+    /// (connection), not per session (see [`Registry::set_models`]).
+    catalog: Mutex<Vec<String>>,
     /// The live **local** roster (see [`Registry::locals`]), refreshed on every
     /// `register`/`register_remote` so a socket server can fan a session that
     /// appears after it started. Read via [`Registry::subscribe`].
@@ -84,6 +91,9 @@ impl Default for Inner {
             owners: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             states: Mutex::new(HashMap::new()),
+            efforts: Mutex::new(HashMap::new()),
+            windows: Mutex::new(HashMap::new()),
+            catalog: Mutex::new(Vec::new()),
             roster: watch::channel(Vec::new()).0,
         }
     }
@@ -195,9 +205,10 @@ impl Registry {
 
     /// Record a session's effective model id, so the roster this registry feeds
     /// (a socket server's `Sessions` push) can name it. Mirrors [`Self::set_owner`]
-    /// — a plain metadata write, no effect on routing.
+    /// — a plain metadata write, no effect on routing; it RE-PUBLISHES the roster.
     pub fn set_model(&self, id: SessionId, model: impl Into<String>) {
         self.inner.models.lock().unwrap().insert(id, model.into());
+        self.refresh_roster();
     }
 
     /// Mirror a session's run-state. Called by the per-session watcher
@@ -224,6 +235,40 @@ impl Registry {
     /// peer registered without one (e.g. a remote reached across a socket).
     pub fn model_of(&self, id: &SessionId) -> Option<String> {
         self.inner.models.lock().unwrap().get(id).cloned()
+    }
+
+    /// Record a session's effective effort. A metadata write, no routing effect —
+    /// but it RE-PUBLISHES the roster, so a socket push reflects it.
+    pub fn set_effort(&self, id: SessionId, effort: Option<String>) {
+        self.inner.efforts.lock().unwrap().insert(id, effort);
+        self.refresh_roster();
+    }
+
+    /// The effort last recorded for `id`; `None` when unset OR cleared.
+    pub fn effort_of(&self, id: &SessionId) -> Option<String> {
+        self.inner.efforts.lock().unwrap().get(id).cloned().flatten()
+    }
+
+    /// Record a session's context window in tokens. RE-PUBLISHES the roster.
+    pub fn set_context_window(&self, id: SessionId, window: u64) {
+        self.inner.windows.lock().unwrap().insert(id, window);
+        self.refresh_roster();
+    }
+
+    /// The window last recorded for `id`; `None` when unknown.
+    pub fn window_of(&self, id: &SessionId) -> Option<u64> {
+        self.inner.windows.lock().unwrap().get(id).copied()
+    }
+
+    /// Record the connection's model catalog. Does NOT re-publish — the catalog
+    /// names no session, so it is not roster data.
+    pub fn set_models(&self, models: Vec<String>) {
+        *self.inner.catalog.lock().unwrap() = models;
+    }
+
+    /// The recorded catalog (empty when unset — `ListModels` then answers `[]`).
+    pub fn models(&self) -> Vec<String> {
+        self.inner.catalog.lock().unwrap().clone()
     }
 
     /// Whether `from` may address `to` (§10.1): the pair must be joined by an
@@ -439,6 +484,46 @@ mod tests {
         reg.set_model(w1.clone(), "m1");
         assert_eq!(reg.model_of(&w1).as_deref(), Some("m1"));
         assert_eq!(reg.model_of(&ghost), None);
+    }
+
+    /// Await the next roster change, failing the test if it never comes.
+    async fn next_change(rx: &mut watch::Receiver<Vec<(SessionId, SessionHandle)>>) {
+        tokio::time::timeout(Duration::from_secs(2), rx.changed())
+            .await
+            .expect("a roster change")
+            .expect("open");
+    }
+
+    #[tokio::test]
+    async fn set_effort_window_catalog_are_read_back() {
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        assert_eq!(reg.effort_of(&w1), None);
+        reg.set_effort(w1.clone(), Some("high".into()));
+        assert_eq!(reg.effort_of(&w1).as_deref(), Some("high"));
+        reg.set_effort(w1.clone(), None); // cleared == None
+        assert_eq!(reg.effort_of(&w1), None);
+
+        assert_eq!(reg.window_of(&w1), None);
+        reg.set_context_window(w1.clone(), 200_000);
+        assert_eq!(reg.window_of(&w1), Some(200_000));
+
+        assert_eq!(reg.models(), Vec::<String>::new());
+        reg.set_models(vec!["m1".into(), "m2".into()]);
+        assert_eq!(reg.models(), vec!["m1".to_string(), "m2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn set_model_and_set_effort_republish_the_roster() {
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        let mut rx = reg.subscribe();
+        reg.set_model(w1.clone(), "m1"); // NEW: re-publishes
+        next_change(&mut rx).await;
+        reg.set_effort(w1.clone(), Some("low".into()));
+        next_change(&mut rx).await;
+        reg.set_context_window(w1.clone(), 1_000);
+        next_change(&mut rx).await;
     }
 
     #[tokio::test]

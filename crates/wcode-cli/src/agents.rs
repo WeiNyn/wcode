@@ -228,8 +228,8 @@ impl SessionFactory {
         let name = self.assign_name(&spec.name)?;
         let id = SessionId::agent(name);
         let session = self.persist_member(&id, &spec)?;
-        let handle = self.build_with(&id, owner, &spec, session, Vec::new());
-        self.register_and_announce(&id, owner, handle, spec.model.clone());
+        let (handle, meta) = self.build_with(&id, owner, &spec, session, Vec::new());
+        self.register_and_announce(&id, owner, handle, meta);
         Ok(SpawnedWorker { id })
     }
 
@@ -246,8 +246,8 @@ impl SessionFactory {
     ) -> Result<SpawnedWorker, String> {
         let name = self.assign_name(&spec.name)?;
         let id = SessionId::agent(name);
-        let handle = self.build_with(&id, owner, &spec, session, context);
-        self.register_and_announce(&id, owner, handle, spec.model.clone());
+        let (handle, meta) = self.build_with(&id, owner, &spec, session, context);
+        self.register_and_announce(&id, owner, handle, meta);
         Ok(SpawnedWorker { id })
     }
 
@@ -290,7 +290,7 @@ impl SessionFactory {
         Ok(Some(session))
     }
 
-    /// Register the worker, record its effective model (so a served roster names
+    /// Register the worker, record its effective metadata (so a served roster names
     /// it, S2), and announce its surface so a running TUI can add it — D27
     /// replaced the old `TeamUpdate` feed with this. A closed receiver is ignored.
     fn register_and_announce(
@@ -298,18 +298,21 @@ impl SessionFactory {
         id: &SessionId,
         owner: &SessionId,
         handle: SessionHandle,
-        spec_model: Option<String>,
+        meta: SessionMeta,
     ) {
         let backend = Backend::from(handle.clone());
         self.registry.register(id.clone(), handle);
         self.registry.set_owner(id.clone(), owner.clone());
-        let model = spec_model.unwrap_or_else(|| self.template.llm.model.clone());
-        self.registry.set_model(id.clone(), model.clone());
+        self.registry.set_model(id.clone(), meta.model.clone());
+        self.registry.set_effort(id.clone(), meta.effort.clone());
+        if let Some(window) = meta.window {
+            self.registry.set_context_window(id.clone(), window);
+        }
         if let Some(tx) = &*self.sink.lock().unwrap() {
             let _ = tx.send(SurfaceSpec {
                 id: id.clone(),
                 label: short_name(id),
-                model,
+                model: meta.model.clone(),
                 is_root: false,
                 backend,
             });
@@ -323,12 +326,13 @@ impl SessionFactory {
         spec: &WorkerSpec,
         session: Option<Session>,
         context: Vec<AgentMessage>,
-    ) -> SessionHandle {
+    ) -> (SessionHandle, SessionMeta) {
         let bg = Background::new();
         let config = self.worker_config_with(id, owner, spec, session, context, bg.clone());
+        let meta = SessionMeta::from_llm(&config.llm);
         let handle = SessionActor::spawn(Agent::new(config));
         bg.bind(handle.clone());
-        handle
+        (handle, meta)
     }
 
     /// The pure worker config — no actor, no persisted session; a test-only
@@ -437,6 +441,25 @@ impl SessionFactory {
             parallel_tools: true,
             compaction: t.compaction,
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+        }
+    }
+}
+
+/// The roster metadata a worker's BUILT config settles: the effective model,
+/// effort, and context window. Derived once, in [`SessionFactory::build_with`].
+struct SessionMeta {
+    model: String,
+    effort: Option<String>,
+    window: Option<u64>,
+}
+
+impl SessionMeta {
+    fn from_llm(llm: &LlmOpts) -> Self {
+        SessionMeta {
+            model: llm.model.clone(),
+            effort: llm.effort.clone(),
+            window: wcode_harness::limits::model_limit(llm.base_url.as_deref(), &llm.model)
+                .map(|l| l.context),
         }
     }
 }
@@ -732,6 +755,53 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
         };
         (SessionFactory::new(registry.clone(), template), registry)
+    }
+
+    #[tokio::test]
+    async fn a_spawned_worker_records_its_effort_and_window() {
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, registry) = factory_full(
+            stream_fn,
+            LlmOpts {
+                model: "glm-5".into(),
+                base_url: Some("https://opencode.ai/zen/go/v1".into()),
+                effort: Some("high".into()),
+                ..LlmOpts::default()
+            },
+        );
+        let orch = SessionId::agent("orch");
+        let w = factory.spawn(&orch, WorkerSpec::default()).unwrap();
+        assert_eq!(registry.effort_of(&w.id).as_deref(), Some("high"));
+        assert_eq!(registry.window_of(&w.id), Some(202_752), "glm-5's window");
+    }
+
+    #[tokio::test]
+    async fn a_worker_effort_override_reaches_the_roster() {
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, registry) = factory_full(
+            stream_fn,
+            LlmOpts {
+                model: "glm-5".into(),
+                base_url: Some("https://opencode.ai/zen/go/v1".into()),
+                effort: Some("high".into()),
+                ..LlmOpts::default()
+            },
+        );
+        let orch = SessionId::agent("orch");
+        let w = factory
+            .spawn(
+                &orch,
+                WorkerSpec {
+                    effort: Some("low".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(registry.effort_of(&w.id).as_deref(), Some("low"));
     }
 
     #[tokio::test]

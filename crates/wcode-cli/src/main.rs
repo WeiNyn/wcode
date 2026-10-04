@@ -11,7 +11,7 @@ use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, rig_stream_fn};
-use wcode_protocol::Backend;
+use wcode_protocol::{Backend, Registry};
 
 mod agent_files;
 mod agents;
@@ -1341,6 +1341,19 @@ fn build_agent_for(
     )
 }
 
+/// Record the ROOT's effective metadata (model, effort, context window) into `registry`,
+/// keyed by the id the server pushes first — this agent's own `session_id`, not the
+/// registry's `agent:orchestrator` alias (a distinct id, never served). Plain registry
+/// writes, so it is testable without the diverging `serve`.
+fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) {
+    registry.set_model(session_id.clone(), llm.model.clone());
+    registry.set_effort(session_id.clone(), llm.effort.clone());
+    let window = wcode_harness::limits::model_limit(llm.base_url.as_deref(), &llm.model)
+        .map(|l| l.context)
+        .unwrap_or(wcode_harness::limits::DEFAULT_CONTEXT_WINDOW);
+    registry.set_context_window(session_id.clone(), window);
+}
+
 /// P7: `serve` — spawn the `SessionActor`, register the root, build the
 /// registry/roster/`define` handler, print the `serving ...` lines, and run
 /// `serve_at`. Non-unix `serve` is `exit(2)`. Diverges.
@@ -1368,14 +1381,23 @@ async fn serve(
         .as_ref()
         .map(|o| o.registry().clone())
         .unwrap_or_default();
-    // Record the **root**'s effective model too, keyed by the id the server
-    // pushes first — `session_id`, this agent's own session, *not* the
-    // registry's `agent:orchestrator` alias (a distinct id, never served).
-    // Only with `--agents`: without it there is no orchestrator and the
-    // registry stays a bare `Registry::default()`, so nothing is registered
-    // and a client falls back to its own model (acceptable).
-    if orchestrator.is_some() {
-        registry.set_model(session_id.clone(), llm.model.clone());
+    // Record the ROOT's metadata UNCONDITIONALLY — the extension's plain `serve --stdio`
+    // has NO orchestrator, yet still needs the root's model/effort/window. Without
+    // `--agents` the writes go to a bare `Registry::default()` nobody subscribes to
+    // (harmless: the root id is ALWAYS served, and `roster_infos` reads it by id).
+    record_root_meta(&registry, &session_id, llm);
+    // The catalog fetch is a NETWORK GET: never await it inline (it would delay the
+    // seeded `Sessions` push the extension keys its root id off). Fill it in the
+    // background; a `ListModels` before it lands answers `[]`.
+    {
+        let registry = registry.clone();
+        let llm = llm.clone();
+        tokio::spawn(async move {
+            let models = wcode_harness::streamfn::list_models(&llm)
+                .await
+                .unwrap_or_default();
+            registry.set_models(models);
+        });
     }
     let roster = match orchestrator {
         Some(o) => live_roster(o.registry(), o.id().clone()),
@@ -2240,6 +2262,37 @@ fn task_items(orchestrator: &Option<crate::agents::Orchestrator>) -> Vec<wcode_t
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn record_root_meta_sets_model_effort_window() {
+        let registry = Registry::new();
+        let id = SessionId::new("root");
+        // A KNOWN provider/model settles a real window; `effort` is copied through.
+        let known = LlmOpts {
+            model: "glm-5".into(),
+            base_url: Some("https://opencode.ai/zen/go/v1".into()),
+            effort: Some("high".into()),
+            ..LlmOpts::default()
+        };
+        record_root_meta(&registry, &id, &known);
+        assert_eq!(registry.model_of(&id).as_deref(), Some("glm-5"));
+        assert_eq!(registry.effort_of(&id).as_deref(), Some("high"));
+        assert_eq!(registry.window_of(&id), Some(202_752), "glm-5's window");
+
+        // An unknown provider/model falls back to DEFAULT_CONTEXT_WINDOW.
+        let unknown = LlmOpts {
+            model: "who-knows".into(),
+            effort: None,
+            ..LlmOpts::default()
+        };
+        record_root_meta(&registry, &id, &unknown);
+        assert_eq!(registry.effort_of(&id), None, "an unset effort clears");
+        assert_eq!(
+            registry.window_of(&id),
+            Some(wcode_harness::limits::DEFAULT_CONTEXT_WINDOW),
+            "an unknown model falls back to the default window",
+        );
+    }
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
