@@ -1,0 +1,1128 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="calm">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode · VS Code surface · v3 draft</title>
+<style>
+/* ============================================================================
+   wcode · VS Code surface · v3 draft (prototype, not shipped code)
+
+   This file IS the v3 spec. The rationale and the phases are in
+   docs/vscode-ui-v3-plan.md.
+
+   Two headline fixes:
+     1. CURATION. Sixteen header cells to five, in one row. Three stacked chrome
+        bands to one. The team in three regions to one home plus one line. A
+        seven-control composer to two always-on controls. Removals are a feature.
+     2. A SYSTEM. Five spacing tokens, four type tokens, two component levels
+        (a LINE and a CARD), and one accent with four jobs written down.
+
+   Invariants kept: every colour is a --vscode-* token (the fallbacks below make
+   the file render standalone); one accent; zero remote assets; no em-dash in any
+   rendered string; hover / focus / disabled on every control; reduced-motion
+   honored. The only new tokens are LENGTHS and TYPE SIZES (--wc-1..5, --wc-fs-*),
+   which carry no colour at all.
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  /* VS Code provides these in the panel; the Dark+ values keep the file honest
+     standalone. Nothing in the app hardcodes a colour of its own. */
+  --vscode-editor-background:#1f1f1f;
+  --vscode-editor-foreground:#cccccc;
+  --vscode-sideBar-background:#181818;
+  --vscode-sideBar-foreground:#cccccc;
+  --vscode-sideBar-border:#2b2b2b;
+  --vscode-panel-border:#2b2b2b;
+  --vscode-descriptionForeground:#9d9d9d;
+  --vscode-foreground:#cccccc;
+  --vscode-focusBorder:#0078d4;
+  --vscode-input-background:#313131;
+  --vscode-input-foreground:#cccccc;
+  --vscode-input-border:#3c3c3c;
+  --vscode-input-placeholderForeground:#989898;
+  --vscode-button-background:#0078d4;
+  --vscode-button-foreground:#ffffff;
+  --vscode-button-secondaryBackground:#313131;
+  --vscode-button-secondaryForeground:#cccccc;
+  --vscode-list-hoverBackground:#2a2d2e;
+  --vscode-list-activeSelectionBackground:#04395e;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#4d4d4d;
+  --vscode-badge-foreground:#f8f8f8;
+  --vscode-textCodeBlock-background:#1a1a1a;
+  --vscode-textBlockQuote-background:#232323;
+  --vscode-textLink-foreground:#4daafc;
+  --vscode-errorForeground:#f14c4c;
+  --vscode-charts-blue:#3794ff;
+  --vscode-charts-green:#89d185;
+  --vscode-charts-yellow:#cca700;
+  --vscode-charts-purple:#b180d7;
+  --vscode-charts-orange:#d18616;
+  --vscode-charts-red:#f14c4c;
+  --vscode-diffEditor-insertedTextBackground:rgba(156,204,101,.16);
+  --vscode-diffEditor-removedTextBackground:rgba(255,0,0,.17);
+  --vscode-editorWidget-background:#252526;
+  --vscode-editorWidget-border:#454545;
+  --vscode-widget-shadow:rgba(0,0,0,.36);
+  --vscode-editor-font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --vscode-font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --vscode-font-size:13px;
+
+  /* --- the wcode system: LENGTHS and TYPE SIZES only, never a colour ------- */
+  --wc-1:4px;   /* hairline insets, control padding */
+  --wc-2:8px;   /* row padding, control gaps */
+  --wc-3:12px;  /* band padding */
+  --wc-4:16px;  /* the gap between turns */
+  --wc-5:24px;  /* a card's inner air */
+
+  --wc-fs-meta:11px;  /* section labels, badges, tool meta, rail action lines */
+  --wc-fs-ui:12px;    /* header cells, controls, rail rows, tables */
+  --wc-fs-body:13px;  /* prose; equals --vscode-font-size so it tracks the editor */
+  --wc-fs-code:.9em;  /* code and console; relative, so it tracks the body */
+
+  --wc-radius:6px;
+  --wc-accent:var(--vscode-charts-blue); /* the one wcode accent */
+}
+html[data-theme="light"]{
+  color-scheme: light;
+  --vscode-editor-background:#ffffff;
+  --vscode-editor-foreground:#3b3b3b;
+  --vscode-sideBar-background:#f8f8f8;
+  --vscode-sideBar-foreground:#3b3b3b;
+  --vscode-sideBar-border:#e7e7e7;
+  --vscode-panel-border:#e7e7e7;
+  --vscode-descriptionForeground:#717171;
+  --vscode-foreground:#3b3b3b;
+  --vscode-input-background:#ffffff;
+  --vscode-input-foreground:#3b3b3b;
+  --vscode-input-border:#cecece;
+  --vscode-input-placeholderForeground:#767676;
+  --vscode-button-secondaryBackground:#e5e5e5;
+  --vscode-button-secondaryForeground:#3b3b3b;
+  --vscode-list-hoverBackground:#e8e8e8;
+  --vscode-list-activeSelectionBackground:#0060c0;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#c4c4c4;
+  --vscode-badge-foreground:#333333;
+  --vscode-textCodeBlock-background:#f3f3f3;
+  --vscode-textBlockQuote-background:#f3f3f3;
+  --vscode-textLink-foreground:#006ab1;
+  --vscode-errorForeground:#e51400;
+  --vscode-editorWidget-background:#f3f3f3;
+  --vscode-editorWidget-border:#c8c8c8;
+  --vscode-widget-shadow:rgba(0,0,0,.16);
+}
+/* Density is a token switch, not a second design. That IS the system. */
+html[data-density="dense"]{
+  --wc-1:2px; --wc-2:4px; --wc-3:8px; --wc-4:10px; --wc-5:16px;
+  --wc-fs-meta:10px; --wc-fs-ui:11.5px; --wc-fs-body:12px;
+}
+
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:#0d0d0d; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-font-family); font-size:var(--wc-fs-body);
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.mono{ font-family:var(--vscode-editor-font-family); }
+.grow{ flex:1; }
+
+/* ======================================================= the draft's toolbar
+   Gallery chrome: a way to drive the prototype. Not part of the surface. */
+.draft{ max-width:1100px; margin:0 auto; padding:20px 20px 6px; color:#c9c9c9; }
+.draft h1{ font-size:15px; font-weight:600; margin:0 0 2px; }
+.draft .sub{ color:#8a8a8a; font-size:12px; margin:0 0 10px; max-width:94ch; }
+.draft .read{
+  font-family:var(--vscode-editor-font-family); font-size:11.5px;
+  color:#9cd0ff; background:#12202b; border:1px solid #1d3446;
+  border-radius:6px; padding:8px 10px; margin:0 0 10px; white-space:pre-wrap;
+}
+.dials{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px; }
+.dial{ font-family:var(--vscode-editor-font-family); font-size:11px;
+  border:1px solid #333; border-radius:999px; padding:2px 9px; color:#a8a8a8; }
+.dial b{ color:#e6e6e6; font-weight:600; }
+.toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px; }
+.toolbar .sp{ flex:1; }
+.tbtn{
+  font:inherit; font-size:12px; color:#cfe6ff; background:#15222e;
+  border:1px solid #24384a; border-radius:6px; padding:4px 10px; cursor:pointer;
+}
+.tbtn:hover{ background:#1b2c3b; }
+.tbtn:focus-visible{ outline:2px solid var(--wc-accent); outline-offset:2px; }
+.tbtn[aria-pressed="true"]{ background:var(--wc-accent); color:#fff; border-color:transparent; }
+
+/* ================================================================ the app
+   The gallery frame (border, radius, shadow) stands in for the docked editor;
+   it is not a --vscode-* token and is not part of the surface. */
+.app{
+  max-width:1100px; margin:0 auto 40px; height:800px;
+  border:1px solid #2b2b2b; border-radius:8px; overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex; flex-direction:column; position:relative;
+  background:var(--vscode-editor-background);
+}
+.app[data-width="sidebar"]{ max-width:340px; height:720px; }
+.app[data-width="panel"]{ max-width:900px; height:440px; }
+
+/* ======================================================== 1. the header bar
+   ONE row. It answers three questions: who am I talking to, is it working, how
+   big is the context. Everything else is one click behind the disclosure. */
+.bar{
+  flex:0 0 auto; display:flex; align-items:center; gap:var(--wc-2);
+  padding:var(--wc-2) var(--wc-3); position:relative;
+  border-bottom:1px solid var(--vscode-panel-border);
+  background:var(--vscode-editor-background); font-size:var(--wc-fs-ui);
+}
+.ident{ display:inline-flex; align-items:center; gap:var(--wc-1); min-width:0; }
+
+/* the glyphs are the locked TUI vocabulary, reused: the identity bridge. */
+.glyph{ font-family:var(--vscode-editor-font-family); font-weight:700; }
+.g-run{ color:var(--wc-accent); --st:var(--wc-accent); }
+.g-done{ color:var(--vscode-charts-green); --st:var(--vscode-charts-green); }
+.g-err{ color:var(--vscode-errorForeground); --st:var(--vscode-errorForeground); }
+.g-idle{ color:var(--vscode-descriptionForeground); --st:var(--vscode-descriptionForeground); }
+/* the running glyph spins: one of THREE animations in the surface (the ⠋ spinner,
+   the ▌ live cursor, and the working pill's ⋯ pulse). */
+.spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; }
+@keyframes wc-spin{ to{ transform:rotate(360deg); } }
+
+/* THE CHIP. One component, three uses: the target, the pressed segment of a
+   control group, and (in the composer) the mode. Accent-tinted, never solid. */
+.chip{
+  display:inline-flex; align-items:center; gap:var(--wc-1); font:inherit;
+  font-size:var(--wc-fs-ui); font-weight:600; max-width:22ch;
+  color:var(--wc-accent);
+  background:color-mix(in srgb, var(--wc-accent) 12%, transparent);
+  border:1px solid color-mix(in srgb, var(--wc-accent) 35%, transparent);
+  border-radius:999px; padding:0 var(--wc-2); cursor:pointer;
+}
+.chip .nm{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chip:hover{ background:color-mix(in srgb, var(--wc-accent) 20%, transparent); }
+.chip:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.chip[aria-expanded="true"]{ background:color-mix(in srgb, var(--wc-accent) 24%, transparent); }
+.chip[hidden]{ display:none; } /* All mode: cell 1 is the root's glyph alone */
+
+/* the state word returns ONLY for starting / crashed: a healthy session needs
+   no label, a failed one must be unmistakable. */
+.tag{
+  display:none; font-size:var(--wc-fs-meta); padding:0 var(--wc-2);
+  border-radius:999px; color:var(--vscode-errorForeground);
+  border:1px solid color-mix(in srgb, var(--vscode-errorForeground) 40%, transparent);
+}
+#app[data-screen="empty"] .tag{ display:inline-flex; }
+/* A CRASH IS A GLYPH CHANGE, NOT A COLOUR CHANGE: the header glyph is `✗` (set in JS,
+   from memberGlyph, reducer.ts:RNWdV) AND the word `crashed` appears. No frozen spinner. */
+#app[data-screen="empty"] .ident .glyph{ color:var(--vscode-errorForeground); animation:none; }
+
+/* the segmented control: the SAME pill shape as the chip, two options. Used
+   twice: All / Focus in the header, Act / Plan in the composer. */
+.seg{ display:inline-flex; border:1px solid var(--vscode-panel-border); border-radius:999px; overflow:hidden; flex:0 0 auto; }
+.seg button{
+  font:inherit; font-size:var(--wc-fs-ui); padding:0 var(--wc-3); cursor:pointer;
+  background:none; border:0; color:var(--vscode-descriptionForeground);
+}
+.seg button:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.seg button[aria-pressed="true"]{
+  background:color-mix(in srgb, var(--wc-accent) 16%, transparent);
+  color:var(--wc-accent); font-weight:600;
+}
+.seg button:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:-2px; }
+
+/* THE CONTEXT METER. The V6 DEFAULT is the plain text `ctx 42k`: the context WINDOW
+   is not on the wire (plan V11), so there is no denominator and no gauge glyph. The
+   `▰▰▰▱▱ 42k / 200k` form exists only as the labelled V11 PREVIEW (#tGauge). The
+   numerator is monochrome on purpose: the accent is reserved for "active now". */
+.meter[hidden]{ display:none; }
+.meter{
+  display:inline-flex; align-items:baseline; gap:var(--wc-1); white-space:nowrap;
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-ui);
+  letter-spacing:0; color:var(--vscode-foreground);
+}
+.meter .e{ color:var(--vscode-descriptionForeground); opacity:.45; }
+.meter b{ font-weight:600; }
+.meter .f{ color:var(--vscode-foreground); }
+/* the V11 preview only: the gauge glyphs need the tracking, the text token does not */
+.meter.gauge{ letter-spacing:1px; color:var(--vscode-descriptionForeground); }
+.meter.gauge b{ letter-spacing:0; color:var(--vscode-foreground); }
+
+.popwrap{ position:relative; display:inline-flex; }
+.more{
+  font:inherit; font-size:var(--wc-fs-meta); line-height:1.4;
+  color:var(--vscode-descriptionForeground); background:none;
+  border:1px solid transparent; border-radius:4px; padding:0 var(--wc-1); cursor:pointer;
+}
+.more:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.more:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.more[aria-expanded="true"]{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+
+/* the ONE popover primitive (the target menu uses the same one). */
+.pop{
+  position:absolute; top:calc(100% + 4px); right:0; z-index:10; min-width:230px;
+  padding:var(--wc-1); background:var(--vscode-editorWidget-background);
+  border:1px solid var(--vscode-editorWidget-border); border-radius:var(--wc-radius);
+  box-shadow:0 6px 18px var(--vscode-widget-shadow);
+}
+.pop[hidden]{ display:none; }
+.pop .prow{ display:grid; grid-template-columns:62px 1fr; gap:var(--wc-2); align-items:baseline; padding:var(--wc-1) var(--wc-2); }
+.pop .pk{ font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground); }
+.pop .pv{ font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-ui); color:var(--vscode-foreground); overflow-wrap:anywhere; }
+
+/* ============================================================== the content */
+.content{ flex:1 1 auto; display:flex; min-height:0; }
+.main{ flex:1 1 auto; display:flex; flex-direction:column; min-width:0; min-height:0; }
+
+/* ============================================ 3. the team's ONE home: the rail
+   Identity is the --sw coloured edge; state is the glyph's colour. The same
+   language the transcript's turn rail already speaks. */
+.side{
+  flex:0 0 216px; display:flex; flex-direction:column; min-height:0; overflow:auto;
+  background:var(--vscode-sideBar-background); color:var(--vscode-sideBar-foreground);
+  border-right:1px solid var(--vscode-sideBar-border);
+}
+.side-head{
+  display:flex; align-items:center; gap:var(--wc-2);
+  padding:var(--wc-2) var(--wc-3) var(--wc-1);
+  font-size:var(--wc-fs-meta); text-transform:uppercase; letter-spacing:.06em;
+  color:var(--vscode-descriptionForeground);
+}
+.side-head .count{ font-family:var(--vscode-editor-font-family); text-transform:none; letter-spacing:0; }
+.tasks-head{ margin-top:var(--wc-2); border-top:1px solid var(--vscode-sideBar-border); }
+.collapse{
+  font:inherit; font-size:var(--wc-fs-ui); line-height:1; padding:0 var(--wc-1);
+  color:var(--vscode-descriptionForeground); background:none; border:1px solid transparent;
+  border-radius:4px; cursor:pointer;
+}
+.collapse:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.collapse:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+
+.roster{ list-style:none; margin:0; padding:0; }
+.roster li{
+  display:grid; grid-template-columns:14px 1fr; gap:var(--wc-2); align-items:baseline;
+  padding:var(--wc-1) var(--wc-3) var(--wc-1) calc(var(--wc-3) - 2px);
+  border-left:2px solid var(--sw, transparent); cursor:pointer;
+}
+.roster li:hover{ background:var(--vscode-list-hoverBackground); }
+.roster li.sel{ background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
+.roster .name{ font-weight:600; }
+.roster .act{
+  grid-column:2; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.roster li.sel .act{ color:var(--vscode-list-activeSelectionForeground); opacity:.85; }
+
+/* the collapsed rail: a strip of swatch chips. The fill is IDENTITY (--sw), the
+   ring is STATE (--st). The initial is the glyph. */
+.strip{ display:none; list-style:none; margin:0 0 var(--wc-2); padding:0;
+  flex-direction:column; align-items:center; gap:var(--wc-1); }
+.side.collapsed{ flex:0 0 auto; }
+.side.collapsed .side-title,
+.side.collapsed .count,
+.side.collapsed .tasks-head,
+.side.collapsed .roster,
+.side.collapsed .todo{ display:none; }
+.side.collapsed .strip{ display:flex; }
+.side.collapsed .side-head{ justify-content:center; border-top:0; margin-top:0; padding:var(--wc-2) 0 var(--wc-1); }
+.side.collapsed .collapse{ align-self:center; }
+.sc{
+  width:22px; height:22px; padding:0; display:grid; place-items:center;
+  font:inherit; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
+  border-radius:5px; cursor:pointer;
+  background:color-mix(in srgb, var(--sw) 22%, transparent); color:var(--sw);
+  border:1px solid var(--st, transparent);
+}
+.sc:hover{ background:color-mix(in srgb, var(--sw) 36%, transparent); }
+.sc:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.sc[aria-current="true"]{ box-shadow:0 0 0 1px var(--wc-accent); }
+
+.todo{ list-style:none; margin:0; padding:0 0 var(--wc-2); }
+.todo li{ display:grid; grid-template-columns:14px 1fr; gap:var(--wc-2); align-items:baseline; padding:calc(var(--wc-1) / 2) var(--wc-3); font-size:var(--wc-fs-ui); }
+.todo .box{ font-family:var(--vscode-editor-font-family); color:var(--vscode-descriptionForeground); }
+.todo .box.done{ color:var(--vscode-charts-green); }
+.todo li.done span:last-child{ color:var(--vscode-descriptionForeground); text-decoration:line-through; }
+.todo li.doing span:last-child{ color:var(--vscode-foreground); font-weight:600; }
+
+/* ============================================================== transcript */
+.transcript{
+  flex:1 1 auto; overflow:auto; min-height:0;
+  padding:var(--wc-4) var(--wc-3) var(--wc-2);
+  display:flex; flex-direction:column; gap:var(--wc-4);
+}
+.turn{ display:grid; grid-template-columns:12px 1fr; gap:var(--wc-3); }
+.transcript[hidden],
+.turn[hidden]{ display:none; }
+.rail{ border-left:2px solid var(--vscode-panel-border); }
+.turn.you .rail{ border-left-color:var(--vscode-descriptionForeground); }
+/* the `--sw` fallback is IDENTITY, not an accent paint: the accent shows only when a
+   member has no swatch (mirrors media/chat.css:191 / :223). */
+.turn.wcode .rail{ border-left-color:var(--sw, var(--wc-accent)); }
+.turn.err .rail{ border-left-color:var(--vscode-errorForeground); }
+.who{
+  display:flex; align-items:center; gap:var(--wc-2); margin:0 0 var(--wc-1);
+  font-size:var(--wc-fs-meta); font-weight:600; color:var(--vscode-descriptionForeground);
+}
+.who .av{
+  width:15px; height:15px; border-radius:4px; display:grid; place-items:center;
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
+  background:var(--vscode-badge-background); color:var(--vscode-badge-foreground);
+}
+.who .name{ color:var(--vscode-foreground); }
+.who.wcode .av{ background:color-mix(in srgb, var(--sw, var(--wc-accent)) 20%, transparent); color:var(--sw, var(--wc-accent)); }
+.body{ overflow-wrap:anywhere; }
+.body p{ margin:0 0 var(--wc-2); }
+.body p:last-child{ margin-bottom:0; }
+.body code, .mono{ font-family:var(--vscode-editor-font-family); }
+.body code{ font-size:var(--wc-fs-code); background:var(--vscode-textCodeBlock-background); border-radius:3px; padding:0 3px; }
+.body a{ color:var(--vscode-textLink-foreground); }
+.dim{ color:var(--vscode-descriptionForeground); }
+/* A NOTICE and a BTW are FOLDED into ONE treatment: a dim, inset L1 line. Both are
+   host-rendered, non-prose, non-interactive asides (view.ts:2wb8h / :VPBGw), so v3
+   draws them as a line, not a fourth card. The two classes stay distinct in the
+   contract; this rule is the fold. */
+.body.notice, .body.btw{
+  color:var(--vscode-descriptionForeground); font-style:italic;
+  border-left:2px solid color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
+  padding-left:var(--wc-2); margin:var(--wc-1) 0;
+}
+/* the live cursor: the second of THREE animations. */
+.body.live::after{
+  content:"▌"; margin-left:2px; color:var(--wc-accent);
+  animation:wc-blink 1.1s steps(1) infinite;
+}
+@keyframes wc-blink{ 50%{ opacity:0; } }
+
+/* ------------------------------------------------------ LEVEL 1: a LINE
+   Structure only. A 2px inset rule, no box, no fill. Thinking folds and tool
+   folds live here. This is the single biggest calm change: the transcript stops
+   being a stack of bordered boxes. */
+.line{ border-left:2px solid var(--vscode-panel-border); margin:var(--wc-1) 0; }
+.line.thinking{ border-left-color:color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent); }
+.line.tool.error, .line.tool[data-err="1"]{ border-left-color:var(--vscode-errorForeground); }
+.line > summary{
+  list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:var(--wc-2);
+  padding:var(--wc-1) var(--wc-2); font-size:var(--wc-fs-ui);
+  color:var(--vscode-descriptionForeground);
+}
+.line > summary::-webkit-details-marker{ display:none; }
+.line > summary:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:-1px; }
+.line .chev{ width:9px; font-size:var(--wc-fs-meta); }
+.line[open] > summary .chev::before{ content:"▾"; }
+.line:not([open]) > summary .chev::before{ content:"▸"; }
+/* a tool name is NOT accent-coloured: identity comes from the ⚙ glyph. */
+.tname{ font-family:var(--vscode-editor-font-family); font-weight:600; color:var(--vscode-foreground); }
+.tsum{ font-family:var(--vscode-editor-font-family); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.meta{
+  margin-left:auto; font-family:var(--vscode-editor-font-family);
+  font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground); white-space:nowrap;
+}
+.meta .add{ color:var(--vscode-charts-green); }
+.meta .del{ color:var(--vscode-charts-red); }
+.meta .run{ color:var(--wc-accent); }
+.line .inner{ padding:0 var(--wc-2) var(--wc-2) 22px; }
+
+/* ------------------------------------------------------ LEVEL 2: a CARD
+   A fill + a hairline + the radius. Used ONLY for content that is foreign or
+   interactive: code, tool output, the change review, a peer message, the state
+   card, popovers. L2 has exactly TWO sub-forms and every component is one of them:
+     L2a BORDERED - the boundary is a 1px hairline; the fill is optional.
+                    -> .card (code), .review, .statecard, .pop, .menu, .body table, .pill
+     L2b RECESSED - the boundary is the fill alone; radius, NO border.
+                    -> .out (the tool console), .body.peer
+   There is no third treatment. */
+.card{
+  border:1px solid var(--vscode-panel-border); border-radius:var(--wc-radius);
+  overflow:hidden; margin:var(--wc-2) 0; background:var(--vscode-textCodeBlock-background);
+}
+.card .chead{
+  display:flex; align-items:center; gap:var(--wc-2); padding:var(--wc-1) var(--wc-2);
+  background:var(--vscode-textBlockQuote-background); border-bottom:1px solid var(--vscode-panel-border);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+}
+.card pre{
+  margin:0; padding:var(--wc-2); overflow-x:auto; white-space:pre;
+  background:var(--vscode-textCodeBlock-background);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+}
+.out{ /* L2b: a recessed shape (fill + radius, no border), inside a LINE */
+  margin:0; padding:var(--wc-2); max-height:180px; overflow:auto; white-space:pre-wrap;
+  background:var(--vscode-textCodeBlock-background); border-radius:var(--wc-radius);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  color:var(--vscode-editor-foreground);
+}
+.mini{
+  font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  background:none; border:1px solid var(--vscode-panel-border); border-radius:4px;
+  padding:0 var(--wc-1); cursor:pointer;
+}
+.mini:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.mini:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+
+/* L2b: a peer's message is someone else's words, so it is a recess (fill + radius,
+   no border). */
+.body.peer{ background:var(--vscode-textBlockQuote-background); border-radius:var(--wc-radius); padding:var(--wc-1) var(--wc-2); }
+
+/* tables (v2 restored these; they keep their borders, in card colours). */
+.body table{ border-collapse:collapse; margin:var(--wc-2) 0; font-size:var(--wc-fs-ui); }
+.body th, .body td{ border:1px solid var(--vscode-panel-border); padding:var(--wc-1) var(--wc-2); text-align:left; }
+.body th{ background:var(--vscode-textBlockQuote-background); font-weight:600; }
+
+/* the in-panel change review: a card with an accent rule, because it is the one
+   interactive, foreign object in the transcript. */
+.review{ border:1px solid var(--vscode-panel-border); border-left:3px solid var(--wc-accent); border-radius:var(--wc-radius); overflow:hidden; margin:var(--wc-2) 0; }
+.rhead{
+  display:flex; align-items:center; gap:var(--wc-2); padding:var(--wc-1) var(--wc-2);
+  background:var(--vscode-textBlockQuote-background); border-bottom:1px solid var(--vscode-panel-border);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+}
+.badge{ font-weight:600; }
+.badge.ok{ color:var(--vscode-charts-green); }
+.hunk{ font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code); }
+.hunk .hhead{ padding:var(--wc-1) var(--wc-2); color:var(--vscode-descriptionForeground); border-bottom:1px solid var(--vscode-panel-border); }
+.hunk .ln{ display:grid; grid-template-columns:40px 1fr; }
+.hunk .g{ text-align:right; padding:0 var(--wc-2); color:var(--vscode-descriptionForeground); opacity:.6; user-select:none; }
+.hunk .t{ white-space:pre-wrap; padding:0 var(--wc-2); }
+.hunk .ln.add{ background:var(--vscode-diffEditor-insertedTextBackground); }
+.hunk .ln.del{ background:var(--vscode-diffEditor-removedTextBackground); }
+.hunk .ln.add .g::before{ content:"+"; }
+.hunk .ln.del .g::before{ content:"−"; }
+.ractions{ display:flex; align-items:center; gap:var(--wc-2); padding:var(--wc-1) var(--wc-2); border-top:1px solid var(--vscode-panel-border); }
+.ractions .note{ font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground); }
+
+/* ------------------------------------------- the working pill (the typing cue)
+   An IN-FLOW BAND: its own row between the transcript scroller and the composer, a
+   SIBLING of `.transcript` (so it never scrolls away) that occupies real layout
+   height (so it NEVER overlays rendered transcript content at any scroll position or
+   width). It is NOT `position:absolute`. The durable "typing" affordance: avatars +
+   `{n} working` + a pulse. It shows whenever ANY OTHER member is working, in BOTH the
+   rail-expanded and rail-collapsed states: the rail owns the per-member rows, the
+   band owns the aggregate. */
+.pill{
+  display:none; align-items:center; gap:var(--wc-2);
+  width:100%; text-align:left; cursor:pointer;
+  font:inherit; font-size:var(--wc-fs-ui); color:var(--vscode-foreground);
+  padding:var(--wc-1) var(--wc-3);
+  border:0; border-top:1px solid var(--vscode-panel-border);
+  background:var(--vscode-editor-background);
+}
+#app[data-work="some"] .pill{ display:flex; }
+.pill:hover{ background:var(--vscode-list-hoverBackground); }
+.pill:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:-2px; }
+/* the avatar stack: overlapping swatch chips, up to 3, then a neutral `+N`. */
+.pill .stack{ display:inline-flex; align-items:center; }
+.pill .mav{
+  width:20px; height:20px; display:grid; place-items:center; border-radius:5px;
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
+  background:color-mix(in srgb, var(--sw) 22%, transparent); color:var(--sw);
+  box-shadow:0 0 0 2px var(--vscode-editor-background); /* the band's own background */
+}
+.pill .mav + .mav{ margin-left:-7px; } /* ~35% overlap */
+.pill .over{ /* the 4th and beyond: a count, not a member, so no swatch */
+  margin-left:-7px; min-width:20px; height:20px; padding:0 4px;
+  display:grid; place-items:center; border-radius:5px;
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
+  background:var(--vscode-badge-background); color:var(--vscode-descriptionForeground);
+  box-shadow:0 0 0 2px var(--vscode-editor-background);
+}
+.pill .lbl{ color:var(--vscode-foreground); }
+.pill .lbl b{ font-weight:600; }
+/* the pulse: the surface's THIRD animation, one @keyframes on the locked glyph ⋯. */
+.pill .dots{ font-family:var(--vscode-editor-font-family); color:var(--wc-accent); animation:wc-typing 1.4s ease-in-out infinite; }
+@keyframes wc-typing{ 0%,100%{ opacity:.25; } 50%{ opacity:1; } }
+
+/* ---------------------------------------------------- the empty state card */
+.statewrap{ flex:1 1 auto; display:flex; min-height:0; padding:var(--wc-4); }
+.statewrap[hidden]{ display:none; }
+.statecard{
+  margin:auto; max-width:400px; padding:var(--wc-5) var(--wc-4); text-align:center;
+  border:1px solid var(--vscode-panel-border); border-radius:var(--wc-radius);
+}
+.etitle{ margin:0 0 var(--wc-1); font-size:var(--wc-fs-body); font-weight:600; color:var(--vscode-foreground); }
+.esub{ margin:0; font-size:var(--wc-fs-ui); color:var(--vscode-descriptionForeground); }
+.stderr{
+  margin:var(--wc-3) 0 0; padding:var(--wc-2); text-align:left; white-space:pre-wrap;
+  max-height:110px; overflow:auto; border-radius:var(--wc-radius);
+  background:var(--vscode-textCodeBlock-background); color:var(--vscode-errorForeground);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+}
+
+/* ============================================================== 4. composer
+   Two controls always (Send, mode), one when it applies (@ with a selection),
+   one while it applies (Stop while running). */
+.composer{
+  flex:0 0 auto; display:flex; flex-direction:column; gap:var(--wc-2);
+  padding:var(--wc-2) var(--wc-3) var(--wc-3);
+  border-top:1px solid var(--vscode-panel-border);
+}
+.chips{ display:flex; flex-wrap:wrap; gap:var(--wc-1); }
+.chips:empty{ display:none; }
+.chip-ctx{
+  display:inline-flex; align-items:center; gap:var(--wc-1); padding:0 var(--wc-1);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  background:var(--vscode-textCodeBlock-background);
+  border:1px solid var(--vscode-panel-border); border-radius:4px;
+}
+.chip-ctx .x{ background:none; border:0; color:var(--vscode-descriptionForeground); cursor:pointer; font:inherit; font-size:var(--wc-fs-ui); padding:0 var(--wc-1); }
+.chip-ctx .x:hover{ color:var(--vscode-foreground); }
+.chip-ctx .x:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+textarea{
+  width:100%; resize:none; min-height:42px; max-height:160px; padding:var(--wc-2);
+  border-radius:var(--wc-radius); border:1px solid var(--vscode-input-border);
+  background:var(--vscode-input-background); color:var(--vscode-input-foreground);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-ui); line-height:1.45;
+}
+textarea::placeholder{ color:var(--vscode-input-placeholderForeground); }
+textarea:focus{ outline:1px solid var(--vscode-focusBorder); border-color:var(--vscode-focusBorder); }
+.toolbar{ display:flex; align-items:center; gap:var(--wc-1); }
+.tbtn-sm{
+  font:inherit; font-size:var(--wc-fs-ui); color:var(--vscode-descriptionForeground);
+  background:none; border:1px solid transparent; border-radius:4px;
+  padding:0 var(--wc-2); cursor:pointer;
+}
+.tbtn-sm:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.tbtn-sm:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.btn{
+  font:inherit; font-size:var(--wc-fs-ui); border:0; border-radius:4px;
+  padding:3px var(--wc-3); cursor:pointer;
+  background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground);
+}
+.btn.primary{ background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+.btn:hover{ opacity:.92; }
+.btn:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.btn:disabled{ opacity:.5; cursor:default; }
+#stop[hidden]{ display:none; }
+
+/* ================================================= docked at a sidebar width */
+@media (max-width:560px){
+  .content{ flex-direction:column; }
+  .side{ flex:0 0 auto; border-right:0; border-bottom:1px solid var(--vscode-sideBar-border); max-height:42%; }
+  .side.collapsed{ max-height:none; }
+  .strip{ flex-direction:row; flex-wrap:wrap; justify-content:center; }
+}
+@media (prefers-reduced-motion: reduce){
+  /* all THREE animations off: the ⠋ spinner, the ▌ cursor, the pill's ⋯ pulse.
+     The pill's ⋯ stays visible, just static. */
+  .spin, .body.live::after, .pill .dots{ animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="draft">
+  <h1>wcode · VS Code surface · v3 draft</h1>
+  <p class="sub">
+    The visual and behavioral spec for the next rework, not shipped code. Drive it
+    with the toolbar: view mode, dock width, a run simulation, density, and the
+    crashed state (which reads `✗ crashed`, never a frozen spinner). The meter is the
+    V6 default `ctx 42k`; the Gauge toggle reveals the V11 preview that needs a context
+    window on the wire. The Working toggle shows the working band (an in-flow row above
+    the composer, never an overlay; click it to jump to the newest live step). The plan
+    is
+    <span class="mono">docs/vscode-ui-v3-plan.md</span>.
+  </p>
+  <p class="read">Reading this as: a web screen (the VS Code webview), for a developer driving a multi-agent session inside VS Code, in VS Code's own theme-variable language (only --vscode-* tokens for colour), with the dominant constraint that the surface uses zero remote assets and one accent.</p>
+  <div class="dials">
+    <span class="dial">VARIANCE <b>2</b></span>
+    <span class="dial">MOTION <b>2</b></span>
+    <span class="dial">DENSITY <b>6</b></span>
+    <span class="dial">spacing tokens <b>5</b></span>
+    <span class="dial">type tokens <b>4</b></span>
+    <span class="dial">accents <b>1</b></span>
+    <span class="dial">external requests <b>0</b></span>
+  </div>
+  <div class="toolbar">
+    <button class="tbtn" id="tModeAll" aria-pressed="true">View: All</button>
+    <button class="tbtn" id="tModeFocus" aria-pressed="false">View: Focus</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSidebar" aria-pressed="false">Dock: sidebar</button>
+    <button class="tbtn" id="tPanel" aria-pressed="false">Dock: panel</button>
+    <button class="tbtn" id="tEditor" aria-pressed="true">Dock: editor</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSim" aria-pressed="false">Steps: running</button>
+    <button class="tbtn" id="tWork" aria-pressed="true">Working: 2 members</button>
+    <button class="tbtn" id="tDensity" aria-pressed="false">Density: calm</button>
+    <button class="tbtn" id="tScreen" aria-pressed="false">Screen: transcript</button>
+    <button class="tbtn" id="tGauge" aria-pressed="false">Gauge: V6 (ctx 42k)</button>
+    <button class="tbtn" id="tTheme" aria-pressed="false">Theme: dark</button>
+  </div>
+</div>
+
+<div class="app" id="app" data-width="editor" data-mode="all" data-screen="chat" data-work="some"
+     role="group" aria-label="wcode: one docked surface holding the team, tasks, transcript and composer">
+
+  <!-- ============================================ the header: ONE row, five cells -->
+  <header class="bar" role="banner">
+    <span class="ident">
+      <span class="glyph g-run spin" id="hGlyph" data-s="1" aria-hidden="true">⠋</span>
+      <!-- the target chip is hidden in All mode (the default): cell 1 is then the root's glyph alone -->
+      <button class="chip" id="target" hidden aria-haspopup="true" aria-expanded="false" title="Switch target member">
+        <span class="nm">orchestrator</span>
+      </button>
+      <span class="tag" role="status">crashed</span>
+    </span>
+
+    <span class="seg" role="group" aria-label="View mode">
+      <button id="hAll" type="button" aria-pressed="true">All</button>
+      <button id="hFocus" type="button" aria-pressed="false">Focus</button>
+    </span>
+
+    <span class="grow"></span>
+
+    <!-- the V6 default: the numerator only. No gauge, no denominator. -->
+    <span class="meter" id="meter" role="status" aria-label="Context: 42k tokens used">ctx 42k</span>
+    <!-- the V11 preview: shown ONLY behind the labelled #tGauge toggle, never by default. -->
+    <span class="meter gauge" id="meterGauge" role="img" hidden
+          aria-label="V11 preview: context 42k tokens used of 200k">
+      <span class="f" aria-hidden="true">▰▰▰</span><span class="e" aria-hidden="true">▱▱</span> <b>42k / 200k</b>
+    </span>
+
+    <span class="popwrap">
+      <button class="more" id="more" type="button" aria-haspopup="true" aria-expanded="false"
+              aria-label="Session details" title="Session details">▾</button>
+      <div class="pop" id="pop" hidden role="group" aria-label="Session details">
+        <div class="prow"><span class="pk">session</span><span class="pv">root-1</span></div>
+        <div class="prow"><span class="pk">model</span><span class="pv">gpt-5-codex</span></div>
+        <!-- effort is not on the wire today. The row ships only once it is (plan V11). -->
+      </div>
+    </span>
+  </header>
+
+  <div class="content">
+    <!-- ================================================ the team's ONE home -->
+    <aside class="side" id="side" aria-label="Team and tasks">
+      <div class="side-head">
+        <span class="side-title">Team</span>
+        <span class="grow"></span>
+        <span class="count">4</span>
+        <button class="collapse" id="collapse" type="button" aria-expanded="true"
+                aria-label="Collapse the team rail" title="Collapse the team rail">«</button>
+      </div>
+      <ul class="roster" role="list">
+        <li role="listitem" data-member="root" class="sel" aria-current="true" style="--sw:var(--vscode-charts-blue)">
+          <span class="glyph g-run spin" data-s="1" aria-hidden="true">⠋</span>
+          <span class="name">orchestrator</span>
+          <span class="act">editing media/chat.css</span>
+        </li>
+        <li role="listitem" data-member="w1" style="--sw:var(--vscode-charts-green)">
+          <span class="glyph g-run spin" data-s="1" aria-hidden="true">⠋</span>
+          <span class="name">explorer</span>
+          <span class="act">grep "onOpenDiff"</span>
+        </li>
+        <li role="listitem" data-member="w2" style="--sw:var(--vscode-charts-orange)">
+          <span class="glyph g-idle" data-s="1" aria-hidden="true">○</span>
+          <span class="name">developer</span>
+          <span class="act">waiting on orchestrator</span>
+        </li>
+        <li role="listitem" data-member="w3" style="--sw:var(--vscode-charts-purple)">
+          <span class="glyph g-done" data-s="1" aria-hidden="true">✓</span>
+          <span class="name">reviewer</span>
+          <span class="act">turn done</span>
+        </li>
+      </ul>
+      <ul class="strip" role="list" aria-label="Team, collapsed">
+        <li role="listitem"><button class="sc" type="button" aria-current="true" title="orchestrator" style="--sw:var(--vscode-charts-blue);--st:var(--wc-accent)">O</button></li>
+        <li role="listitem"><button class="sc" type="button" title="explorer" style="--sw:var(--vscode-charts-green);--st:var(--wc-accent)">E</button></li>
+        <li role="listitem"><button class="sc" type="button" title="developer" style="--sw:var(--vscode-charts-orange)">D</button></li>
+        <li role="listitem"><button class="sc" type="button" title="reviewer" style="--sw:var(--vscode-charts-purple);--st:var(--vscode-charts-green)">R</button></li>
+      </ul>
+
+      <div class="side-head tasks-head">
+        <span class="side-title">Tasks</span>
+        <span class="grow"></span>
+        <span class="count">☑ 1/3</span>
+      </div>
+      <ul class="todo">
+        <li class="done"><span class="box done" aria-hidden="true">☑</span><span>Collapse the chrome to one row</span></li>
+        <li class="doing"><span class="box" aria-hidden="true">▸</span><span>Give the team one home</span></li>
+        <li><span class="box" aria-hidden="true">☐</span><span>Land the spacing scale</span></li>
+      </ul>
+    </aside>
+
+    <section class="main">
+      <!-- the pill is an IN-FLOW BAND below: a sibling of .transcript inside this flex
+           column, so it never scrolls away and never overlays rendered content -->
+           over the transcript without entering its scroll container -->
+      <div class="transcript" id="transcript" role="log" aria-label="Transcript">
+
+        <div class="turn you">
+          <div class="rail" aria-hidden="true"></div>
+          <div>
+            <div class="who"><span class="av" aria-hidden="true">Y</span><span class="name">you</span></div>
+            <div class="body"><p>Collapse the panel chrome to one row, give the team one home, and land a real spacing and type scale. Then show me the change review.</p></div>
+          </div>
+        </div>
+
+        <div class="turn wcode" data-member="root" style="--sw:var(--vscode-charts-blue)">
+          <div class="rail" aria-hidden="true"></div>
+          <div>
+            <div class="who wcode"><span class="av" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
+
+            <details class="line thinking">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="tname">thinking</span>
+                <span class="tsum">the flatness is a hierarchy problem, not a symmetry one</span>
+                <span class="meta">4s</span>
+              </summary>
+              <div class="inner"><p class="dim">More boxes answered a complaint about too many boxes. Weight, colour and space do the hierarchy work instead, and the accent is reserved for "active now".</p></div>
+            </details>
+
+            <details class="line tool" open data-run="running" data-live="1">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="tname">⚙ bash</span>
+                <span class="tsum">cargo test --workspace</span>
+                <span class="meta"><span class="run">running…</span></span>
+              </summary>
+              <div class="inner"><pre class="out">running 145 tests
+test webview::panel_header ... ok
+test view::fold_open ... ok</pre></div>
+            </details>
+
+            <details class="line tool" data-run="done">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="tname">⚙ edit</span>
+                <span class="tsum">media/chat.css</span>
+                <span class="meta"><span class="add">+24</span> <span class="del">−11</span> · 38ms</span>
+              </summary>
+              <div class="inner">
+                <div class="review">
+                  <div class="rhead">
+                    <span>media/chat.css</span><span class="grow"></span>
+                    <span class="badge ok">accepted</span>
+                    <button class="mini" type="button">Open native diff</button>
+                  </div>
+                  <div class="hunk">
+                    <div class="hhead">@@ -1,6 +1,9 @@  :root</div>
+                    <div class="ln ctx"><span class="g" aria-hidden="true">1</span><span class="t">:root {</span></div>
+                    <div class="ln del"><span class="g" aria-hidden="true">2</span><span class="t">  --wc-gap: 8px;</span></div>
+                    <div class="ln add"><span class="g" aria-hidden="true">2</span><span class="t">  --wc-1: 4px;  --wc-2: 8px;</span></div>
+                    <div class="ln add"><span class="g" aria-hidden="true">3</span><span class="t">  --wc-3: 12px; --wc-4: 16px;</span></div>
+                    <div class="ln ctx"><span class="g" aria-hidden="true">4</span><span class="t">}</span></div>
+                  </div>
+                  <div class="ractions">
+                    <button class="btn primary" type="button" disabled>Accept change</button>
+                    <button class="btn" type="button" disabled>Reject change</button>
+                    <span class="grow"></span>
+                    <span class="note">1 change · reject reverts with reverse-apply</span>
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="body"><p class="live">The chrome is one row now. Here is the scale the surface runs on:</p></div>
+
+            <div class="body">
+              <table>
+                <thead><tr><th>token</th><th>step</th><th>used for</th></tr></thead>
+                <tbody>
+                  <tr><td class="mono">--wc-2</td><td class="mono">8px</td><td>row padding, control gaps</td></tr>
+                  <tr><td class="mono">--wc-3</td><td class="mono">12px</td><td>band padding</td></tr>
+                  <tr><td class="mono">--wc-4</td><td class="mono">16px</td><td>the gap between turns</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card">
+              <div class="chead">
+                <span>media/chat.css</span><span class="grow"></span>
+                <button class="mini" type="button">Copy</button>
+              </div>
+<pre>/* a LINE is structure: a rule, no box. */
+.fold { border:0; border-left:2px solid var(--vscode-panel-border); }
+/* a CARD is foreign or interactive content. */
+.card { background:var(--vscode-textCodeBlock-background);
+        border-radius:var(--wc-radius); }</pre>
+            </div>
+
+            <div class="body"><p>Two members are running; the pill above the composer is the live cue.</p></div>
+          </div>
+        </div>
+
+        <div class="turn wcode" data-member="w1" style="--sw:var(--vscode-charts-green)">
+          <div class="rail" aria-hidden="true"></div>
+          <div>
+            <div class="who wcode"><span class="av" aria-hidden="true">E</span><span class="name">explorer</span></div>
+            <details class="line tool" open data-run="running" data-live="1">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="tname">⚙ grep</span>
+                <span class="tsum">onOpenDiff</span>
+                <span class="meta"><span class="run">running…</span></span>
+              </summary>
+              <div class="inner"><pre class="out">src/webview/chat.ts:88  post({ kind: "open-diff", callId });</pre></div>
+            </details>
+            <div class="body"><p>The diff hook is at <span class="mono">chat.ts:88</span>.</p></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- the empty / error state card (one card, centered, no gallery heading) -->
+      <div class="statewrap" id="statewrap" hidden>
+        <div class="statecard" role="status">
+          <p class="etitle">wcode crashed.</p>
+          <p class="esub">Run "wcode: Restart" to try again.</p>
+          <pre class="stderr">error: could not bind 127.0.0.1:0
+  caused by: address already in use</pre>
+        </div>
+      </div>
+
+      <!-- THE WORKING PILL. An IN-FLOW BAND between the transcript scroller and the
+           composer: it occupies real layout height and NEVER overlays rendered content.
+           Avatars (up to 3, then +N) + "{n} working" + a pulsing ⋯ (locked glyph).
+           A real button: it reveals the newest live step. -->
+      <button class="pill" id="pill" type="button"
+              aria-label="Show the newest working step (2 members working)">
+        <span class="stack" aria-hidden="true">
+          <span class="mav" style="--sw:var(--vscode-charts-green)">E</span>
+          <span class="mav" style="--sw:var(--vscode-charts-orange)">D</span>
+        </span>
+        <span class="lbl"><b>2</b> working</span>
+        <span class="dots" aria-hidden="true">⋯</span>
+      </button>
+
+      <footer class="composer">
+        <div class="chips" aria-label="Attached context">
+          <span class="chip-ctx">
+            <span class="mono">@src/panel.ts#L88-104</span>
+            <button class="x" type="button" aria-label="Remove the attached selection">×</button>
+          </span>
+        </div>
+        <textarea id="input" rows="2" spellcheck="false" aria-label="Message wcode"
+          placeholder="Message wcode…  (Enter to send, Shift+Enter for a newline, Esc to cancel)"></textarea>
+        <div class="toolbar">
+          <button class="tbtn-sm" type="button" title="Attach the current editor selection">@</button>
+          <span class="seg" role="group" aria-label="Mode">
+            <button id="mAct" type="button" aria-pressed="true">Act</button>
+            <button id="mPlan" type="button" aria-pressed="false">Plan</button>
+          </span>
+          <span class="grow"></span>
+          <button class="btn primary" type="button">Send</button>
+          <button class="btn" id="stop" type="button" title="Cancel the in-flight run (Esc)">Stop</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+  var app = document.getElementById("app");
+  var root = document.documentElement;
+
+  function press(btns, on) {
+    btns.forEach(function (b) { b.setAttribute("aria-pressed", b === on ? "true" : "false"); });
+  }
+
+  /* ---------------------------------------------------------------- theme */
+  var tTheme = document.getElementById("tTheme");
+  tTheme.addEventListener("click", function () {
+    var light = root.dataset.theme === "light";
+    root.dataset.theme = light ? "dark" : "light";
+    tTheme.textContent = "Theme: " + (light ? "dark" : "light");
+    tTheme.setAttribute("aria-pressed", light ? "false" : "true");
+  });
+
+  /* -------------------------------------------------------------- density
+     The compare the brief asks for: it changes ONLY the token values, which is
+     the proof that the scale is the system. */
+  var tDensity = document.getElementById("tDensity");
+  tDensity.addEventListener("click", function () {
+    var dense = root.dataset.density === "dense";
+    root.dataset.density = dense ? "calm" : "dense";
+    tDensity.textContent = "Density: " + (dense ? "calm" : "dense");
+    tDensity.setAttribute("aria-pressed", dense ? "false" : "true");
+  });
+
+  /* ------------------------------------------------------------- the mode
+     One setting, two controls: the header's All / Focus and the toolbar's. */
+  var hAll = document.getElementById("hAll");
+  var hFocus = document.getElementById("hFocus");
+  var tAll = document.getElementById("tModeAll");
+  var tFocus = document.getElementById("tModeFocus");
+  var turns = Array.prototype.slice.call(document.querySelectorAll(".transcript .turn"));
+
+  function setMode(mode) {
+    app.dataset.mode = mode;
+    var all = mode === "all";
+    turns.forEach(function (t) { t.hidden = !all && t.dataset.member !== "root"; });
+    /* one setting, four buttons: the header pair and the toolbar pair, in step */
+    hAll.setAttribute("aria-pressed", all ? "true" : "false");
+    tAll.setAttribute("aria-pressed", all ? "true" : "false");
+    hFocus.setAttribute("aria-pressed", all ? "false" : "true");
+    tFocus.setAttribute("aria-pressed", all ? "false" : "true");
+    /* A2: in ALL mode there is no single target, so cell 1 is the ROOT's state glyph
+       and nothing else; the chip is hidden (mirrors chat.ts:YoBUD). In FOCUS mode the
+       chip names the member being read. The mode .seg says which mode you are in, and
+       the transcript's per-turn .who lines carry identity in All mode. */
+    document.getElementById("target").hidden = all;
+    document.getElementById("hGlyph").title = all ? "All members" : "Target member";
+  }
+  hAll.addEventListener("click", function () { setMode("all"); });
+  hFocus.addEventListener("click", function () { setMode("focus"); });
+  tAll.addEventListener("click", function () { setMode("all"); });
+  tFocus.addEventListener("click", function () { setMode("focus"); });
+
+  /* ------------------------------------------------------- dock width */
+  var wSidebar = document.getElementById("tSidebar");
+  var wPanel = document.getElementById("tPanel");
+  var wEditor = document.getElementById("tEditor");
+  var wAll = [wSidebar, wPanel, wEditor];
+  [["sidebar", wSidebar], ["panel", wPanel], ["editor", wEditor]].forEach(function (pair) {
+    pair[1].addEventListener("click", function () {
+      app.dataset.width = pair[0];
+      press(wAll, pair[1]);
+    });
+  });
+
+  /* ------------------------------------------- the rail's collapse toggle */
+  var collapse = document.getElementById("collapse");
+  collapse.addEventListener("click", function () {
+    var collapsed = app.dataset.rail === "collapsed";
+    app.dataset.rail = collapsed ? "open" : "collapsed";
+    collapse.textContent = collapsed ? "«" : "»";
+    collapse.setAttribute("aria-expanded", collapsed ? "true" : "false");
+    collapse.setAttribute("aria-label", collapsed ? "Collapse the team rail" : "Expand the team rail");
+    collapse.setAttribute("title", collapse.getAttribute("aria-label"));
+    document.getElementById("side").classList.toggle("collapsed", !collapsed);
+  });
+
+  /* ------------------------------------- the run simulation (fold states) */
+  var tSim = document.getElementById("tSim");
+  var spins = Array.prototype.slice.call(document.querySelectorAll("#app .spin"));
+  spins.forEach(function (g) { g.dataset.on = g.textContent; });
+  var simDone = false;
+
+  function setGlyphs(done) {
+    if (app.dataset.screen === "empty") return; /* a crashed glyph is owned by #tScreen */
+    spins.forEach(function (g) {
+      if (done) { g.textContent = "✓"; g.className = "glyph g-done"; }
+      else { g.textContent = g.dataset.on; g.className = "glyph g-run spin"; }
+    });
+  }
+
+  tSim.addEventListener("click", function () {
+    simDone = !simDone;
+    document.querySelectorAll("details.line.tool[data-live]").forEach(function (d) {
+      var run = d.querySelector(".run");
+      if (simDone) {
+        d.removeAttribute("open");
+        d.dataset.run = "done";
+        if (run) { run.textContent = "1.2s"; run.className = "dur"; }
+      } else {
+        d.setAttribute("open", "");
+        d.dataset.run = "running";
+        if (run) { run.textContent = "running…"; run.className = "run"; }
+      }
+    });
+    setGlyphs(simDone);
+    applyWork();
+    /* Stop is present only while a run is in flight. */
+    document.getElementById("stop").hidden = simDone;
+    tSim.textContent = "Steps: " + (simDone ? "done" : "running");
+    tSim.setAttribute("aria-pressed", simDone ? "true" : "false");
+  });
+
+  /* the working pill: a client-local "reveal the live step". In All mode it scrolls
+     the transcript to the newest live element; in Focus mode the others' steps are not
+     in the transcript, so it switches to All first. Reduced-motion picks a jump over a
+     smooth scroll. */
+  var tWork = document.getElementById("tWork");
+  var pill = document.getElementById("pill");
+  var workOff = false;
+
+  function applyWork() {
+    app.dataset.work = simDone || workOff ? "none" : "some";
+  }
+
+  pill.addEventListener("click", function () {
+    if (app.dataset.mode === "focus") setMode("all");
+    var transcript = document.getElementById("transcript");
+    var live = transcript.querySelectorAll("[data-live]");
+    var el = live.length ? live[live.length - 1] : transcript.lastElementChild;
+    var calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: calm ? "auto" : "smooth" });
+  });
+
+  tWork.addEventListener("click", function () {
+    workOff = !workOff;
+    applyWork();
+    tWork.textContent = "Working: " + (workOff ? "none" : "2 members");
+    tWork.setAttribute("aria-pressed", workOff ? "false" : "true");
+  });
+
+  /* ------------------------------------------------ the transcript / state */
+  var tScreen = document.getElementById("tScreen");
+  tScreen.addEventListener("click", function () {
+    var empty = app.dataset.screen === "empty";
+    app.dataset.screen = empty ? "chat" : "empty";
+    document.getElementById("transcript").hidden = !empty;
+    document.getElementById("statewrap").hidden = empty;
+    tScreen.textContent = "Screen: " + (empty ? "transcript" : "crashed");
+    tScreen.setAttribute("aria-pressed", empty ? "false" : "true");
+    /* A4: a crash is a GLYPH change, not a colour change. Entering the crashed state
+       sets the header glyph to `✗` (memberGlyph's error glyph, g-err) and the `.tag`
+       word "crashed" appears (CSS). Leaving restores the run state via setGlyphs. */
+    if (!empty) {
+      var g = document.getElementById("hGlyph");
+      g.textContent = "✗";
+      g.className = "glyph g-err";
+    } else {
+      setGlyphs(simDone);
+    }
+  });
+
+  /* ------------------------------- the V11 context-gauge PREVIEW (never the default) */
+  var tGauge = document.getElementById("tGauge");
+  var meter = document.getElementById("meter");
+  var meterGauge = document.getElementById("meterGauge");
+  tGauge.addEventListener("click", function () {
+    var preview = tGauge.getAttribute("aria-pressed") === "true";
+    tGauge.setAttribute("aria-pressed", preview ? "false" : "true");
+    tGauge.textContent = "Gauge: " + (preview ? "V6 (ctx 42k)" : "V11 preview");
+    meter.hidden = !preview;
+    meterGauge.hidden = preview;
+  });
+
+  /* -------------------------------------------------- the two popovers */
+  var more = document.getElementById("more");
+  var pop = document.getElementById("pop");
+  var target = document.getElementById("target");
+
+  function toggle(button, panel) {
+    var open = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", open ? "false" : "true");
+    panel.hidden = open;
+  }
+  more.addEventListener("click", function () { toggle(more, pop); });
+  target.addEventListener("click", function () {
+    var open = target.getAttribute("aria-expanded") === "true";
+    target.setAttribute("aria-expanded", open ? "false" : "true");
+  });
+  document.addEventListener("click", function (event) {
+    if (!event.target.closest(".popwrap") && more.getAttribute("aria-expanded") === "true") {
+      more.setAttribute("aria-expanded", "false"); pop.hidden = true; more.focus();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    if (!pop.hidden) { pop.hidden = true; more.setAttribute("aria-expanded", "false"); more.focus(); }
+    if (target.getAttribute("aria-expanded") === "true") { target.setAttribute("aria-expanded", "false"); target.focus(); }
+  });
+
+  /* --------------------------------------------------------- the composer */
+  var mAct = document.getElementById("mAct");
+  var mPlan = document.getElementById("mPlan");
+  mAct.addEventListener("click", function () { press([mAct, mPlan], mAct); });
+  mPlan.addEventListener("click", function () { press([mAct, mPlan], mPlan); });
+
+  setMode("all");
+})();
+</script>
+</body>
+</html>
