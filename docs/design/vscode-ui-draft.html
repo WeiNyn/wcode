@@ -351,7 +351,7 @@ body{
 /* thinking / tool rows (details) */
 details.fold{ border:1px solid var(--vscode-panel-border); border-left:2px solid var(--vscode-panel-border); border-radius:var(--wc-radius); margin:6px 0; }
 details.fold.tool{ border-left-color:var(--wc-accent); }
-details.fold.thought{ background:var(--vscode-textBlockQuote-background); }
+details.fold.thinking{ background:var(--vscode-textBlockQuote-background); }
 details.fold > summary{
   list-style:none; cursor:pointer; padding:5px 9px; display:flex; align-items:baseline; gap:8px;
   font-size:12px;
@@ -371,7 +371,7 @@ details.fold:not([open]) > summary .chev::before{ content:"▸"; }
   border-radius:var(--wc-radius); font-family:var(--vscode-editor-font-family);
   font-size:.88em; white-space:pre-wrap; max-height:220px; overflow:auto; color:var(--vscode-editor-foreground);
 }
-details.thought > summary{ color:var(--vscode-descriptionForeground); }
+details.thinking > summary{ color:var(--vscode-descriptionForeground); }
 
 /* code block with a header + actions */
 .code{ border:1px solid var(--vscode-panel-border); border-radius:var(--wc-radius); overflow:hidden; margin:8px 0; }
@@ -693,9 +693,8 @@ in VS Code's own theme-variable language, with the dominant constraint that the 
               <div class="rail" aria-hidden="true"></div>
               <div>
                 <div class="who wcode"><span class="av">❯</span><span class="name">wcode</span><span class="stamp">09:41</span></div>
-
-                <details class="fold thought">
-                  <summary><span class="chev"></span><span class="tname">thought</span><span class="tsum">4s · weighing native diff vs in-panel review</span></summary>
+                <details class="fold thinking">
+                  <summary><span class="chev"></span><span class="tname">thinking</span><span class="tsum">4s · weighing native diff vs in-panel review</span></summary>
                   <div class="inner"><p class="body" style="color:var(--vscode-descriptionForeground);margin:0">An in-panel review lets per-change accept/reject without a round trip; the native editor stays the escape hatch for big patches.</p></div>
                 </details>
 

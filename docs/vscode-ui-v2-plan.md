@@ -48,9 +48,9 @@ Dials unchanged: `VARIANCE 3 · MOTION 2 · DENSITY 8`; one accent.
 | `/model` picker | `SetModel` exists; the **selectable-model list** is not on the wire | ✗ new wire field |
 | `/effort` picker | `SetEffort` exists; the **current effort** is not on the wire | ✗ new wire field |
 | context gauge | `Usage.input_tokens` is the numerator; the **window** (`limits::model_limit`) is never serialized | ✗ new wire field |
-| `/resume` picker | the wire `SessionInfo` is `{id, model, state}` — no cwd, no preview | ✗ new wire surface (or the extension reads the sessions dir) |
-| `/resume` cwd filter | sessions record `cwd` in the header (`session.rs:17`); the listing (`session_groups::list_groups`) does not filter | ✗ a CLI listing change (benefits the TUI too) |
-| `/resume` label | the TUI label is `id · age · first line` (`app.rs:744`) | ✗ lead with the user message, drop the id |
+| `/resume` picker | the wire `SessionInfo` is `{id, model, state}` — no cwd, no preview | ✔ **chosen: the extension reads the sessions dir** (V5) |
+| `/resume` cwd filter | sessions record `cwd` in the header (`session.rs:17`); the listing (`session_groups::list_groups`) does not filter | ✔ **chosen: filter client-side** in `sessions.ts` |
+| `/resume` label | the TUI label is `id · age · first line` (`app.rs:744`) | ✔ **chosen: lead with the user message**, drop the id (client-side) |
 
 ## 3. Phases
 
@@ -59,11 +59,13 @@ Dials unchanged: `VARIANCE 3 · MOTION 2 · DENSITY 8`; one accent.
 | **V1** | **Surface polish.** Bordered tables; run-following folds (open while running, collapse when done, user override preserved). | `media/chat.css`, `webview/chat.ts` | a table renders bordered; a live fold is open and a finished one is collapsed; a manual toggle still sticks |
 | **V2** | **One dockable surface.** A shared webview served by a `WebviewViewProvider` (sidebar/panel, user-movable) and a `WebviewPanel` (editor); the team + tasks render inside; the native tree is retired; a responsive layout. | `extension.ts`, new `surface.ts` (the view provider), `panel.ts` (the panel), `roster.ts` (retired), `webview/chat.ts`, `media/chat.css`, `package.json` | the surface opens in the sidebar (movable to the panel/secondary) and as an editor tab; the team + tasks render inside; no native tree |
 | **V3** | **All / Focus.** A client-local mode; All = the merged activity of every member; Focus = the target. | `reducer.ts` (a merged view), `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | All interleaves members (labeled); Focus shows only the target |
-| **V4** | **Wire additions + pickers + gauge.** A model list, the current effort, and a context window on the wire; the `/model` `/effort` pickers, the `/` command menu, and the header gauge. | `wcode-harness` (a `Status`/`Sessions` field or a new event), `wcode-cli`, `wcode-protocol`, the extension | the gauge shows `used / window`; `/model` and `/effort` set and reflect |
-| **V5** | **`/resume`.** The CLI listing filtered by cwd + a first-user-message preview; a wire surface for the extension + the picker. | `wcode-cli` (`session_groups`), `wcode-tui` (label), `wcode-protocol` (a `Request`), the extension | `/resume` lists only this cwd's sessions, labeled by the user message; picking re-execs/resumes |
+| **V3.5** | **Rail identity + All ordering.** Member swatches (per-member identity colour) with a per-row state ring; a collapsible team rail; peer turns labeled by their sender; tool rows carrying their call target; the All merge in arrival order (a `seq` stamp) instead of per-session runs. | `reducer.ts`, `render.ts`, `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | a row/avatar carries its member's swatch; the rail collapses to avatars; a peer message opens its own labeled turn; a tool row shows its target; All interleaves by arrival |
+| **V4a** | **Client `/` menu + pickers.** A client-side `/` registry (the typeahead menu + a typed `/name arg`), host-dispatched: `/model` `/effort` post a `Request` (typed argument, `requiresArg`); `/resume` `/sessions` open a host `QuickPick`. | `commands.ts` (new), `sessions.ts` (new), `extension.ts`, `surface.ts`, `webview.ts`, `webview/chat.ts`, `media/chat.css` | `/` filters + runs; `/resume` picks a cwd-filtered session; `/model` `/effort` set |
+| **V4b** | **Wire additions + gauge.** A model list, the current effort, and a context window on the wire; pickers backed by them; the header gauge. | `wcode-harness`, `wcode-cli`, `wcode-protocol`, the extension | the gauge shows `used / window`; `/model` and `/effort` list + reflect |
+| **V5** | **`/resume` (client-side).** The extension reads the session dir itself — cwd-filtered, labeled by the first user message — and respawns with `--resume <path>`. The CLI listing + wire `Request` are **dropped** from scope. | `extension.ts`, `sessions.ts` (new) | `/resume` lists only this cwd's sessions, labeled by the user message; picking respawns into it |
 
 Phases are independent commits; V1 is small and unblocks the visible regressions;
-V2 is the architectural core; V4/V5 carry the wire additions.
+V2 is the architectural core; V4b carries the remaining wire additions.
 
 ## 4. Decisions
 
@@ -71,7 +73,10 @@ V2 is the architectural core; V4/V5 carry the wire additions.
    user-movable (primary/secondary sidebar ↔ panel) for free; the editor tab is a
    `WebviewPanel` from the same `media/*` + contract. The native tree is retired.
 2. **All mode is a client-side merge** over the existing per-session transcripts —
-   no protocol change (the extension already folds every session's events).
+   no protocol change (the extension already folds every session's events). The
+   reducer stamps every block with a monotonic `seq` (the order the client saw it),
+   so the merge is a true **arrival-order interleave** — superseding V3's per-session
+   contiguous runs and closing the ordering gap V3 recorded.
 3. **Run-following folds:** a **tool** fold auto-opens while running and collapses
    once done, with a manual override that wins until the next state change (the
    override records the phase it was made in, so it expires at the running→done
@@ -79,10 +84,17 @@ V2 is the architectural core; V4/V5 carry the wire additions.
    its assistant block is live and collapses when done, with **no** manual override
    — the block is host-rendered and replaced on every update, so a client toggle
    could not survive; the auto behaviour is the whole feature there.
-4. **The `/` menu is client-side**, routing to the pickers and the existing host
-   commands; the pickers reuse the one overlay component.
-5. **`/resume` cwd-filter + preview land in the CLI first** (the TUI benefits),
-   then the extension gets the list over the wire.
+4. **The `/` menu is client-side.** `commands.ts` is the ONE registry the menu and
+   the host share: the webview names a command, the host validates it against the
+   same table and decides what it is. Commands that respawn the child (`/new`,
+   `/reload`, `/resume`) or read live state (`/sessions`) are composition-root
+   actions; the rest post a `Request`. The pickers are **host `QuickPick`s**, not an
+   on-surface overlay.
+5. **`/resume` is client-side.** The extension reads the session dir
+   (`~/.local/share/wcode/sessions`) itself — cwd-filtered, labeled by the first
+   user message — and respawns with `--resume <path>`. The CLI/protocol listing this
+   plan first specified is **not** added; the extension reads the same on-disk layout
+   `session_groups.rs` writes.
 
 ## 5. Non-goals
 
@@ -98,5 +110,7 @@ V2 is the architectural core; V4/V5 carry the wire additions.
 | V1 | ☑ `3332998` — bordered tables + run-following folds; second-layer APPROVED (145 tests green) |
 | V2 | ☑ `7c29470` — one dockable surface (WebviewView + editor panel; tree retired); second-layer APPROVED (131 tests green) |
 | V3 | ☑ `51469b0` — All / Focus view mode (merged transcript, origin-bounded turns); second-layer APPROVED (135 tests green) |
-| V4 | ☐ not started |
-| V5 | ☐ not started |
+| V3.5 | ☑ (this change) rail swatches + collapse; peer turns labeled by sender; tool targets; All merges by arrival `seq` |
+| V4a | ☑ (this change) client `/` menu + host `QuickPick`/`Request` pickers |
+| V4b | ☐ open — wire additions (a model list, the current effort, a context window) + the header gauge |
+| V5 | ☑ (this change) `/resume`, client-side (the extension reads the session dir) |

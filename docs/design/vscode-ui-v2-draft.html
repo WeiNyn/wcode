@@ -241,7 +241,7 @@ body{
 details.fold{ border:1px solid var(--vscode-panel-border); border-left:2px solid var(--vscode-panel-border); border-radius:var(--wc-radius); margin:6px 0; }
 details.fold.tool{ border-left-color:var(--wc-accent); }
 details.fold.tool.error{ border-left-color:var(--vscode-errorForeground); }
-details.fold.thought{ background:var(--vscode-textBlockQuote-background); }
+details.fold.thinking{ background:var(--vscode-textBlockQuote-background); }
 details.fold > summary{ list-style:none; cursor:pointer; padding:5px 9px; display:flex; align-items:baseline; gap:8px; font-size:12px; }
 details.fold > summary::-webkit-details-marker{ display:none; }
 details.fold > summary:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:-1px; }
@@ -258,7 +258,7 @@ details.fold:not([open]) > summary .chev::before{ content:"▸"; }
 .fold .running-tag{ color:var(--vscode-charts-yellow); font-size:11px; }
 .spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; font-family:var(--vscode-editor-font-family); color:var(--wc-accent); }
 @keyframes wc-spin{ to{ transform:rotate(360deg); } }
-details.thought > summary{ color:var(--vscode-descriptionForeground); }
+details.thinking > summary{ color:var(--vscode-descriptionForeground); }
 
 /* code card */
 .code{ border:1px solid var(--vscode-panel-border); border-radius:var(--wc-radius); overflow:hidden; margin:8px 0; }
@@ -432,8 +432,8 @@ textarea#input:focus{ outline:1px solid var(--vscode-focusBorder); border-color:
             <div class="who wcode"><span class="av">❯</span><span class="name">orchestrator</span><span class="stamp">09:41</span></div>
 
             <!-- thinking: collapsed because DONE -->
-            <details class="fold thought">
-              <summary><span class="chev"></span><span class="tname">thought</span><span class="tsum">4s · one surface, docked anywhere</span></summary>
+            <details class="fold thinking">
+              <summary><span class="chev"></span><span class="tname">thinking</span><span class="tsum">4s · one surface, docked anywhere</span></summary>
               <div class="inner"><p class="body" style="color:var(--vscode-descriptionForeground);margin:0">A single webview can be a WebviewView (sidebar/panel) or a WebviewPanel (editor), so the team list belongs inside it, not in a native tree.</p></div>
             </details>
 
