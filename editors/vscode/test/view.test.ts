@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { initialState, reduce, type SessionMember, type ViewState } from "../src/reducer.ts";
+import { initialState, reduce, type RosterItem, type SessionMember, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
 import { parseToWebview, type PanelSessionInfo, type ToWebview, type ViewMode } from "../src/webview.ts";
 import {
   classNames,
+  avatarStack,
   composerControls,
   composeSubmit,
   diffStat,
@@ -14,6 +15,7 @@ import {
   foldOpen,
   formatTokens,
   panelHeader,
+  rosterRows,
   selectionRef,
   stateLabel,
   toggleFold,
@@ -427,7 +429,7 @@ test("composeSubmit prepends the ref, else passes the text through", () => {
 });
 /* -------------------------------------------------------- working group */
 
-test("workingGroup: other members that are running or carry a liveAction", () => {
+test("workingGroup: other members that are running or carry a liveAction (the pill's source)", () => {
   const members: SessionMember[] = [
     { id: "root-1", label: "root-1", state: "running", isRoot: true }, // the target: EXCLUDED
     { id: "agent:w1", label: "w1", state: "running", isRoot: false, liveAction: "edit src/f.rs" },
@@ -438,11 +440,14 @@ test("workingGroup: other members that are running or carry a liveAction", () =>
   assert.equal(group.count, 2);
   assert.deepEqual(group.rows.map((r) => r.id), ["agent:w1", "agent:w3"]);
   assert.equal(group.rows[0].name, "w1");
-  // No `glyph` field — a row always renders ●; `running` picks .g-run / .g-idle.
   assert.equal(group.rows[0].running, true);
   assert.equal(group.rows[0].action, "edit src/f.rs");
-  assert.equal(group.rows[1].running, false); // -> .g-idle; the glyph is still ●
+  // Each row carries its avatar identity: the roster swatch + the initial (the pill's chips).
+  assert.equal(group.rows[0].swatch, memberSwatch(1, false), "the avatar's `--sw`");
+  assert.equal(group.rows[0].initial, "W");
+  assert.equal(group.rows[1].running, false);
   assert.equal(group.rows[1].action, "grep onOpenDiff");
+  assert.equal(group.rows[1].swatch, memberSwatch(3, false));
 });
 
 test("workingGroup: a running member with no liveAction still appears (empty action)", () => {
@@ -468,6 +473,63 @@ test("workingGroup: the root reads as 'orchestrator' when it is NOT the target",
   const group = workingGroup(members, "agent:w1");
   assert.equal(group.rows[0].name, "orchestrator");
 });
+test("avatarStack: the first 3 chips, then a neutral +N overflow", () => {
+  const members = (n: number): SessionMember[] =>
+    Array.from({ length: n }, (_, i) => ({ id: `agent:w${i}`, label: `w${i}`, state: "running" as const, isRoot: false }));
+  const rows = (n: number) => workingGroup(members(n), null).rows;
+  assert.deepEqual(avatarStack(workingGroup(members(2), null).rows).shown.length, 2, "2 fits: no +N");
+  assert.equal(avatarStack(rows(5)).shown.length, 3, "the cap is 3");
+  assert.equal(avatarStack(rows(5)).overflow, 2, "the 4th and beyond collapse into +N");
+  assert.equal(avatarStack(rows(3)).overflow, 0, "exactly 3 fits: no +N");
+  assert.deepEqual(avatarStack(workingGroup([], null).rows), { shown: [], overflow: 0 });
+  // The order is the roster order (root first) — the stack is the first N rows.
+  assert.deepEqual(avatarStack(rows(4)).shown.map((r) => r.id), ["agent:w0", "agent:w1", "agent:w2"]);
+});
+
+test("rosterRows: the rail row is a `--sw` edge + the STATE glyph (no `.mav` box)", () => {
+  const rows: RosterItem[] = [
+    { id: "root-1", label: "orchestrator", state: "running", isRoot: true }, // no model ⇒ "root"
+    { id: "agent:w1", label: "explorer", state: "done", isRoot: false, model: "sonnet" },
+    { id: "agent:w2", label: "developer", state: "failed", isRoot: false },
+    { id: "agent:w3", label: "reviewer", state: "idle", isRoot: false },
+  ];
+  const rail = rosterRows(rows, "agent:w1");
+  assert.equal(rail.length, 4);
+  // IDENTITY is the swatch class; STATE is the glyph's class + char — the SAME four states.
+  assert.deepEqual(
+    rail.map((r) => [r.glyph, r.glyphClass]),
+    [
+      ["⠋", "g-run"],
+      ["✓", "g-done"],
+      ["✗", "g-err"],
+      ["○", "g-idle"],
+    ],
+  );
+  assert.equal(rail[0].className, "sw-blue", "the root's edge is the first swatch");
+  assert.equal(rail[1].className, "sw-green sel", "the target carries the 3px edge (`sel`)");
+  assert.equal(rail[2].className, "sw-orange");
+  assert.equal(rail[0].name, "orchestrator");
+  assert.equal(rail[0].meta, "root", "a root with no model reads `root`");
+  assert.equal(rail[1].meta, "sonnet");
+  assert.equal(rail[3].action, "idle", "the action line falls back to the state word");
+});
+
+test("panelHeader: no member-count cell remains on the bar (it lives in the rail now)", () => {
+  const state = renderState(
+    {
+      ...initialState(),
+      members: [
+        { id: "root-1", label: "root-1", state: "idle", isRoot: true },
+        { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
+      ],
+      targeted: "root-1",
+    },
+    "root-1",
+  );
+  const texts = panelHeader(state, session(), "focus").cells.flatMap((c) => ("text" in c ? [c.text] : []));
+  assert.ok(!texts.some((t) => /\d+ members/.test(t)), "the bar carries no `N members` cell");
+});
+
 test("turns: WITHOUT a resolver (Focus), labels stay you/wcode", () => {
   const t = turns([
     { kind: "user", html: "hi", live: false },

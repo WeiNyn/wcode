@@ -6,7 +6,7 @@
  * `render.ts`-pure / `panel.ts`-impure split on the host side.
  */
 import type { MemberState } from "../protocol.ts";
-import { memberGlyph, type SessionMember } from "../reducer.ts";
+import { memberGlyph, type RosterItem, type SessionMember } from "../reducer.ts";
 import type { RenderedBlock, RenderedState } from "../render.ts";
 import type { SessionState } from "../session.ts";
 import type { PanelSessionInfo, SelectionContext, ViewMode } from "../webview.ts";
@@ -112,7 +112,7 @@ function identityGlyph(
   return {
     glyph,
     className,
-    stateTitle: session.state === "ready" ? state : session.state,
+    stateTitle: stateLabel(session.state),
     spin: state === "running",
   };
 }
@@ -346,7 +346,7 @@ export function diffStat(diff: string): { added: number; removed: number } {
 /**
  * The composer's non-text controls. Pure.
  *   mode  = `state.status.planMode` ? "Plan" : "Act"
- *   model = the TARGETED member's `model` — the SAME lookup `panelHeader`'s r2 does
+ *   model = the TARGETED member's `model` — the SAME lookup the header's disclosure does
  *           (`SessionMember.model` IS set; `ViewStatus.model` is dead) — or null.
  * Effort and a context WINDOW are not on the wire, so neither appears here
  * (plan §6 — the gauge and the model picker are deferred).
@@ -391,34 +391,38 @@ export function selectionRef(context: SelectionContext): string {
 export function composeSubmit(text: string, context: SelectionContext | null): string {
   return context === null ? text : `${selectionRef(context)}\n\n${text}`;
 }
-/** One live subagent row (draft `.running`). */
+/** One live subagent row — the working pill's source (draft `.pill`). */
 export interface WorkingRow {
   id: string;
   /** Display name; the ROOT reads as "orchestrator" (mirrors `reducer.displayLabel`). */
   name: string;
   /** True when the row's member is `state === "running"` (→ `.g-run`). */
   running: boolean;
-  /** The dim right-hand text (draft `.running .what`) — the member's `liveAction`. */
+  /** The dim right-hand text (the member's `liveAction`). */
   action: string;
+  /** The member's identity swatch — the avatar's fill (roster order). */
+  swatch: MemberSwatch;
+  /** The avatar glyph: the root's `❯`, else the initial (`memberInitial`). */
+  initial: string;
 }
 
-/** The live "N members working" box (draft `.group`). */
+/** The aggregate the working pill renders: WHO is working (other than the target), and how many. */
 export interface WorkingGroup {
   count: number;
   rows: WorkingRow[];
 }
 
 /**
- * The members OTHER than the target that are active (draft `.group`). Pure, over
- * `RenderedState.members` — the roster push and the `liveAction` events already
- * reach the panel.
+ * The members OTHER than the target that are ACTIVE — the working pill's source. Pure, over
+ * `RenderedState.members` — the roster push and the `liveAction` events already reach the panel.
  *
  * A member is INCLUDED iff `id !== targetId` AND (`state === "running"` OR
  * `liveAction !== undefined`). Order follows `members` (roster order, root first).
  *   name    = member.isRoot ? "orchestrator" : member.label
- *   running = member.state === "running"   (a row always renders `●`; this picks
- *             `.g-run` / `.g-idle`; the animated `⠋` lives only in the `.ghead`)
+ *   running = member.state === "running"
  *   action  = member.liveAction ?? ""      (empty ⇒ the DOM shows just the name)
+ *   swatch  = memberSwatch(index, isRoot)   (the avatar's identity fill)
+ *   initial = memberInitial(name, isRoot)   (the root's ❯, else the initial)
  *   count   = rows.length
  *
  * `liveAction` is CLEARED on `agent_end`, so a finished member drops out — correct,
@@ -427,17 +431,28 @@ export interface WorkingGroup {
  */
 export function workingGroup(members: SessionMember[], targetId: string | null): WorkingGroup {
   const rows: WorkingRow[] = [];
-  for (const member of members) {
-    if (member.id === targetId) continue;
-    if (member.state !== "running" && member.liveAction === undefined) continue;
+  members.forEach((member, index) => {
+    if (member.id === targetId) return;
+    if (member.state !== "running" && member.liveAction === undefined) return;
+    const name = member.isRoot ? "orchestrator" : member.label;
     rows.push({
       id: member.id,
-      name: member.isRoot ? "orchestrator" : member.label,
+      name,
       running: member.state === "running",
       action: member.liveAction ?? "",
+      swatch: memberSwatch(index, member.isRoot),
+      initial: memberInitial(name, member.isRoot),
     });
-  }
+  });
   return { count: rows.length, rows };
+}
+
+/**
+ * The overlapping avatar stack: the first `cap` rows, plus the overflow count (the 4th
+ * and beyond collapse into ONE neutral `+N`). Pure.
+ */
+export function avatarStack(rows: WorkingRow[], cap = 3): { shown: WorkingRow[]; overflow: number } {
+  return { shown: rows.slice(0, cap), overflow: Math.max(0, rows.length - cap) };
 }
 
 /** A manual override of a tool fold, recorded for the PHASE it was made in. */
@@ -493,6 +508,43 @@ export type MemberSwatch = (typeof MEMBER_SWATCHES)[number];
 export function memberSwatch(index: number, isRoot: boolean): MemberSwatch {
   if (isRoot) return MEMBER_SWATCHES[0];
   return MEMBER_SWATCHES[index % MEMBER_SWATCHES.length];
+}
+
+/** One EXPANDED rail row (draft `.roster li`): the `--sw` identity edge + the STATE glyph. */
+export interface RosterRow {
+  id: string;
+  /** → the `<li>`'s class list: the `--sw` identity swatch, plus `sel` on the target. */
+  className: string;
+  /** → the state glyph's class (`g-run` / `g-done` / `g-err` / `g-idle`); its colour is STATE. */
+  glyphClass: string;
+  /** → the state glyph (`⠋ ✓ ✗ ○`). */
+  glyph: string;
+  name: string;
+  /** The dim text beside the name (the member's model, else "root"). */
+  meta: string;
+  /** The dim action line (`liveAction`, else the state word). */
+  action: string;
+}
+
+/**
+ * The rail rows, ready to paint (draft `.roster`). Pure. Identity is the `--sw` edge colour;
+ * STATE is the glyph's colour — the SAME language the transcript turn rail speaks. The 18px
+ * `.mav` swatch box is GONE here; it survives only in the collapsed strip, where a chip needs
+ * a fill (`.sc`, rendered by `chat.ts::stripChip`).
+ */
+export function rosterRows(rows: RosterItem[], targetId: string | null): RosterRow[] {
+  return rows.map((row, index) => {
+    const glyph = memberGlyph(row.state);
+    return {
+      id: row.id,
+      className: `sw-${memberSwatch(index, row.isRoot)}${row.id === targetId ? " sel" : ""}`,
+      glyphClass: glyph.className,
+      glyph: glyph.glyph,
+      name: row.label,
+      meta: row.model ?? (row.isRoot ? "root" : ""),
+      action: row.liveAction ?? row.state,
+    };
+  });
 }
 
 /** The avatar glyph: the root's `❯`, else the name's initial. Mirrors `who()`. Pure. */

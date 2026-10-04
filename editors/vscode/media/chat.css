@@ -765,7 +765,8 @@ textarea#input:focus {
 
 @media (prefers-reduced-motion: reduce) {
   .body.live::after,
-  .spin {
+  .spin,
+  .pill .dots {
     animation: none;
   }
 }
@@ -826,43 +827,8 @@ textarea#input:focus {
   outline-offset: 1px;
 }
 
-/* --------------------------------------------------- working group (P3) */
-
-/* Transient: V7 replaces this box with the working pill. V8 re-points its tokens
-   only; it deliberately does NOT redesign a surface another phase removes. */
-.group {
-  border: 1px dashed var(--vscode-panel-border);
-  border-radius: var(--wc-radius);
-  padding: var(--wc-1) var(--wc-2);
-  margin: var(--wc-1) 0;
-}
-
-.group > .ghead {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  font-size: var(--wc-fs-meta);
-  color: var(--vscode-descriptionForeground);
-  margin-bottom: var(--wc-1);
-}
-
-.running {
-  display: flex;
-  align-items: baseline;
-  gap: var(--wc-2);
-  font-size: var(--wc-fs-ui);
-  padding: var(--wc-1) 0;
-}
-
-.running .who2 {
-  font-weight: 600;
-}
-
-.running .what {
-  color: var(--vscode-descriptionForeground);
-  font-family: var(--vscode-editor-font-family);
-}
-
+/* The state glyph (the rail rows + the header identity): IDENTITY is the `--sw` edge,
+   STATE is this glyph's colour — `⠋` running · `✓` done · `✗` failed · `○` idle. */
 .glyph {
   font-family: var(--vscode-editor-font-family);
   font-weight: 700;
@@ -1148,6 +1114,7 @@ textarea#input:focus {
 }
 
 .side.collapsed .side-title,
+.side.collapsed .count,
 .side.collapsed .side-head .spacer,
 .side.collapsed .roster,
 .side.collapsed .tasks-sec {
@@ -1197,6 +1164,103 @@ textarea#input:focus {
   min-height: 0;
 }
 
+/* ------------------------------------------- the working pill (the typing cue) */
+
+/* An IN-FLOW band: a sibling of `.transcript` inside `.main`'s flex column, between the
+   scroller and the composer. It occupies real layout height and NEVER overlays rendered
+   content (it is NOT `position:absolute`). L2a: a bordered, interactive card. */
+.pill {
+  display: flex;
+  align-items: center;
+  gap: var(--wc-2);
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--wc-fs-ui);
+  color: var(--vscode-foreground);
+  padding: var(--wc-1) var(--wc-3);
+  border: 0;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+}
+
+.pill[hidden] {
+  display: none;
+}
+
+.pill:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.pill:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+/* The overlapping avatar stack: up to 3 chips, then a neutral `+N`. */
+.pill .stack {
+  display: inline-flex;
+  align-items: center;
+}
+
+.pill .mav {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--sw) 22%, transparent);
+  color: var(--sw);
+  box-shadow: 0 0 0 2px var(--vscode-editor-background); /* the band's own background */
+}
+
+.pill .mav + .mav {
+  margin-left: -7px; /* ~35% overlap */
+}
+
+/* The 4th and beyond: a count, not a member, so no swatch. */
+.pill .over {
+  margin-left: -7px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--wc-1);
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  font-weight: 700;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-descriptionForeground);
+  box-shadow: 0 0 0 2px var(--vscode-editor-background);
+}
+
+.pill .lbl {
+  color: var(--vscode-foreground);
+}
+
+.pill .lbl b {
+  font-weight: 600;
+}
+
+/* The pulse: the surface's THIRD animation, one @keyframes on the locked glyph `⋯`. */
+.pill .dots {
+  font-family: var(--vscode-editor-font-family);
+  color: var(--wc-accent);
+  animation: wc-typing 1.4s ease-in-out infinite;
+}
+
+@keyframes wc-typing {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
 /* -------------------------------------------- the rail sections (Team/Tasks) */
 
 .side-head {
@@ -1230,12 +1294,13 @@ textarea#input:focus {
 
 .roster li {
   display: grid;
-  grid-template-columns: 20px 1fr;
+  grid-template-columns: 14px 1fr;
   gap: var(--wc-2);
-  align-items: center;
+  align-items: baseline;
   padding: var(--wc-1) var(--wc-3) var(--wc-1) calc(var(--wc-3) - 2px);
   cursor: pointer;
-  border-left: 2px solid transparent;
+  /* IDENTITY: the member's `--sw` edge — the same language the turn rail speaks. */
+  border-left: 2px solid var(--sw, transparent);
 }
 
 .roster li:hover {
@@ -1245,7 +1310,7 @@ textarea#input:focus {
 .roster li.sel {
   background: var(--vscode-list-activeSelectionBackground);
   color: var(--vscode-list-activeSelectionForeground);
-  border-left-color: var(--wc-accent);
+  border-left-width: 3px; /* the target's edge is THICKER — identity, not accent */
 }
 
 .roster .who {

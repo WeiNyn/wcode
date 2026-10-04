@@ -20,6 +20,7 @@ import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from 
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
 import {
   classNames,
+  avatarStack,
   composerControls,
   composeSubmit,
   diffStat,
@@ -30,6 +31,7 @@ import {
   memberInitial,
   memberSwatch,
   panelHeader,
+  rosterRows,
   selectionRef,
   toggleFold,
   turns,
@@ -42,7 +44,6 @@ import {
   type MemberSwatch,
   type Turn,
   type TurnMember,
-  type WorkingGroup,
 } from "./view.ts";
 
 /** The webview global; not in `@types/vscode` (it is injected by the host). */
@@ -65,6 +66,7 @@ app.innerHTML = [
   '  <aside id="side" class="side" aria-label="Team and tasks"></aside>',
   '  <section class="main">',
   '    <main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
+  '    <button id="pill" class="pill" type="button" hidden></button>',
   '    <footer id="composer" class="composer">',
   '      <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
   '      <div id="cmdmenu" class="cmdmenu" role="listbox" aria-label="Commands" hidden></div>',
@@ -95,6 +97,7 @@ const cmodelEl = requireEl("cmodel");
 const cattachEl = requireEl("cattach");
 const ctxChipsEl = requireEl("ctx-chips");
 const menuEl = requireEl("cmdmenu");
+const pillEl = requireEl("pill") as HTMLButtonElement;
 
 /** Per-callId tool-fold overrides (the user's manual toggle, keyed to its phase). */
 let foldOverrides: FoldOverrides = new Map();
@@ -110,7 +113,6 @@ let lastContext: SelectionContext | null = null;
 /** The last rendered selection ref, so a NEW selection re-arms the chip. */
 let lastRef: string | null = null;
 
-/** Is the header target menu open? (webview-local view state). */
 /** Which header popover is open (webview-local view state): the target chip's menu
  *  or the `▾` disclosure. Only ONE is ever open. */
 let popover: "target" | "more" | null = null;
@@ -259,7 +261,7 @@ function segNode(cell: SegCell): HTMLElement {
 }
 
 function segButton(label: string, mode: ViewMode, current: ViewMode): HTMLElement {
-  const button = el("button", "seg-btn", label);
+  const button = el("button", null, label);
   button.setAttribute("type", "button");
   button.dataset.el = `seg-${mode}`;
   button.setAttribute("aria-pressed", current === mode ? "true" : "false");
@@ -417,6 +419,7 @@ function blockShell(block: RenderedBlock): HTMLElement {
   // "body notice" / …), so there is no outer wrap + nested `.body`. No `.role`
   // line either — the `.who` line is per-TURN now.
   const node = el("div", classNames(block));
+  if (block.live) node.dataset.live = "1"; // the working pill's reveal targets the live step
   node.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
   return node;
 }
@@ -426,6 +429,8 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   if (tool === undefined) return el("details", "fold tool");
   const open = foldOpen(foldOverrides, tool.callId, tool.done); // override wins; else open while running
   const details = el("details", classNames(block, open));
+  if (open) details.setAttribute("open", "");
+  if (!tool.done) details.dataset.live = "1"; // a RUNNING fold is the newest live step
   if (open) details.setAttribute("open", "");
 
   const summary = el("summary", null);
@@ -566,24 +571,72 @@ function renderTurn(turn: Turn): HTMLElement {
   return wrap;
 }
 
-/** The live subagent rows (draft `.group`): a transcript-tail region. */
-function renderGroup(group: WorkingGroup): HTMLElement {
-  const box = el("div", "group");
-  const head = el("div", "ghead");
-  const spin = el("span", "spin", "⠋");
-  spin.setAttribute("aria-hidden", "true");
-  head.appendChild(spin);
-  head.appendChild(el("span", null, `${group.count} member${group.count === 1 ? "" : "s"} working`));
-  box.appendChild(head);
-  for (const row of group.rows) {
-    const line = el("div", "running");
-    line.appendChild(el("span", `glyph ${row.running ? "g-run" : "g-idle"}`, "●")); // constant ●
-    line.appendChild(el("span", "who2", row.name));
-    if (row.action !== "") line.appendChild(el("span", "what", row.action));
-    box.appendChild(line);
+/* ------------------------------------------------------- the working pill */
+
+/** The pill's rebuild signature; a matching snapshot keeps the SAME DOM (focus survives). */
+let pillKey: string | null = null;
+/** A reveal the pill asked for; run AFTER the next paint (so an All switch lands first). */
+let revealPending = false;
+
+/**
+ * The working pill (draft `.pill`). An IN-FLOW band — a sibling of `.transcript` inside
+ * `.main`, so it never overlays rendered content and never scrolls away. It owns the
+ * team's AGGREGATE echo (how many OTHER members are working) and reveals the live step.
+ */
+function renderPill(state: RenderedState): void {
+  const group = workingGroup(state.members, state.target?.id ?? null);
+  const key = JSON.stringify(group);
+  if (key === pillKey) return;
+  pillKey = key;
+  pillEl.textContent = "";
+  if (group.count === 0) {
+    pillEl.hidden = true;
+    return;
   }
-  return box;
+  pillEl.hidden = false;
+  pillEl.setAttribute(
+    "aria-label",
+    `Show the newest working step (${group.count} member${group.count === 1 ? "" : "s"} working)`,
+  );
+  const stack = el("span", "stack");
+  stack.setAttribute("aria-hidden", "true");
+  const { shown, overflow } = avatarStack(group.rows);
+  for (const row of shown) stack.appendChild(el("span", `mav sw-${row.swatch}`, row.initial));
+  if (overflow > 0) stack.appendChild(el("span", "over", `+${overflow}`));
+  pillEl.appendChild(stack);
+  const label = el("span", "lbl");
+  label.appendChild(el("b", null, String(group.count)));
+  label.appendChild(document.createTextNode(" working"));
+  pillEl.appendChild(label);
+  const dots = el("span", "dots", "⋯");
+  dots.setAttribute("aria-hidden", "true");
+  pillEl.appendChild(dots);
 }
+
+/**
+ * The pill's click: REVEAL the newest live step. In Focus the other members' steps are
+ * NOT in the transcript, so switch to All first and scroll on the next paint.
+ */
+function revealLiveStep(): void {
+  if (lastState === null) return;
+  if (lastState.mode !== "all") {
+    revealPending = true;
+    post({ kind: "set-mode", mode: "all" });
+    return;
+  }
+  scrollToLiveStep();
+}
+
+/** Scroll the newest `[data-live]` element into view (the transcript bottom when none). */
+function scrollToLiveStep(): void {
+  const live = transcriptEl.querySelectorAll<HTMLElement>("[data-live]");
+  const newest = live.length > 0 ? live[live.length - 1] : transcriptEl.lastElementChild;
+  if (!(newest instanceof HTMLElement)) return;
+  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  newest.scrollIntoView({ block: "center", behavior: calm ? "auto" : "smooth" });
+}
+
+pillEl.addEventListener("click", revealLiveStep);
 
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
@@ -591,6 +644,7 @@ function render(snapshot: ToWebview): void {
   renderHeader(state, session, snapshot.mode);
   renderRails(state);
   renderComposer(state, snapshot.context);
+  renderPill(state);
   lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
@@ -598,12 +652,13 @@ function render(snapshot: ToWebview): void {
   } else {
     const member = snapshot.mode === "all" ? memberOf(state) : undefined;
     for (const turn of turns(state.blocks, member, targetSwatch(state))) transcriptEl.appendChild(renderTurn(turn));
-    // The working group is a transcript-TAIL region, NOT nested in a turn: it is
-    // LIVE roster state (from `members`), not per-turn block data.
-    const group = workingGroup(state.members, state.target?.id ?? null);
-    if (group.count > 0) transcriptEl.appendChild(renderGroup(group));
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  // A pending pill reveal runs AFTER the paint, so an All-mode switch has landed.
+  if (revealPending) {
+    revealPending = false;
+    scrollToLiveStep();
+  }
 }
 
 /** Resolve a block's `origin` (or a peer's `from`) to the member that labels its turn. */
@@ -713,18 +768,11 @@ function applyCollapsed(): void {
   });
 }
 
-/** A member avatar: the swatch is IDENTITY (`--sw`, the fill), the `g-*` class is
- *  STATE (`--st`, the border), the initial is the glyph. A row avatar is decorative
- *  (`<span>`, aria-hidden); a strip chip is a `<button>`. */
-function memberAvatar(row: RosterItem, index: number, interactive: boolean): HTMLElement {
+/** The COLLAPSED strip's chip (draft `.sc`): the fill is the member's `--sw` (identity),
+ *  the `g-*` class rings it with STATE (`--st`), the initial is the glyph. A `<button>`. */
+function stripChip(row: RosterItem, index: number): HTMLButtonElement {
   const cls = ["mav", `sw-${memberSwatch(index, row.isRoot)}`, memberGlyph(row.state).className];
-  const initial = memberInitial(row.label, row.isRoot);
-  if (!interactive) {
-    const span = el("span", cls.join(" "), initial);
-    span.setAttribute("aria-hidden", "true");
-    return span;
-  }
-  const btn = el("button", cls.join(" "), initial);
+  const btn = el("button", cls.join(" "), memberInitial(row.label, row.isRoot));
   btn.setAttribute("type", "button");
   btn.title = `${row.label} · ${row.liveAction ?? row.state}`;
   btn.setAttribute("aria-label", `Focus ${btn.title}`);
@@ -736,22 +784,23 @@ function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
   const head = el("div", "side-head");
   head.appendChild(el("span", "side-title", "Team"));
   head.appendChild(el("span", "spacer"));
+  head.appendChild(el("span", "count", String(rows.length))); // O1: the member count lives here
   head.appendChild(sideToggle());
   box.appendChild(head);
 
+  // The EXPANDED row: the `--sw` identity edge + the STATE glyph + name + dim action.
   const list = el("ul", "roster");
-  rows.forEach((row, index) => {
-    const item = el("li", row.id === targetId ? "sel" : null);
-    item.appendChild(memberAvatar(row, index, false));
+  for (const row of rosterRows(rows, targetId)) {
+    const item = el("li", row.className);
+    item.appendChild(el("span", `glyph ${row.glyphClass}`, row.glyph));
     const who = el("span", "who");
-    who.appendChild(el("b", null, row.label));
-    who.appendChild(el("span", "meta", row.model ?? (row.isRoot ? "root" : "")));
+    who.appendChild(el("b", null, row.name));
+    if (row.meta !== "") who.appendChild(el("span", "meta", row.meta));
     item.appendChild(who);
-    item.appendChild(el("span", "act-line", row.liveAction ?? row.state));
-    // A rail row click RETARGETS — the same P3 path the header chip's menu uses.
+    item.appendChild(el("span", "act-line", row.action));
     item.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
     list.appendChild(item);
-  });
+  }
   box.appendChild(list);
 
   // The COLLAPSED form: the same members as a strip of avatar chips. The fill is the
@@ -759,7 +808,7 @@ function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
   const strip = el("ul", "avatars");
   rows.forEach((row, index) => {
     const cell = el("li", null);
-    const chip = memberAvatar(row, index, true);
+    const chip = stripChip(row, index);
     chip.setAttribute("aria-current", row.id === targetId ? "true" : "false");
     chip.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
     cell.appendChild(chip);
