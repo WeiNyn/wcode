@@ -166,8 +166,9 @@ mod member_state_tests {
         assert_eq!(info.state, MemberState::Idle);
     }
 }
-/// A served session's address plus the little metadata a roster shows: today
-/// only its **effective model**. Carried by
+/// A served session's address plus the little metadata a roster shows: its
+/// **effective model**, **reasoning effort**, and **context window** (each
+/// `None` when the server does not know it). Carried by
 /// [`crate::event::AgentEvent::Sessions`], so a client can label each member by
 /// its own model instead of substituting the root's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

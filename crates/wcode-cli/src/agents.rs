@@ -454,6 +454,11 @@ struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// Derive a WORKER's metadata from its BUILT `LlmOpts`. `window` is `None`
+    /// when `model_limit` knows no window for the model — unlike the ROOT
+    /// (`main.rs::record_root_meta`), which falls back to
+    /// `DEFAULT_CONTEXT_WINDOW`; a worker's gauge therefore degrades to
+    /// numerator-only rather than asserting a default it may not have.
     fn from_llm(llm: &LlmOpts) -> Self {
         SessionMeta {
             model: llm.model.clone(),

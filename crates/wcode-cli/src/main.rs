@@ -1345,6 +1345,10 @@ fn build_agent_for(
 /// keyed by the id the server pushes first — this agent's own `session_id`, not the
 /// registry's `agent:orchestrator` alias (a distinct id, never served). Plain registry
 /// writes, so it is testable without the diverging `serve`.
+///
+/// The window falls back to `limits::DEFAULT_CONTEXT_WINDOW` when `model_limit`
+/// knows none, so the ROOT always has a gauge denominator — unlike a WORKER
+/// (`agents.rs::SessionMeta::from_llm`), which stays `None` and degrades.
 fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) {
     registry.set_model(session_id.clone(), llm.model.clone());
     registry.set_effort(session_id.clone(), llm.effort.clone());
