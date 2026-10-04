@@ -33,6 +33,7 @@ import {
   type ViewState,
 } from "./reducer.ts";
 import { WcodeSession, type CrashInfo, type SessionState } from "./session.ts";
+import { listSessions, sessionDir } from "./sessions.ts";
 import { isUnsupportedStdio, unsupportedStdioMessage } from "./startup.ts";
 import type { AgentEvent, RawFrame } from "./protocol.ts";
 
@@ -282,6 +283,9 @@ function runCommand(name: string, arg: string): void {
       // The SAME args, a new child: config re-read, `serve` re-run.
       void restartSession(sessionArgs);
       return;
+    case "resume":
+      void resumeSession(arg);
+      return;
     case "plan":
       togglePlan();
       return;
@@ -326,6 +330,37 @@ function runCommand(name: string, arg: string): void {
 function isClearEffort(arg: string): boolean {
   const value = arg.trim().toLowerCase();
   return value === "-" || value === "off" || value === "none";
+}
+
+/**
+ * `/resume`: an explicit path respawns straight into it; no argument opens a
+ * picker over the session dir, filtered to THIS workspace (another project's
+ * conversations are noise). Newest first, labeled by the first user message.
+ */
+async function resumeSession(arg: string): Promise<void> {
+  if (arg !== "") {
+    ensureOutput().appendLine(`resuming ${arg}`);
+    await restartSession(["--resume", arg]);
+    return;
+  }
+  const cwd = workspaceRoot();
+  const choices = await listSessions(sessionDir(), cwd);
+  if (choices.length === 0) {
+    void vscode.window.showInformationMessage(`wcode: no sessions recorded for ${cwd}`);
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    choices.map((choice) => ({
+      label: choice.label,
+      description: choice.when,
+      detail: choice.path,
+      path: choice.path,
+    })),
+    { title: "wcode: resume a session", placeHolder: "Newest first — only this workspace", matchOnDetail: true },
+  );
+  if (picked === undefined) return;
+  ensureOutput().appendLine(`resuming ${picked.path}`);
+  await restartSession(["--resume", picked.path]);
 }
 
 /** `/sessions`: the LIVE sessions in this connection; picking one retargets. */
