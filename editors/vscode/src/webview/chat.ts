@@ -74,12 +74,13 @@ app.innerHTML = [
   '        placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
   '      <div class="ctoolbar">',
   '        <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
-  '        <button id="cmode" class="tool-btn mode" type="button"></button>',
-  '        <span id="cmodel" class="tool-btn model"></span>',
+  '        <span class="seg" id="cmode" role="group" aria-label="Mode">',
+  '          <button id="mAct" type="button">Act</button>',
+  '          <button id="mPlan" type="button">Plan</button>',
+  '        </span>',
   '        <span class="spacer"></span>',
-  '        <span id="hint" class="hint">Enter to send</span>',
   '        <button id="send" class="btn primary">Send</button>',
-  '        <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)">Stop</button>',
+  '        <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)" hidden>Stop</button>',
   '      </div>',
   '    </footer>',
   '  </section>',
@@ -92,8 +93,8 @@ const sideEl = requireEl("side");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
 const cancelBtn = requireEl("cancel");
-const cmodeEl = requireEl("cmode");
-const cmodelEl = requireEl("cmodel");
+const mActEl = requireEl("mAct");
+const mPlanEl = requireEl("mPlan");
 const cattachEl = requireEl("cattach");
 const ctxChipsEl = requireEl("ctx-chips");
 const menuEl = requireEl("cmdmenu");
@@ -112,6 +113,8 @@ let attached = true;
 let lastContext: SelectionContext | null = null;
 /** The last rendered selection ref, so a NEW selection re-arms the chip. */
 let lastRef: string | null = null;
+/** The composer's current mode (the `.seg`'s pressed segment), for the click guard. */
+let composerMode: "Plan" | "Act" = "Act";
 
 /** Which header popover is open (webview-local view state): the target chip's menu
  *  or the `▾` disclosure. Only ONE is ever open. */
@@ -211,7 +214,8 @@ function identNode(cell: IdentCell, state: RenderedState): HTMLElement {
   const ident = el("span", "ident");
   const glyph = el("span", cell.glyphClass, cell.glyph);
   glyph.title = cell.stateTitle;
-  glyph.setAttribute("aria-label", `Session state: ${cell.stateTitle}`);
+  // `done`/`failed` read oddly as a SESSION state, so label it just `State: …`.
+  glyph.setAttribute("aria-label", `State: ${cell.stateTitle}`);
   ident.appendChild(glyph);
   if (cell.chip !== null) ident.appendChild(chipNode(cell, state));
   if (cell.word !== "") ident.appendChild(el("span", cell.word === "crashed" ? "tag error" : "tag", cell.word));
@@ -702,12 +706,14 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
   ctxChipsEl.textContent = "";
   if (context !== null && attached) ctxChipsEl.appendChild(ctxChip(context));
 
-  const { mode, model } = composerControls(state);
-  cmodeEl.textContent = `Mode: ${mode}`;
-  cmodeEl.setAttribute("aria-pressed", mode === "Plan" ? "true" : "false");
-  // Render NOTHING when there is no model — no em-dash placeholder.
-  cmodelEl.textContent = model === null ? "" : `Model: ${model}`;
-  cmodelEl.hidden = model === null;
+  const controls = composerControls(state);
+  composerMode = controls.mode;
+  // The mode control is the SAME `.seg` component as the header's All/Focus.
+  for (const segment of controls.segments) {
+    (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
+  }
+  // `Stop` is conditional chrome: visible ONLY while a run is in flight (Esc still cancels).
+  cancelBtn.hidden = !controls.stop;
 }
 
 function ctxChip(context: SelectionContext): HTMLElement {
@@ -722,6 +728,11 @@ function ctxChip(context: SelectionContext): HTMLElement {
   });
   chip.appendChild(dismiss);
   return chip;
+}
+
+/** Flip plan-mode to `mode` unless it is already active (the wire op is a bare toggle). */
+function selectMode(mode: "Plan" | "Act"): void {
+  if (mode !== composerMode) post({ kind: "toggle-plan" });
 }
 
 /* ------------------------------------------------------------------- rail */
@@ -977,9 +988,11 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
   }
 });
 sendBtn.addEventListener("click", submit);
-// The mode control: post and let the HOST flip plan-mode; the next snapshot
-// reflects it (no optimistic flip here).
-cmodeEl.addEventListener("click", () => post({ kind: "toggle-plan" }));
+// The mode `.seg`: post and let the HOST flip plan-mode; the next snapshot reflects it
+// (no optimistic flip). The wire only carries `toggle-plan`, so a click on the segment
+// that is ALREADY active is a no-op — otherwise it would flip the mode the wrong way.
+mActEl.addEventListener("click", () => selectMode("Act"));
+mPlanEl.addEventListener("click", () => selectMode("Plan"));
 // Re-attach the same selection the chip was dismissed from.
 cattachEl.addEventListener("click", () => {
   attached = true;

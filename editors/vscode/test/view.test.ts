@@ -120,6 +120,14 @@ test("panelHeader: a crashed session reads `✗` + the word 'crashed' (never a s
   assert.equal(crashed.stateTitle, "crashed");
 });
 
+test("panelHeader: a `ready` session's glyph title reflects the MEMBER's liveness", () => {
+  assert.equal(identOf(headerState("idle"), session()).stateTitle, "idle");
+  assert.equal(identOf(headerState("running"), session()).stateTitle, "running", "idle vs running must differ");
+  // The terminal states keep the session vocabulary.
+  assert.equal(identOf(headerState("idle"), session({ state: "crashed" })).stateTitle, "crashed");
+  assert.equal(identOf(headerState("idle"), session({ state: "stopped" })).stateTitle, "stopped");
+});
+
 test("panelHeader: starting spins `⠋`, stopped is `○`; both carry their word", () => {
   const starting = identOf(headerState("idle"), session({ state: "starting" }));
   assert.equal(starting.glyph, "⠋");
@@ -404,18 +412,40 @@ test("parseToWebview rejects junk and malformed snapshots", () => {
 });
 /* --------------------------------------------------------------- composer */
 
-test("composerControls: mode reflects planMode, model is the target member's", () => {
-  const state: ViewState = {
+test("composerControls: mode + the `.seg` segments + the `Stop` gate (NO model)", () => {
+  const running: ViewState = {
     ...initialState(),
-    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet" }],
+    members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true, model: "sonnet" }],
     targeted: "root-1",
-    status: { running: false, planMode: true },
+    status: { running: true, planMode: true },
   };
-  assert.equal(composerControls(renderState(state, "root-1")).mode, "Plan");
-  assert.equal(composerControls(renderState(state, "root-1")).model, "sonnet");
-  // No target / no model ⇒ Act, and model null (never an em-dash).
-  assert.equal(composerControls(renderState(initialState(), null)).mode, "Act");
-  assert.equal(composerControls(renderState(initialState(), null)).model, null);
+  const controls = composerControls(renderState(running, "root-1"));
+  assert.equal(controls.mode, "Plan");
+  // The `Model: …` span is gone (the model lives in the header's `▾` disclosure now).
+  assert.ok(!("model" in controls), "composerControls carries no `model` field");
+  // The mode is the `.seg` FORM: two segments (Act then Plan), exactly one pressed.
+  assert.deepEqual(
+    controls.segments.map((s) => [s.mode, s.pressed]),
+    [
+      ["Act", false],
+      ["Plan", true],
+    ],
+  );
+  // `Stop` is conditional: present ONLY while a run is in flight.
+  assert.equal(controls.stop, true, "a running session shows Stop");
+});
+
+test("composerControls: an idle composer is Act, with NO `Stop`", () => {
+  const controls = composerControls(renderState(initialState(), null));
+  assert.equal(controls.mode, "Act");
+  assert.deepEqual(
+    controls.segments.map((s) => [s.mode, s.pressed]),
+    [
+      ["Act", true],
+      ["Plan", false],
+    ],
+  );
+  assert.equal(controls.stop, false, "no Stop when nothing is running");
 });
 
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {

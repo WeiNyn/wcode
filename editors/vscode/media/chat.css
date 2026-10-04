@@ -731,11 +731,6 @@ textarea#input:focus {
   color: var(--vscode-foreground);
 }
 
-.hint {
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wc-fs-meta);
-}
-
 .btn {
   font: inherit;
   font-size: var(--wc-fs-ui);
@@ -806,20 +801,6 @@ textarea#input:focus {
 .ctx .x:focus-visible {
   outline: 2px solid var(--vscode-focusBorder);
   outline-offset: 1px;
-}
-
-.tool-btn.model {
-  cursor: default; /* read-only display, not a button */
-}
-
-.tool-btn.model:hover {
-  background: none;
-  color: var(--vscode-descriptionForeground);
-}
-
-/* The active (Plan) state of the composer's mode control. */
-.tool-btn.mode[aria-pressed="true"] {
-  color: var(--vscode-charts-purple);
 }
 
 .tool-btn:focus-visible {
@@ -1351,7 +1332,8 @@ textarea#input:focus {
 }
 
 /* A member avatar: the swatch is IDENTITY (the fill), the `--st` state colour is the
-   ring, the initial is the glyph. Shared by the rail row and the collapsed strip. */
+   ring, the initial is the glyph. Shared by the collapsed strip (`.sc`) and the working
+   pill (`.pill .mav`); the EXPANDED rail row uses the `--sw` edge + glyph instead. */
 .mav {
   display: grid;
   place-items: center;

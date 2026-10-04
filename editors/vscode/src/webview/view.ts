@@ -112,7 +112,10 @@ function identityGlyph(
   return {
     glyph,
     className,
-    stateTitle: stateLabel(session.state),
+    // The title spells out the state: the session vocabulary for the terminal words, but
+    // the MEMBER's own liveness when the session is merely `ready` (so an idle glyph and
+    // a running glyph do not read the same).
+    stateTitle: session.state === "ready" ? state : stateLabel(session.state),
     spin: state === "running",
   };
 }
@@ -344,25 +347,31 @@ export function diffStat(diff: string): { added: number; removed: number } {
   return { added, removed };
 }
 /**
- * The composer's non-text controls. Pure.
- *   mode  = `state.status.planMode` ? "Plan" : "Act"
- *   model = the TARGETED member's `model` — the SAME lookup the header's disclosure does
- *           (`SessionMember.model` IS set; `ViewStatus.model` is dead) — or null.
- * Effort and a context WINDOW are not on the wire, so neither appears here
- * (plan §6 — the gauge and the model picker are deferred).
+ * The composer's control set (draft `.composer`). Pure.
+ *   mode     = `state.status.planMode` ? "Plan" : "Act"  (the `.seg`'s pressed segment)
+ *   segments = the mode `.seg` — Act then Plan, exactly one pressed
+ *   stop     = `status.running`  (Show `Stop`? Conditional chrome: Esc already cancels.)
+ * The `Model: …` span is GONE (the model lives in the header's `▾` disclosure, V6), so
+ * there is no `model` field to render. Effort and a context window are not on the wire.
  */
 export interface ComposerControls {
-  /** `Mode: Plan` / `Mode: Act` — reflects `status.planMode`. */
+  /** The mode — the pressed segment of the mode `.seg`. */
   mode: "Plan" | "Act";
-  /** The TARGETED member's model, or null (READ-ONLY; no picker). */
-  model: string | null;
+  /** The mode `.seg`'s segments, in order; EXACTLY one is pressed. */
+  segments: Array<{ mode: "Plan" | "Act"; pressed: boolean }>;
+  /** Show `Stop`? ONLY while a run is in flight — an idle Stop button is chrome. */
+  stop: boolean;
 }
 
 export function composerControls(state: RenderedState): ComposerControls {
-  const model = state.members.find((member) => member.id === state.target?.id)?.model;
+  const mode = state.status.planMode ? "Plan" : "Act";
   return {
-    mode: state.status.planMode ? "Plan" : "Act",
-    model: model !== undefined && model !== "" ? model : null,
+    mode,
+    segments: [
+      { mode: "Act", pressed: mode === "Act" },
+      { mode: "Plan", pressed: mode === "Plan" },
+    ],
+    stop: state.status.running,
   };
 }
 
@@ -529,8 +538,8 @@ export interface RosterRow {
 /**
  * The rail rows, ready to paint (draft `.roster`). Pure. Identity is the `--sw` edge colour;
  * STATE is the glyph's colour — the SAME language the transcript turn rail speaks. The 18px
- * `.mav` swatch box is GONE here; it survives only in the collapsed strip, where a chip needs
- * a fill (`.sc`, rendered by `chat.ts::stripChip`).
+ * `.mav` swatch box is GONE from the EXPANDED row; it survives in the collapsed strip
+ * (`.sc`) and the working pill (`.pill .mav`), where a chip needs a fill.
  */
 export function rosterRows(rows: RosterItem[], targetId: string | null): RosterRow[] {
   return rows.map((row, index) => {
