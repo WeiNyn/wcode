@@ -1,11 +1,45 @@
 /* The wcode chat panel. Zero remote assets: only VS Code theme variables and
    the bundled media/chat.js. The palette follows the editor theme, so the panel
-   reads as part of VS Code rather than a foreign surface. */
+   reads as part of VS Code rather than a foreign surface.
+
+   V8 — the visual system. Colour is owned entirely by the host (--vscode-*) and
+   the one accent; the only NEW tokens are lengths and type sizes (carrying no
+   colour), which is what makes the system enforceable:
+     - SPACING  a 4px grid: --wc-1…5 (replaces the dead --wc-gap).
+     - TYPE     four sizes: --wc-fs-meta/ui/body/code (was ten).
+     - LEVELS   every component is exactly ONE of L1 / L2a / L2b (below).
+     - ACCENT   --wc-accent means "active now" and nothing else.
+   Density is a token switch, not a second design. */
 
 :root {
-  --wc-gap: 8px;
-  --wc-radius: 6px;
-  --wc-accent: var(--vscode-charts-blue); /* the one wcode accent */
+  /* --- the wcode system: LENGTHS and TYPE SIZES only, never a colour --- */
+  --wc-1: 4px; /* hairline insets, control padding */
+  --wc-2: 8px; /* row padding, control gaps */
+  --wc-3: 12px; /* band padding */
+  --wc-4: 16px; /* the gap between turns */
+  --wc-5: 24px; /* a card's inner air */
+
+  --wc-fs-meta: 11px; /* section labels, badges, tool meta, rail action lines */
+  --wc-fs-ui: 12px; /* header cells, controls, rail rows, tables */
+  --wc-fs-body: var(--vscode-font-size, 13px); /* prose; equals the editor's font size, so the panel tracks it */
+  --wc-fs-code: 0.9em; /* code and console; relative, so it tracks the body */
+
+  --wc-radius: 6px; /* the ONE card radius (small adornments round themselves) */
+  --wc-accent: var(--vscode-charts-blue); /* the one wcode accent: "active now" */
+}
+
+/* Density is a token switch, not a second design — which IS the proof the scale
+   is a system. No shipped surface sets the attribute yet; it is inert until one
+   does (V8 defines the switch, V-level work elects to use it). */
+[data-density="dense"] {
+  --wc-1: 2px;
+  --wc-2: 4px;
+  --wc-3: 8px;
+  --wc-4: 10px;
+  --wc-5: 16px;
+  --wc-fs-meta: 10px;
+  --wc-fs-ui: 11.5px;
+  --wc-fs-body: 12px;
 }
 
 * {
@@ -20,7 +54,7 @@ body {
   background: var(--vscode-editor-background);
   color: var(--vscode-editor-foreground);
   font-family: var(--vscode-font-family, ui-sans-serif, system-ui, sans-serif);
-  font-size: var(--vscode-font-size, 13px);
+  font-size: var(--wc-fs-body);
 }
 
 #app {
@@ -34,10 +68,11 @@ body {
 .phead {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 12px;
+  gap: var(--wc-1);
+  padding: var(--wc-2) var(--wc-3);
   border-bottom: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
+  font-size: var(--wc-fs-ui);
   flex: 0 0 auto;
 }
 
@@ -45,7 +80,7 @@ body {
 .phead .r2 {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--wc-2);
   flex-wrap: wrap;
 }
 
@@ -80,7 +115,7 @@ body {
 
 .seg {
   color: var(--vscode-descriptionForeground);
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
 }
 
 .seg.state {
@@ -103,21 +138,21 @@ body {
 .target {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: var(--wc-1);
+  font-size: var(--wc-fs-ui);
   font-weight: 600;
   color: var(--wc-accent);
   background: color-mix(in srgb, var(--wc-accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--wc-accent) 35%, transparent);
   border-radius: 999px;
-  padding: 1px 9px 1px 7px;
+  padding: 0 var(--wc-2);
   cursor: pointer;
 }
 
 .pchip {
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 0 var(--wc-2);
   border: 1px solid var(--vscode-panel-border);
   color: var(--vscode-descriptionForeground);
 }
@@ -127,43 +162,21 @@ body {
   border-color: color-mix(in srgb, var(--vscode-charts-purple) 40%, transparent);
 }
 
-/* Reserved for the P2 composer controls; harmless in P1. */
-.chipbtn {
-  font: inherit;
-  font-size: 12px;
-  color: var(--vscode-descriptionForeground);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 1px 7px;
-  cursor: pointer;
-}
-
-.chipbtn:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-.chipbtn:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
 /* ----------------------------------------------------- transcript + turns */
 
 .transcript {
   flex: 1 1 auto;
   overflow: auto;
-  padding: 14px 14px 6px;
+  padding: var(--wc-4) var(--wc-3) var(--wc-2);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--wc-4);
 }
 
 .turn {
   display: grid;
   grid-template-columns: 14px 1fr;
-  gap: 8px;
+  gap: var(--wc-2);
 }
 
 .rail {
@@ -185,12 +198,12 @@ body {
 .who {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: var(--wc-2);
+  font-size: var(--wc-fs-meta);
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--vscode-descriptionForeground);
-  margin: 0 0 4px;
+  margin: 0 0 var(--wc-1);
 }
 
 .who .av {
@@ -199,7 +212,7 @@ body {
   border-radius: 4px;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: var(--wc-fs-meta);
   font-family: var(--vscode-editor-font-family);
   font-weight: 700;
   background: var(--vscode-badge-background);
@@ -220,7 +233,7 @@ body {
 }
 
 .body p {
-  margin: 0 0 8px;
+  margin: 0 0 var(--wc-2);
 }
 
 .body p:last-child {
@@ -229,10 +242,10 @@ body {
 
 .body code {
   font-family: var(--vscode-editor-font-family);
-  font-size: 0.92em;
+  font-size: var(--wc-fs-code);
   background: var(--vscode-textCodeBlock-background);
   border-radius: 3px;
-  padding: 1px 4px;
+  padding: 0 var(--wc-1);
 }
 
 .body a {
@@ -243,12 +256,20 @@ body {
   color: var(--vscode-errorForeground);
 }
 
-/* An inbound peer message: a tinted card, so it reads as someone ELSE's words
-   (the `.who` line above it names and colours the sender). */
+/* A non-error notice: an L1 aside (a line, no box) so the class stops being a
+   no-op (V8; the moved lastError lands in `.body.error`, non-errors here). */
+.body.notice {
+  border-left: 2px solid var(--vscode-panel-border);
+  padding-left: var(--wc-2);
+  color: var(--vscode-descriptionForeground);
+}
+
+/* L2b RECESSED: a peer's message is someone ELSE's words — a fill + the radius,
+   no border (the `.who` line above names and colours the sender). */
 .body.peer {
   background: var(--vscode-textBlockQuote-background);
   border-radius: var(--wc-radius);
-  padding: 6px 10px;
+  padding: var(--wc-1) var(--wc-2);
 }
 
 .body.live::after {
@@ -266,33 +287,37 @@ body {
 
 /* ------------------------------------------------ folds: thinking + tool */
 
+/* L1 LINE: structure only. A 2px inset rule, NO box and NO fill. The fold is a
+   feature and stays; its chrome was the problem. */
 details.fold {
-  border: 1px solid var(--vscode-panel-border);
+  border: 0;
   border-left: 2px solid var(--vscode-panel-border);
-  border-radius: var(--wc-radius);
-  margin: 6px 0;
+  margin: var(--wc-1) 0;
 }
 
+/* The tool fold's rule is NEUTRAL (plan §1.5d): identity comes from the ⚙ glyph,
+   not from colour — so the accent stays reserved for "active now". */
 details.fold.tool {
-  border-left-color: var(--wc-accent);
+  border-left-color: var(--vscode-panel-border);
 }
 
 details.fold.tool.error {
   border-left-color: var(--vscode-errorForeground);
 }
 
+/* A thinking fold reads as structure, not a card: a dim rule instead of a fill. */
 details.fold.thinking {
-  background: var(--vscode-textBlockQuote-background);
+  border-left-color: color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
 }
 
 details.fold > summary {
   list-style: none;
   cursor: pointer;
-  padding: 5px 9px;
+  padding: var(--wc-1) var(--wc-2);
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
+  gap: var(--wc-2);
+  font-size: var(--wc-fs-ui);
 }
 
 details.fold > summary::-webkit-details-marker {
@@ -306,7 +331,7 @@ details.fold > summary:focus-visible {
 
 details.fold > summary .chev {
   color: var(--vscode-descriptionForeground);
-  font-size: 10px;
+  font-size: var(--wc-fs-meta);
   width: 9px;
 }
 
@@ -318,8 +343,9 @@ details.fold:not([open]) > summary .chev::before {
   content: "▸";
 }
 
+/* A tool name is NOT accent-coloured: a NEUTRAL foreground at weight 600 in mono. */
 .tname {
-  color: var(--wc-accent);
+  color: var(--vscode-foreground);
   font-family: var(--vscode-editor-font-family);
   font-weight: 600;
 }
@@ -335,7 +361,7 @@ details.fold:not([open]) > summary .chev::before {
 .tmeta {
   margin-left: auto;
   color: var(--vscode-descriptionForeground);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   font-family: var(--vscode-editor-font-family);
   white-space: nowrap;
 }
@@ -349,16 +375,17 @@ details.fold:not([open]) > summary .chev::before {
 }
 
 .fold .inner {
-  padding: 0 9px 9px 26px;
+  padding: 0 var(--wc-2) var(--wc-2) 22px;
 }
 
+/* L2b RECESSED: the tool console is a fill + the radius, no border (the `.out`). */
 .fold .tool-output {
   margin: 0;
-  padding: 8px 10px;
+  padding: var(--wc-2);
   background: var(--vscode-textCodeBlock-background);
   border-radius: var(--wc-radius);
   font-family: var(--vscode-editor-font-family);
-  font-size: 0.88em;
+  font-size: var(--wc-fs-code);
   white-space: pre-wrap;
   max-height: 220px;
   overflow: auto;
@@ -366,22 +393,23 @@ details.fold:not([open]) > summary .chev::before {
 
 /* ------------------------------------------------- code block with header */
 
+/* L2a BORDERED: a 1px hairline + the radius. */
 .code {
   border: 1px solid var(--vscode-panel-border);
   border-radius: var(--wc-radius);
   overflow: hidden;
-  margin: 8px 0;
+  margin: var(--wc-2) 0;
 }
 
 .code .chead {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px 4px 10px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-2);
   background: var(--vscode-textBlockQuote-background);
   border-bottom: 1px solid var(--vscode-panel-border);
   font-family: var(--vscode-editor-font-family);
-  font-size: 11.5px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
@@ -391,22 +419,23 @@ details.fold:not([open]) > summary .chev::before {
 
 .code .pre {
   margin: 0;
-  padding: 9px 10px;
+  padding: var(--wc-2);
   overflow-x: auto;
   background: var(--vscode-textCodeBlock-background);
   font-family: var(--vscode-editor-font-family);
-  font-size: 0.88em;
+  font-size: var(--wc-fs-code);
 }
 
-/* Reserved for the P4 code-block actions (Copy / Open diff). */
+/* The code card's action control. Its call site (a Copy button) is markup the
+   code card does not yet emit — V8 keeps the rules ready (see the report). */
 .mini {
   font: inherit;
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
   background: none;
   border: 1px solid var(--vscode-panel-border);
-  border-radius: 5px;
-  padding: 1px 7px;
+  border-radius: 4px;
+  padding: 0 var(--wc-1);
   cursor: pointer;
 }
 
@@ -417,9 +446,10 @@ details.fold:not([open]) > summary .chev::before {
 
 /* --------------------------------------------- empty / error state card */
 
+/* L2a BORDERED: the state card is a foreign object, so it earns a border. */
 .statecard {
   border: 1px solid var(--vscode-panel-border);
-  border-radius: 8px;
+  border-radius: var(--wc-radius);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -434,30 +464,30 @@ details.fold:not([open]) > summary .chev::before {
   align-items: center;
   justify-content: center;
   gap: 0;
-  padding: 18px;
+  padding: var(--wc-5) var(--wc-4);
   text-align: center;
 }
 
 .empty-title {
-  margin: 0 0 4px;
-  font-size: 1.02em;
+  margin: 0 0 var(--wc-1);
+  font-size: var(--wc-fs-body);
   color: var(--vscode-foreground);
 }
 
 .empty-sub {
   margin: 0;
   color: var(--vscode-descriptionForeground);
-  font-size: 0.92em;
+  font-size: var(--wc-fs-ui);
 }
 
 .statecard .sc-body .stderr {
-  margin: 10px 0 0;
-  padding: 8px;
+  margin: var(--wc-3) 0 0;
+  padding: var(--wc-2);
   border-radius: var(--wc-radius);
   background: var(--vscode-textCodeBlock-background);
   color: var(--vscode-errorForeground);
   font-family: var(--vscode-editor-font-family);
-  font-size: 11.5px;
+  font-size: var(--wc-fs-meta);
   text-align: left;
   white-space: pre-wrap;
   max-height: 120px;
@@ -483,20 +513,20 @@ details.fold:not([open]) > summary .chev::before {
 .composer {
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-panel-border);
-  padding: 9px 12px 11px;
+  padding: var(--wc-2) var(--wc-3) var(--wc-3);
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: var(--wc-2);
 }
 
 .ctx-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--wc-1);
 }
 
 /* The `/` command menu: a compact list ABOVE the input. The composer grows to hold
-   it, so there is no overlay to z-index against the transcript. */
+   it, so there is no overlay to z-index against the transcript. L2a BORDERED. */
 .cmdmenu {
   display: flex;
   flex-direction: column;
@@ -514,10 +544,10 @@ details.fold:not([open]) > summary .chev::before {
 .cmdmenu .cmd {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  padding: 4px 10px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-2);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
 }
 
 .cmdmenu .cmd.sel {
@@ -537,14 +567,14 @@ details.fold:not([open]) > summary .chev::before {
 
 .cmdmenu .cmd-arg {
   font-family: var(--vscode-editor-font-family);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
 .cmdmenu .cmd-help {
   margin-left: auto;
   color: var(--vscode-descriptionForeground);
-  font-size: 11.5px;
+  font-size: var(--wc-fs-meta);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -561,13 +591,13 @@ textarea#input {
   resize: none;
   min-height: 44px;
   max-height: 160px;
-  padding: 9px 10px;
+  padding: var(--wc-2);
   border-radius: var(--wc-radius);
   border: 1px solid var(--vscode-input-border);
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
   font-family: var(--vscode-editor-font-family);
-  font-size: 0.95em;
+  font-size: var(--wc-fs-ui);
   line-height: 1.45;
 }
 
@@ -583,7 +613,7 @@ textarea#input:focus {
 .ctoolbar {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--wc-1);
   flex-wrap: wrap;
 }
 
@@ -594,12 +624,12 @@ textarea#input:focus {
 /* The composer toolbar controls (mode/model ship in P2; `＋` / `/` are deferred). */
 .tool-btn {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
   color: var(--vscode-descriptionForeground);
   background: none;
   border: 1px solid transparent;
-  border-radius: 5px;
-  padding: 2px 8px;
+  border-radius: 4px;
+  padding: 0 var(--wc-2);
   cursor: pointer;
 }
 
@@ -610,15 +640,15 @@ textarea#input:focus {
 
 .hint {
   color: var(--vscode-descriptionForeground);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
 }
 
 .btn {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
   border: 0;
-  border-radius: 5px;
-  padding: 4px 11px;
+  border-radius: 4px;
+  padding: var(--wc-1) var(--wc-3);
   cursor: pointer;
   background: var(--vscode-button-secondaryBackground);
   color: var(--vscode-button-secondaryForeground);
@@ -647,20 +677,19 @@ textarea#input:focus {
   }
 }
 
-
 /* ------------------------------------------------ composer control states */
 
 .ctx {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--wc-1);
   font-family: var(--vscode-editor-font-family);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-foreground);
   background: var(--vscode-textCodeBlock-background);
   border: 1px solid var(--vscode-panel-border);
-  border-radius: 5px;
-  padding: 1px 4px 1px 7px;
+  border-radius: 4px;
+  padding: 0 var(--wc-1);
 }
 
 .ctx .mono {
@@ -672,8 +701,8 @@ textarea#input:focus {
   border: 0;
   color: var(--vscode-descriptionForeground);
   cursor: pointer;
-  font-size: 12px;
-  padding: 0 2px;
+  font-size: var(--wc-fs-ui);
+  padding: 0 var(--wc-1);
 }
 
 .ctx .x:hover {
@@ -706,28 +735,30 @@ textarea#input:focus {
 
 /* --------------------------------------------------- working group (P3) */
 
+/* Transient: V7 replaces this box with the working pill. V8 re-points its tokens
+   only; it deliberately does NOT redesign a surface another phase removes. */
 .group {
   border: 1px dashed var(--vscode-panel-border);
   border-radius: var(--wc-radius);
-  padding: 7px 9px;
-  margin: 6px 0;
+  padding: var(--wc-1) var(--wc-2);
+  margin: var(--wc-1) 0;
 }
 
 .group > .ghead {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 11px;
+  gap: var(--wc-2);
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
-  margin-bottom: 5px;
+  margin-bottom: var(--wc-1);
 }
 
 .running {
   display: flex;
   align-items: baseline;
-  gap: 7px;
-  font-size: 12px;
-  padding: 2px 0;
+  gap: var(--wc-2);
+  font-size: var(--wc-fs-ui);
+  padding: var(--wc-1) 0;
 }
 
 .running .who2 {
@@ -783,15 +814,16 @@ textarea#input:focus {
   background: color-mix(in srgb, var(--wc-accent) 24%, transparent);
 }
 
+/* L2a BORDERED: the ONE popover primitive (the target menu; V6 reuses it). */
 .menu {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + var(--wc-1));
   left: 0;
   z-index: 10;
   min-width: 160px;
   display: flex;
   flex-direction: column;
-  padding: 4px;
+  padding: var(--wc-1);
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
   border-radius: var(--wc-radius);
@@ -800,13 +832,13 @@ textarea#input:focus {
 
 .menu .item {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
   text-align: left;
   color: var(--vscode-foreground);
   background: none;
   border: 0;
   border-radius: 4px;
-  padding: 4px 8px;
+  padding: var(--wc-1) var(--wc-2);
   cursor: pointer;
 }
 
@@ -826,21 +858,27 @@ textarea#input:focus {
 
 /* -------------------------------------------- in-panel change review (P4) */
 
+/* L2a BORDERED: the change review is the one interactive, foreign object in the
+   transcript, so it carries an accent left rule AS A MODIFIER on its card. */
 .hunk {
   border: 1px solid var(--vscode-panel-border);
   border-radius: var(--wc-radius);
-  margin: 6px 0;
+  margin: var(--wc-2) 0;
   overflow: hidden;
+}
+
+.review .hunk {
+  border-left: 3px solid var(--wc-accent);
 }
 
 .hunk .hhead {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 9px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-2);
   background: var(--vscode-textBlockQuote-background);
   font-family: var(--vscode-editor-font-family);
-  font-size: 11.5px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
@@ -850,7 +888,7 @@ textarea#input:focus {
 
 .hunk .lines {
   font-family: var(--vscode-editor-font-family);
-  font-size: 12px;
+  font-size: var(--wc-fs-code);
 }
 
 .hunk .ln {
@@ -860,7 +898,7 @@ textarea#input:focus {
 
 .hunk .ln .gutter {
   text-align: right;
-  padding: 0 8px;
+  padding: 0 var(--wc-2);
   user-select: none;
   color: var(--vscode-descriptionForeground);
   opacity: 0.7;
@@ -868,7 +906,7 @@ textarea#input:focus {
 
 .hunk .ln .txt {
   white-space: pre-wrap;
-  padding: 0 8px;
+  padding: 0 var(--wc-2);
 }
 
 .hunk .ln.ctx .txt {
@@ -896,16 +934,16 @@ textarea#input:focus {
 .hunk .hactions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-2);
   border-top: 1px solid var(--vscode-panel-border);
 }
 
 .reviewbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 2px 2px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) 0 0;
 }
 
 .reviewbar .spacer {
@@ -913,7 +951,7 @@ textarea#input:focus {
 }
 
 .reviewbar .stat {
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
@@ -925,11 +963,11 @@ textarea#input:focus {
 .btn.link {
   background: none;
   color: var(--vscode-textLink-foreground);
-  padding: 4px 4px;
+  padding: var(--wc-1);
 }
 
 .reviewbar .badge {
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
 }
 
 /* The verdict ANNOTATES the block; it never un-renders the edit. */
@@ -956,16 +994,17 @@ textarea#input:focus {
 
 /* ---------------------------------------- bordered tables (v2, re-added) */
 
+/* L2a BORDERED: the markdown tables keep their hairlines, in card colours. */
 .body table {
   border-collapse: collapse;
-  margin: 8px 0;
-  font-size: 0.94em;
+  margin: var(--wc-2) 0;
+  font-size: var(--wc-fs-ui);
 }
 
 .body th,
 .body td {
   border: 1px solid var(--vscode-panel-border);
-  padding: 4px 10px;
+  padding: var(--wc-1) var(--wc-2);
   text-align: left;
 }
 
@@ -978,7 +1017,7 @@ textarea#input:focus {
 
 .fold .running-tag {
   color: var(--vscode-charts-yellow);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
 }
 
 /* ------------------------------------- the two-pane surface (rail + main) */
@@ -1004,9 +1043,9 @@ textarea#input:focus {
    class on `#side` is the whole state; the strip is always in the DOM, hidden by CSS. */
 .side-toggle {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
   line-height: 1;
-  padding: 1px 5px;
+  padding: 0 var(--wc-1);
   background: none;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -1030,7 +1069,7 @@ textarea#input:focus {
 
 .side.collapsed .side-head {
   justify-content: center;
-  padding: 8px 0 4px;
+  padding: var(--wc-2) 0 var(--wc-1);
 }
 
 .side.collapsed .side-title,
@@ -1047,17 +1086,17 @@ textarea#input:focus {
 .avatars {
   list-style: none;
   margin: 0;
-  padding: 2px 0 8px;
+  padding: var(--wc-1) 0 var(--wc-2);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: var(--wc-1);
 }
 
 .avatars .mav {
   width: 24px;
   height: 24px;
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
   padding: 0;
   cursor: pointer;
 }
@@ -1088,9 +1127,9 @@ textarea#input:focus {
 .side-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px 4px;
-  font-size: 11px;
+  gap: var(--wc-2);
+  padding: var(--wc-2) var(--wc-3) var(--wc-1);
+  font-size: var(--wc-fs-meta);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--vscode-descriptionForeground);
@@ -1110,9 +1149,9 @@ textarea#input:focus {
 .roster li {
   display: grid;
   grid-template-columns: 20px 1fr;
-  gap: 6px;
+  gap: var(--wc-2);
   align-items: center;
-  padding: 4px 10px 4px 12px;
+  padding: var(--wc-1) var(--wc-3) var(--wc-1) calc(var(--wc-3) - 2px);
   cursor: pointer;
   border-left: 2px solid transparent;
 }
@@ -1129,7 +1168,7 @@ textarea#input:focus {
 
 .roster .who {
   display: flex;
-  gap: 6px;
+  gap: var(--wc-2);
   align-items: baseline;
 }
 
@@ -1139,18 +1178,13 @@ textarea#input:focus {
 
 .roster .who .meta {
   color: var(--vscode-descriptionForeground);
-  font-size: 11px;
+  font-size: var(--wc-fs-meta);
 }
 
 .roster .act-line {
   grid-column: 2;
   color: var(--vscode-descriptionForeground);
-  font-size: 11.5px;
-}
-
-.glyph {
-  font-family: var(--vscode-editor-font-family);
-  font-weight: 700;
+  font-size: var(--wc-fs-meta);
 }
 
 .glyph.g-done {
@@ -1178,7 +1212,7 @@ textarea#input:focus {
   height: 18px;
   border-radius: 5px;
   font-family: var(--vscode-editor-font-family);
-  font-size: 10px;
+  font-size: var(--wc-fs-meta);
   font-weight: 700;
   background: color-mix(in srgb, var(--sw) 20%, transparent);
   color: var(--sw);
@@ -1214,9 +1248,9 @@ textarea#input:focus {
 .todo li {
   display: grid;
   grid-template-columns: 16px 1fr;
-  gap: 6px;
-  padding: 3px 10px;
-  font-size: 12px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-3);
+  font-size: var(--wc-fs-ui);
   align-items: baseline;
 }
 
@@ -1271,7 +1305,7 @@ textarea#input:focus {
   display: inline-flex;
   flex: 0 0 auto; /* NEVER shrink: a tall transcript must not crush this row's height */
   align-self: flex-start; /* a flex-column child would otherwise stretch full width */
-  margin: 6px 12px 2px;
+  margin: var(--wc-1) var(--wc-3);
   border: 1px solid var(--vscode-panel-border);
   border-radius: 999px;
   overflow: hidden;
@@ -1279,8 +1313,8 @@ textarea#input:focus {
 
 .modes button {
   font: inherit;
-  font-size: 11.5px;
-  padding: 2px 12px;
+  font-size: var(--wc-fs-ui);
+  padding: 0 var(--wc-3);
   cursor: pointer;
   background: none;
   border: 0;
@@ -1308,10 +1342,10 @@ textarea#input:focus {
   display: none;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: var(--wc-2);
+  padding: var(--wc-1) var(--wc-3);
   border-bottom: 1px solid var(--vscode-panel-border);
-  font-size: 12px;
+  font-size: var(--wc-fs-ui);
   color: var(--vscode-descriptionForeground);
 }
 
