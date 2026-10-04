@@ -190,6 +190,32 @@ body {
   color: var(--vscode-foreground);
 }
 
+/* The gauge form (V11): MONOCHROME — `▰` in the foreground, `▱` dim. The accent is
+   reserved for "active now", so the meter never takes it (§1.5(d)). */
+.meter .f {
+  color: var(--vscode-foreground);
+}
+
+.meter .e {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.45;
+}
+
+.meter b {
+  font-weight: 600;
+}
+
+/* The glyphs need the tracking; the text token does not. */
+.meter.gauge {
+  letter-spacing: 1px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.meter.gauge b {
+  letter-spacing: 0;
+  color: var(--vscode-foreground);
+}
+
 /* The `▾` disclosure button (draft `.more`) + its right-anchored popover. */
 .more-wrap {
   position: relative;

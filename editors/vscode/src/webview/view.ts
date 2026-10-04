@@ -56,16 +56,19 @@ export interface SpacerCell {
   kind: "spacer";
 }
 
-/** The context meter — the TEXT `ctx N`; the window is not on the wire (no gauge). */
+/** The context meter — the TEXT `ctx N`, or the gauge `▰▰▰▱▱ 42k / 200k` when the window is known. */
 export interface MeterCell {
   kind: "meter";
+  /** The plain numerator-only text (`ctx 42k`) — the form used when the window is unknown. */
   text: string;
+  /** The gauge parts, when the TARGET member's window is known (`▰▰▰▱▱ 42k / 200k`). */
+  gauge?: { filled: string; empty: string; text: string };
 }
 
 /** The `▾` disclosure (draft `.more`): session + model behind the ONE popover. */
 export interface MoreCell {
   kind: "more";
-  /** The popover rows, in order. Effort is OMITTED while the wire lacks it. */
+  /** The popover rows, in order: session · model · effort (each omitted when unknown). */
   rows: Array<{ key: string; value: string }>;
 }
 
@@ -80,6 +83,18 @@ export function formatTokens(n: number): string {
   const scaled = (value: number, suffix: string): string =>
     `${value < 10 ? Number(value.toFixed(1)) : Math.round(value)}${suffix}`;
   return n < 1_000_000 ? scaled(n / 1000, "k") : scaled(n / 1_000_000, "M");
+}
+
+/**
+ * The `▰▰▰▱▱` bar for `used` of `window`, `cells` wide (draft `.meter.gauge`). Pure.
+ * The ratio is CLAMPED to [0,1] (an over-run pins the bar full); a non-positive window
+ * paints all-empty rather than NaN. `▰` is the filled run, `▱` the empty one.
+ */
+export function gauge(used: number, window: number, cells = 5): string {
+  if (cells <= 0) return "";
+  const ratio = window > 0 && Number.isFinite(used) ? Math.min(1, Math.max(0, used / window)) : 0;
+  const filled = Math.round(ratio * cells);
+  return "▰".repeat(filled) + "▱".repeat(cells - filled);
 }
 
 /** The ROOT member — the merged transcript's identity (roster order, root first). Pure. */
@@ -125,10 +140,10 @@ function identityGlyph(
  *
  * In order: (1) the IDENTITY — the target's (Focus) or the root's (All) state glyph,
  * plus the target chip (Focus only; `chipHidden` in All); (2) the All/Focus `.seg`;
- * (3) a spacer; (4) the context meter as the TEXT `ctx N` (numerator only — the
- * window is NOT on the wire, so there is never a `▰▰▰▱▱ N / M` gauge); (5) the `▾`
- * disclosure, whose rows are the session id and the model (effort is omitted while
- * the wire lacks it). The state WORD survives only for starting/stopped/crashed, and
+ * (3) a spacer; (4) the context meter — the gauge `▰▰▰▱▱ 42k / 200k` (monochrome) when the
+ * TARGET member's window is known, else the numerator-only `ctx 42k`; (5) the `▾`
+ * disclosure, whose rows are the session id, the model, and the effort when known. The
+ * state WORD survives only for starting/stopped/crashed, and
  * a `crashed` session reads `✗` (never a recoloured spinner).
  */
 export function panelHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): PanelHeader {
@@ -149,12 +164,32 @@ export function panelHeader(state: RenderedState, session: PanelSessionInfo, mod
   ];
   // (4) The context meter — the TEXT `ctx N` (the window is not on the wire).
   if (typeof state.status.contextUsed === "number") {
-    cells.push({ kind: "meter", text: `ctx ${formatTokens(state.status.contextUsed)}` });
+    const used = state.status.contextUsed;
+    const window = member?.contextWindow;
+    const text = `ctx ${formatTokens(used)}`;
+    if (window !== undefined && window > 0) {
+      // The gauge does NOT exist without a window (never `▰▰▰▱▱ 42 / ?`).
+      const bar = gauge(used, window);
+      const cut = bar.indexOf("▱");
+      cells.push({
+        kind: "meter",
+        text,
+        gauge: {
+          filled: cut < 0 ? bar : bar.slice(0, cut),
+          empty: cut < 0 ? "" : bar.slice(cut),
+          text: `${formatTokens(used)} / ${formatTokens(window)}`,
+        },
+      });
+    } else {
+      cells.push({ kind: "meter", text });
+    }
   }
   // (5) The ▾ disclosure: session + model (the effort row is omitted while absent).
   const rows: Array<{ key: string; value: string }> = [{ key: "session", value: session.id ?? "no session yet" }];
   const model = member?.model;
   if (model !== undefined && model !== "") rows.push({ key: "model", value: model });
+  const effort = member?.effort;
+  if (effort !== undefined && effort !== "") rows.push({ key: "effort", value: effort });
   cells.push({ kind: "more", rows });
   return { cells };
 }

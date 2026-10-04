@@ -40,7 +40,7 @@ export interface RawFrame extends Envelope {
 /* ------------------------------------------------------------------ Request */
 
 /**
- * Inbound intent — the 14 request tags plus the `unknown` catch-all
+ * Inbound intent — the 15 request tags plus the `unknown` catch-all
  * (`Request::Unknown`, `#[serde(other)]`). Send the canonical tags; `steer`
  * and `follow_up` also deserialize (aliases) but are not emitted here.
  *
@@ -62,6 +62,8 @@ export type Request =
   | { type: "get_history" }
   | { type: "status" }
   | { type: "list_sessions" }
+  /** Ask the transport for the provider's model catalog (reply: `models`). */
+  | { type: "list_models" }
   | {
       type: "define";
       name?: string;
@@ -86,7 +88,7 @@ export interface TodoItem {
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
 /**
- * Everything a session streams or replies — **23 tags, no catch-all**
+ * Everything a session streams or replies — **24 tags, no catch-all**
  * (`event.rs`; the serde `other` fallback is deliberately absent). Forward
  * compatibility is the client's job: an unknown `type` is unknown JSON, not a
  * Rust error, so a client must IGNORE it, never throw.
@@ -122,6 +124,8 @@ export type AgentEvent =
   | { type: "history"; messages: AgentMessage[] }
   | { type: "status"; last_assistant_text: string | null }
   | { type: "sessions"; sessions: SessionInfo[] }
+  /** The provider's model catalog, answering a `list_models` request. */
+  | { type: "models"; models: string[] }
   /** The field is `worker`, NOT `id` — the envelope already carries `id`. */
   | { type: "spawned"; worker: string }
   /** The field is `todos`, NOT `id` — the envelope already carries `id`. */
@@ -169,9 +173,14 @@ export interface Usage {
 /** `protocol.rs` `MemberState` — the server-side liveness fact. */
 export type MemberState = "idle" | "running" | "done" | "failed";
 
-/** `protocol.rs` `SessionInfo` — `model` skips when absent, `state` defaults idle. */
+/** `protocol.rs` `SessionInfo` — `model`/`effort`/`context_window` skip when absent,
+ *  `state` defaults idle. */
 export interface SessionInfo {
   id: string;
   model?: string;
+  /** The session's effective reasoning effort; absent ⇒ unknown. */
+  effort?: string;
+  /** The context window in tokens — the gauge denominator; absent ⇒ unknown. */
+  context_window?: number;
   state: MemberState;
 }

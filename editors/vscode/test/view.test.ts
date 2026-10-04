@@ -17,6 +17,7 @@ import {
   emptySpec,
   foldOpen,
   formatTokens,
+  gauge,
   panelHeader,
   rosterRows,
   selectionRef,
@@ -91,7 +92,7 @@ test("formatTokens: a k/M suffix, `<1000` verbatim", () => {
   assert.equal(formatTokens(20_000_000), "20M");
 });
 
-test("panelHeader: the meter is the TEXT `ctx 42k` — no gauge, no denominator", () => {
+test("panelHeader: the meter is `ctx 42k` WITHOUT a window — no gauge, no denominator", () => {
   const { cells } = panelHeader(
     headerState("idle", { status: { running: false, planMode: false, contextUsed: 42_000 } }),
     session(),
@@ -100,11 +101,60 @@ test("panelHeader: the meter is the TEXT `ctx 42k` — no gauge, no denominator"
   const meter = cells.find((c) => c.kind === "meter");
   assert.equal(meter?.kind, "meter", "a meter cell is present");
   assert.equal(meter?.kind === "meter" ? meter.text : "", "ctx 42k");
+  assert.equal(meter?.kind === "meter" ? meter.gauge : "absent", undefined, "no gauge without a window");
   for (const cell of cells) {
     const text = cell.kind === "meter" ? cell.text : "";
     assert.ok(!text.includes("▰"), `no gauge glyph in "${text}"`);
     assert.ok(!text.includes("/"), `no denominator in "${text}"`);
   }
+});
+
+test("panelHeader: the meter becomes the GAUGE when the TARGET's window is known", () => {
+  const withWindow = (window: number): RenderedState =>
+    headerState("idle", {
+      members: [
+        { id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet", contextWindow: window },
+      ],
+      status: { running: false, planMode: false, contextUsed: 42_000 },
+    });
+  const meter = panelHeader(withWindow(200_000), session(), "focus").cells.find((c) => c.kind === "meter");
+  assert.equal(meter?.kind === "meter" ? meter.gauge?.text : "", "42k / 200k", "the denominator is formatted");
+  assert.equal(meter?.kind === "meter" ? meter.gauge?.filled : "", "▰", "42k of 200k fills ONE of five cells");
+  assert.equal(meter?.kind === "meter" ? meter.gauge?.empty : "", "▱▱▱▱");
+  // A window of 0 is "unknown": the numerator-only form (never `▰▰▰▱▱ 42 / ?`).
+  const zero = panelHeader(withWindow(0), session(), "focus").cells.find((c) => c.kind === "meter");
+  assert.equal(zero?.kind === "meter" ? zero.text : "", "ctx 42k");
+  assert.equal(zero?.kind === "meter" ? zero.gauge : "absent", undefined);
+});
+
+test("gauge: a clamped ratio; a non-positive window paints all-empty (never NaN)", () => {
+  assert.equal(gauge(0, 100), "▱▱▱▱▱");
+  assert.equal(gauge(50, 100), "▰▰▰▱▱");
+  assert.equal(gauge(100, 100), "▰▰▰▰▰");
+  assert.equal(gauge(150, 100), "▰▰▰▰▰", "an over-run clamps full");
+  assert.equal(gauge(10, 0), "▱▱▱▱▱", "no window ⇒ all-empty, never NaN");
+  assert.equal(gauge(-5, 100), "▱▱▱▱▱", "a negative count clamps to empty");
+  assert.equal(gauge(1, 2, 2), "▰▱");
+  assert.equal(gauge(1, 2, 0), "", "no cells ⇒ no bar");
+  assert.ok(!gauge(Number.NaN, 100).includes("NaN"), "never NaN");
+});
+
+test("reducer: a `sessions` push threads effort + context_window onto the member", () => {
+  const s = reduce(initialState(), {
+    type: "sessions",
+    sessions: [{ id: "root", model: "m1", effort: "high", context_window: 200_000, state: "idle" }],
+  });
+  assert.equal(s.members[0].effort, "high");
+  assert.equal(s.members[0].contextWindow, 200_000);
+  // Absent on the wire ⇒ undefined (older peer / unset).
+  const bare = reduce(initialState(), { type: "sessions", sessions: [{ id: "w1", state: "idle" }] });
+  assert.equal(bare.members[0].effort, undefined);
+  assert.equal(bare.members[0].contextWindow, undefined);
+});
+
+test("reducer: a `models` event fills the connection catalog", () => {
+  const s = reduce(initialState(), { type: "models", models: ["m1", "m2"] });
+  assert.deepEqual(s.models, ["m1", "m2"]);
 });
 
 test("panelHeader: the identity glyph — the member's liveness for `ready`, the FSM for terminal states", () => {
@@ -184,14 +234,28 @@ test("panelHeader: the seg cell carries the mode (the ONE All/Focus control)", (
   assert.equal(all?.kind === "seg" ? all.mode : null, "all");
 });
 
-test("panelHeader: the ▾ disclosure carries the session id + model (no effort row)", () => {
+test("panelHeader: the ▾ disclosure carries session + model + effort (each only when known)", () => {
   const more = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "more");
   assert.equal(more?.kind, "more");
-  assert.deepEqual(more?.kind === "more" ? more.rows : [], [
+  assert.deepEqual(
+    more?.kind === "more" ? more.rows : [],
+    [
+      { key: "session", value: "root-1" },
+      { key: "model", value: "sonnet" },
+    ],
+    "no effort ⇒ NO effort row (never an empty row)",
+  );
+  // Effort known ⇒ the row appears, in order (session · model · effort).
+  const withEffort = headerState("idle", {
+    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet", effort: "high" }],
+  });
+  const rows = panelHeader(withEffort, session(), "focus").cells.find((c) => c.kind === "more");
+  assert.deepEqual(rows?.kind === "more" ? rows.rows : [], [
     { key: "session", value: "root-1" },
     { key: "model", value: "sonnet" },
+    { key: "effort", value: "high" },
   ]);
-  // No session id ⇒ "no session yet"; no member ⇒ no model row at all.
+  // No session id ⇒ "no session yet"; no member ⇒ no model/effort rows at all.
   const bare = panelHeader(renderState(initialState(), null), session({ id: null }), "focus").cells.find(
     (c) => c.kind === "more",
   );

@@ -71,6 +71,10 @@ export interface SessionMember {
   /** `shortLabel(id)` — the raw short name, not the display label. */
   label: string;
   model?: string;
+  /** The member's effective reasoning effort; absent ⇒ unknown (`SessionInfo.effort`). */
+  effort?: string;
+  /** The member's context window in tokens — the gauge denominator; absent ⇒ unknown. */
+  contextWindow?: number;
   state: MemberState;
   isRoot: boolean;
   /**
@@ -117,6 +121,8 @@ export interface ViewState {
   /** Todos PER session id — the sidebar is authoritative (no transcript notice). */
   todos: Record<string, TodoItem[]>;
   status: ViewStatus;
+  /** The provider's model catalog (the `models` arm) — ONE value per connection. */
+  models: string[];
   /**
    * The next arrival ordinal for `pushBlocks` (the All view's merge key). One
    * counter across EVERY session, so blocks from different members interleave by
@@ -132,6 +138,7 @@ export function initialState(): ViewState {
     members: [],
     todos: {},
     status: { running: false, planMode: false },
+    models: [],
     seq: 0,
   };
 }
@@ -238,9 +245,15 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
     case "sessions":
       return { ...state, members: mergeMembers(state.members, event.sessions) };
 
+    case "models":
+      return { ...state, models: event.models };
+
     case "spawned": {
       if (state.members.some((m) => m.id === event.worker)) return state;
-      return { ...state, members: [...state.members, toMember(event.worker, undefined, "idle", false)] };
+      return {
+        ...state,
+        members: [...state.members, toMember(event.worker, undefined, undefined, undefined, "idle", false)],
+      };
     }
 
     case "message_received":
@@ -585,17 +598,37 @@ function setLiveAction(state: ViewState, session: string, action: string | undef
  */
 function mergeMembers(
   previous: SessionMember[],
-  incoming: Array<{ id: string; model?: string; state: MemberState }>,
+  incoming: Array<{
+    id: string;
+    model?: string;
+    effort?: string;
+    context_window?: number;
+    state: MemberState;
+  }>,
 ): SessionMember[] {
   return incoming.map((session, index) => {
-    const member = toMember(session.id, session.model, session.state, index === 0);
+    const member = toMember(
+      session.id,
+      session.model,
+      session.effort,
+      session.context_window,
+      session.state,
+      index === 0,
+    );
     const before = previous.find((m) => m.id === session.id);
     return before?.liveAction === undefined ? member : { ...member, liveAction: before.liveAction };
   });
 }
 
-function toMember(id: string, model: string | undefined, state: MemberState, isRoot: boolean): SessionMember {
-  return { id, label: shortLabel(id), model, state, isRoot };
+function toMember(
+  id: string,
+  model: string | undefined,
+  effort: string | undefined,
+  contextWindow: number | undefined,
+  state: MemberState,
+  isRoot: boolean,
+): SessionMember {
+  return { id, label: shortLabel(id), model, effort, contextWindow, state, isRoot };
 }
 
 function shortLabel(id: string): string {

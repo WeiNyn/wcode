@@ -203,10 +203,22 @@ function headerCellNode(cell: HeaderCell, state: RenderedState): HTMLElement {
     case "spacer":
       return el("span", "spacer");
     case "meter":
-      return el("span", "meter", cell.text);
+      return cell.gauge === undefined ? el("span", "meter", cell.text) : meterNode(cell.gauge);
     case "more":
       return moreNode(cell);
   }
+}
+
+/** The monochrome gauge (draft `.meter.gauge`): `▰▰▰` fg + `▱▱` dim + `42k / 200k`. */
+function meterNode(gauge: { filled: string; empty: string; text: string }): HTMLElement {
+  const node = el("span", "meter gauge");
+  node.setAttribute("role", "img");
+  node.setAttribute("aria-label", `Context: ${gauge.text} tokens used`);
+  node.appendChild(el("span", "f", gauge.filled));
+  node.appendChild(el("span", "e", gauge.empty));
+  node.appendChild(document.createTextNode(" "));
+  node.appendChild(el("b", null, gauge.text));
+  return node;
 }
 
 /** The identity (draft `.ident`): the state glyph, the target chip, the state word. */
