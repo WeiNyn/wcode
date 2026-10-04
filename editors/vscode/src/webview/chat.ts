@@ -74,7 +74,7 @@ app.innerHTML = [
   '        placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
   '      <div class="ctoolbar">',
   '        <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
-  '        <span class="seg" id="cmode" role="group" aria-label="Mode">',
+  '        <span class="seg" role="group" aria-label="Mode">',
   '          <button id="mAct" type="button">Act</button>',
   '          <button id="mPlan" type="button">Plan</button>',
   '        </span>',

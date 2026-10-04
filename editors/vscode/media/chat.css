@@ -349,10 +349,12 @@ body {
   color: var(--vscode-errorForeground);
 }
 
-/* A non-error notice: an L1 aside (a line, no box) so the class stops being a
-   no-op (V8; the moved lastError lands in `.body.error`, non-errors here). */
-.body.notice {
-  border-left: 2px solid var(--vscode-panel-border);
+/* L1: the ONE folded treatment for a non-prose aside. `.body.notice` and `.body.btw` are
+   host-rendered, non-interactive asides; they stay DISTINCT classes in the contract
+   (`classNames` picks one) and share this single rule (friction 5 — CSS-only fold). */
+.body.notice,
+.body.btw {
+  border-left: 2px solid var(--vscode-descriptionForeground);
   padding-left: var(--wc-2);
   color: var(--vscode-descriptionForeground);
 }

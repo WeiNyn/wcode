@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { initialState, reduce, type RosterItem, type SessionMember, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
@@ -27,6 +30,8 @@ import {
   type FoldOverride,
   type IdentCell,
 } from "../src/webview/view.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const idle = (): RenderedState => renderState(initialState());
 
@@ -324,6 +329,43 @@ test("classNames composes the content-element classes", () => {
   assert.equal(classNames({ kind: "notice", html: "", live: false }), "body notice");
   assert.equal(classNames({ kind: "error", html: "", live: false }), "body error");
   assert.equal(classNames({ kind: "btw", html: "", live: false }), "body btw");
+});
+
+/* ------------------------------------------------- V10: the notice row */
+
+test("a run failure renders ONCE — the `error` block (`.body.error`); the header stays clean", () => {
+  const state = reduce(
+    reduce(initialState(), { type: "agent_start" }, "root-1"),
+    { type: "error", message: "boom" },
+    "root-1",
+  );
+  assert.equal(state.status.lastError, "boom", "the reducer records the failure");
+  const rendered = renderState(state, "root-1");
+  // EXACTLY one error BLOCK: `status.lastError` is the record, the block is the render — ONE
+  // fact, not two rows.
+  const error = rendered.blocks.find((b) => b.kind === "error");
+  assert.notEqual(error, undefined, "the error block is present");
+  assert.equal(error === undefined ? "" : classNames(error), "body error", "it paints as `.body.error`");
+  assert.equal(rendered.blocks.filter((b) => b.kind === "error").length, 1, "rendered ONCE");
+  // …and NO header cell carries the failure (V6 removed the cell; it must not return).
+  const cells = panelHeader(rendered, session(), "focus").cells;
+  assert.ok(!cells.some((c) => "text" in c && c.text.includes("boom")), "the header holds no error cell");
+});
+
+test("the notice/btw fold: distinct classes, ONE L1 rule in the sheet (friction 5)", () => {
+  // Distinct in the CONTRACT — the renderer still chooses one.
+  assert.equal(classNames({ kind: "notice", html: "", live: false }), "body notice");
+  assert.equal(classNames({ kind: "btw", html: "", live: false }), "body btw");
+  // ONE treatment in the SHEET: a single rule lists both selectors, and `.body.btw` never
+  // opens a rule of its own (the fold is CSS-only).
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.body\.notice,\s*\n\.body\.btw\s*\{/, "notice + btw share ONE rule");
+  const withoutFold = css.replace(/\.body\.notice,\s*\n\.body\.btw\s*\{/, "/* fold */");
+  assert.ok(!/(^|\n)\s*\.body\.btw\s*\{/.test(withoutFold), "`.body.btw` has no rule of its own");
+  // …and it is the dim inset LINE (`--vscode-descriptionForeground`, a 2px left rule).
+  const rule = css.slice(css.indexOf(".body.notice,"));
+  assert.match(rule, /border-left: 2px solid var\(--vscode-descriptionForeground\)/);
+  assert.match(rule, /color: var\(--vscode-descriptionForeground\)/);
 });
 
 /* --------------------------------------------------------- parseToWebview */
