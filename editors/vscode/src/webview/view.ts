@@ -152,6 +152,8 @@ export interface Turn {
   role: "you" | "wcode" | "err";
   /** → the `.who` line (draft `.who.you` / `.who.wcode`). */
   who: { className: string; avatar: string; name: string };
+  /** The member's swatch, carried onto the turn so the rail takes its colour. */
+  swatch?: MemberSwatch;
   /** The blocks of this turn, in order. */
   blocks: RenderedBlock[];
 }
@@ -168,7 +170,8 @@ export interface Turn {
  */
 export function turns(
   blocks: RenderedBlock[],
-  memberOf?: (origin: string | undefined) => { name: string; isRoot: boolean } | undefined,
+  memberOf?: (origin: string | undefined) => TurnMember | undefined,
+  fallbackSwatch?: MemberSwatch,
 ): Turn[] {
   const grouped: Turn[] = [];
   for (const block of blocks) {
@@ -182,7 +185,12 @@ export function turns(
     if (opensYou || opensPeer || last === undefined || lastKind === "user" || lastKind === "peer" || startsRun) {
       // A peer block is labeled by its SENDER (`from`); everything else by its origin.
       const member = memberOf?.(opensPeer ? block.from : block.origin);
-      grouped.push({ role: opensYou ? "you" : "wcode", who: who(opensYou, member), blocks: [block] });
+      grouped.push({
+        role: opensYou ? "you" : "wcode",
+        who: who(opensYou, member, fallbackSwatch),
+        swatch: opensYou ? undefined : member?.swatch ?? fallbackSwatch,
+        blocks: [block],
+      });
     } else {
       last.blocks.push(block);
     }
@@ -195,13 +203,22 @@ export function turns(
   return grouped;
 }
 
-/** The `.who` line: you / the root's `❯` / a member's initial (All mode). Pure. */
-function who(isYou: boolean, member?: { name: string; isRoot: boolean }): Turn["who"] {
+/** The member a turn is labeled by — the All-mode resolver's answer, or Focus's fallback. */
+export interface TurnMember {
+  name: string;
+  isRoot: boolean;
+  swatch: MemberSwatch;
+}
+
+/** The `.who` line: you / the root's ❯ / a member's initial, tinted with its swatch. Pure. */
+function who(isYou: boolean, member: TurnMember | undefined, fallback?: MemberSwatch): Turn["who"] {
   if (isYou) return { className: "who you", avatar: "Y", name: "you" };
+  const swatch = member?.swatch ?? fallback;
+  const sw = swatch === undefined ? "" : ` sw-${swatch}`;
   if (member === undefined || member.isRoot) {
-    return { className: "who wcode", avatar: "❯", name: member?.name ?? "wcode" };
+    return { className: `who wcode${sw}`, avatar: "❯", name: member?.name ?? "wcode" };
   }
-  return { className: "who wcode", avatar: member.name.charAt(0).toUpperCase(), name: member.name };
+  return { className: `who wcode${sw}`, avatar: member.name.charAt(0).toUpperCase(), name: member.name };
 }
 
 /** One empty/error state card (draft States `.statecard`). */
@@ -406,4 +423,31 @@ export function toggleFold(overrides: FoldOverrides, callId: string, done: boole
   const next = new Map(overrides);
   next.set(callId, { done, open: !foldOpen(overrides, callId, done) });
   return next;
+}
+
+/* ------------------------------------------------------- member swatches (rail) */
+
+/**
+ * The rail's member palette: one identifiable colour per member, so a row (or a
+ * collapsed avatar) reads as a specific teammate at a glance. VS Code's own
+ * `charts-*` tokens, so it follows the host theme; the root always takes the first.
+ */
+export const MEMBER_SWATCHES = ["blue", "green", "orange", "purple", "yellow", "red"] as const;
+
+export type MemberSwatch = (typeof MEMBER_SWATCHES)[number];
+
+/**
+ * The colour for the member at roster `index`. Pure. The root takes the first
+ * (accent-adjacent blue — it is `members[0]`), then the palette cycles by POSITION:
+ * distinct for up to six members and stable across a render, unlike a hash that can
+ * collide. The swatch is IDENTITY; the row's border carries STATE (`--st`).
+ */
+export function memberSwatch(index: number, isRoot: boolean): MemberSwatch {
+  if (isRoot) return MEMBER_SWATCHES[0];
+  return MEMBER_SWATCHES[index % MEMBER_SWATCHES.length];
+}
+
+/** The avatar glyph: the root's `❯`, else the name's initial. Mirrors `who()`. Pure. */
+export function memberInitial(label: string, isRoot: boolean): string {
+  return isRoot ? "❯" : label.charAt(0).toUpperCase();
 }

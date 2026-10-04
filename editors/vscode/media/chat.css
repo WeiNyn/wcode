@@ -175,7 +175,7 @@ body {
 }
 
 .turn.wcode .rail {
-  border-left-color: var(--wc-accent);
+  border-left-color: var(--sw, var(--wc-accent));
 }
 
 .turn.err .rail {
@@ -207,8 +207,8 @@ body {
 }
 
 .who.wcode .av {
-  background: color-mix(in srgb, var(--wc-accent) 20%, transparent);
-  color: var(--wc-accent);
+  background: color-mix(in srgb, var(--sw, var(--wc-accent)) 20%, transparent);
+  color: var(--sw, var(--wc-accent));
 }
 
 .who .name {
@@ -683,12 +683,23 @@ textarea#input:focus {
   font-weight: 700;
 }
 
-.g-run {
+/* The state token, split in two: `--st` is always set (a member avatar rings with it),
+   while `color` is scoped to `.glyph` so a `.mav` keeps its swatch colour, whatever the
+   order of these rules. */
+.glyph.g-run {
   color: var(--wc-accent);
 }
 
-.g-idle {
+.glyph.g-idle {
   color: var(--vscode-descriptionForeground);
+}
+
+.g-run {
+  --st: var(--wc-accent);
+}
+
+.g-idle {
+  --st: var(--vscode-descriptionForeground);
 }
 
 /* ------------------------------------- interactive target chip + member menu */
@@ -918,7 +929,7 @@ textarea#input:focus {
 }
 
 .side {
-  flex: 0 0 220px;
+  flex: 0 0 190px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -926,6 +937,81 @@ textarea#input:focus {
   border-right: 1px solid var(--vscode-sideBar-border);
   overflow: auto;
   color: var(--vscode-sideBar-foreground);
+}
+
+/* The rail's collapse: a head button, and (collapsed) a strip of avatar chips. The
+   class on `#side` is the whole state; the strip is always in the DOM, hidden by CSS. */
+.side-toggle {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 5px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+
+.side-toggle:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
+.side-toggle:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.side.collapsed {
+  flex: 0 0 auto;
+}
+
+.side.collapsed .side-head {
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.side.collapsed .side-title,
+.side.collapsed .side-head .spacer,
+.side.collapsed .roster,
+.side.collapsed .tasks-sec {
+  display: none;
+}
+
+.side:not(.collapsed) .avatars {
+  display: none;
+}
+
+.avatars {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.avatars .mav {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.avatars .mav:hover {
+  background: color-mix(in srgb, var(--sw) 34%, transparent);
+}
+
+.avatars .mav:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.avatars .mav[aria-current="true"] {
+  box-shadow: 0 0 0 2px var(--vscode-list-activeSelectionBackground);
 }
 
 .main {
@@ -962,9 +1048,9 @@ textarea#input:focus {
 
 .roster li {
   display: grid;
-  grid-template-columns: 16px 1fr;
+  grid-template-columns: 20px 1fr;
   gap: 6px;
-  align-items: baseline;
+  align-items: center;
   padding: 4px 10px 4px 12px;
   cursor: pointer;
   border-left: 2px solid transparent;
@@ -1006,12 +1092,62 @@ textarea#input:focus {
   font-weight: 700;
 }
 
-.g-done {
+.glyph.g-done {
   color: var(--vscode-charts-green);
 }
 
-.g-err {
+.glyph.g-err {
   color: var(--vscode-errorForeground);
+}
+
+.g-done {
+  --st: var(--vscode-charts-green);
+}
+
+.g-err {
+  --st: var(--vscode-errorForeground);
+}
+
+/* A member avatar: the swatch is IDENTITY (the fill), the `--st` state colour is the
+   ring, the initial is the glyph. Shared by the rail row and the collapsed strip. */
+.mav {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 10px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--sw) 20%, transparent);
+  color: var(--sw);
+  border: 1.5px solid var(--st, var(--vscode-panel-border));
+  flex: 0 0 auto;
+}
+
+/* The member palette: VS Code's chart tokens, so a colour follows the theme. */
+.sw-blue {
+  --sw: var(--vscode-charts-blue);
+}
+
+.sw-green {
+  --sw: var(--vscode-charts-green);
+}
+
+.sw-orange {
+  --sw: var(--vscode-charts-orange);
+}
+
+.sw-purple {
+  --sw: var(--vscode-charts-purple);
+}
+
+.sw-yellow {
+  --sw: var(--vscode-charts-yellow);
+}
+
+.sw-red {
+  --sw: var(--vscode-charts-red);
 }
 
 .todo li {
@@ -1056,12 +1192,23 @@ textarea#input:focus {
     border-bottom: 1px solid var(--vscode-sideBar-border);
     max-height: 46%;
   }
+
+  /* Stacked, the collapsed strip reads as a horizontal avatar row, not a tall column. */
+  .side.collapsed {
+    max-height: none;
+  }
+
+  .side.collapsed .avatars {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
 }
 
 /* -------------------------------------------- the All / Focus control (v3) */
 
 .modes {
   display: inline-flex;
+  flex: 0 0 auto; /* NEVER shrink: a tall transcript must not crush this row's height */
   align-self: flex-start; /* a flex-column child would otherwise stretch full width */
   margin: 6px 12px 2px;
   border: 1px solid var(--vscode-panel-border);
@@ -1098,6 +1245,7 @@ textarea#input:focus {
 
 .focusbar {
   display: none;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;

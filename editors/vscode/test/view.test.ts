@@ -18,6 +18,9 @@ import {
   toggleFold,
   turns,
   workingGroup,
+  memberInitial,
+  memberSwatch,
+  MEMBER_SWATCHES,
   type FoldOverride,
 } from "../src/webview/view.ts";
 
@@ -443,16 +446,17 @@ test("turns: WITH a resolver (All), a non-user turn is labeled by its origin mem
     { kind: "assistant", html: "", live: false, origin: "agent:w1" },
     { kind: "tool", html: "", live: false, origin: "agent:w1" },
   ];
-  const t = turns(blocks, (origin) => (origin === "agent:w1" ? { name: "explorer", isRoot: false } : undefined));
+  const t = turns(blocks, (origin) => (origin === "agent:w1" ? { name: "explorer", isRoot: false, swatch: "green" } : undefined));
   assert.equal(t.length, 1, "one contiguous member run");
   assert.equal(t[0].who.name, "explorer");
   assert.equal(t[0].who.avatar, "E");
-  assert.equal(t[0].who.className, "who wcode");
+  assert.equal(t[0].who.className, "who wcode sw-green", "the turn carries the member swatch");
+  assert.equal(t[0].swatch, "green");
 
   // A1/R1: a ROOT origin keeps the `❯` avatar (the resolver carries `isRoot`).
   const rootTurn = turns(
     [{ kind: "assistant", html: "", live: false, origin: "root-1" }],
-    (o) => (o === "root-1" ? { name: "orchestrator", isRoot: true } : undefined),
+    (o) => (o === "root-1" ? { name: "orchestrator", isRoot: true, swatch: "blue" } : undefined),
   );
   assert.equal(rootTurn[0].who.avatar, "❯");
   assert.equal(rootTurn[0].who.name, "orchestrator");
@@ -463,12 +467,68 @@ test("turns: an ORIGIN change starts a NEW turn (mixed-origin adjacency)", () =>
     { kind: "assistant", html: "", live: false, origin: "agent:w1" },
     { kind: "assistant", html: "", live: false, origin: "agent:w2" }, // NO user text between
   ];
-  const members: Record<string, { name: string; isRoot: boolean }> = {
-    "agent:w1": { name: "explorer", isRoot: false },
-    "agent:w2": { name: "developer", isRoot: false },
+  const members: Record<string, { name: string; isRoot: boolean; swatch: "green" | "orange" }> = {
+    "agent:w1": { name: "explorer", isRoot: false, swatch: "green" },
+    "agent:w2": { name: "developer", isRoot: false, swatch: "orange" },
   };
   const t = turns(blocks, (origin) => (origin === undefined ? undefined : members[origin]));
   assert.equal(t.length, 2, "TWO turns, one per origin — NOT one collapsed turn");
   assert.equal(t[0].who.name, "explorer");
   assert.equal(t[1].who.name, "developer");
+});
+
+test("memberSwatch: the root always takes the first swatch", () => {
+  assert.equal(memberSwatch(0, true), MEMBER_SWATCHES[0]);
+  assert.equal(memberSwatch(3, true), MEMBER_SWATCHES[0], "the root ignores its index");
+});
+
+test("memberSwatch: non-root members cycle the palette by position", () => {
+  assert.equal(memberSwatch(0, false), MEMBER_SWATCHES[0]);
+  assert.equal(memberSwatch(1, false), MEMBER_SWATCHES[1]);
+  assert.equal(memberSwatch(2, false), MEMBER_SWATCHES[2]);
+});
+
+test("memberSwatch: adjacent members differ, and the palette wraps", () => {
+  const n = MEMBER_SWATCHES.length;
+  // Every member in the first lap is a DIFFERENT colour — the whole point of the rail.
+  const lap = Array.from({ length: n }, (_, i) => memberSwatch(i, false));
+  assert.equal(new Set(lap).size, n, "no repeats within one lap");
+  // Past the palette it wraps back to the first colour (a collision only past six members).
+  assert.equal(memberSwatch(n, false), MEMBER_SWATCHES[0]);
+  assert.equal(memberSwatch(n + 1, false), MEMBER_SWATCHES[1]);
+});
+
+test("memberInitial: the root reads ❯, a member its initial (upper-cased)", () => {
+  assert.equal(memberInitial("orchestrator", true), "❯");
+  assert.equal(memberInitial("scout", false), "S");
+  assert.equal(memberInitial("explorer", false), "E");
+  assert.equal(memberInitial("Developer", false), "D", "already upper-cased is unchanged");
+});
+
+test("turns: a peer block opens its OWN turn, labeled by its sender", () => {
+  const blocks: RenderedBlock[] = [
+    { kind: "assistant", html: "", live: false, origin: "root-1" },
+    { kind: "peer", html: "found 3 issues", live: false, from: "agent:explorer" },
+    { kind: "assistant", html: "", live: false, origin: "root-1" },
+  ];
+  const resolve = (id: string | undefined) =>
+    id === "root-1"
+      ? { name: "orchestrator", isRoot: true, swatch: "blue" as const }
+      : id === "agent:explorer"
+        ? { name: "explorer", isRoot: false, swatch: "green" as const }
+        : undefined;
+  const t = turns(blocks, resolve);
+  assert.equal(t.length, 3, "the peer message is its own turn");
+  assert.equal(t[1].who.name, "explorer", "labeled by the SENDER, never 'you'");
+  assert.equal(t[1].who.avatar, "E");
+  assert.equal(t[1].who.className, "who wcode sw-green");
+  assert.equal(t[1].swatch, "green");
+  assert.equal(t[1].blocks[0].kind, "peer");
+});
+
+test("turns: the Focus fallback swatch tints a single member's turns", () => {
+  const t = turns([{ kind: "assistant", html: "", live: false }], undefined, "orange");
+  assert.equal(t[0].who.className, "who wcode sw-orange");
+  assert.equal(t[0].swatch, "orange");
+  assert.equal(t[0].who.name, "wcode", "Focus still labels the assistant turn 'wcode'");
 });

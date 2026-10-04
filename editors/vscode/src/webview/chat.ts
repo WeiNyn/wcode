@@ -25,6 +25,9 @@ import {
   emptyKind,
   emptySpec,
   foldOpen,
+  MEMBER_SWATCHES,
+  memberInitial,
+  memberSwatch,
   panelHeader,
   selectionRef,
   toggleFold,
@@ -32,7 +35,9 @@ import {
   workingGroup,
   type FoldOverrides,
   type HeaderCell,
+  type MemberSwatch,
   type Turn,
+  type TurnMember,
   type WorkingGroup,
 } from "./view.ts";
 
@@ -116,6 +121,10 @@ let menuOpen = false;
 let activeIndex = 0;
 /** The header's cell+menu signature; a matching snapshot skips the rebuild (B1). */
 let headerKey: string | null = null;
+/** Is the team rail collapsed to its avatar strip? (webview-local view state). */
+let railCollapsed = false;
+/** The rail's team+tasks+target signature; a matching snapshot skips the rebuild. */
+let railsKey: string | null = null;
 
 /* ----------------------------------------------------------------- utilities */
 
@@ -444,13 +453,17 @@ function toolMeta(tool: RenderedTool): HTMLElement | null {
     }
   } else {
     if (hasStat) meta.appendChild(document.createTextNode(" · "));
+    // The tool row's ONE running indicator (right-aligned `.tmeta`, the same slot
+    // that carries `+N −M · 38ms` once done); `.tsum` above never repeats it.
     meta.appendChild(el("span", "running-tag", "running…"));
   }
   return meta.childNodes.length > 0 ? meta : null;
 }
 
 function renderTurn(turn: Turn): HTMLElement {
-  const wrap = el("div", `turn ${turn.role}`);
+  // The swatch rides the WRAPPER, so the rail (a sibling of the content) takes it too.
+  const sw = turn.swatch === undefined ? "" : ` sw-${turn.swatch}`;
+  const wrap = el("div", `turn ${turn.role}${sw}`);
   const rail = el("div", "rail");
   rail.setAttribute("aria-hidden", "true");
   wrap.appendChild(rail);
@@ -506,7 +519,7 @@ function render(snapshot: ToWebview): void {
     transcriptEl.appendChild(renderStateCard(state, session));
   } else {
     const member = snapshot.mode === "all" ? memberOf(state) : undefined;
-    for (const turn of turns(state.blocks, member)) transcriptEl.appendChild(renderTurn(turn));
+    for (const turn of turns(state.blocks, member, targetSwatch(state))) transcriptEl.appendChild(renderTurn(turn));
     // The working group is a transcript-TAIL region, NOT nested in a turn: it is
     // LIVE roster state (from `members`), not per-turn block data.
     const group = workingGroup(state.members, state.target?.id ?? null);
@@ -534,15 +547,31 @@ function renderRibbon(state: RenderedState, mode: ViewMode): void {
   ribbonEl.appendChild(showAll);
 }
 
-/** Resolve a block's `origin` to the member that labels its turn (All mode). */
-function memberOf(state: RenderedState): (origin: string | undefined) => { name: string; isRoot: boolean } | undefined {
+/** Resolve a block's `origin` (or a peer's `from`) to the member that labels its turn. */
+function memberOf(state: RenderedState): (origin: string | undefined) => TurnMember | undefined {
   return (origin) => {
     if (origin === undefined) return undefined;
-    const member = state.members.find((m) => m.id === origin);
-    return member === undefined
-      ? undefined
-      : { name: member.isRoot ? "orchestrator" : member.label, isRoot: member.isRoot };
+    const index = state.members.findIndex((m) => m.id === origin);
+    if (index < 0) {
+      // Not in the roster (a peer that has since left): name it by its id, uncoloured.
+      const name = origin.startsWith("agent:") ? origin.slice("agent:".length) : origin;
+      return { name, isRoot: false, swatch: MEMBER_SWATCHES[0] };
+    }
+    const member = state.members[index];
+    return {
+      name: member.isRoot ? "orchestrator" : member.label,
+      isRoot: member.isRoot,
+      swatch: memberSwatch(index, member.isRoot),
+    };
   };
+}
+
+/** The TARGET's swatch: Focus mode shows ONE member, so every turn takes its colour. */
+function targetSwatch(state: RenderedState): MemberSwatch | undefined {
+  const id = state.target?.id;
+  if (id === undefined) return undefined;
+  const index = state.members.findIndex((m) => m.id === id);
+  return index < 0 ? undefined : memberSwatch(index, state.members[index].isRoot);
 }
 
 /* ---------------------------------------------------------------- composer */
@@ -587,22 +616,74 @@ function renderRails(state: RenderedState): void {
   // The rail is DURABLE: the roster + the ROOT session's plan (the OVERALL plan, NOT the
   // shown member's) — `state.todos` is the root's (render.ts).
   const rails = sidebarRails(state.members, state.todos);
+  const targetId = state.target?.id ?? null;
+  // The rail changes only when the roster / todos / target change — NOT on every
+  // streamed token. The signature keeps the SAME DOM (so a collapse toggle keeps its
+  // focus) while a live action still repaints.
+  const key = JSON.stringify([rails.team, rails.tasks, targetId]);
+  if (key === railsKey) return;
+  railsKey = key;
   sideEl.textContent = "";
-  sideEl.appendChild(teamSection(rails.team, state.target?.id ?? null));
+  sideEl.appendChild(teamSection(rails.team, targetId));
   if (rails.tasks.rows.length > 0) sideEl.appendChild(tasksSection(rails.tasks));
+  applyCollapsed();
+}
+
+/** The rail's collapse control, in the Team head. Its glyph/label/flags are set by
+ *  `applyCollapsed`, which also runs after every rebuild. */
+function sideToggle(): HTMLElement {
+  const btn = el("button", "side-toggle");
+  btn.setAttribute("type", "button");
+  btn.addEventListener("click", () => {
+    railCollapsed = !railCollapsed;
+    applyCollapsed();
+  });
+  return btn;
+}
+
+/** Reflect `railCollapsed` on the rail. The class on `#side` drives the CSS; every
+ *  toggle button keeps its glyph/label/`aria-expanded` in step. Idempotent, so it
+ *  is safe to call after a rebuild. */
+function applyCollapsed(): void {
+  sideEl.classList.toggle("collapsed", railCollapsed);
+  sideEl.querySelectorAll<HTMLElement>(".side-toggle").forEach((btn) => {
+    btn.textContent = railCollapsed ? "»" : "«";
+    btn.title = railCollapsed ? "Expand the team rail" : "Collapse the team rail";
+    btn.setAttribute("aria-label", btn.title);
+    btn.setAttribute("aria-expanded", railCollapsed ? "false" : "true");
+  });
+}
+
+/** A member avatar: the swatch is IDENTITY (`--sw`, the fill), the `g-*` class is
+ *  STATE (`--st`, the border), the initial is the glyph. A row avatar is decorative
+ *  (`<span>`, aria-hidden); a strip chip is a `<button>`. */
+function memberAvatar(row: RosterItem, index: number, interactive: boolean): HTMLElement {
+  const cls = ["mav", `sw-${memberSwatch(index, row.isRoot)}`, memberGlyph(row.state).className];
+  const initial = memberInitial(row.label, row.isRoot);
+  if (!interactive) {
+    const span = el("span", cls.join(" "), initial);
+    span.setAttribute("aria-hidden", "true");
+    return span;
+  }
+  const btn = el("button", cls.join(" "), initial);
+  btn.setAttribute("type", "button");
+  btn.title = `${row.label} · ${row.liveAction ?? row.state}`;
+  btn.setAttribute("aria-label", `Focus ${btn.title}`);
+  return btn;
 }
 
 function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
-  const box = el("div", null);
+  const box = el("div", "sec team-sec");
   const head = el("div", "side-head");
-  head.appendChild(el("span", null, "Team"));
+  head.appendChild(el("span", "side-title", "Team"));
   head.appendChild(el("span", "spacer"));
+  head.appendChild(sideToggle());
   box.appendChild(head);
+
   const list = el("ul", "roster");
-  for (const row of rows) {
-    const glyph = memberGlyph(row.state);
+  rows.forEach((row, index) => {
     const item = el("li", row.id === targetId ? "sel" : null);
-    item.appendChild(el("span", `glyph ${glyph.className}`, glyph.glyph));
+    item.appendChild(memberAvatar(row, index, false));
     const who = el("span", "who");
     who.appendChild(el("b", null, row.label));
     who.appendChild(el("span", "meta", row.model ?? (row.isRoot ? "root" : "")));
@@ -611,13 +692,26 @@ function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
     // A rail row click RETARGETS — the same P3 path the header chip's menu uses.
     item.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
     list.appendChild(item);
-  }
+  });
   box.appendChild(list);
+
+  // The COLLAPSED form: the same members as a strip of avatar chips. The fill is the
+  // member's swatch (identity), the ring is the state colour — legible at ~30px wide.
+  const strip = el("ul", "avatars");
+  rows.forEach((row, index) => {
+    const cell = el("li", null);
+    const chip = memberAvatar(row, index, true);
+    chip.setAttribute("aria-current", row.id === targetId ? "true" : "false");
+    chip.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
+    cell.appendChild(chip);
+    strip.appendChild(cell);
+  });
+  box.appendChild(strip);
   return box;
 }
 
 function tasksSection(tasks: SidebarRails["tasks"]): HTMLElement {
-  const box = el("div", null);
+  const box = el("div", "sec tasks-sec");
   const head = el("div", "side-head");
   head.appendChild(el("span", null, "Tasks"));
   head.appendChild(el("span", "spacer"));
