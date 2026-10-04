@@ -35,6 +35,10 @@ export interface ToolBlock {
   diff?: string;
   path?: string;
   durationMs?: number;
+  /** The call's recognizable arg (`callTarget`, clipped to 40) — the row's
+   *  `⚙ name  <target>`. ABSENT on a hydrated history row: a `tool_result`
+   *  carries no `arguments` (`seedFromHistory`). */
+  target?: string;
 }
 
 /** A transcript entry. `live` marks the one streaming assistant block. */
@@ -165,7 +169,7 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
       const blocks = blocksOf(state, session);
       const started = setBlocks(state, session, [
         ...blocks,
-        { kind: "tool", tool: { callId: event.call_id, name: event.name, output: "", done: false, isError: false } },
+        { kind: "tool", tool: { callId: event.call_id, name: event.name, output: "", done: false, isError: false, target: callTarget(blocks, event.call_id) } },
       ]);
       // The roster row's dim right-hand text, from the live stream — cleared on
       // `agent_end`, so a finished member falls back to its `MemberState`.

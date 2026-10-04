@@ -337,7 +337,12 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   const summary = el("summary", null);
   summary.appendChild(el("span", "chev"));
   summary.appendChild(el("span", "tname", `⚙ ${tool.name}`));
-  summary.appendChild(el("span", "tsum", tool.summary));
+  // `.tsum` is the TARGET (the draft's `⚙ edit` + `src/panel.ts`), falling back to
+  // the output summary (`tool.summary`) for a row with no target — a history row, or
+  // a call with no recognizable arg. Omit the span when both are empty (exact TUI
+  // parity — never an empty `<span class="tsum">`).
+  const tsum = tool.target ?? tool.summary;
+  if (tsum !== "") summary.appendChild(el("span", "tsum", tsum));
   const meta = toolMeta(tool);
   if (meta !== null) summary.appendChild(meta);
   // We drive the fold from the override map (so it survives a stream re-render):

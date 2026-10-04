@@ -1,0 +1,7 @@
+{"v":1,"id":0,"session":"root","type":"agent_start"}
+{"v":1,"id":0,"session":"root","type":"turn_start"}
+{"v":1,"id":0,"session":"root","type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":""}],"stop_reason":"tool_use"}}
+{"v":1,"id":0,"session":"root","type":"message_end","message":{"role":"assistant","content":[{"type":"tool_call","id":"t1","name":"edit","arguments":{"path":"src/panel.ts"}}],"stop_reason":"tool_use"}}
+{"v":1,"id":0,"session":"root","type":"tool_execution_start","call_id":"t1","name":"edit"}
+{"v":1,"id":0,"session":"root","type":"tool_execution_end","call_id":"t1","name":"edit","output":"","is_error":false,"path":"src/panel.ts","duration_ms":38}
+{"v":1,"id":0,"session":"root","type":"agent_end"}

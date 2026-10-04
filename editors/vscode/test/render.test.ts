@@ -79,10 +79,10 @@ test("an assistant's raw HTML is escaped by markdown-it (html: false)", () => {
   assert.match(block.html, /&lt;b&gt;/);
 });
 
-test("toolSummary clips, and names running / error", () => {
+test("toolSummary clips output, names error, and is empty while running with no content", () => {
   assert.equal(
     toolSummary({ callId: "c", name: "n", output: "", done: false, isError: false }),
-    "running…",
+    "",
   );
   assert.equal(
     toolSummary({ callId: "c", name: "n", output: "boom", done: true, isError: true }),
@@ -98,15 +98,15 @@ test("escapeHtml covers the four dangerous characters", () => {
   assert.equal(escapeHtml('&<>"'), "&amp;&lt;&gt;&quot;");
 });
 
-test("a thinking block renders as the draft's folded `thought` row", () => {
+test("a thinking block renders as the draft's folded `thinking` row", () => {
   const block = renderBlock({
     kind: "assistant",
     content: [{ type: "thinking", text: "weighing it" }],
   });
-  assert.match(block.html, /<details class="fold thought">/);
-  assert.match(block.html, /<span class="tname">thought<\/span>/);
+  assert.match(block.html, /<details class="fold thinking">/);
+  assert.match(block.html, /<span class="tname">thinking<\/span>/);
   assert.match(block.html, /weighing it/);
-  assert.doesNotMatch(block.html, /class="thinking"/, "the old fold class is gone");
+  assert.match(block.html, /class="fold thinking"/, "the renamed fold class is present");
 });
 
 test("a fenced code block renders as a titled `.code` card", () => {
@@ -126,7 +126,7 @@ test("a live assistant block's thinking fold is open; a settled one is not", () 
     live: true,
     content: [{ type: "thinking", text: "weighing options" }],
   });
-  assert.match(live.html, /<details class="fold thought" open>/);
+  assert.match(live.html, /<details class="fold thinking" open>/);
 
   const done = renderBlock({
     kind: "assistant",
@@ -134,7 +134,7 @@ test("a live assistant block's thinking fold is open; a settled one is not", () 
     content: [{ type: "thinking", text: "weighing options" }],
   });
   assert.doesNotMatch(done.html, / open>/);
-  assert.match(done.html, /<details class="fold thought">/);
+  assert.match(done.html, /<details class="fold thinking">/);
 });
 test("renderMerged concatenates per-session blocks in ROSTER order, tagged by origin", () => {
   const members: SessionMember[] = [

@@ -34,6 +34,9 @@ export interface RenderedTool {
    * there is no diff (mirrors the `hasDiff` gate).
    */
   diff?: string;
+  /** `ToolBlock.target` — the row's `⚙ name  <target>`. Absent on a history row
+   *  (or a call with no recognizable arg). */
+  target?: string;
 }
 
 /** One transcript block, pre-rendered. */
@@ -115,11 +118,11 @@ export function renderBlock(block: Block): RenderedBlock {
 
 /** The collapsed one-liner for a tool call. Pure. */
 export function toolSummary(tool: ToolBlock): string {
-  if (!tool.done) return "running…";
   if (tool.isError) return "error";
   const firstLine = tool.output.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
   if (firstLine !== "") return clip(firstLine, 72);
-  return tool.path !== undefined && tool.path !== "" ? tool.path : "done";
+  if (tool.path !== undefined && tool.path !== "") return tool.path;
+  return tool.done ? "done" : "";
 }
 
 /** Escape text for safe insertion into HTML. Pure. */
@@ -142,11 +145,13 @@ function renderContent(content: ContentBlock[], live: boolean): string {
         break;
       case "thinking":
         parts.push(
-          `<details class="fold thought"${live ? " open" : ""}><summary><span class="chev"></span><span class="tname">thought</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
+          `<details class="fold thinking"${live ? " open" : ""}><summary><span class="chev"></span><span class="tname">thinking</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
         );
         break;
+      // A `tool_call` content block renders as NOTHING (TUI parity:
+      // crates/wcode-tui/src/ui.rs:559 `ContentBlock::ToolCall { .. } => {}`); the
+      // tool's own `details.fold.tool` row (chat.ts `renderToolFold`) carries the call.
       case "tool_call":
-        parts.push(`<div class="tool-call">⚙ ${escapeHtml(block.name)}</div>`);
         break;
     }
   }
@@ -167,6 +172,7 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
     durationMs: tool.durationMs,
     hasDiff: typeof tool.diff === "string" && tool.diff !== "",
     diff: tool.diff,
+    target: tool.target,
   };
 }
 

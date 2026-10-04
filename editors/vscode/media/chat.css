@@ -273,7 +273,7 @@ details.fold.tool.error {
   border-left-color: var(--vscode-errorForeground);
 }
 
-details.fold.thought {
+details.fold.thinking {
   background: var(--vscode-textBlockQuote-background);
 }
 
