@@ -23,7 +23,7 @@ import type {
   TodoStatus,
 } from "./protocol.ts";
 
-export type BlockKind = "user" | "assistant" | "notice" | "error" | "btw" | "tool";
+export type BlockKind = "user" | "assistant" | "peer" | "notice" | "error" | "btw" | "tool";
 
 /** One tool invocation, keyed by `call_id` (better than the TUI's last-block). */
 export interface ToolBlock {
@@ -44,10 +44,19 @@ export interface ToolBlock {
 /** A transcript entry. `live` marks the one streaming assistant block. */
 export interface Block {
   kind: BlockKind;
-  /** user / notice / error / btw */
+  /** user / peer / notice / error / btw */
   text?: string;
-  /** an inter-agent `message_received` sender */
+  /**
+   * A peer's id (`agent:<name>`) — the sender of an inbound A2A message, on a
+   * `peer` block or a `notice`. The All view labels the turn with it.
+   */
   from?: string;
+  /**
+   * Arrival order, for the All view's merge. Assigned by `pushBlocks`; hydrated
+   * history gets its seqs first so it sorts before everything that streamed live.
+   * Optional because a hand-built block (a test) needs no order.
+   */
+  seq?: number;
   /** assistant — text + thinking interleaved */
   content?: ContentBlock[];
   /** tool */
@@ -108,6 +117,12 @@ export interface ViewState {
   /** Todos PER session id — the sidebar is authoritative (no transcript notice). */
   todos: Record<string, TodoItem[]>;
   status: ViewStatus;
+  /**
+   * The next arrival ordinal for `pushBlocks` (the All view's merge key). One
+   * counter across EVERY session, so blocks from different members interleave by
+   * the order the client saw them — the only ordering signal on the wire.
+   */
+  seq: number;
 }
 
 export function initialState(): ViewState {
@@ -117,6 +132,7 @@ export function initialState(): ViewState {
     members: [],
     todos: {},
     status: { running: false, planMode: false },
+    seq: 0,
   };
 }
 
@@ -136,10 +152,7 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
     case "message_start":
       // Only an assistant opens a live block; a user echo is ignored (app.rs).
       if (event.message.role !== "assistant") return state;
-      return setBlocks(state, session, [
-        ...blocksOf(state, session),
-        { kind: "assistant", content: event.message.content, live: true },
-      ]);
+      return pushBlocks(state, session, [{ kind: "assistant", content: event.message.content, live: true }]);
 
     case "message_update": {
       if (event.message.role !== "assistant") return state;
@@ -167,9 +180,18 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
 
     case "tool_execution_start": {
       const blocks = blocksOf(state, session);
-      const started = setBlocks(state, session, [
-        ...blocks,
-        { kind: "tool", tool: { callId: event.call_id, name: event.name, output: "", done: false, isError: false, target: callTarget(blocks, event.call_id) } },
+      const started = pushBlocks(state, session, [
+        {
+          kind: "tool",
+          tool: {
+            callId: event.call_id,
+            name: event.name,
+            output: "",
+            done: false,
+            isError: false,
+            target: callTarget(blocks, event.call_id),
+          },
+        },
       ]);
       // The roster row's dim right-hand text, from the live stream — cleared on
       // `agent_end`, so a finished member falls back to its `MemberState`.
@@ -194,10 +216,7 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
       }));
 
     case "error": {
-      const withError = setBlocks(state, session, [
-        ...blocksOf(state, session),
-        { kind: "error", text: event.message },
-      ]);
+      const withError = pushBlocks(state, session, [{ kind: "error", text: event.message }]);
       // A run failure marks the run; an idle reply error does not (app.rs). A
       // pending optimistic plan toggle whose reply errored reverts.
       const status = withError.status.running
@@ -227,10 +246,9 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
     case "message_received":
       // The frame is stamped with the RECEIVING session, so inter-agent traffic
       // lands in that member's transcript (the root's own in the root's).
-      return setBlocks(state, session, [
-        ...blocksOf(state, session),
-        { kind: "notice", from: event.from, text: event.content },
-      ]);
+      // An inbound A2A message is a PEER turn (labeled by the sender), never the
+      // user's own words — a `peer` block, so the All view colours and names it.
+      return pushBlocks(state, session, [{ kind: "peer", from: event.from, text: event.content }]);
 
     case "history":
       return seedFromHistory(state, event.messages, session);
@@ -242,7 +260,7 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
     }
 
     case "side_answer":
-      return setBlocks(state, session, [...blocksOf(state, session), { kind: "btw", text: event.text }]);
+      return pushBlocks(state, session, [{ kind: "btw", text: event.text }]);
 
     case "compaction":
       return notice(state, session, `⋯ compacted ${event.summarized} messages, kept ${event.kept}`);
@@ -259,6 +277,27 @@ export function reduce(state: ViewState, event: AgentEvent, session = ""): ViewS
   }
 }
 
+/** An inbound message, once its `[message from X]` tag is stripped. */
+export interface Inbound {
+  /** The sender: `user`, `bg`, or an `agent:<name>` peer id. */
+  from: string;
+  /** The body, without the tag. */
+  body: string;
+}
+
+/** `[message from <sender>]\n<body>` — the harness's inbound tag (`actor.rs::tag`). */
+const INBOUND_TAG = /^\[message from ([^\]]+)\]\n/;
+
+/**
+ * Split the harness's inbound tag off a message body, or `null` when there is none.
+ * Pure. Every inbound message is tagged — the human's `Submit` too — so the raw
+ * `user` role alone cannot tell the human's words from a peer's.
+ */
+export function parseInbound(text: string): Inbound | null {
+  const match = INBOUND_TAG.exec(text);
+  return match === null ? null : { from: match[1], body: text.slice(match[0].length) };
+}
+
 /**
  * Seed a session's transcript from a `GetHistory` reply (or a resumed session) —
  * the second entry point, mirroring `App::seed_history`. The TUI seeds at
@@ -272,7 +311,20 @@ export function seedFromHistory(state: ViewState, messages: AgentMessage[], sess
     switch (message.role) {
       case "user": {
         const text = textOf(message.content);
-        if (text.trim() !== "") hydrated.push({ kind: "user", text });
+        if (text.trim() === "") break;
+        // Every inbound message was tagged `[message from X]` by the harness (the
+        // user's own Submit included), so a raw `user` role does NOT mean the human
+        // spoke. Unwrap it: `user` is the human, `agent:<name>` is a peer, else a notice.
+        const inbound = parseInbound(text);
+        if (inbound === null) {
+          hydrated.push({ kind: "user", text });
+        } else if (inbound.from === "user") {
+          hydrated.push({ kind: "user", text: inbound.body });
+        } else if (inbound.from.startsWith("agent:")) {
+          hydrated.push({ kind: "peer", from: inbound.from, text: inbound.body });
+        } else {
+          hydrated.push({ kind: "notice", from: inbound.from, text: inbound.body });
+        }
         break;
       }
       case "assistant": {
@@ -298,10 +350,17 @@ export function seedFromHistory(state: ViewState, messages: AgentMessage[], sess
   // committed blocks. A member's events are folded by `frame.session` as they
   // stream, so its committed blocks are already here — appending would duplicate
   // them (and put a live block before the history it belongs to). Only an
-  // in-flight (`live`) block survives, and it goes LAST.
+  // in-flight (`live`) block survives, and it goes LAST — re-stamped to the tail of
+  // the arrival order, so the All view sorts the history before it.
   const live = blocksOf(state, session).filter((block) => block.live === true);
+  const base = state.seq;
+  const stamped = [
+    ...hydrated.map((block, i) => ({ ...block, seq: base + i })),
+    ...live.map((block, i) => ({ ...block, seq: base + hydrated.length + i })),
+  ];
   return {
-    ...setBlocks(state, session, [...hydrated, ...live]),
+    ...setBlocks(state, session, stamped),
+    seq: base + stamped.length,
     status: { ...state.status, contextUsed },
   };
 }
@@ -314,7 +373,7 @@ export function seedFromHistory(state: ViewState, messages: AgentMessage[], sess
  */
 export function appendUser(state: ViewState, text: string, session = ""): ViewState {
   if (text.trim() === "") return state;
-  return setBlocks(state, session, [...blocksOf(state, session), { kind: "user", text }]);
+  return pushBlocks(state, session, [{ kind: "user", text }]);
 }
 
 /** The blocks for one session (never undefined). Pure. */
@@ -451,12 +510,29 @@ function setBlocks(state: ViewState, session: string, blocks: Block[]): ViewStat
   return { ...state, transcripts: { ...state.transcripts, [session]: blocks } };
 }
 
+/**
+ * APPEND blocks to one session's transcript, stamping each with the next arrival
+ * ordinal. Every append goes through here, so `seq` is a single total order across
+ * all sessions — the All view's merge key (a `setBlocks` REPLACE keeps the seqs it
+ * is handed, which is what `seedFromHistory` needs).
+ */
+function pushBlocks(state: ViewState, session: string, added: Block[]): ViewState {
+  if (added.length === 0) return state;
+  const base = state.seq;
+  const stamped = added.map((block, i) => ({ ...block, seq: base + i }));
+  return {
+    ...state,
+    seq: base + added.length,
+    transcripts: { ...state.transcripts, [session]: [...blocksOf(state, session), ...stamped] },
+  };
+}
+
 function withStatus(state: ViewState, patch: Partial<ViewStatus>): ViewState {
   return { ...state, status: { ...state.status, ...patch } };
 }
 
 function notice(state: ViewState, session: string, text: string): ViewState {
-  return setBlocks(state, session, [...blocksOf(state, session), { kind: "notice", text }]);
+  return pushBlocks(state, session, [{ kind: "notice", text }]);
 }
 
 function lastLiveIndex(transcript: Block[]): number {

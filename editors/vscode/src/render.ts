@@ -47,6 +47,8 @@ export interface RenderedBlock {
   from?: string;
   /** The session id this block came from (All mode labels the turn by it). */
   origin?: string;
+  /** The block's arrival ordinal, carried through so `renderMerged` can interleave. */
+  seq?: number;
   tool?: RenderedTool;
 }
 
@@ -104,6 +106,9 @@ export function renderBlock(block: Block): RenderedBlock {
       return { kind: "tool", html: "", live: false, tool: renderTool(block.tool) };
     case "user":
       return { kind: "user", html: escapeHtml(block.text ?? ""), live: false };
+    case "peer":
+      // A peer's message is prose from another agent — markdown, like `btw`.
+      return { kind: "peer", html: renderMarkdown(block.text ?? ""), live: false, from: block.from };
     case "notice":
       return { kind: "notice", html: escapeHtml(block.text ?? ""), live: false, from: block.from };
     case "error":
@@ -181,16 +186,16 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * ALL-mode: every session's blocks, concatenated in ROSTER order (root first), each tagged
- * with its `origin`. Pure.
+ * ALL-mode: every session's blocks, INTERLEAVED by arrival order. Pure.
  *
- * ORDERING (honest limitation): the reducer keeps NO global timestamps, so a true
- * time-INTERLEAVE is impossible without a protocol change (plan §4.2 forbids one). The merge
- * is per-session CONTIGUOUS runs in roster order — a member's conversation appears as one
- * stretch, NOT woven by time. A future timestamp on a block would fix it.
+ * The reducer stamps each block with a monotonic `seq` (the order the client saw
+ * it), so a member's blocks are contiguous only when nothing else streamed in
+ * between — which is exactly the timeline the panel should show. Blocks without a
+ * seq (a hand-built state) keep their relative order (a stable sort).
  */
 export function renderMerged(state: ViewState): RenderedBlock[] {
-  return state.members.flatMap((member) =>
-    transcriptOf(state, member.id).map((block) => ({ ...renderBlock(block), origin: member.id })),
+  const merged = state.members.flatMap((member) =>
+    transcriptOf(state, member.id).map((block) => ({ ...renderBlock(block), origin: member.id, seq: block.seq })),
   );
+  return merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }

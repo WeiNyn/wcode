@@ -133,6 +133,8 @@ export function classNames(block: RenderedBlock, expanded = false): string {
       return `body${block.live ? " live" : ""}`;
     case "user":
       return "body";
+    case "peer":
+      return "body peer";
     case "notice":
       return "body notice";
     case "error":
@@ -171,11 +173,16 @@ export function turns(
   const grouped: Turn[] = [];
   for (const block of blocks) {
     const last = grouped[grouped.length - 1];
+    const lastKind = last?.blocks[last.blocks.length - 1]?.kind;
     const opensYou = block.kind === "user";
-    // A NEW turn starts on a `user` block OR an ORIGIN change (the merged run boundary).
+    const opensPeer = block.kind === "peer";
+    // A NEW turn starts on a `user`/`peer` block, right after one, OR on an ORIGIN
+    // change (the merged run boundary) — so the timeline reads as discrete messages.
     const startsRun = last === undefined || last.blocks[last.blocks.length - 1]?.origin !== block.origin;
-    if (opensYou || last === undefined || last.role === "you" || startsRun) {
-      grouped.push({ role: opensYou ? "you" : "wcode", who: who(opensYou, memberOf?.(block.origin)), blocks: [block] });
+    if (opensYou || opensPeer || last === undefined || lastKind === "user" || lastKind === "peer" || startsRun) {
+      // A peer block is labeled by its SENDER (`from`); everything else by its origin.
+      const member = memberOf?.(opensPeer ? block.from : block.origin);
+      grouped.push({ role: opensYou ? "you" : "wcode", who: who(opensYou, member), blocks: [block] });
     } else {
       last.blocks.push(block);
     }

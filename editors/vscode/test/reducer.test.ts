@@ -4,11 +4,13 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { AgentEvent, AgentMessage, TodoItem } from "../src/protocol.ts";
+import type { AgentEvent, AgentMessage, ContentBlock, TodoItem } from "../src/protocol.ts";
 import {
   HydratedSet,
+  appendUser,
   initialState,
   memberGlyph,
+  parseInbound,
   reduce,
   seedFromHistory,
   sidebarRails,
@@ -269,4 +271,108 @@ test("todoBadge counts completed over total", () => {
     ]),
     "☑ 1/2",
   );
+});
+
+/* ------------------------------------------------- inbound tags (history + live) */
+
+test("parseInbound splits the harness tag off an inbound message", () => {
+  assert.deepEqual(parseInbound("[message from user]\nhello"), { from: "user", body: "hello" });
+  assert.deepEqual(parseInbound("[message from agent:explorer]\nplease review"), {
+    from: "agent:explorer",
+    body: "please review",
+  });
+  assert.deepEqual(parseInbound("[message from bg]\nbg1 exited (0)"), { from: "bg", body: "bg1 exited (0)" });
+  // A body with newlines keeps everything after the tag's own newline.
+  assert.deepEqual(parseInbound("[message from agent:w1]\nline1\nline2"), { from: "agent:w1", body: "line1\nline2" });
+});
+
+test("parseInbound returns null when there is no tag (a locally typed message)", () => {
+  assert.equal(parseInbound("hello there"), null);
+  assert.equal(parseInbound(""), null);
+  // A tag with no newline is not the tag — the harness always emits `]\n`.
+  assert.equal(parseInbound("[message from user] hello"), null);
+});
+
+test("history: a peer's inbound message hydrates as a `peer` block, not the user's", () => {
+  let state = initialState();
+  state = seedFromHistory(
+    state,
+    [
+      { role: "user", content: [{ type: "text", text: "[message from user]\nreview the diff" }] },
+      { role: "user", content: [{ type: "text", text: "[message from agent:explorer]\nfound 3 issues" }] },
+      { role: "user", content: [{ type: "text", text: "[message from bg]\nbg1 exited (0)" }] },
+    ],
+    "root",
+  );
+  const blocks = transcriptOf(state, "root");
+  assert.equal(blocks[0].kind, "user", "the human's own words stay a user block");
+  assert.equal(blocks[0].text, "review the diff", "the tag is stripped for display");
+  assert.equal(blocks[1].kind, "peer");
+  assert.equal(blocks[1].from, "agent:explorer");
+  assert.equal(blocks[1].text, "found 3 issues");
+  assert.equal(blocks[2].kind, "notice", "a non-peer sender (bg) is a notice");
+});
+
+test("history: an untagged user message is untouched", () => {
+  let state = initialState();
+  state = seedFromHistory(state, [{ role: "user", content: [{ type: "text", text: "plain hello" }] }], "root");
+  assert.equal(transcriptOf(state, "root")[0].text, "plain hello");
+});
+
+test("seq: appended blocks get a monotonic arrival ordinal across sessions", () => {
+  let state = initialState();
+  state = appendUser(state, "a", "root");
+  state = appendUser(state, "b", "agent:w1");
+  state = appendUser(state, "c", "root");
+  assert.deepEqual(
+    [transcriptOf(state, "root")[0].seq, transcriptOf(state, "agent:w1")[0].seq, transcriptOf(state, "root")[1].seq],
+    [0, 1, 2],
+  );
+});
+
+test("seq: hydrated history sorts BEFORE a retained live block", () => {
+  let state = initialState();
+  // A live assistant block streams first (seq 0), then the history arrives.
+  state = reduce(state, { type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "…" }], stop_reason: "stop" } }, "root");
+  state = seedFromHistory(state, [{ role: "user", content: [{ type: "text", text: "old" }] }], "root");
+  const blocks = transcriptOf(state, "root");
+  assert.equal(blocks[0].kind, "user", "the history leads");
+  assert.equal(blocks[1].live, true, "the in-flight block trails");
+  assert.ok((blocks[0].seq ?? 0) < (blocks[1].seq ?? 0), "and its seq sorts first");
+});
+
+test("seq: EVERY appended block carries one — including a tool call", () => {
+  // Regression: `tool_execution_start` once bypassed `pushBlocks`, so its block had no
+  // seq and the merged view sorted it to the FRONT (the tool rendered a turn early).
+  let state = initialState();
+  const assistant = (content: ContentBlock[]): AgentMessage =>
+    ({ role: "assistant", content, stop_reason: "stop" });
+  state = appendUser(state, "do it", "root");
+  state = reduce(state, { type: "message_start", message: assistant([]) }, "root");
+  state = reduce(
+    state,
+    { type: "message_update", message: assistant([{ type: "tool_call", id: "c1", name: "read", arguments: {} }]) },
+    "root",
+  );
+  state = reduce(
+    state,
+    {
+      type: "message_end",
+      message: assistant([{ type: "tool_call", id: "c1", name: "read", arguments: {} }]),
+    },
+    "root",
+  );
+  state = reduce(state, { type: "tool_execution_start", call_id: "c1", name: "read" }, "root");
+
+  const blocks = transcriptOf(state, "root");
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ["user", "assistant", "tool"],
+  );
+  assert.deepEqual(
+    blocks.map((b) => b.seq),
+    [0, 1, 2],
+    "a tool block gets its arrival ordinal like any other",
+  );
+  assert.ok(blocks.every((b) => typeof b.seq === "number"), "no block may be left without one");
 });

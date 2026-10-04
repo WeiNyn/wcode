@@ -136,21 +136,37 @@ test("a live assistant block's thinking fold is open; a settled one is not", () 
   assert.doesNotMatch(done.html, / open>/);
   assert.match(done.html, /<details class="fold thinking">/);
 });
-test("renderMerged concatenates per-session blocks in ROSTER order, tagged by origin", () => {
+test("renderMerged INTERLEAVES members by arrival order, tagged by origin", () => {
   const members: SessionMember[] = [
     { id: "root-1", label: "root-1", state: "running", isRoot: true },
     { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
   ];
   let state: ViewState = { ...initialState(), members };
+  // The orchestrator speaks, hands off, the worker answers, the orchestrator resumes —
+  // the timeline the panel must show, NOT per-member contiguous runs.
   state = appendUser(state, "hello", "root-1");
-  state = appendUser(state, "another", "root-1");
   state = appendUser(state, "on it", "agent:w1");
+  state = appendUser(state, "another", "root-1");
 
-  // LIMITATION pinned by the test: no global timestamps exist, so the merge cannot weave
-  // the members by time — it is per-session CONTIGUOUS runs in roster order.
   assert.deepEqual(
     renderMerged(state).map((b) => b.origin),
-    ["root-1", "root-1", "agent:w1"],
-    "contiguous per-session runs in roster order — NOT time-interleaved",
+    ["root-1", "agent:w1", "root-1"],
+    "woven by arrival, so the orchestrator's continuation is a NEW block after the worker's",
   );
+});
+
+test("renderMerged falls back to a stable order for blocks with no seq", () => {
+  const members: SessionMember[] = [
+    { id: "root-1", label: "root-1", state: "running", isRoot: true },
+    { id: "agent:w1", label: "w1", state: "idle", isRoot: false },
+  ];
+  const state: ViewState = {
+    ...initialState(),
+    members,
+    transcripts: {
+      "root-1": [{ kind: "user", text: "a" }],
+      "agent:w1": [{ kind: "user", text: "b" }],
+    },
+  };
+  assert.deepEqual(renderMerged(state).map((b) => b.origin), ["root-1", "agent:w1"]);
 });

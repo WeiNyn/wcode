@@ -243,6 +243,14 @@ body {
   color: var(--vscode-errorForeground);
 }
 
+/* An inbound peer message: a tinted card, so it reads as someone ELSE's words
+   (the `.who` line above it names and colours the sender). */
+.body.peer {
+  background: var(--vscode-textBlockQuote-background);
+  border-radius: var(--wc-radius);
+  padding: 6px 10px;
+}
+
 .body.live::after {
   content: "▌";
   margin-left: 2px;
