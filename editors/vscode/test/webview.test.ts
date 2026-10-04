@@ -30,6 +30,16 @@ test("parseFromWebview accepts the well-formed messages", () => {
     callId: "t1",
     verdict: "accept",
   });
+  assert.deepEqual(parseFromWebview({ kind: "command", name: "model", arg: "gpt-x" }), {
+    kind: "command",
+    name: "model",
+    arg: "gpt-x",
+  });
+  assert.deepEqual(parseFromWebview({ kind: "command", name: "plan" }), {
+    kind: "command",
+    name: "plan",
+    arg: "",
+  }, "a missing arg is empty, never undefined");
   assert.deepEqual(parseFromWebview({ kind: "review", callId: "t1", verdict: "reject" }), {
     kind: "review",
     callId: "t1",
@@ -52,6 +62,8 @@ test("parseFromWebview rejects junk and empty input", () => {
   assert.equal(parseFromWebview({ kind: "review", callId: "t1" }), null, "no verdict");
   assert.equal(parseFromWebview({ kind: "review", callId: "t1", verdict: "maybe" }), null, "bad verdict");
   assert.equal(parseFromWebview({ kind: "review", verdict: "accept" }), null, "no callId");
+  assert.equal(parseFromWebview({ kind: "command" }), null, "no name");
+  assert.equal(parseFromWebview({ kind: "command", name: "   " }), null, "blank name");
 });
 
 /* ------------------------------------------------------------------- throttle */

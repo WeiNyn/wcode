@@ -63,6 +63,8 @@ export type FromWebview =
   | { kind: "focus-member"; id: string }
   | { kind: "review"; callId: string; verdict: "accept" | "reject" }
   | { kind: "set-mode"; mode: ViewMode }
+  /** A `/` command from the menu (or a typed `/name arg`). The host dispatches it. */
+  | { kind: "command"; name: string; arg: string }
   /** The webview's script has run and it is ready to receive a snapshot. */
   | { kind: "ready" };
 
@@ -95,6 +97,10 @@ export function parseFromWebview(raw: unknown): FromWebview | null {
     case "set-mode":
       return message.mode === "all" || message.mode === "focus"
         ? { kind: "set-mode", mode: message.mode }
+        : null;
+    case "command":
+      return typeof message.name === "string" && message.name.trim() !== ""
+        ? { kind: "command", name: message.name, arg: typeof message.arg === "string" ? message.arg : "" }
         : null;
     case "review":
       return typeof message.callId === "string" && (message.verdict === "accept" || message.verdict === "reject")

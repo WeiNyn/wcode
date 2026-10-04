@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 
+import { findCommand } from "./commands.ts";
 import { clearDiffs, openDiff, registerDiffProvider, revertDiff } from "./diffProvider.ts";
 import { setVerdict, type Verdict } from "./review.ts";
 import { ChatPanel } from "./panel.ts";
@@ -41,6 +42,16 @@ let output: vscode.OutputChannel | undefined;
 let status: vscode.StatusBarItem | undefined;
 let extensionUri: vscode.Uri | undefined;
 let controller: SurfaceController | undefined;
+/**
+ * Extra args appended after `serve --stdio` for the NEXT child. `/resume` sets
+ * them; `/new` clears them. They persist so `/reload` re-runs the same session.
+ */
+let sessionArgs: string[] = [];
+/**
+ * Set by `wcode: Stop Session`, so an explicit stop is not undone by the next
+ * `ready` (a webview reload posts one). Cleared by `startSession`.
+ */
+let userStopped = false;
 /** Session ids whose `GetHistory` has been asked for (once each, per child). */
 let hydrated = new HydratedSet();
 /** The last non-empty editor selection — STICKY (survives focus moving to the webview). */
@@ -85,8 +96,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("wcode.start", () => void startSession()),
-    vscode.commands.registerCommand("wcode.stop", () => void stopSession()),
-    vscode.commands.registerCommand("wcode.restart", () => void restartSession()),
+    vscode.commands.registerCommand("wcode.stop", () => {
+      userStopped = true;
+      void stopSession();
+    }),
+    vscode.commands.registerCommand("wcode.restart", () => void restartSession(sessionArgs)),
     vscode.commands.registerCommand("wcode.openDiff", () =>
       void openDiff(viewState, workspaceRoot(), undefined, logLine),
     ),
@@ -110,7 +124,21 @@ export function deactivate(): Thenable<void> | undefined {
 
 /* ----------------------------------------------------------------- commands */
 
+/**
+ * Opening the surface IS the intent to work, so the panel starts the session
+ * itself — `wcode: Start Session` stays for a manual start after a stop.
+ *
+ * Refuses when the user explicitly stopped (`userStopped`) or a child is already
+ * running: the webview posts `ready` on every reload, and a stop must survive it.
+ */
+function ensureSession(): void {
+  if (userStopped) return;
+  if (session && (session.state === "ready" || session.state === "starting")) return;
+  void startSession();
+}
+
 async function startSession(): Promise<void> {
+  userStopped = false;
   const channel = ensureOutput();
   // Seed the chip ONCE when the surface opens; the listeners keep it in sync after.
   const editor = vscode.window.activeTextEditor;
@@ -134,9 +162,10 @@ async function startSession(): Promise<void> {
     return;
   }
 
-  channel.appendLine(`starting: ${binary} serve --stdio`);
+  channel.appendLine(`starting: ${binary} serve --stdio ${sessionArgs.join(" ")}`.trimEnd());
   const next = new WcodeSession({
     binary,
+    args: sessionArgs,
     cwd: workspaceRoot(),
     logger: { info: (m) => channel.appendLine(m), error: (m) => channel.appendLine(`error: ${m}`) },
   });
@@ -209,8 +238,13 @@ async function stopSession(): Promise<void> {
   controller?.setSession({ state: "stopped" });
 }
 
-async function restartSession(): Promise<void> {
+/**
+ * Stop, wipe the view state, and start a FRESH child with `args`. The state must
+ * start empty: the new session knows nothing of the old conversation.
+ */
+async function restartSession(args: string[]): Promise<void> {
   await stopSession();
+  sessionArgs = args;
   // A restart spawns a *fresh* child with empty history, so the state must start
   // empty too — otherwise the panel shows a conversation the new session knows
   // nothing about.
@@ -219,6 +253,93 @@ async function restartSession(): Promise<void> {
   controller?.update(viewState, true);
   controller?.setMode("all"); // the mode RESETS on a fresh child
   await startSession();
+}
+
+/* --------------------------------------------------------------- / commands */
+
+/**
+ * The `/` menu's dispatch. The webview names a command; the host decides what it
+ * IS: a composition-root action (a fresh child, a picker) or a plain `Request`.
+ * An unknown name is refused — the webview's list is the only source, but a
+ * hand-crafted `postMessage` is not trusted.
+ */
+function runCommand(name: string, arg: string): void {
+  const channel = ensureOutput();
+  const command = findCommand(name);
+  if (command === undefined) {
+    channel.appendLine(`unknown command: /${name}`);
+    return;
+  }
+  const target = controller?.currentTarget ?? undefined;
+
+  // Composition-root actions: they respawn the child, so no wire request exists.
+  switch (command.name) {
+    case "new":
+      // A FRESH session: a new session file and a new team (the CLI's `/new`).
+      void restartSession([]);
+      return;
+    case "reload":
+      // The SAME args, a new child: config re-read, `serve` re-run.
+      void restartSession(sessionArgs);
+      return;
+    case "plan":
+      togglePlan();
+      return;
+    case "sessions":
+      void pickConnectionSession();
+      return;
+    case "status":
+      void peekMember(target);
+      return;
+  }
+
+  if (!session) {
+    channel.appendLine(`/${command.name} ignored: no session is running`);
+    return;
+  }
+  if (command.requiresArg === true && arg === "") {
+    void vscode.window.showWarningMessage(`wcode: /${command.name} needs an argument`);
+    return;
+  }
+  try {
+    switch (command.name) {
+      case "model":
+        session.send({ type: "set_model", model: arg }, target);
+        break;
+      case "effort":
+        // `-`/`off`/`none` clears it, mirroring the CLI's `/effort -`.
+        session.send({ type: "set_effort", effort: isClearEffort(arg) ? null : arg }, target);
+        break;
+      case "btw":
+        void sideAsk(target ?? viewState.targeted ?? "", arg);
+        break;
+      case "compact":
+        session.send({ type: "compact", instructions: arg === "" ? null : arg }, target);
+        break;
+    }
+  } catch (err) {
+    channel.appendLine(`/${command.name} failed: ${errMessage(err)}`);
+  }
+}
+
+/** The spellings of `/effort` that CLEAR it (the CLI's `/effort -`). Pure. */
+function isClearEffort(arg: string): boolean {
+  const value = arg.trim().toLowerCase();
+  return value === "-" || value === "off" || value === "none";
+}
+
+/** `/sessions`: the LIVE sessions in this connection; picking one retargets. */
+async function pickConnectionSession(): Promise<void> {
+  const picked = await vscode.window.showQuickPick(
+    viewState.members.map((member) => ({
+      label: targetLabel(viewState, member.id),
+      description: `${member.state}${member.model === undefined ? "" : ` · ${member.model}`}`,
+      detail: member.id,
+      id: member.id,
+    })),
+    { title: "wcode: sessions in this connection" },
+  );
+  if (picked !== undefined) focusMember(picked.id);
 }
 
 /* ------------------------------------------------------------- member verbs */
@@ -249,15 +370,9 @@ async function peekMember(id: string | undefined): Promise<void> {
   }
 }
 
-/** `ask` = `Request::SideAsk`: a side question — no turn, not recorded. */
-async function askMember(id: string | undefined): Promise<void> {
-  if (id === undefined || !session) return;
-  const question = await vscode.window.showInputBox({
-    title: `wcode: ask ${targetLabel(viewState, id)}`,
-    prompt: "A side question — answered from its context, no turn, not recorded",
-    placeHolder: "why did you choose that approach?",
-  });
-  if (question === undefined || question.trim() === "") return;
+/** `SideAsk`: a side question — no turn, not recorded. The `/btw` command's engine. */
+async function sideAsk(id: string, question: string): Promise<void> {
+  if (!session) return;
   try {
     const reply = await session.ask({ type: "side_ask", text: question }, id, 60_000);
     const answer = reply.type === "side_answer" ? reply.text : `(${reply.type})`;
@@ -268,6 +383,18 @@ async function askMember(id: string | undefined): Promise<void> {
       `wcode: ${targetLabel(viewState, id)} did not answer in time (it may be busy): ${errMessage(err)}`,
     );
   }
+}
+
+/** `wcode.member.ask`: prompt for the question, then `sideAsk`. */
+async function askMember(id: string | undefined): Promise<void> {
+  if (id === undefined || !session) return;
+  const question = await vscode.window.showInputBox({
+    title: `wcode: ask ${targetLabel(viewState, id)}`,
+    prompt: "A side question — answered from its context, no turn, not recorded",
+    placeHolder: "why did you choose that approach?",
+  });
+  if (question === undefined || question.trim() === "") return;
+  await sideAsk(id, question);
 }
 
 /** `stop` = `Request::Cancel`; the row's state settles via the roster push. */
@@ -368,6 +495,8 @@ function surfaceHandlers(): SurfaceHandlers {
       if (target !== null) hydrate(target);
     },
     onTogglePlan: () => togglePlan(),
+    onCommand: (name: string, arg: string) => runCommand(name, arg),
+    onReady: () => ensureSession(),
     onFocusMember: (id: string) => {
       // Defence-in-depth: ignore an id not in the roster (a bogus id would
       // retarget to an empty transcript and waste a `get_history`).

@@ -13,6 +13,7 @@
  * DOM-bound: element construction, scroll glue, the click/keydown handlers, and
  * `acquireVsCodeApi()`.
  */
+import { filterCommands, parseSlash, type SlashCommand } from "../commands.ts";
 import { memberGlyph, sidebarRails, todoGlyph, type RosterItem, type SidebarRails } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
@@ -71,6 +72,7 @@ app.innerHTML = [
   '    <main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
   '    <footer id="composer" class="composer">',
   '      <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
+  '      <div id="cmdmenu" class="cmdmenu" role="listbox" aria-label="Commands" hidden></div>',
   '      <textarea id="input" rows="1" spellcheck="false"',
   '        placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
   '      <div class="ctoolbar">',
@@ -100,6 +102,7 @@ const cmodeEl = requireEl("cmode");
 const cmodelEl = requireEl("cmodel");
 const cattachEl = requireEl("cattach");
 const ctxChipsEl = requireEl("ctx-chips");
+const menuEl = requireEl("cmdmenu");
 
 /** Per-callId tool-fold overrides (the user's manual toggle, keyed to its phase). */
 let foldOverrides: FoldOverrides = new Map();
@@ -729,6 +732,83 @@ function tasksSection(tasks: SidebarRails["tasks"]): HTMLElement {
   return box;
 }
 
+/* ------------------------------------------------------------- / commands */
+
+/** The `/` menu's current items (webview-local: the INPUT drives them, not the host). */
+let cmdItems: SlashCommand[] = [];
+/** The highlighted item of the open menu. */
+let cmdIndex = 0;
+
+/**
+ * The menu's query: the text after `/` while the FIRST word is still being typed,
+ * else null. A space means the argument is being typed, so the menu closes and
+ * the line submits normally.
+ */
+function cmdQuery(): string | null {
+  const text = inputEl.value;
+  if (!text.startsWith("/")) return null;
+  const rest = text.slice(1);
+  return /\s/.test(rest) ? null : rest;
+}
+
+/** Rebuild the menu from the input. Cheap: it runs on every keystroke. */
+function renderCmdMenu(): void {
+  const query = cmdQuery();
+  if (query === null) {
+    closeCmdMenu();
+    return;
+  }
+  cmdItems = filterCommands(query);
+  if (cmdItems.length === 0) {
+    closeCmdMenu();
+    return;
+  }
+  if (cmdIndex >= cmdItems.length) cmdIndex = 0;
+  menuEl.textContent = "";
+  cmdItems.forEach((command, index) => {
+    const item = el("div", index === cmdIndex ? "cmd sel" : "cmd");
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", index === cmdIndex ? "true" : "false");
+    item.appendChild(el("span", "cmd-name", `/${command.name}`));
+    if (command.arg !== undefined) item.appendChild(el("span", "cmd-arg", command.arg));
+    item.appendChild(el("span", "cmd-help", command.help));
+    // `mousedown`, not `click`: preventDefault keeps focus in the textarea, so the
+    // input's blur cannot tear the menu down before the handler runs.
+    item.addEventListener("mousedown", (event: MouseEvent) => {
+      event.preventDefault();
+      runMenuCommand(command);
+    });
+    menuEl.appendChild(item);
+  });
+  menuEl.hidden = false;
+}
+
+function closeCmdMenu(): void {
+  cmdItems = [];
+  cmdIndex = 0;
+  menuEl.hidden = true;
+  menuEl.textContent = "";
+}
+
+/**
+ * Run a command picked from the menu. One that NEEDS an argument only arms the
+ * input (`/model `) — running it empty would be a round-trip the host must reject.
+ */
+function runMenuCommand(command: SlashCommand): void {
+  if (command.requiresArg === true) {
+    inputEl.value = `/${command.name} `;
+    closeCmdMenu();
+    autoGrow();
+    inputEl.focus();
+    return;
+  }
+  inputEl.value = "";
+  autoGrow();
+  closeCmdMenu();
+  post({ kind: "command", name: command.name, arg: "" });
+  inputEl.focus();
+}
+
 /* -------------------------------------------------------------------- input */
 
 // Grow via the `rows` attribute, not an inline style: the panel's CSP is
@@ -741,14 +821,48 @@ function autoGrow(): void {
 function submit(): void {
   const text = inputEl.value;
   if (text.trim() === "") return;
-  post({ kind: "submit", text: composeSubmit(text, attached ? lastContext : null) });
+  // A KNOWN `/name` line is a command; anything else (including an unknown `/…`,
+  // the CLI's rule) is prompt text for the model.
+  const slash = parseSlash(text);
   inputEl.value = "";
   autoGrow();
+  closeCmdMenu();
+  if (slash !== null) post({ kind: "command", name: slash.command.name, arg: slash.arg });
+  else post({ kind: "submit", text: composeSubmit(text, attached ? lastContext : null) });
   inputEl.focus();
 }
 
-inputEl.addEventListener("input", autoGrow);
+inputEl.addEventListener("input", () => {
+  autoGrow();
+  renderCmdMenu();
+});
 inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
+  if (menuEl.hidden === false && cmdItems.length > 0) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      cmdIndex = (cmdIndex + 1) % cmdItems.length;
+      renderCmdMenu();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      cmdIndex = (cmdIndex - 1 + cmdItems.length) % cmdItems.length;
+      renderCmdMenu();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCmdMenu();
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      // A BARE `/` only opens the list — running the top item there would start a
+      // fresh session off one keystroke. The query must name something first.
+      if (cmdQuery() !== null && cmdQuery() !== "") runMenuCommand(cmdItems[cmdIndex]);
+      return;
+    }
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     submit();

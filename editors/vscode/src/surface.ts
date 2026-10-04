@@ -41,6 +41,17 @@ export interface SurfaceHandlers {
   onFocusMember(id: string): void;
   /** The change review: `callId` + intent. The host settles it (Reject writes). */
   onReview(callId: string, verdict: "accept" | "reject"): void;
+  /**
+   * A `/` command from the composer menu (or a typed `/name arg`). The webview
+   * never speaks the wire — it names a command and the host decides what it is
+   * (a `Request`, a fresh child, a picker).
+   */
+  onCommand(name: string, arg: string): void;
+  /**
+   * The webview's script has run: the surface is OPEN. The host uses this to start
+   * the session on its own, so opening the panel is the only gesture needed.
+   */
+  onReady(): void;
 }
 
 /**
@@ -249,6 +260,7 @@ export class SurfaceController {
         this.ready.add(host);
         // Route through the SAME builder so a ready host never bypasses the mode.
         host.post(this.message(this.snapshot()));
+        this.handlers.onReady();
         break;
       case "submit":
         this.handlers.onSubmit(message.text, this.target);
@@ -275,6 +287,9 @@ export class SurfaceController {
         break;
       case "review":
         this.handlers.onReview(message.callId, message.verdict);
+        break;
+      case "command":
+        this.handlers.onCommand(message.name, message.arg);
         break;
       case "set-mode":
         this.setMode(message.mode);

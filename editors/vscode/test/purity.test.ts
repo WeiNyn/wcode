@@ -20,6 +20,7 @@ for (const file of [
   "reducer.ts",
   "render.ts",
   "webview.ts",
+  "commands.ts",
   "diff.ts",
   "review.ts",
   "startup.ts",
