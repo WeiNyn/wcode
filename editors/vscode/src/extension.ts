@@ -65,7 +65,7 @@ export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("wcode");
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.command = "wcode.restart";
-  status.tooltip = "wcode session — click to restart";
+  status.tooltip = "wcode session: click to restart";
   context.subscriptions.push(output, status);
   registerDiffProvider(context, logLine);
 
@@ -412,7 +412,7 @@ async function resumeSession(arg: string): Promise<void> {
       detail: choice.path,
       path: choice.path,
     })),
-    { title: "wcode: resume a session", placeHolder: "Newest first — only this workspace", matchOnDetail: true },
+    { title: "wcode: resume a session", placeHolder: "Newest first: only this workspace", matchOnDetail: true },
   );
   if (picked === undefined) return;
   ensureOutput().appendLine(`resuming ${picked.path}`);
@@ -481,7 +481,7 @@ async function askMember(id: string | undefined): Promise<void> {
   if (id === undefined || !session) return;
   const question = await vscode.window.showInputBox({
     title: `wcode: ask ${targetLabel(viewState, id)}`,
-    prompt: "A side question — answered from its context, no turn, not recorded",
+    prompt: "A side question: answered from its context, no turn, not recorded",
     placeHolder: "why did you choose that approach?",
   });
   if (question === undefined || question.trim() === "") return;

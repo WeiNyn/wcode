@@ -37,11 +37,11 @@ export function completionText(command: SlashCommand): string {
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "new", aliases: ["clear"], help: "Start a fresh session" },
   { name: "reload", help: "Restart the session" },
-  { name: "resume", arg: "[path]", help: "Resume a session — pick one, or pass a path" },
+  { name: "resume", arg: "[path]", help: "Resume a session: pick one, or pass a path" },
   { name: "model", arg: "[id]", help: "Switch the model: pick one, or pass an id" },
   { name: "effort", arg: "[level | -]", help: "Set the reasoning effort: pick one, or pass a level (- clears it)" },
   { name: "plan", help: "Toggle plan mode" },
-  { name: "btw", arg: "<question>", help: "Side question — no turn, not recorded", requiresArg: true },
+  { name: "btw", arg: "<question>", help: "Side question: no turn, not recorded", requiresArg: true },
   { name: "compact", arg: "[focus]", help: "Summarize older messages now" },
   { name: "sessions", help: "List the sessions in this connection" },
   { name: "status", help: "Show the target's last work" },
