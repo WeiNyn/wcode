@@ -399,7 +399,13 @@ body{
    being a stack of bordered boxes. */
 .line{ border-left:2px solid var(--vscode-panel-border); margin:var(--wc-1) 0; }
 .line.thinking{ border-left-color:color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent); }
+/* V13 TOOL STATUS: the tool row's L1 rule AND its ⚙ mark carry the status. running =
+   the accent (a running tool IS "active now"), error = the semantic red, complete =
+   NEUTRAL (no glyph, no colour: most tools complete, so the two exceptions are loud). */
+.line.tool[data-live="1"]{ border-left-color:var(--wc-accent); }
+.line.tool[data-live="1"] .tname{ color:var(--wc-accent); }
 .line.tool.error, .line.tool[data-err="1"]{ border-left-color:var(--vscode-errorForeground); }
+.line.tool.error .tname, .line.tool[data-err="1"] .tname{ color:var(--vscode-errorForeground); }
 .line > summary{
   list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:var(--wc-2);
   padding:var(--wc-1) var(--wc-2); font-size:var(--wc-fs-ui);
@@ -426,6 +432,7 @@ body{
 .meta .add{ color:var(--vscode-charts-green); }
 .meta .del{ color:var(--vscode-charts-red); }
 .meta .run{ color:var(--wc-accent); }
+.meta .fail{ color:var(--vscode-errorForeground); }
 .line .inner{ padding:0 var(--wc-2) var(--wc-2) 22px; }
 
 /* ------------------------------------------------------ LEVEL 2: a CARD
@@ -779,7 +786,7 @@ textarea:focus{ outline:1px solid var(--vscode-focusBorder); border-color:var(--
                 <span class="chev" aria-hidden="true"></span>
                 <span class="tname">⚙ bash</span>
                 <span class="tsum">cargo test --workspace</span>
-                <span class="meta"><span class="run">running…</span></span>
+<span class="meta"><span class="run"><span class="spin" aria-hidden="true">⠋</span> running…</span></span>
               </summary>
               <div class="inner">
                 <!-- V12: the tool console is an L2a CARD with a head naming its producer -->
@@ -828,6 +835,28 @@ test view::fold_open ... ok</pre>
               </div>
             </details>
 
+            <!-- V13: a FAILED tool. All three statuses are now side by side in this turn:
+                 running (⚙ bash, accent), complete (⚙ edit, neutral), error (⚙ bash, red). -->
+            <details class="line tool error" data-run="done">
+              <summary>
+                <span class="chev" aria-hidden="true"></span>
+                <span class="tname">⚙ bash</span>
+                <span class="tsum">cargo clippy --workspace</span>
+                <span class="meta"><span class="fail">✗ failed</span></span>
+              </summary>
+              <div class="inner">
+                <div class="card tool-output" role="group" aria-label="Output from bash">
+                  <div class="chead">
+                    <span class="mark" aria-hidden="true">⚙</span><span>bash · output</span>
+                    <span class="grow"></span>
+                    <button class="mini" type="button">Copy</button>
+                  </div>
+<pre>error: unused import: `std::fmt`
+  --> crates/wcode-tui/src/ui.rs:12:5</pre>
+                </div>
+              </div>
+            </details>
+
             <div class="body"><p class="live">The chrome is one row now. Here is the scale the surface runs on:</p></div>
 
             <div class="body">
@@ -866,7 +895,7 @@ test view::fold_open ... ok</pre>
                 <span class="chev" aria-hidden="true"></span>
                 <span class="tname">⚙ grep</span>
                 <span class="tsum">onOpenDiff</span>
-                <span class="meta"><span class="run">running…</span></span>
+<span class="meta"><span class="run"><span class="spin" aria-hidden="true">⠋</span> running…</span></span>
               </summary>
               <div class="inner">
                 <div class="card tool-output" role="group" aria-label="Output from grep">
@@ -1020,6 +1049,8 @@ test view::fold_open ... ok</pre>
   var tSim = document.getElementById("tSim");
   var spins = Array.prototype.slice.call(document.querySelectorAll("#app .spin"));
   spins.forEach(function (g) { g.dataset.on = g.textContent; });
+  /* the running tag now carries a ⠋ glyph (V13), so the sim restores its HTML, not its text */
+  document.querySelectorAll("#app .run").forEach(function (r) { r.dataset.html = r.innerHTML; });
   var simDone = false;
 
   function setGlyphs(done) {
@@ -1041,7 +1072,7 @@ test view::fold_open ... ok</pre>
       } else {
         d.setAttribute("open", "");
         d.dataset.run = "running";
-        if (run) { run.textContent = "running…"; run.className = "run"; }
+        if (run) { run.innerHTML = run.dataset.html; run.className = "run"; }
       }
     });
     setGlyphs(simDone);

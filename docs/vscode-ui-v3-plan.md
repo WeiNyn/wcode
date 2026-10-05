@@ -1,7 +1,7 @@
 # VS Code surface — v3 plan (curation + a real visual system)
 
 **Status:** design proposed. The prototype [`design/vscode-ui-v3-draft.html`](design/vscode-ui-v3-draft.html)
-IS the spec. V6–V11b shipped, each second-layer APPROVED; **V12 proposed**.
+IS the spec. V6–V11b shipped, each second-layer APPROVED; **V12–V13 proposed**.
 **Companion docs:** the rationale is [`design/vscode-ui-exploration.md`](design/vscode-ui-exploration.md);
 v1's locked UI is [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md) (P1–P5 shipped);
 v2's one-dockable-surface plan is [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) (V1–V5 shipped, V4b open).
@@ -313,7 +313,8 @@ the policy down: **the accent means "active now"** —
 
 1. the target chip (identity + the one interactive element in the header),
 2. the pressed segment of a `.seg` (the active mode),
-3. the running state: the `⠋` glyph (`g-run`), `running…`, and the **working band's**
+3. the running state: the `⠋` glyph (`g-run`), `running…`, the **working band's** `⋯`
+   pulse (§1.3), and the **running tool row's** rule and `⚙` mark (§1.5e, V13),
    `⋯` pulse (§1.3),
 4. links, the live cursor `▌`, and the **current** item in a list —
    `.cmdmenu .cmd-name` (`media/chat.css:561`), the "where you are / where to go" job,
@@ -350,14 +351,42 @@ card, which has a `.chead` (`media/chat.css:525`).
 
 - the tool fold **stays L1** — promoting it to a card would re-create the wall of boxes v3
   removed (the fold is a summary row, not a body);
-- `.tname` (the `⚙ {tool}` mark, `media/chat.css:468`) goes **600 → 700**, still
+- `.tname` (the `⚙ {tool}` mark, `media/chat.css:471`) goes **600 → 700**, still
   `--vscode-foreground`, still mono. The **`⚙` glyph is the action mark** and it is on every
-  tool, never on a thinking block;
+  tool, never on a thinking block. **V13:** the mark is neutral for a *complete* tool,
+  but it takes the status colour while the tool is running or has failed (below);
 - **`thinking` is demoted**: its label drops to `--vscode-descriptionForeground` at weight
   **400** with an **italic** summary; its dim rule (`:430`) stays.
 - *Rationale (the level/accent decision in one sentence):* the two rows are separated by
   making the **aside quiet**, which costs no chrome, no accent and no new level — raising the
   tool instead would have to borrow the accent, and a finished tool is not "active now".
+*The status: the exception is loud, the norm is quiet (V13).* A tool row carries exactly
+one of three states, and the colour budget is spent on the two that are exceptions:
+
+| state | the L1 rule (`border-left`) | the `⚙` mark | the meta slot |
+|---|---|---|---|
+| **running** | `--wc-accent` | `--wc-accent` | `⠋ running…` in `--wc-accent` (the glyph spins) |
+| **error** | `--vscode-errorForeground` | `--vscode-errorForeground` | `✗ failed` in `--vscode-errorForeground` |
+| **complete** | `--vscode-panel-border` (neutral) | `--vscode-foreground` (neutral) | `+N −M · 38ms`, dim, no glyph |
+
+- **Where the colour is expressed:** the **L1 rule** (the row's own edge — the most
+  glanceable channel at zero chrome cost) **plus the `⚙` mark** (the row's identity glyph),
+  and a **status glyph + word in the meta slot**. **No fill, no box:** the fold stays
+  **L1** ("no box, NO fill") and no fourth treatment is introduced.
+- **Complete is QUIET, and carries no glyph.** *Rationale (one sentence):* most tools
+  complete, so a green stripe would be as flat as no colour and would drown the two
+  exceptions — neutral therefore means "complete", which is unambiguous because **there is
+  no idle tool state** (a tool block is always running or `done`).
+- **The glyphs are the member-state vocabulary** (`memberGlyph`, `reducer.ts:RNWdV`):
+  `⠋` running (it spins, `prefers-reduced-motion` gated), `✗` error. Only the exception
+  states carry a glyph.
+- **The yellow `.running-tag` is retired.** `media/chat.css:1107` paints `running…` in
+  `--vscode-charts-yellow`; a running tool IS "active now", so it takes the accent like the
+  rest of job 3 — a *reconciliation* of an inconsistency, not a new accent job.
+- **Accent: §1.5(d) job 3 is CLARIFIED, not extended.** Job 3 already owns "the running
+  state"; V13 names the running tool's rule and `⚙` mark as part of it, so the accent still
+  has **five** jobs. Stated openly: the yellow `running…` folds into job 3, and the `⚙`
+  mark is neutral *except* while running (accent) or failed (error red).
 
 *The output: L2b → L2a, because it gains a head.*
 
@@ -375,8 +404,7 @@ running 145 tests
 - **Exactly one body per fold.** A diff-bearing tool renders the existing `.review` card
   (L2a) as the body; a plain tool renders the new output card (L2a). Either way the fold's
   body is **exactly one L2a**, the fold stays **L1**, and no card nests in a card.
-- **Accent unchanged.** §1.5(d) is not touched: the `⚙` mark and the tool name stay neutral,
-  and "active now" keeps its five jobs.
+  mark is neutral *except* while running (accent) or failed (error red).
 
 ### 1.6 What is KEPT / MOVED / REMOVED
 
@@ -404,8 +432,11 @@ running 145 tests
 | `Stop` always-on | `chat.ts:nFrit` | **conditional** (running only) |
 | `--wc-gap` | `chat.css:MWQb5` | **replaced** by `--wc-1…5` |
 | tool output `<pre class="tool-output">` | `chat.ts:481`, `chat.css:502` | **promoted** L2b → **L2a**: it gains a `.chead` (`⚙ {tool} · output` + `Copy`), so it is no longer anonymous |
-| `.tname` (the `⚙ {tool}` mark) | `chat.css:468` | **kept**, weight 600 → **700** (identity by weight, not accent) |
+| `.tname` (the `⚙ {tool}` mark) | `chat.css:471` | **kept**, weight 600 → **700** (identity by weight, not accent) |
 | `thinking` fold label | `chat.css:430` | **demoted**: `--vscode-descriptionForeground`, weight 400, italic summary (so a tool no longer reads like an aside) |
+| tool fold rule (`details.fold.tool`) | `media/chat.css:421` | **kept L1**, but the colour becomes the **STATUS**: neutral (complete) / accent (running) / error red |
+| `.fold .running-tag` (yellow) | `media/chat.css:1107` | **recoloured** to `--wc-accent` + the `⠋` glyph; the yellow is retired (folded into accent job 3) |
+| tool meta slot | `chat.ts:575` | **extended**: `⠋ running…` / `✗ failed` for the exception states; the done `+N −M · 38ms` is unchanged |
 
 ### 1.7 Frictions (where v3 fights the shipped code)
 
@@ -473,6 +504,7 @@ existing data; `✗ new` = new plumbing or a decision.
 | `.body.notice` / `.body.btw` (folded into ONE L1 rule) | `view.ts:2wb8h`,`:VPBGw` already emit both classes | ✔ CSS only |
 | context meter **gauge + denominator** (`▰▰▰▱▱ 42k / 200k`); **the V6 default is the text `ctx 42k`** | `status.contextUsed` is the numerator; **the window is never serialized** (`limits::model_limit` is kernel-internal) | **✗ new (flagged)** — V6 ships `ctx 42k`; the gauge waits on V11 |
 | effort in the disclosure | `SetEffort` exists; the current effort is not on the wire | **✗ new (flagged)** — the row is hidden while absent |
+| tool status colour (running / error / complete) | the DOM already carries the state: `.fold.tool.error` (from `block.tool.isError`) and `[data-live]` (set when `!tool.done`, `chat.ts:449`); `RenderedTool.done`/`isError` (`render.ts`) need no change | ✔ no new wire; ◑ CSS + the meta content |
 | tool output card (L2b → L2a) + the tool mark at weight 700 + `thinking` demoted | `RenderedTool.name` (`render.ts:QWZjR`) and `outputText` (`:iKvzO`) already reach the webview; the head reuses the existing `.card`/`.chead`/`.mini`; the rest is CSS only | ✔ no new wire; ◑ one head |
 
 ---
@@ -483,13 +515,14 @@ existing data; `✗ new` = new plumbing or a decision.
 
 | phase | goal | touches | acceptance |
 |---|---|---|---|
-| **V6** | **One chrome row.** `panelHeader` → one `cells` array: state glyph + target chip + All/Focus `.seg` + spacer + ctx + `▾` disclosure. Delete `#modes`, `#ribbon`, `renderRibbon`. Move session/model into the disclosure and **drop the `lastError` cell** (the failure already renders in the transcript; see V10). The state word survives only for `starting`/`stopped`/`crashed`, and `crashed` reads `✗ crashed` (the error glyph, not a recoloured spinner). The target chip is hidden in All mode (`chat.ts:YoBUD`); cell 1 is then the root's glyph alone. **The meter default is the text `ctx 42k`** (no gauge, no denominator). | `webview/view.t
+| **V6** | **One chrome row.** `panelHeader` → one `cells` array: state glyph + target chip + All/Focus `.seg` + spacer + ctx + `▾` disclosure. Delete `#modes`, `#ribbon`, `renderRibbon`. Move session/model into the disclosure and **drop the `lastError` cell** (the failure already renders in the transcript; see V10). The state word survives only for `starting`/`stopped`/`crashed`, and `crashed` reads `✗ crashed` (the error glyph, not a recoloured spinner). The target chip is hidden in All mode (`chat.ts:YoBUD`); cell 1 is then the root's glyph alone. **The meter default is the text `ctx 42k`** (no gauge, no denominator). | `webview/view.ts`, `webview/chat.ts`, `media/chat.css`, `test/view.test.ts` | one chrome band above the transcript; All/Focus switches mode from the header; no `ready` word in the steady state; the disclosure opens on click and Enter, closes on Escape, and restores focus to its button |
 | **V7** | **The team's one home, and the working pill.** The rail row becomes `--sw` edge + state glyph + name + action; the header count and the `.group` box go; the **working pill** is an **in-flow band** above the composer (avatars + `{n} working` + a pulse), a real button that reveals the live step. | `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | the transcript contains no member-count and no `.group` box; a running member shows `⠋` in the rail; the pill is **in flow and never overlays transcript content** at any scroll position or docked width (no `position:absolute`); it shows **whenever any other member is working** (rail expanded **and** collapsed), with an overlapping avatar stack capped at 3 plus `+N`; clicking it scrolls to the newest live step (in Focus it switches to All first); it is keyboard-reachable with a visible focus ring; under `prefers-reduced-motion` the `⋯` is static |
 | **V8** | **The visual system.** The two token scales; every padding/gap/font-size re-pointed; `details.fold` box → rule; every component assigned **exactly one** L2 sub-form (`L2a` bordered: `.code`, `.hunk`/`.review`, `.statecard`, `.menu`/`.pop`, `.body table`, `.pill`; `L2b` recessed: `.out`, `.body.peer`) with no third treatment; the accent policy applied; `.chipbtn` deleted; `.body.notice`/`.body.btw` styled; `.mini` given its `Copy` call site. | `media/chat.css`, `webview/chat.ts` | ☑ shipped `3fcd09c` (second-layer APPROVED); a §8 pre-flight pass, no bare `font-size:` px outside `:root`. **V12 later supersedes the L2b assignment here:** `.out` is promoted to L2a and L2b is `.body.peer` only |
 | **V9** | **The composer.** `Model:` span and the hint removed; `Stop` gated on `status.running`; the mode is a `.seg` (the same component as All/Focus). | `webview/chat.ts`, `media/chat.css` | idle shows `@`, mode, `Send`; running adds `Stop`; a keyboard-only pass reaches every control with a visible focus ring |
 | **V10** | **The notice treatment (no new error row).** The run failure is **already** carried by the transcript's `error` block (`reducer.ts:306` → `.body.error`, `media/chat.css:348`), so V10 adds **nothing** for it: the redundant header cell is removed in V6, and V10 only gives `.body.notice`/`.body.btw` the one folded L1 treatment (friction 5). | `webview/chat.ts`, `media/chat.css` | a notice and a btw render as the same dim inset line; the header is clean; the run failure appears **exactly once**, via the existing `.body.error` block (no duplicate row) |
 | **V11** | **(wire, flagged) The gauge + effort.** `contextWindow` + `effort` on the wire fan out to `SessionMember`; the meter renders `▰▰▰▱▱ 42k / 200k`; the disclosure gains an effort row. While absent, both degrade (numerator-only `ctx 42k`; the row hidden). | `wcode-harness`, `wcode-cli`, `wcode-protocol`, the extension | the meter shows `used / window` when known and `ctx 42k` when not; nothing renders `▰▰▰▱▱ 42 / ?` |
 | **V12** | **Tool activity identification.** The tool fold keeps its **L1** rule but its `⚙ {tool}` mark goes to weight **700**, and `thinking` is demoted (dim, weight 400, italic); the tool output is promoted **L2b → L2a** into a card whose `.chead` names it (`⚙ {tool} · output`) with a `Copy` `.mini`. | `media/chat.css`, `webview/chat.ts` | a tool line reads at full strength and a thinking line reads quiet; the output is a labelled card with a Copy button; a diff-bearing tool still shows **exactly one** `.review` card as its body; no fourth treatment and no nested card |
+| **V13** | **Tool status colour.** The tool row's **L1** rule and `⚙` mark take the **status**: **accent** running, **errorForeground** error, **neutral** complete; the meta slot shows `⠋ running…` / `✗ failed` for the exceptions only (complete keeps `+N −M · 38ms`); the yellow `running-tag` is retired to the accent. | `media/chat.css`, `webview/chat.ts` | a running, a failed and a completed tool are distinguishable **by colour alone at a glance**; complete carries **no glyph and no colour**; the fold stays **L1** (no box, no fill); the `⠋` spin is reduced-motion gated |
 
 ---
 
@@ -580,3 +613,4 @@ existing data; `✗ new` = new plumbing or a decision.
 | V11a wire gauges + effort | ☑ `8896332` |
 | V11b client gauge + effort row | ☑ `f37dba4` |
 | V12 tool activity identification | ☐ proposed |
+| V13 tool status colour | ☐ proposed |
