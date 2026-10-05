@@ -464,11 +464,29 @@ details.fold:not([open]) > summary .chev::before {
   content: "▸";
 }
 
-/* A tool name is NOT accent-coloured: a NEUTRAL foreground at weight 600 in mono. */
+/* The TOOL mark is the ACTION mark: the ⚙ glyph + the name at weight 700, still NEUTRAL
+   (no accent — a finished tool is not "active now"). A thinking block is the ASIDE, so it
+   is DEMOTED instead: dim, weight 400, an italic summary. That contrast is what tells an
+   action from an aside (V12). */
 .tname {
   color: var(--vscode-foreground);
   font-family: var(--vscode-editor-font-family);
   font-weight: 600;
+}
+
+/* The tool line reads at FULL strength (scoped, so the thinking label is unaffected). */
+details.fold.tool .tname {
+  font-weight: 700;
+}
+
+/* The thinking line reads QUIET: a demoted label + an italic summary (its dim rule stays). */
+details.fold.thinking .tname {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 400;
+}
+
+details.fold.thinking .tsum {
+  font-style: italic;
 }
 
 .tsum {
@@ -499,17 +517,31 @@ details.fold:not([open]) > summary .chev::before {
   padding: 0 var(--wc-2) var(--wc-2) 22px;
 }
 
-/* L2b RECESSED: the tool console is a fill + the radius, no border (the `.out`). */
+/* L2a BORDERED (V12): the tool output GAINS A HEAD, so it gains a border. Its body is a
+   bare `<pre>` (exactly one card, never nested); the old L2b `.out` recess is gone — L2b
+   is now `.body.peer` only. */
 .fold .tool-output {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: var(--wc-radius);
+  overflow: hidden;
+  margin: 0;
+}
+
+/* The ⚙ mark in the output card's head is the ACTION mark: neutral foreground. */
+.fold .tool-output .chead .mark {
+  color: var(--vscode-foreground);
+}
+
+/* The card body: the output `<pre>` (keeps the pre-wrap + the max-height + scroll). */
+.fold .tool-output pre {
   margin: 0;
   padding: var(--wc-2);
+  max-height: 220px;
+  overflow: auto;
   background: var(--vscode-textCodeBlock-background);
-  border-radius: var(--wc-radius);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-code);
   white-space: pre-wrap;
-  max-height: 220px;
-  overflow: auto;
 }
 
 /* ------------------------------------------------- code block with header */
@@ -522,7 +554,8 @@ details.fold:not([open]) > summary .chev::before {
   margin: var(--wc-2) 0;
 }
 
-.code .chead {
+.code .chead,
+.fold .tool-output .chead {
   display: flex;
   align-items: center;
   gap: var(--wc-2);
@@ -534,7 +567,8 @@ details.fold:not([open]) > summary .chev::before {
   color: var(--vscode-descriptionForeground);
 }
 
-.code .chead .spacer {
+.code .chead .spacer,
+.fold .tool-output .chead .spacer {
   flex: 1;
 }
 
@@ -547,8 +581,8 @@ details.fold:not([open]) > summary .chev::before {
   font-size: var(--wc-fs-code);
 }
 
-/* The code card's action control. Its call site (a Copy button) is markup the
-   code card does not yet emit — V8 keeps the rules ready (see the report). */
+/* The card action control (V12: the tool output card's `Copy`; the code card uses the
+   same component). */
 .mini {
   font: inherit;
   font-size: var(--wc-fs-meta);
@@ -563,6 +597,11 @@ details.fold:not([open]) > summary .chev::before {
 .mini:hover {
   background: var(--vscode-list-hoverBackground);
   color: var(--vscode-foreground);
+}
+
+.mini:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
 }
 
 /* --------------------------------------------- empty / error state card */

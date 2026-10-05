@@ -49,7 +49,6 @@ test("tool blocks render a collapsed summary and flag a diff", () => {
   assert.equal(bash?.summary, "line1", "the first non-empty output line");
   assert.equal(bash?.hasDiff, false);
   assert.equal(bash?.durationMs, 42);
-  assert.match(bash?.outputHtml ?? "", /^<pre class="tool-output">/);
 
   const edit = tools[1].tool;
   assert.equal(edit?.summary, "src/f.rs", "an empty output falls back to the path");

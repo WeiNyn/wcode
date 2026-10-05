@@ -9,6 +9,8 @@ import { renderState, type RenderedBlock, type RenderedState } from "../src/rend
 import { parseToWebview, type PanelSessionInfo, type ToWebview, type ViewMode } from "../src/webview.ts";
 import {
   classNames,
+  bodyKind,
+  outputHead,
   avatarStack,
   composerControls,
   composeSubmit,
@@ -274,7 +276,6 @@ function aTool(isError = false): RenderedBlock {
       callId: "t1",
       name: "edit",
       summary: "s",
-      outputHtml: "",
       outputText: "",
       done: true,
       isError,
@@ -393,6 +394,24 @@ test("classNames composes the content-element classes", () => {
   assert.equal(classNames({ kind: "notice", html: "", live: false }), "body notice");
   assert.equal(classNames({ kind: "error", html: "", live: false }), "body error");
   assert.equal(classNames({ kind: "btw", html: "", live: false }), "body btw");
+});
+
+/* ------------------------------------------------- V12: tool activity */
+
+test("outputHead: the output card's head is `⚙ {tool} · output`", () => {
+  assert.equal(outputHead("bash"), "⚙ bash · output");
+  assert.equal(outputHead("edit"), "⚙ edit · output");
+});
+
+test("bodyKind: a diff-bearing tool gets the `.review` card, else the output card", () => {
+  // EXACTLY one L2a body per fold (V12): `.review` for a diff, the output card otherwise.
+  assert.equal(bodyKind({ hasDiff: true }), "review");
+  assert.equal(bodyKind({ hasDiff: false }), "output");
+  // The real `RenderedTool`: `hasDiff` is the predicate `render.ts` derives from `diff`.
+  const plain = aTool(false).tool ?? { hasDiff: false };
+  const diffTool = { ...plain, hasDiff: true, diff: "@@ -1,1 +1,1 @@\n-a\n+b" };
+  assert.equal(bodyKind(plain), "output");
+  assert.equal(bodyKind(diffTool), "review");
 });
 
 /* ------------------------------------------------- V10: the notice row */

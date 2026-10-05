@@ -232,6 +232,17 @@ export function classNames(block: RenderedBlock, expanded = false): string {
   }
 }
 
+/** The tool output card's head text — `⚙ {tool} · output` (V12, §1.5e). Pure. */
+export function outputHead(tool: string): string {
+  return `⚙ ${tool} · output`;
+}
+
+/** Which L2a card a tool fold's body is: the `.review` (a diff-bearing tool) or the output
+ *  card. EXACTLY ONE body per fold; the fold itself stays L1. Pure. */
+export function bodyKind(tool: { hasDiff: boolean }): "review" | "output" {
+  return tool.hasDiff ? "review" : "output";
+}
+
 /** ONE transcript turn (draft `.turn` = grid `rail | content`). */
 export interface Turn {
   /** → `.turn.{role}`; `err` = a turn containing an error block (draft `.turn.err`). */

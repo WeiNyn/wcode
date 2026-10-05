@@ -31,6 +31,8 @@ import {
   memberInitial,
   memberSwatch,
   panelHeader,
+  outputHead,
+  bodyKind,
   rosterRows,
   selectionRef,
   toggleFold,
@@ -447,7 +449,6 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   const details = el("details", classNames(block, open));
   if (open) details.setAttribute("open", "");
   if (!tool.done) details.dataset.live = "1"; // a RUNNING fold is the newest live step
-  if (open) details.setAttribute("open", "");
 
   const summary = el("summary", null);
   summary.appendChild(el("span", "chev"));
@@ -470,15 +471,43 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   details.appendChild(summary);
 
   const inner = el("div", "inner");
-  const hunk = typeof tool.diff === "string" && tool.diff !== "" ? reviewHunk(tool.diff) : null;
+  // EXACTLY ONE L2a body per fold (V12): the `.review` card for a diff-bearing tool, else
+  // the output card — the fold itself stays L1.
+  const hunk = bodyKind(tool) === "review" ? reviewHunk(tool.diff ?? "") : null;
   inner.appendChild(hunk !== null ? reviewBlock(tool, hunk, verdictOf(lastVerdicts, tool.callId)) : rawOutput(tool));
   details.appendChild(inner);
   return details;
 }
 
-/** The plain output `<pre>` for a tool with no diff (the draft's `.fold .out`). */
+/** The plain output CARD (V12, L2a): a `.chead` naming the producer + its kind, a `Copy`,
+ *  over a BARE `<pre>` body — exactly ONE card, never nested. */
 function rawOutput(tool: RenderedTool): HTMLElement {
-  return el("pre", "tool-output", tool.outputText);
+  const card = el("div", "tool-output");
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", outputHead(tool.name));
+
+  const head = el("div", "chead");
+  const mark = el("span", "mark", "⚙");
+  mark.setAttribute("aria-hidden", "true");
+  head.appendChild(mark);
+  head.appendChild(el("span", null, `${tool.name} · output`));
+  head.appendChild(el("span", "spacer"));
+  head.appendChild(copyButton(tool.outputText));
+  card.appendChild(head);
+
+  card.appendChild(el("pre", null, tool.outputText));
+  return card;
+}
+
+/** The output card's `Copy`: writes the output text to the clipboard (client-local). */
+function copyButton(text: string): HTMLElement {
+  const button = el("button", "mini", "Copy");
+  button.setAttribute("type", "button");
+  button.setAttribute("aria-label", "Copy the tool output");
+  button.addEventListener("click", () => {
+    void navigator.clipboard.writeText(text).catch(() => undefined);
+  });
+  return button;
 }
 
 /** The in-panel change review for ONE diff-bearing tool (draft Change review). */

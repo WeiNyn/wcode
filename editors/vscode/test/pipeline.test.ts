@@ -24,7 +24,7 @@ function blocksToHtml(rendered: RenderedState): string {
   return rendered.blocks
     .map((block) => {
       if (block.kind === "tool" && block.tool) {
-        return `<div class="tool">⚙ ${block.tool.name} — ${block.tool.summary}</div>\n${block.tool.outputHtml}`;
+        return `<div class="tool">⚙ ${block.tool.name} — ${block.tool.summary}</div>\n<pre>${block.tool.outputText}</pre>`;
       }
       return block.html.trimEnd();
     })

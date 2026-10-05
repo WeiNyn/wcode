@@ -109,7 +109,8 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
+    "lint:css": "node scripts/check-css.mjs",
+    "test": "node scripts/check-css.mjs && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test test/*.test.ts",
     "capture": "node scripts/capture.mjs",
     "verify:diff-fixtures": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/verify-diff-fixtures.mjs",
     "vscode:prepublish": "npm run build"

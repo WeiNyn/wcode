@@ -20,7 +20,6 @@ export interface RenderedTool {
   name: string;
   /** The one-line summary shown while collapsed. */
   summary: string;
-  outputHtml: string;
   outputText: string;
   done: boolean;
   isError: boolean;
@@ -169,7 +168,6 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
     callId: tool.callId,
     name: tool.name,
     summary: toolSummary(tool),
-    outputHtml: `<pre class="tool-output">${escapeHtml(tool.output)}</pre>`,
     outputText: tool.output,
     done: tool.done,
     isError: tool.isError,
