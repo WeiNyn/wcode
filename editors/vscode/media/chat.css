@@ -373,9 +373,9 @@ body {
 }
 
 .who .av {
-  width: 15px;
-  height: 15px;
-  border-radius: 4px;
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
   display: grid;
   place-items: center;
   font-size: var(--wc-fs-meta);
