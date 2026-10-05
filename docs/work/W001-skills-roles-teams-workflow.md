@@ -1,6 +1,6 @@
 # W001 — Skills, roles, teams & the brainstorm-first workflow
 
-- **Status:** in progress
+- **Status:** shipped — P0–P6 + P9 landed; P8 (node artefacts as files) deferred; P7 Phase 2 (the docs link sweep) deferred by decision
 - **Decisions:** [D001](../decisions/D001-workflow-task-fenced-instantiation.md),
   [D002](../decisions/D002-gates-are-structural-not-verification.md),
   [D003](../decisions/D003-team-file-reference.md),
@@ -193,3 +193,37 @@ an unseeded DAG run.
   bash" while its `tools` list omits `bash` (a worker told it has a tool it
   cannot use); and the four `[[team]]` role blocks are duplicated verbatim
   between `.wcode/team.toml` and `.wcode/workflow.toml`.
+- **2026-10-05** — **Outcome.** Seven commits, each gated on
+  `cargo test --workspace` + `cargo clippy --workspace --all-targets` clean:
+  `a399d94` (F1: the `[workflow]` fence + the doc edits), `2d273d8` (F2: the
+  validation split), `2739b94` (`[[team]] file =` + the fold extraction),
+  `ee71bb5` (the roles moved into `.wcode/agents/*.md`, the duplicated `[[team]]`
+  blocks deleted, the loop encoded in the guidelines), `9d10eb0` (the skills
+  suite + the validator), `09457d0` (the decisions, this work item, the docs
+  buckets), `967857b` (D005: the opt-out governs project discovery only).
+  Final gates: **1113 passed, 4 ignored; clippy clean.**
+- **2026-10-05** — **Live verification** (a real binary, not `cargo build`):
+  a workflow naming members supplied only by `.wcode/agents/*.md` **loads** (the
+  F2 regression); a loaded `[workflow]` with no `--task` prints
+  `workflow: present but inert (no --task)` and boots, with the old
+  `uses {{task}} but no --task` exit-2 gone; the same with `--task "hi"`
+  reports `workflow: 2 nodes` and dispatches `#1 [doing] recon`; the repo team
+  forms as six members from the role files with no `[[team]]` anywhere; and a
+  probe in `~/.config/wcode/agents/` survives `--no-project-config` while the
+  project members do not.
+- **2026-10-05** — **Two defects found on the way, both fixed:** the explorer's
+  role text promised "non-mutating bash" while its `tools` list refused `bash`
+  (the role files now list `bash` + `read_only: true`, which `ReadOnlyHooks`
+  makes true — it blocks mutating `bash` and `bg` but permits `cargo test` and
+  `cargo clippy`); and the four `[[team]]` role blocks were duplicated verbatim
+  across the two TOMLs. The duplication turned out to be a **workaround** for the
+  validation-order bug that F2 fixed, which is why the role move had to wait for
+  it.
+- **2026-10-05** — **Deferred, with reasons.** *P8 (node artefacts as files)*:
+  it changes `tasks.rs::complete`'s contract and the DAG's invariants, and the
+  plan required a sketch + first-layer review before such a change — no reviewer
+  was available at that point, so it is tracked here rather than landed
+  unreviewed. *P7 Phase 2 (the docs link sweep)*: deferred by lock L3 — moving
+  the ~36 top-level files touches 112 `docs/*.md` references across 45 files
+  (including `README.md`, `AGENTS.md` and Rust doc comments) and deserves its own
+  change with a link check.
