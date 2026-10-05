@@ -347,28 +347,51 @@ body{
 /* ============================================================== transcript */
 .transcript{
   flex:1 1 auto; overflow:auto; min-height:0;
-  padding:var(--wc-4) var(--wc-3) var(--wc-2);
-  display:flex; flex-direction:column; gap:var(--wc-4);
+  padding:var(--wc-3) var(--wc-3) var(--wc-2);
+  display:flex; flex-direction:column; gap:var(--wc-2); /* V14: tight; a speaker change adds the beat */
 }
-.turn{ display:grid; grid-template-columns:12px 1fr; gap:var(--wc-3); }
+/* V14 COMPOSITION: a turn head, a 3px rounded spine, conversation alignment and a
+   role-aware rhythm. Depth from composition, NO new level and NO card. */
+.turn{ display:grid; grid-template-columns:3px 1fr; gap:var(--wc-3); }
+.turn.new{ margin-top:var(--wc-4); } /* a speaker change is a new beat */
 .transcript[hidden],
 .turn[hidden]{ display:none; }
-.rail{ border-left:2px solid var(--vscode-panel-border); }
-.turn.you .rail{ border-left-color:var(--vscode-descriptionForeground); }
+/* the SPINE: a 3px rounded shape (was a 2px border-left), so a turn reads as a unit */
+.rail{ border:0; background:var(--sw, var(--vscode-panel-border)); border-radius:2px; }
+.turn.you .rail{ background:var(--vscode-descriptionForeground); }
+/* conversation alignment: your own words indent and take a QUIET fill (neutral, not accent) */
+/* the fill is on the TURN, so no wrapper class is needed anywhere */
+/* V14: the `you` fill sits on the TURN itself, with NO DOM change, because the shipped
+   `renderTurn` emits a class-less content div (`chat.ts:619` `el("div", null)`). No left
+   padding, so the 3px spine sits FLUSH at the fill's own left edge; `overflow:hidden`
+   clips both to the fill's 6px radius. */
+.turn.you{
+  margin-left:var(--wc-5);
+  background:var(--vscode-textBlockQuote-background);
+  border-radius:var(--wc-radius);
+  padding:var(--wc-2) var(--wc-3) var(--wc-2) 0;
+  overflow:hidden; /* clip the spine's 2px corners to the fill's 6px radius */
+}
 /* the `--sw` fallback is IDENTITY, not an accent paint: the accent shows only when a
    member has no swatch (mirrors media/chat.css:191 / :223). */
-.turn.wcode .rail{ border-left-color:var(--sw, var(--wc-accent)); }
-.turn.err .rail{ border-left-color:var(--vscode-errorForeground); }
+.turn.wcode .rail{ background:var(--sw, var(--wc-accent)); }
+.turn.err .rail{ background:var(--vscode-errorForeground); }
+/* the one live thing carries a faint wash: depth that MOVES (the accent = "active now") */
+.line.tool[data-live="1"]{ background:color-mix(in srgb, var(--wc-accent) 6%, transparent); border-radius:0 var(--wc-radius) var(--wc-radius) 0; }
 .who{
-  display:flex; align-items:center; gap:var(--wc-2); margin:0 0 var(--wc-1);
-  font-size:var(--wc-fs-meta); font-weight:600; color:var(--vscode-descriptionForeground);
+  display:flex; align-items:center; gap:var(--wc-2); margin:0 0 var(--wc-2);
+  font-size:var(--wc-fs-ui); letter-spacing:0; color:var(--vscode-descriptionForeground);
 }
 .who .av{
-  width:15px; height:15px; border-radius:4px; display:grid; place-items:center;
+  width:17px; height:17px; border-radius:5px; display:grid; place-items:center;
   font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
   background:var(--vscode-badge-background); color:var(--vscode-badge-foreground);
 }
-.who .name{ color:var(--vscode-foreground); }
+.who .name{ color:var(--vscode-foreground); font-weight:700; }
+/* the turn head's hairline: an L1 line from the name to the right edge */
+.who::after{ content:""; flex:1; height:1px; background:var(--vscode-panel-border); }
+.turn.you .who::after{ display:none; }
+.turn.you .who{ margin-bottom:var(--wc-1); }
 .who.wcode .av{ background:color-mix(in srgb, var(--sw, var(--wc-accent)) 20%, transparent); color:var(--sw, var(--wc-accent)); }
 .body{ overflow-wrap:anywhere; }
 .body p{ margin:0 0 var(--wc-2); }
@@ -399,9 +422,14 @@ body{
    being a stack of bordered boxes. */
 .line{ border-left:2px solid var(--vscode-panel-border); margin:var(--wc-1) 0; }
 .line.thinking{ border-left-color:color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent); }
-/* V13 TOOL STATUS: the tool row's L1 rule AND its ⚙ mark carry the status. running =
+/* V13r TOOL STATUS (GREEN / BLUE / RED): the tool row's L1 rule AND its ⚙ mark carry the
+   status. running = the accent (blue, "active now"); error = the semantic red; complete =
+   the semantic GREEN (`--vscode-charts-green`, a host token, NOT the accent). V13r
+   overrides V13's neutral complete: the user chose colour for all three states. */
    the accent (a running tool IS "active now"), error = the semantic red, complete =
-   NEUTRAL (no glyph, no colour: most tools complete, so the two exceptions are loud). */
+/* complete: the semantic green (the shipped V13 left it neutral) */
+.line.tool{ border-left-color:var(--vscode-charts-green); }
+.line.tool .tname{ color:var(--vscode-charts-green); }
 .line.tool[data-live="1"]{ border-left-color:var(--wc-accent); }
 .line.tool[data-live="1"] .tname{ color:var(--wc-accent); }
 .line.tool.error, .line.tool[data-err="1"]{ border-left-color:var(--vscode-errorForeground); }
@@ -758,7 +786,7 @@ textarea:focus{ outline:1px solid var(--vscode-focusBorder); border-color:var(--
            over the transcript without entering its scroll container -->
       <div class="transcript" id="transcript" role="log" aria-label="Transcript">
 
-        <div class="turn you">
+        <div class="turn you new">
           <div class="rail" aria-hidden="true"></div>
           <div>
             <div class="who"><span class="av" aria-hidden="true">Y</span><span class="name">you</span></div>
@@ -766,7 +794,7 @@ textarea:focus{ outline:1px solid var(--vscode-focusBorder); border-color:var(--
           </div>
         </div>
 
-        <div class="turn wcode" data-member="root" style="--sw:var(--vscode-charts-blue)">
+        <div class="turn wcode new" data-member="root" style="--sw:var(--vscode-charts-blue)">
           <div class="rail" aria-hidden="true"></div>
           <div>
             <div class="who wcode"><span class="av" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
@@ -886,7 +914,17 @@ test view::fold_open ... ok</pre>
           </div>
         </div>
 
-        <div class="turn wcode" data-member="w1" style="--sw:var(--vscode-charts-green)">
+        <!-- V14: a CONTINUATION turn (the same speaker, no `.new`), so the role-aware
+             rhythm is visible: this sits --wc-2 from the turn above, not --wc-4. -->
+        <div class="turn wcode" data-member="root" style="--sw:var(--vscode-charts-blue)">
+          <div class="rail" aria-hidden="true"></div>
+          <div>
+            <div class="who wcode"><span class="av" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
+            <div class="body"><p>Handing the render to the reviewer. Nothing else changed in the kernel.</p></div>
+          </div>
+        </div>
+
+        <div class="turn wcode new" data-member="w1" style="--sw:var(--vscode-charts-green)">
           <div class="rail" aria-hidden="true"></div>
           <div>
             <div class="who wcode"><span class="av" aria-hidden="true">E</span><span class="name">explorer</span></div>
