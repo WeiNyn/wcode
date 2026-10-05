@@ -1,7 +1,7 @@
 # VS Code surface — v3 plan (curation + a real visual system)
 
 **Status:** design proposed. The prototype [`design/vscode-ui-v3-draft.html`](design/vscode-ui-v3-draft.html)
-IS the spec. V6–V10 not started.
+IS the spec. V6–V11b shipped, each second-layer APPROVED; **V12 proposed**.
 **Companion docs:** the rationale is [`design/vscode-ui-exploration.md`](design/vscode-ui-exploration.md);
 v1's locked UI is [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md) (P1–P5 shipped);
 v2's one-dockable-surface plan is [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) (V1–V5 shipped, V4b open).
@@ -212,11 +212,10 @@ indicator a chat app puts above its input.
   new `FromWebview` variant): in **All** mode it scrolls the transcript to the newest
   `data-live` element; in **Focus** mode, where the other members' steps are not in the
   transcript, it first switches to **All** and then scrolls. One affordance ("see what
-  is happening"), two mechanisms. **`data-live` is a NEW client-local DOM attribute** — it
-  does not exist in the shipped webview today, so **V7 must add it** (stamp it on the
-  live tool fold / turn when it renders) or the reveal has nothing to target. It is
-  view state, not wire state: no protocol change, and it degrades to "scroll to the
-  transcript bottom" when absent.
+  is happening"), two mechanisms. **`data-live` is a client-local DOM attribute V7 ADDED**
+  (it is view state, not wire state — no protocol change): the live assistant block stamps
+  it at `chat.ts:438`, the running tool fold at `chat.ts:449`, and the reveal reads it at
+  `chat.ts:648`. It degrades to "scroll to the transcript bottom" when absent.
 - **Count + membership: `workingGroup` unchanged.** The pill renders
   `workingGroup(state.members, state.target?.id ?? null)` (`view.ts:KeUWa`): a member
   other than the target with `state === "running" || liveAction !== undefined`. **No
@@ -292,14 +291,15 @@ v3 defines **two levels** and says which is which:
     **optional** (present where the content is a console, absent where the card sits on
     the panel background). → the code block, the change review (plus the accent left
     rule as a modifier), the state card, the popovers and menus (the bordered markdown
-    tables are L2a too), and the **working pill** (a bordered, interactive card).
+    tables are L2a too), the **working pill** (a bordered, interactive card), and the
+    **tool output card** (V12, §1.5e — it gains a head, so it gains a border).
   - **L2b recessed** — the boundary is the **fill alone**, with the radius and **no
-    border at all**. → the tool console inside a fold (`.out`), and a peer's message
-    (`.body.peer`).
+    border at all**. → **a peer's message** (`.body.peer`) — and nothing else. (The tool
+    console *was* here; V12 moved it to L2a to give it a head.)
 
   A component is exactly one of L1 / L2a / L2b. There is no third treatment, and no
-  component may mix them (the shipped sheet does: `.out` is a borderless recess while
-  `.code` next to it is a bordered box, and `.body.peer` is a recess with no border at
+  component may mix them (the pre-v3 sheet did: `.out` was a borderless recess while
+  `.code` next to it was a bordered box, and `.body.peer` was a recess with no border at
   all — three treatments for two levels).
 
 The rule to write down: **an L2 boundary means "this is a distinct object you can act
@@ -338,6 +338,46 @@ rail, the `.who` avatar and the collapsed strip — always at the existing low m
 `+N −M` (`:R1gHN`,`:pmb3R`) and the diff (`:MVZAP`,`:m3duW`) — they are semantic, not
 decorative.
 
+**(e) Tool activity: the call is a LINE, the output is a CARD (V12).** The user's read of the
+shipped surface: *"the render of tool call and output feel lack of identification."*
+Grounded: the tool fold is an **L1 line** (`media/chat.css:413`) whose rule is explicitly
+**neutral** (`:421`, comment `:418`) with a neutral `.tname` (`:468`), and the **thinking**
+fold is *also* an L1 line (`:430`) — so an action and an aside read alike. The output is a
+bare **L2b recess with no header** (`media/chat.css:502`, `chat.ts:481`), unlike the code
+card, which has a `.chead` (`media/chat.css:525`).
+
+*The call: identity inside L1, bought by lowering the aside.*
+
+- the tool fold **stays L1** — promoting it to a card would re-create the wall of boxes v3
+  removed (the fold is a summary row, not a body);
+- `.tname` (the `⚙ {tool}` mark, `media/chat.css:468`) goes **600 → 700**, still
+  `--vscode-foreground`, still mono. The **`⚙` glyph is the action mark** and it is on every
+  tool, never on a thinking block;
+- **`thinking` is demoted**: its label drops to `--vscode-descriptionForeground` at weight
+  **400** with an **italic** summary; its dim rule (`:430`) stays.
+- *Rationale (the level/accent decision in one sentence):* the two rows are separated by
+  making the **aside quiet**, which costs no chrome, no accent and no new level — raising the
+  tool instead would have to borrow the accent, and a finished tool is not "active now".
+
+*The output: L2b → L2a, because it gains a head.*
+
+```
+⚙ bash · output                                          Copy
+running 145 tests
+```
+
+- the console becomes a **bordered card with a `.chead`** naming its producer and its kind
+  (`⚙ {tool} · output`), mirroring the code card's `.chead` (`media/chat.css:525`); the `.mini` `Copy`
+  button already has its call site (V8).
+- *Rationale:* an anonymous recess cannot carry a header, so identification forces the
+  level change — the console moves **L2b → L2a**, and there is still exactly one card
+  treatment in the system.
+- **Exactly one body per fold.** A diff-bearing tool renders the existing `.review` card
+  (L2a) as the body; a plain tool renders the new output card (L2a). Either way the fold's
+  body is **exactly one L2a**, the fold stays **L1**, and no card nests in a card.
+- **Accent unchanged.** §1.5(d) is not touched: the `⚙` mark and the tool name stay neutral,
+  and "active now" keeps its five jobs.
+
 ### 1.6 What is KEPT / MOVED / REMOVED
 
 | element (shipped) | anchor | verdict |
@@ -363,6 +403,9 @@ decorative.
 | `Enter to send` hint | `chat.ts:JpHql` | **removed** (the placeholder says it) |
 | `Stop` always-on | `chat.ts:nFrit` | **conditional** (running only) |
 | `--wc-gap` | `chat.css:MWQb5` | **replaced** by `--wc-1…5` |
+| tool output `<pre class="tool-output">` | `chat.ts:481`, `chat.css:502` | **promoted** L2b → **L2a**: it gains a `.chead` (`⚙ {tool} · output` + `Copy`), so it is no longer anonymous |
+| `.tname` (the `⚙ {tool}` mark) | `chat.css:468` | **kept**, weight 600 → **700** (identity by weight, not accent) |
+| `thinking` fold label | `chat.css:430` | **demoted**: `--vscode-descriptionForeground`, weight 400, italic summary (so a tool no longer reads like an aside) |
 
 ### 1.7 Frictions (where v3 fights the shipped code)
 
@@ -423,13 +466,14 @@ existing data; `✗ new` = new plumbing or a decision.
 | remove the `.group` box | drop `renderGroup` (`chat.ts:aee9V`); keep the predicate from `workingGroup` (`view.ts:KeUWa`) | ◑ delete only |
 | the **working pill** | `workingGroup` (`view.ts:KeUWa`) already returns the rows; the avatars reuse `memberSwatch`/`memberInitial` (`view.ts:Kg1gg`,`:TJpz6`); the pill is an **in-flow band**, a sibling of `.transcript` inside `.main`'s existing flex column (outside the scroller, so it never scrolls away; in flow, so it never overlays); the click is a **client-local scroll** (All) or a mode switch then a scroll (Focus) | ✔ no new wire; ◑ one new band, no wrapper |
 | spacing + type scales | new `--wc-1…5`, `--wc-fs-*` in `:root` (`media/chat.css:FGqrn`); every padding/gap/font-size re-pointed | ✔ CSS only |
-| line-vs-card | `details.fold` box → rule (`media/chat.css:tKorz`); each component assigned ONE L2 sub-form (L2a bordered: `.code`, `.hunk`/`.review`, `.statecard`, `.menu`/`.pop`, `.body table`, and `.pill` when V7 lands; L2b recessed: `.out`, `.body.peer`) — no third treatment | ✔ CSS only |
+| line-vs-card | `details.fold` box → rule (`media/chat.css:tKorz`); each component assigned ONE L2 sub-form (L2a bordered: `.code`, `.hunk`/`.review`, `.statecard`, `.menu`/`.pop`, `.body table`, `.pill` when V7 lands, and the **tool output card** when V12 lands; L2b recessed: `.body.peer`) — no third treatment | ✔ CSS only |
 | accent policy | `--wc-accent` call sites audited; the tool name + meter + tool rule move to neutral tokens | ✔ CSS only |
 | composer 7 → 4 | delete the `Model:` span + hint (`chat.ts:reM8I`,`:JpHql`); gate `Stop` on `status.running` (`chat.ts:nFrit`, `reducer.ts:tDvbE`) | ✔ data exists |
 | delete dead `.chipbtn` | `media/chat.css:Cnla7` (+ `:hover`,`:focus-visible`) | ✔ CSS only |
 | `.body.notice` / `.body.btw` (folded into ONE L1 rule) | `view.ts:2wb8h`,`:VPBGw` already emit both classes | ✔ CSS only |
 | context meter **gauge + denominator** (`▰▰▰▱▱ 42k / 200k`); **the V6 default is the text `ctx 42k`** | `status.contextUsed` is the numerator; **the window is never serialized** (`limits::model_limit` is kernel-internal) | **✗ new (flagged)** — V6 ships `ctx 42k`; the gauge waits on V11 |
 | effort in the disclosure | `SetEffort` exists; the current effort is not on the wire | **✗ new (flagged)** — the row is hidden while absent |
+| tool output card (L2b → L2a) + the tool mark at weight 700 + `thinking` demoted | `RenderedTool.name` (`render.ts:QWZjR`) and `outputText` (`:iKvzO`) already reach the webview; the head reuses the existing `.card`/`.chead`/`.mini`; the rest is CSS only | ✔ no new wire; ◑ one head |
 
 ---
 
@@ -441,10 +485,11 @@ existing data; `✗ new` = new plumbing or a decision.
 |---|---|---|---|
 | **V6** | **One chrome row.** `panelHeader` → one `cells` array: state glyph + target chip + All/Focus `.seg` + spacer + ctx + `▾` disclosure. Delete `#modes`, `#ribbon`, `renderRibbon`. Move session/model into the disclosure and **drop the `lastError` cell** (the failure already renders in the transcript; see V10). The state word survives only for `starting`/`stopped`/`crashed`, and `crashed` reads `✗ crashed` (the error glyph, not a recoloured spinner). The target chip is hidden in All mode (`chat.ts:YoBUD`); cell 1 is then the root's glyph alone. **The meter default is the text `ctx 42k`** (no gauge, no denominator). | `webview/view.t
 | **V7** | **The team's one home, and the working pill.** The rail row becomes `--sw` edge + state glyph + name + action; the header count and the `.group` box go; the **working pill** is an **in-flow band** above the composer (avatars + `{n} working` + a pulse), a real button that reveals the live step. | `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | the transcript contains no member-count and no `.group` box; a running member shows `⠋` in the rail; the pill is **in flow and never overlays transcript content** at any scroll position or docked width (no `position:absolute`); it shows **whenever any other member is working** (rail expanded **and** collapsed), with an overlapping avatar stack capped at 3 plus `+N`; clicking it scrolls to the newest live step (in Focus it switches to All first); it is keyboard-reachable with a visible focus ring; under `prefers-reduced-motion` the `⋯` is static |
-| **V8** | **The visual system.** The two token scales; every padding/gap/font-size re-pointed; `details.fold` box → rule; every component assigned **exactly one** L2 sub-form (`L2a` bordered: `.code`, `.hunk`/`.review`, `.statecard`, `.menu`/`.pop`, `.body table`, and `.pill` when V7 lands; `L2b` recessed: `.out`, `.body.peer`) with no thi
+| **V8** | **The visual system.** The two token scales; every padding/gap/font-size re-pointed; `details.fold` box → rule; every component assigned **exactly one** L2 sub-form (`L2a` bordered: `.code`, `.hunk`/`.review`, `.statecard`, `.menu`/`.pop`, `.body table`, `.pill`; `L2b` recessed: `.out`, `.body.peer`) with no third treatment; the accent policy applied; `.chipbtn` deleted; `.body.notice`/`.body.btw` styled; `.mini` given its `Copy` call site. | `media/chat.css`, `webview/chat.ts` | ☑ shipped `3fcd09c` (second-layer APPROVED); a §8 pre-flight pass, no bare `font-size:` px outside `:root`. **V12 later supersedes the L2b assignment here:** `.out` is promoted to L2a and L2b is `.body.peer` only |
 | **V9** | **The composer.** `Model:` span and the hint removed; `Stop` gated on `status.running`; the mode is a `.seg` (the same component as All/Focus). | `webview/chat.ts`, `media/chat.css` | idle shows `@`, mode, `Send`; running adds `Stop`; a keyboard-only pass reaches every control with a visible focus ring |
 | **V10** | **The notice treatment (no new error row).** The run failure is **already** carried by the transcript's `error` block (`reducer.ts:306` → `.body.error`, `media/chat.css:348`), so V10 adds **nothing** for it: the redundant header cell is removed in V6, and V10 only gives `.body.notice`/`.body.btw` the one folded L1 treatment (friction 5). | `webview/chat.ts`, `media/chat.css` | a notice and a btw render as the same dim inset line; the header is clean; the run failure appears **exactly once**, via the existing `.body.error` block (no duplicate row) |
 | **V11** | **(wire, flagged) The gauge + effort.** `contextWindow` + `effort` on the wire fan out to `SessionMember`; the meter renders `▰▰▰▱▱ 42k / 200k`; the disclosure gains an effort row. While absent, both degrade (numerator-only `ctx 42k`; the row hidden). | `wcode-harness`, `wcode-cli`, `wcode-protocol`, the extension | the meter shows `used / window` when known and `ctx 42k` when not; nothing renders `▰▰▰▱▱ 42 / ?` |
+| **V12** | **Tool activity identification.** The tool fold keeps its **L1** rule but its `⚙ {tool}` mark goes to weight **700**, and `thinking` is demoted (dim, weight 400, italic); the tool output is promoted **L2b → L2a** into a card whose `.chead` names it (`⚙ {tool} · output`) with a `Copy` `.mini`. | `media/chat.css`, `webview/chat.ts` | a tool line reads at full strength and a thinking line reads quiet; the output is a labelled card with a Copy button; a diff-bearing tool still shows **exactly one** `.review` card as its body; no fourth treatment and no nested card |
 
 ---
 
@@ -478,8 +523,8 @@ existing data; `✗ new` = new plumbing or a decision.
    **L1** (a line: a rule, no box, no fill), **L2a** (a bordered shape: a `1px` hairline
    plus `--wc-radius`; the fill is optional) or **L2b** (a recessed shape: the fill plus
    the radius, no border). Folds are L1; the code block, the change review, the state
-   card, the popovers, the bordered tables and the working pill are L2a; the tool
-   console and a peer message are L2b. There is
+   card, the popovers, the bordered tables, the working pill and the tool output card are
+   L2a; a peer message is L2b and **nothing else**. There is
    no third treatment and no mixing, so no implementer has to guess. One radius token.
 6. **Density is a token switch, not a second design.** `[data-density="dense"]` changes
    `--wc-1…5` and `--wc-fs-*` and nothing else — which is also how the system proves it
@@ -527,9 +572,11 @@ existing data; `✗ new` = new plumbing or a decision.
 
 | phase | status |
 |---|---|
-| V6 one chrome row | ☐ |
-| V7 the team's one home | ☐ |
-| V8 the visual system | ☐ |
-| V9 the composer | ☐ |
-| V10 the notice row | ☐ |
-| V11 wire gauges + effort (flagged) | ☐ |
+| V6 one chrome row | ☑ `4c4735d` |
+| V7 the team's one home + the working pill | ☑ `8663d89` |
+| V8 the visual system | ☑ `3fcd09c` |
+| V9 the composer | ☑ `a14b641` |
+| V10 the notice treatment | ☑ `d66cc4f` |
+| V11a wire gauges + effort | ☑ `8896332` |
+| V11b client gauge + effort row | ☑ `f37dba4` |
+| V12 tool activity identification | ☐ proposed |

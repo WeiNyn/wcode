@@ -410,7 +410,13 @@ body{
 .line .chev{ width:9px; font-size:var(--wc-fs-meta); }
 .line[open] > summary .chev::before{ content:"▾"; }
 .line:not([open]) > summary .chev::before{ content:"▸"; }
-/* a tool name is NOT accent-coloured: identity comes from the ⚙ glyph. */
+/* The TOOL mark is the action mark: the ⚙ glyph + the tool name at weight 700, still
+   NEUTRAL (no accent: a finished tool is not "active now"). A thinking block is the
+   ASIDE, so it is DEMOTED instead: dim, weight 400, an italic summary. That contrast is
+   what tells an action from an aside (V12). */
+.line.tool .tname{ font-weight:700; }
+.line.thinking .tname{ color:var(--vscode-descriptionForeground); font-weight:400; }
+.line.thinking .tsum{ font-style:italic; }
 .tname{ font-family:var(--vscode-editor-font-family); font-weight:600; color:var(--vscode-foreground); }
 .tsum{ font-family:var(--vscode-editor-font-family); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .meta{
@@ -427,9 +433,10 @@ body{
    interactive: code, tool output, the change review, a peer message, the state
    card, popovers. L2 has exactly TWO sub-forms and every component is one of them:
      L2a BORDERED - the boundary is a 1px hairline; the fill is optional.
-                    -> .card (code), .review, .statecard, .pop, .menu, .body table, .pill
+                    -> .card (code), .review, .statecard, .pop, .menu, .body table, .pill,
+                       and the TOOL OUTPUT card (V12: it gains a head, so it gains a border)
      L2b RECESSED - the boundary is the fill alone; radius, NO border.
-                    -> .out (the tool console), .body.peer
+                    -> .body.peer (and nothing else: the tool console was here until V12)
    There is no third treatment. */
 .card{
   border:1px solid var(--vscode-panel-border); border-radius:var(--wc-radius);
@@ -446,12 +453,10 @@ body{
   background:var(--vscode-textCodeBlock-background);
   font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
 }
-.out{ /* L2b: a recessed shape (fill + radius, no border), inside a LINE */
-  margin:0; padding:var(--wc-2); max-height:180px; overflow:auto; white-space:pre-wrap;
-  background:var(--vscode-textCodeBlock-background); border-radius:var(--wc-radius);
-  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
-  color:var(--vscode-editor-foreground);
-}
+/* V12: the tool console is now an L2a CARD (`.card`) with a `.chead` naming it, so the
+   old L2b `.out` recess is gone. Its scroll/height behaviour is the card body's. */
+.card.tool-output pre{ max-height:180px; overflow:auto; white-space:pre-wrap; }
+.card.tool-output .mark{ color:var(--vscode-foreground); }
 .mini{
   font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
   background:none; border:1px solid var(--vscode-panel-border); border-radius:4px;
@@ -776,9 +781,19 @@ textarea:focus{ outline:1px solid var(--vscode-focusBorder); border-color:var(--
                 <span class="tsum">cargo test --workspace</span>
                 <span class="meta"><span class="run">running…</span></span>
               </summary>
-              <div class="inner"><pre class="out">running 145 tests
+              <div class="inner">
+                <!-- V12: the tool console is an L2a CARD with a head naming its producer -->
+                <div class="card tool-output" role="group" aria-label="Output from bash">
+                  <div class="chead">
+                    <span class="mark" aria-hidden="true">⚙</span><span>bash · output</span>
+                    <span class="grow"></span>
+                    <button class="mini" type="button">Copy</button>
+                  </div>
+<pre>running 145 tests
 test webview::panel_header ... ok
-test view::fold_open ... ok</pre></div>
+test view::fold_open ... ok</pre>
+                </div>
+              </div>
             </details>
 
             <details class="line tool" data-run="done">
@@ -853,7 +868,16 @@ test view::fold_open ... ok</pre></div>
                 <span class="tsum">onOpenDiff</span>
                 <span class="meta"><span class="run">running…</span></span>
               </summary>
-              <div class="inner"><pre class="out">src/webview/chat.ts:88  post({ kind: "open-diff", callId });</pre></div>
+              <div class="inner">
+                <div class="card tool-output" role="group" aria-label="Output from grep">
+                  <div class="chead">
+                    <span class="mark" aria-hidden="true">⚙</span><span>grep · output</span>
+                    <span class="grow"></span>
+                    <button class="mini" type="button">Copy</button>
+                  </div>
+<pre>src/webview/chat.ts:88  post({ kind: "open-diff", callId });</pre>
+                </div>
+              </div>
             </details>
             <div class="body"><p>The diff hook is at <span class="mono">chat.ts:88</span>.</p></div>
           </div>
