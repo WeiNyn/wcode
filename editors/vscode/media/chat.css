@@ -433,8 +433,9 @@ details.fold.tool.error .tname {
   color: var(--vscode-errorForeground);
 }
 
-/* The tool fold's rule is NEUTRAL (plan §1.5d): identity comes from the ⚙ glyph,
-   not from colour — so the accent stays reserved for "active now". */
+/* The tool fold's rule carries the STATUS (V13, plan §1.5e): accent while running
+   (above), errorForeground on failure (below), and NEUTRAL when complete: the base
+   rule IS the complete (quiet) state, the two exceptions override it. */
 details.fold.tool {
   border-left-color: var(--vscode-panel-border);
 }
