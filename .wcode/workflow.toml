@@ -9,6 +9,10 @@
 # exits 2 if none is given. For the INTERACTIVE dev loop (no injected task; watch
 # the team work in the TUI) use .wcode/team.toml instead.
 #
+# D001 — a [workflow] instantiates ONLY when --task/WCODE_TASK is present. Loaded
+# without a task it is INERT: wcode prints "workflow: present but inert (no
+# --task)" and boots normally. There is no non-inert case.
+#
 # The run is HEADLESS: the root is seeded with the task, the scheduler drives the
 # DAG, and wcode exits 0 once every node is Done (a node that reaches Failed, a
 # --timeout, or a root-turn error exits 1).
@@ -17,19 +21,31 @@
 #
 #   explore → sketch → review-sketch → implement → verify → publish → ci
 #
+# The brainstorm/brief step is deliberately NOT a node here (D001): it needs a
+# human's sign-off, and a headless run has none. It lives in the prompt layer —
+# see [orchestrator] guidelines in .wcode/team.toml and the `brainstorm-brief`
+# skill.
+#
+# The members are NOT declared here: each role is a markdown agent definition
+# under .wcode/agents/*.md, auto-discovered and folded in. A `[[team]]` entry of
+# the same name would win wholesale and silently drop the role.
+#
 # Overlays fold over the global config — auto-discovered ./.wcode/config.toml,
 # then ./.wcode/team.toml, then the explicit --config/WCODE_CONFIG on top — so
-# this file is
-# self-contained: the dev team (the same members as .wcode/team.toml), the
-# orchestrator guidance, and the [tools] the explorer needs — plus the [workflow]
-# graph. {{task}} is substituted into node titles only (scripts are never
-# templated), so the request reaches each member as part of its dispatched node.
+# this file needs only what it adds: the [workflow] graph and the [tools] the
+# explorer needs. {{task}} is substituted into node titles only (scripts are
+# never templated), so the request reaches each member as part of its dispatched
+# node.
 #
 # The three review nodes are `gate = true`. A reject re-opens the node(s) the gate
 # depends on AND their entire downstream cone, and the scheduler re-dispatches
 # them with the reason — up to `max_attempts`, then the node fails and the
 # scheduler escalates. `ci` depends on both `implement` and `publish`, so a red
 # pipeline re-opens `implement` (fix) and `publish` (re-push) and the cone re-runs.
+#
+# D002 — a gate is SHAPE, not verification: it proves the step ran, not that the
+# work is correct. A Session gate's verdict is the root model's, and a node
+# completes when the root says so. Judgment belongs to the reviewer's role.
 #
 # The publish/ci legs need an authenticated `gh` on PATH and a git remote to push
 # to; without them the pipeline stalls at `publish` (or `ci`).
@@ -56,31 +72,19 @@ NOT spawn workers or wake them by hand — you drive the plan:
 - You may add nodes (`task create`/`depends`) for a task the seeded graph does
   not cover — e.g. skip the sketch/review-first-layer steps for a tiny change.
 
-Each member keeps its role (below). Keep the kernel (crates/wcode-harness) free
-of presentation concerns; the CLI stays thin. One logical change per commit
-(imperative, area-prefixed: harness:/cli:/tui:/docs:); every change must keep
-`cargo test --workspace` and `cargo clippy --workspace --all-targets` clean;
-prefer a live end-to-end check over unit tests alone; track multi-step work in
-docs/next-steps.md; a task is not done until the second-layer review approves.
+A gate is SHAPE, not verification: it proves the step ran, never that the work is
+correct. The reviewer's role is where judgment lives — read the diff, run
+`cargo test --workspace` and `cargo clippy --workspace --all-targets`, and reject
+with `file:anchor` evidence rather than approving on the gate's existence.
+
+Each member keeps its role (see .wcode/agents/*.md). Keep the kernel
+(crates/wcode-harness) free of presentation concerns; the CLI stays thin. One
+logical change per commit (imperative, area-prefixed: harness:/cli:/tui:/docs:);
+every change must keep `cargo test --workspace` and
+`cargo clippy --workspace --all-targets` clean; prefer a live end-to-end check
+over unit tests alone; track multi-step work in docs/next-steps.md; a task is not
+done until the second-layer review approves.
 """
-
-[[team]]
-name  = "explorer"
-role  = "Reconnaissance for the wcode repo. Read-only: inspect with read/grep/find and non-mutating bash; never edit, write, or run mutating commands. Report findings concisely as file:anchor evidence; say plainly when you did not verify something."
-tools = ["read", "grep", "find"]
-read_only = true
-
-[[team]]
-name  = "sketcher"
-role  = "Interface sketches, not implementations. Two forms: (a) NEW files — a module's types, struct fields, fn signatures with parameter/return types, rustdoc contracts, and #[cfg(test)] test skeletons with todo!() bodies; (b) IN-PLACE comment blocks in existing files — `// ==== SKETCH (review-only, not real code) ==== … // ==== /SKETCH ====`, sketching the structs/fns to ADD to that file as comment lines (may be non-compiling; never modify real code lines). Either way: no working logic; faithfully honor the locked design doc; ground every integration point in the real current code (cite file:anchor); call out where the design fights the existing code. The sketch must be fillable by a developer without redesign."
-
-[[team]]
-name  = "developer"
-role  = "Implement exactly the dispatched task and its acceptance criteria; start nothing unrequested. One logical change per commit (imperative, area-prefixed: harness:/cli:/tui:/docs:). Every change: tests + `cargo clippy --workspace --all-targets` clean; prefer a live check. Report changed file:anchors and gate results."
-
-[[team]]
-name  = "reviewer"
-role  = "Two gates. FIRST-LAYER (on a sketch — new files OR in-place `// SKETCH` comment blocks): verify the interface matches the locked design, settle the design's open questions, approve/block before implementation. SECOND-LAYER (on a diff): read the change against the task, confirm the tests assert behavior (not merely pass), confirm the first layer's amendments landed, confirm ZERO `SKETCH` markers remain in the diff (the developer must replace every block with real code), run build/test/clippy. Verdict: APPROVE, or blocking issues with file:anchor evidence. No rubber-stamping."
 
 # The feature pipeline, as a DAG. `{{task}}` is the request, substituted into each
 # member title. The three review nodes are gates that send work back; `ci`
