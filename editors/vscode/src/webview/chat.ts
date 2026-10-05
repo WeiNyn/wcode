@@ -611,7 +611,8 @@ function toolMeta(tool: RenderedTool): HTMLElement | null {
 function renderTurn(turn: Turn): HTMLElement {
   // The swatch rides the WRAPPER, so the rail (a sibling of the content) takes it too.
   const sw = turn.swatch === undefined ? "" : ` sw-${turn.swatch}`;
-  const wrap = el("div", `turn ${turn.role}${sw}`);
+  // V14: `.turn.new` marks the turn that OPENS a speaker (the role-aware rhythm).
+  const wrap = el("div", `turn ${turn.role}${sw}${turn.isNew ? " new" : ""}`);
   const rail = el("div", "rail");
   rail.setAttribute("aria-hidden", "true");
   wrap.appendChild(rail);

@@ -285,6 +285,9 @@ export interface Turn {
   who: { className: string; avatar: string; name: string };
   /** The member's swatch, carried onto the turn so the rail takes its colour. */
   swatch?: MemberSwatch;
+  /** True when this turn OPENS a speaker (V14's `--wc-4` beat); false when it continues
+   *  the speaker above it (a tight `--wc-2`). → the `.turn.new` class. */
+  isNew: boolean;
   /** The blocks of this turn, in order. */
   blocks: RenderedBlock[];
 }
@@ -298,13 +301,16 @@ export interface Turn {
  * boundary, so every turn has exactly one origin and first-block labelling is correct).
  * A turn containing an `error` block is role "err". `memberOf` (All mode) resolves an origin
  * to the member that labels the turn; absent ⇒ the current `who("wcode")`.
- */
+ *
+ * V14: each turn also carries `isNew` — it OPENS a speaker (a `--wc-4` beat) vs CONTINUES
+ * the speaker above it (a tight `--wc-2`), the transcript's role-aware rhythm. */
 export function turns(
   blocks: RenderedBlock[],
   memberOf?: (origin: string | undefined) => TurnMember | undefined,
   fallbackSwatch?: MemberSwatch,
 ): Turn[] {
   const grouped: Turn[] = [];
+  let lastSpeaker: string | null = null;
   for (const block of blocks) {
     const last = grouped[grouped.length - 1];
     const lastKind = last?.blocks[last.blocks.length - 1]?.kind;
@@ -313,6 +319,9 @@ export function turns(
     // A NEW turn starts on a `user`/`peer` block, right after one, OR on an ORIGIN
     // change (the merged run boundary) — so the timeline reads as discrete messages.
     const startsRun = last === undefined || last.blocks[last.blocks.length - 1]?.origin !== block.origin;
+    // V14: the turn's SPEAKER — `you`, else the member that owns the block (a peer's
+    // sender, else its origin). A turn whose speaker matches the one above CONTINUES it.
+    const speaker = opensYou ? "you" : (block.from ?? block.origin ?? "wcode");
     if (opensYou || opensPeer || last === undefined || lastKind === "user" || lastKind === "peer" || startsRun) {
       // A peer block is labeled by its SENDER (`from`); everything else by its origin.
       const member = memberOf?.(opensPeer ? block.from : block.origin);
@@ -320,8 +329,10 @@ export function turns(
         role: opensYou ? "you" : "wcode",
         who: who(opensYou, member, fallbackSwatch),
         swatch: opensYou ? undefined : member?.swatch ?? fallbackSwatch,
+        isNew: speaker !== lastSpeaker,
         blocks: [block],
       });
+      lastSpeaker = speaker;
     } else {
       last.blocks.push(block);
     }

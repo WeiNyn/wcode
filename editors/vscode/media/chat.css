@@ -289,29 +289,51 @@ body {
   padding: var(--wc-4) var(--wc-3) var(--wc-2);
   display: flex;
   flex-direction: column;
-  gap: var(--wc-4);
+  gap: var(--wc-2); /* the tight baseline: a CONTINUATION (a speaker change adds below) */
 }
 
+/* V14 COMPOSITION: a turn head, a 3px rounded spine, conversation alignment and a
+   role-aware rhythm. Depth comes from composition. NO new level, NO card. */
 .turn {
   display: grid;
-  grid-template-columns: 14px 1fr;
-  gap: var(--wc-2);
+  grid-template-columns: 3px 1fr;
+  gap: var(--wc-3);
 }
 
+/* A SPEAKER CHANGE is a bigger beat; a continuation keeps the transcript's tight --wc-2. */
+.turn.new {
+  margin-top: var(--wc-4);
+}
+
+/* The SPINE: a 3px rounded SHAPE (was a 2px border-left), so a turn reads as a unit. */
 .rail {
-  border-left: 2px solid var(--vscode-panel-border);
+  border: 0;
+  background: var(--sw, var(--vscode-panel-border));
+  border-radius: 2px;
 }
 
 .turn.you .rail {
-  border-left-color: var(--vscode-descriptionForeground);
+  background: var(--vscode-descriptionForeground);
 }
 
 .turn.wcode .rail {
-  border-left-color: var(--sw, var(--wc-accent));
+  background: var(--sw, var(--wc-accent));
 }
 
 .turn.err .rail {
-  border-left-color: var(--vscode-errorForeground);
+  background: var(--vscode-errorForeground);
+}
+
+/* Conversation alignment: your own words INDENT and take a QUIET fill (neutral, NOT the
+   accent). The fill sits on the TURN itself — no wrapper class, no DOM change — and there
+   is no left padding, so the 3px spine sits flush at the fill's own edge; `overflow: hidden`
+   clips both to the fill's radius. */
+.turn.you {
+  margin-left: var(--wc-5);
+  background: var(--vscode-textBlockQuote-background);
+  border-radius: var(--wc-radius);
+  padding: var(--wc-2) var(--wc-3) var(--wc-2) 0;
+  overflow: hidden;
 }
 
 .who {
@@ -323,6 +345,31 @@ body {
   letter-spacing: 0.02em;
   color: var(--vscode-descriptionForeground);
   margin: 0 0 var(--wc-1);
+}
+
+/* V14: the turn HEAD — the name at `--wc-fs-ui` plus a HAIRLINE running to the right
+   edge (an L1 line, so the head costs no chrome). Scoped to `.turn` so the roster row's
+   `.who` — the same class — keeps its own compact treatment. */
+.turn .who {
+  display: flex;
+  font-size: var(--wc-fs-ui);
+  letter-spacing: 0;
+  margin: 0 0 var(--wc-2);
+}
+
+.turn .who::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--vscode-panel-border);
+}
+
+.turn.you .who::after {
+  display: none;
+}
+
+.turn.you .who {
+  margin-bottom: var(--wc-1);
 }
 
 .who .av {
@@ -345,6 +392,7 @@ body {
 
 .who .name {
   color: var(--vscode-foreground);
+  font-weight: 700;
 }
 
 .body {
@@ -423,6 +471,9 @@ details.fold {
    fold stays L1. (`data-live="1"` is the running stamp `renderToolFold` already sets.) */
 details.fold.tool[data-live="1"] {
   border-left-color: var(--wc-accent);
+  /* V14: the ONE live thing carries a faint wash — depth that MOVES ("active now"). */
+  background: color-mix(in srgb, var(--wc-accent) 6%, transparent);
+  border-radius: 0 var(--wc-radius) var(--wc-radius) 0;
 }
 
 details.fold.tool[data-live="1"] .tname {

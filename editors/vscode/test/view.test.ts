@@ -852,4 +852,61 @@ test("turns: the Focus fallback swatch tints a single member's turns", () => {
   assert.equal(t[0].who.className, "who wcode sw-orange");
   assert.equal(t[0].swatch, "orange");
   assert.equal(t[0].who.name, "wcode", "Focus still labels the assistant turn 'wcode'");
+  assert.equal(t[0].who.name, "wcode", "Focus still labels the assistant turn 'wcode'");
+});
+
+/* ------------------------------------------------------- V14: composition */
+
+test("turns: `.new` marks a SPEAKER CHANGE; a repeat speaker is a continuation", () => {
+  // Two `user` blocks in a row are the SAME speaker (you -> you), so the second CONTINUES;
+  // the assistant flips the speaker, and the third `user` flips it back.
+  const t = turns([
+    { kind: "user", html: "one", live: false },
+    { kind: "user", html: "two", live: false },
+    { kind: "assistant", html: "", live: false },
+    { kind: "user", html: "three", live: false },
+  ]);
+  assert.deepEqual(
+    t.map((x) => x.isNew),
+    [true, false, true, true],
+    "a speaker change is new; the repeat `you` is a continuation",
+  );
+});
+
+test("turns: two peer blocks from the SAME sender are one speaker (the second continues)", () => {
+  const t = turns([
+    { kind: "peer", html: "", live: false, from: "agent:w1", origin: "agent:w1" },
+    { kind: "peer", html: "", live: false, from: "agent:w1", origin: "agent:w1" },
+    { kind: "peer", html: "", live: false, from: "agent:w2", origin: "agent:w2" },
+  ]);
+  assert.deepEqual(t.map((x) => x.isNew), [true, false, true], "the repeated sender continues");
+  assert.equal(t[0].isNew, true, "the FIRST turn always opens a speaker");
+});
+
+test("the V14 composition is in the sheet: spine, head, alignment, rhythm, the wash", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  // 2. the spine: a 3px filled, rounded bar in the turn's own colour.
+  assert.match(css, /\.turn \{[^}]*grid-template-columns: 3px 1fr/, "the 3px spine column");
+  assert.match(css, /\.rail \{[^}]*border: 0;[^}]*background: var\(--sw/, "the rail is a filled bar");
+  assert.match(css, /\.rail \{[^}]*border-radius: 2px/, "the spine is rounded");
+  // 1. the turn head: a hairline to the right edge, suppressed on `you`.
+  assert.match(css, /\.turn \.who::after \{[^}]*height: 1px/, "the turn head's hairline");
+  assert.match(css, /\.turn\.you \.who::after \{\s*display: none;/, "no hairline on `you`");
+  // 3. conversation alignment: `you` indents + takes a neutral fill that clips the spine.
+  assert.match(css, /\.turn\.you \{[^}]*margin-left: var\(--wc-5\)/, "`you` indents");
+  assert.match(
+    css,
+    /\.turn\.you \{[^}]*background: var\(--vscode-textBlockQuote-background\)/,
+    "`you` takes a NEUTRAL fill (not the accent)",
+  );
+  assert.match(css, /\.turn\.you \{[^}]*overflow: hidden/, "the fill clips the spine");
+  // 4. the role-aware rhythm: a continuation is tight, a speaker change is a beat.
+  assert.match(css, /\.transcript \{[^}]*gap: var\(--wc-2\)/, "a continuation stays tight");
+  assert.match(css, /\.turn\.new \{[^}]*margin-top: var\(--wc-4\)/, "a speaker change gets the beat");
+  // 5. the one live thing: a faint accent wash ("active now").
+  assert.match(
+    css,
+    /details\.fold\.tool\[data-live="1"\] \{[^}]*background: color-mix\(in srgb, var\(--wc-accent\) 6%/,
+    "the running fold's faint accent wash",
+  );
 });
