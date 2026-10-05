@@ -308,9 +308,17 @@ function runCommand(name: string, arg: string): void {
   try {
     switch (command.name) {
       case "model":
+        if (arg === "") {
+          void pickModel(target);
+          break;
+        }
         session.send({ type: "set_model", model: arg }, target);
         break;
       case "effort":
+        if (arg === "") {
+          void pickEffort(target);
+          break;
+        }
         // `-`/`off`/`none` clears it, mirroring the CLI's `/effort -`.
         session.send({ type: "set_effort", effort: isClearEffort(arg) ? null : arg }, target);
         break;
@@ -323,6 +331,54 @@ function runCommand(name: string, arg: string): void {
     }
   } catch (err) {
     channel.appendLine(`/${command.name} failed: ${errMessage(err)}`);
+  }
+}
+
+/** The effort vocabulary a picker offers (the Responses enum; Chat is free-style). */
+const EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * `/model` with NO argument: ask the transport for the catalog ON DEMAND (no startup
+ * caching, no race), then a native QuickPick marks the current model and sets the pick.
+ * The reply is the `AgentEvent::Models { models }` a `ListModels` is answered with; it
+ * ALSO flows through the frame handler into the `models` reducer arm (a harmless side
+ * effect of the on-demand ask).
+ */
+async function pickModel(target: string | undefined): Promise<void> {
+  if (!session) return;
+  const reply = await session.ask({ type: "list_models" }).catch(() => undefined);
+  const models = reply?.type === "models" ? reply.models : [];
+  if (models.length === 0) {
+    void vscode.window.showInformationMessage("wcode: no model catalog from this provider");
+    return;
+  }
+  const current = viewState.members.find((m) => m.id === (target ?? viewState.targeted))?.model;
+  const items: Array<vscode.QuickPickItem & { id: string }> = models.map((id) => ({
+    label: id,
+    description: id === current ? "current" : undefined,
+    id,
+  }));
+  const picked = await vscode.window.showQuickPick(items, {
+    title: "wcode: switch model",
+    placeHolder: current ?? "pick a model",
+  });
+  if (picked !== undefined) session.send({ type: "set_model", model: picked.id }, target);
+}
+
+/**
+ * `/effort` with NO argument: a native QuickPick over the levels, plus a `clear` entry
+ * (`-`, sending nothing). A TYPED `/effort <level>` still posts whatever the user wrote
+ * (Chat is free-style) — see the non-empty arm in `runCommand`.
+ */
+async function pickEffort(target: string | undefined): Promise<void> {
+  if (!session) return;
+  const items: Array<vscode.QuickPickItem & { id: string; clear: boolean }> = [
+    ...EFFORT_LEVELS.map((level) => ({ label: level as string, id: level as string, clear: false })),
+    { label: "clear", description: "send nothing", id: "-", clear: true },
+  ];
+  const picked = await vscode.window.showQuickPick(items, { title: "wcode: reasoning effort" });
+  if (picked !== undefined) {
+    session.send({ type: "set_effort", effort: picked.clear ? null : picked.id }, target);
   }
 }
 

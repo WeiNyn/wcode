@@ -13,7 +13,7 @@
  * DOM-bound: element construction, scroll glue, the click/keydown handlers, and
  * `acquireVsCodeApi()`.
  */
-import { filterCommands, parseSlash, type SlashCommand } from "../commands.ts";
+import { completionText, filterCommands, parseSlash, type SlashCommand } from "../commands.ts";
 import { memberGlyph, sidebarRails, todoGlyph, type RosterItem, type SidebarRails } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
@@ -948,8 +948,9 @@ function closeCmdMenu(): void {
 }
 
 /**
- * Run a command picked from the menu. One that NEEDS an argument only arms the
- * input (`/model `) — running it empty would be a round-trip the host must reject.
+ * Run a command picked from the menu (the ENTER half; Tab is `completeMenuCommand`). A
+ * command that NEEDS an argument (`/btw`, the only one left) only arms the input — running
+ * it empty would be a round-trip the host must reject.
  */
 function runMenuCommand(command: SlashCommand): void {
   if (command.requiresArg === true) {
@@ -963,6 +964,19 @@ function runMenuCommand(command: SlashCommand): void {
   autoGrow();
   closeCmdMenu();
   post({ kind: "command", name: command.name, arg: "" });
+  inputEl.focus();
+}
+
+/**
+ * Complete the highlighted `/` command into the composer (Tab) — the COMPLEMENT of
+ * `runMenuCommand`: Tab ARMS the line and keeps focus; it NEVER dispatches a `post`.
+ * `renderCmdMenu()` then hides the menu for `/<name> `, because `cmdQuery()` returns null
+ * once a space is typed — the intended behaviour.
+ */
+function completeMenuCommand(command: SlashCommand): void {
+  inputEl.value = completionText(command);
+  autoGrow();
+  renderCmdMenu();
   inputEl.focus();
 }
 
@@ -1010,6 +1024,11 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Escape") {
       event.preventDefault();
       closeCmdMenu();
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault(); // keep Tab away from focus traversal
+      completeMenuCommand(cmdItems[cmdIndex]);
       return;
     }
     if (event.key === "Enter" && !event.shiftKey) {

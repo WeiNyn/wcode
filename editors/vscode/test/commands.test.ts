@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { SLASH_COMMANDS, filterCommands, findCommand, parseSlash } from "../src/commands.ts";
+import { SLASH_COMMANDS, completionText, filterCommands, findCommand, parseSlash } from "../src/commands.ts";
 
 test("findCommand resolves a name and every alias", () => {
   assert.equal(findCommand("model")?.name, "model");
@@ -33,6 +33,32 @@ test("parseSlash rejects a non-command so the caller submits it as prompt text",
   assert.equal(parseSlash("hello"), null);
   assert.equal(parseSlash("/nonsense x"), null, "an unknown /… is prompt text, the CLI's rule");
   assert.equal(parseSlash("/"), null);
+});
+
+test("completionText arms a space only for arg-taking commands", () => {
+  const text = (name: string): string => {
+    const command = findCommand(name);
+    assert.ok(command !== undefined, `/${name} is a command`);
+    return completionText(command);
+  };
+  assert.equal(text("model"), "/model ");
+  assert.equal(text("resume"), "/resume ");
+  assert.equal(text("plan"), "/plan", "no arg hint ⇒ the bare name");
+  assert.equal(text("new"), "/new");
+});
+
+test("/model and /effort are OPTIONAL-arg now (an empty arg opens a host picker)", () => {
+  assert.notEqual(findCommand("model")?.requiresArg, true);
+  assert.notEqual(findCommand("effort")?.requiresArg, true);
+  // The arg HINT stays, so the menu shows it and Tab completes to `/<name> `.
+  assert.notEqual(findCommand("model")?.arg, undefined);
+  assert.notEqual(findCommand("effort")?.arg, undefined);
+  // A bare `/model`/`/effort` parses with an EMPTY arg — the picker path.
+  assert.deepEqual(parseSlash("/model"), { command: findCommand("model"), arg: "" });
+  assert.deepEqual(parseSlash("/effort"), { command: findCommand("effort"), arg: "" });
+  // A typed arg still carries through (the direct path).
+  assert.equal(parseSlash("/model gpt-x")?.arg, "gpt-x");
+  assert.equal(parseSlash("/effort high")?.arg, "high");
 });
 
 test("every command has a help line, and arg-requiring ones name an arg", () => {

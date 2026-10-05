@@ -24,12 +24,22 @@ export interface SlashCommand {
   requiresArg?: boolean;
 }
 
+/**
+ * Tab's completion text for `command` — `/<name>` plus a trailing space IFF the command
+ * takes an argument (`command.arg` set), else the bare name. Pure: the ONE place the
+ * `/<name> ` vs `/<name>` form is decided, so the webview and its test agree. Tab ARMS
+ * the line; it never RUNS it (Enter runs).
+ */
+export function completionText(command: SlashCommand): string {
+  return "/" + command.name + (command.arg !== undefined ? " " : "");
+}
+
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "new", aliases: ["clear"], help: "Start a fresh session" },
   { name: "reload", help: "Restart the session" },
   { name: "resume", arg: "[path]", help: "Resume a session — pick one, or pass a path" },
-  { name: "model", arg: "<id>", help: "Switch the model", requiresArg: true },
-  { name: "effort", arg: "<level | ->", help: "Set the reasoning effort (- clears it)", requiresArg: true },
+  { name: "model", arg: "[id]", help: "Switch the model: pick one, or pass an id" },
+  { name: "effort", arg: "[level | -]", help: "Set the reasoning effort: pick one, or pass a level (- clears it)" },
   { name: "plan", help: "Toggle plan mode" },
   { name: "btw", arg: "<question>", help: "Side question — no turn, not recorded", requiresArg: true },
   { name: "compact", arg: "[focus]", help: "Summarize older messages now" },
