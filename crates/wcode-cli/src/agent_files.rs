@@ -138,7 +138,11 @@ fn discover_project(cwd: &Path) -> Vec<TeamMember> {
 }
 
 /// Global scan only: `<home>/agents/**/*.md`.
-fn discover_global(home: &Path) -> Vec<TeamMember> {
+///
+/// `pub(crate)` because `main.rs::fold_discovered_members` calls it directly
+/// under `--no-project-config` (D005): the opt-out governs PROJECT discovery, so
+/// the global agent dir survives it — as the global `config.toml` always does.
+pub(crate) fn discover_global(home: &Path) -> Vec<TeamMember> {
     let mut files = Vec::new();
     collect_agent_files(&home.join("agents"), &mut files);
     load_members(&files)

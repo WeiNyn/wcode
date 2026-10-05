@@ -46,6 +46,11 @@ existing `merge_values` semantics are unchanged):
 - **D-A5 — opt-out:** `--no-project-config` flag (+ `WCODE_PROJECT_CONFIG=off`
   env). When set, only layers 1 and 4 load (today's behavior). Forwarded across
   the REPL re-exec exactly like `--agents`.
+  **Amended by [D005](decisions/D005-global-agent-definitions.md):** the opt-out
+  governs *project* discovery only. The global agent scan
+  (`~/.config/wcode/agents/**/*.md`, Part C) is not project config, so it
+  survives the opt-out — as the global `config.toml` (layer 1) always does. The
+  shipped `--help` text said otherwise and was corrected.
 
 ## Part B — a team auto-enables agents mode
 

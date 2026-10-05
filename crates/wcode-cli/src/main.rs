@@ -59,10 +59,10 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
-   --no-project-config  disable ALL auto-discovery: ./.wcode/{config,team}.toml,
-                        ./.wcode/agents/, and ~/.config/wcode/agents/ (also
-                        WCODE_PROJECT_CONFIG=off) — only the global config.toml
-                        and an explicit --config load
+   --no-project-config  disable PROJECT auto-discovery: ./.wcode/{config,team}.toml
+                        and ./.wcode/agents/ (also WCODE_PROJECT_CONFIG=off) —
+                        the global config.toml, the global ~/.config/wcode/agents/,
+                        and an explicit --config still load
   --dump-system-prompt  print the composed system prompt and exit
   --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
@@ -118,7 +118,7 @@ env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
 env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
-env: WCODE_PROJECT_CONFIG=off disables ALL auto-discovery (./.wcode/{config,team}.toml, ./.wcode/agents/, ~/.config/wcode/agents/)
+env: WCODE_PROJECT_CONFIG=off disables PROJECT auto-discovery (./.wcode/{config,team}.toml, ./.wcode/agents/); the global config.toml and ~/.config/wcode/agents/ still load
 env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
@@ -158,10 +158,11 @@ struct Args {
     /// `--agents`: register the `spawn` tool so this session can spawn worker
     /// agents (A2A, §10.1).
     agents: bool,
-    /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable all
-    /// auto-discovery — the project `./.wcode/{config,team}.toml` + `.wcode/agents/`
-    /// and the global `~/.config/wcode/agents/` (D-A5). Only the global
-    /// `config.toml` + the explicit `--config` overlay load.
+    /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable PROJECT
+    /// auto-discovery — the `./.wcode/{config,team}.toml` overlays and the
+    /// `./.wcode/agents/` scan (D005). The global `config.toml`, the global
+    /// `~/.config/wcode/agents/` scan, and the explicit `--config` overlay still
+    /// load.
     no_project_config: bool,
     /// `--peer <name>=<socket>`: register a remote peer (a served session) so
     /// A2A messages reach it over its socket (§8, S4-4). Repeatable.
@@ -488,8 +489,10 @@ fn redact_key(key: Option<&str>) -> &'static str {
 fn load_config_raw(args: &mut Args) -> Config {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
-    // D-A5: `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables ALL
-    // `./.wcode/` auto-discovery — config.toml, team.toml, and agent `.md`s.
+    // D005: `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables PROJECT
+    // auto-discovery only — the `./.wcode/` overlays and the `./.wcode/agents/`
+    // scan. The global `config.toml` and the global `~/.config/wcode/agents/` scan
+    // are not project config, and still load.
     let project = !project_config_opt_out(
         args.no_project_config,
         std::env::var("WCODE_PROJECT_CONFIG").ok().as_deref(),
@@ -641,18 +644,23 @@ fn load_config_raw(args: &mut Args) -> Config {
 /// D-C2: fold discovered `.md` members UNDER the TOML `[team]` — a member of the
 /// same name already present wins, so a discovered file never overwrites an
 /// inline (or `[[team]] file =`-resolved) one. `discover` already returns project
-/// `.md`s ahead of global ones. `project = false` is the `--no-project-config`
-/// opt-out (D-A5), which skips the whole scan; `home` is the config dir.
+/// `.md`s ahead of global ones.
+///
+/// D005: `project = false` (the `--no-project-config` opt-out) governs PROJECT
+/// discovery only — the global `<config-dir>/agents/` scan survives it, exactly
+/// as the global `config.toml` (layer 1) always loads. `home` is the config dir.
 fn fold_discovered_members(
     team: &mut Vec<TeamMember>,
     cwd: &Path,
     home: Option<&Path>,
     project: bool,
 ) {
-    if !project {
-        return;
-    }
-    for member in agent_files::discover(cwd, home) {
+    let discovered = if project {
+        agent_files::discover(cwd, home)
+    } else {
+        home.map(agent_files::discover_global).unwrap_or_default()
+    };
+    for member in discovered {
         if !team.iter().any(|t| t.name == member.name) {
             team.push(member);
         }
@@ -2572,9 +2580,9 @@ mod tests {
         assert_eq!(team[0].role.as_deref(), Some("From the file entry."));
     }
 
-    /// The fold still adds a member the TOML never named — and the opt-out skips it.
+    /// The fold adds a member the TOML never named.
     #[test]
-    fn fold_adds_a_discovered_member_and_respects_the_opt_out() {
+    fn fold_adds_a_discovered_member() {
         let dir = tempfile::tempdir().unwrap();
         write_agent_md(
             &dir.path().join(".wcode/agents"),
@@ -2587,9 +2595,42 @@ mod tests {
         assert_eq!(team.len(), 1);
         assert_eq!(team[0].name, "scout");
 
+        // No `home` and no project discovery: nothing to scan.
         let mut team = Vec::new();
         fold_discovered_members(&mut team, dir.path(), None, false);
-        assert!(team.is_empty(), "--no-project-config skips the scan");
+        assert!(team.is_empty(), "the opt-out skips the project scan");
+    }
+
+    /// D005: `--no-project-config` governs PROJECT discovery only — the global
+    /// agent dir (under the config dir) survives it, as the global `config.toml`
+    /// always does.
+    #[test]
+    fn the_opt_out_keeps_the_global_agent_scan() {
+        let cwd = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_agent_md(
+            &cwd.path().join(".wcode/agents"),
+            "project.md",
+            "---\nname: project-only\n---\nProject.\n",
+        );
+        write_agent_md(
+            &home.path().join("agents"),
+            "global.md",
+            "---\nname: global-only\n---\nGlobal.\n",
+        );
+
+        // Discovery on: both are found.
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true);
+        let mut names: Vec<_> = team.iter().map(|m| m.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["global-only", "project-only"]);
+
+        // Opted out: the project member is gone, the global one remains.
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), false);
+        assert_eq!(team.len(), 1);
+        assert_eq!(team[0].name, "global-only");
     }
 
 

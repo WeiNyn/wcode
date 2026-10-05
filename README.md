@@ -249,14 +249,37 @@ section after the team roster, so the workflow can reference the team.
 Project config is auto-discovered from the working dir: `./.wcode/config.toml`
 then `./.wcode/team.toml` (team wins where they overlap), folded over the global
 config, with an explicit `--config`/`WCODE_CONFIG` overlay still layered on top.
-Agent definitions can also be authored as markdown under `./.wcode/agents/**/*.md`
-— YAML frontmatter (`name`, `model`, `effort`, `tools`, `read_only`, `base_url`,
-`api_key`) plus a body that becomes the member's `role` — folded **under** the
-TOML `[team]` (a TOML member of the same name wins). `--no-project-config` (or
-`WCODE_PROJECT_CONFIG=off`) disables all of it. The repo ships `.wcode/team.toml`
-as exactly this — the dev team, the orchestrator workflow, and
-`[tools] grep/find = true`, leaving your provider/model in the global config — so
-here `wcode` (or `wcode --agents`) starts the full team with no flags.
+Agent definitions are authored as markdown — YAML frontmatter (`name`, `model`,
+`effort`, `tools`, `read_only`, `base_url`, `api_key`) plus a body that becomes
+the member's `role`. They are discovered from two roots:
+
+1. **project** — `./.wcode/agents/**/*.md`, folded **under** the TOML `[team]`
+   (a TOML member of the same name wins);
+2. **global** — `~/.config/wcode/agents/**/*.md`, the lowest precedence, so a
+   team travels with you across repos.
+
+A `[[team]]` entry may also point at a file outside either root, which is how a
+preset references a role that lives elsewhere:
+
+```toml
+[[team]]
+file = "roles/judge.md"     # cwd-relative (absolute allowed)
+model = "claude-haiku-4-5"  # a sibling key overrides the file's
+```
+
+The file supplies the member; a sibling key overrides it. A `name` given both
+inline and in the file must agree, and a missing or unparseable file is a hard
+error (unlike a scanned `.md`, which is skipped with a warning).
+
+`--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables **project**
+auto-discovery only — the `./.wcode/{config,team}.toml` overlays and the
+`./.wcode/agents/` scan. The global `config.toml` and the global
+`~/.config/wcode/agents/` scan are not project config and still load.
+
+The repo ships `.wcode/team.toml` as exactly this — the orchestrator workflow and
+`[tools] grep/find = true`, with the members in `.wcode/agents/*.md` and the
+provider/model left in the global config — so here `wcode` (or `wcode --agents`)
+starts the full team with no flags.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a
