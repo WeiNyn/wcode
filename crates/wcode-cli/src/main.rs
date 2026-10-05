@@ -601,18 +601,24 @@ fn load_config_raw(args: &mut Args) -> Config {
             }
         };
     }
+    // D003: resolve `[[team]] file = "<path>"` members BEFORE the discovery fold
+    // (and outside the `--no-project-config` guard), so a file member wins over a
+    // discovered same-named `.md` (D-C2's "TOML wins") instead of self-colliding,
+    // and a global `[[team]] file =` still resolves under `--no-project-config`.
+    {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Err(e) = resolve_team_files(&mut cfg.team, &cwd) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
     // D-C2: fold discovered `.md` members UNDER the TOML `[team]` (a TOML member
     // of the same name wins, so it is never overwritten). `discover` already
     // returns project `.md`s ahead of global ones. `--no-project-config` skips
     // the whole `.wcode/agents/` scan too.
-    if project {
+    {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let home = config_dir();
-        for member in agent_files::discover(&cwd, home.as_deref()) {
-            if !cfg.team.iter().any(|t| t.name == member.name) {
-                cfg.team.push(member);
-            }
-        }
+        fold_discovered_members(&mut cfg.team, &cwd, config_dir().as_deref(), project);
     }
     // Change 1 (F2): membership validation needs the FINAL team — the folded
     // TOML `[team]` plus the `.wcode/agents/*.md` members discovered above (and,
@@ -630,6 +636,122 @@ fn load_config_raw(args: &mut Args) -> Config {
     // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
     args.agents |= !cfg.team.is_empty();
     cfg
+}
+
+/// D-C2: fold discovered `.md` members UNDER the TOML `[team]` — a member of the
+/// same name already present wins, so a discovered file never overwrites an
+/// inline (or `[[team]] file =`-resolved) one. `discover` already returns project
+/// `.md`s ahead of global ones. `project = false` is the `--no-project-config`
+/// opt-out (D-A5), which skips the whole scan; `home` is the config dir.
+fn fold_discovered_members(
+    team: &mut Vec<TeamMember>,
+    cwd: &Path,
+    home: Option<&Path>,
+    project: bool,
+) {
+    if !project {
+        return;
+    }
+    for member in agent_files::discover(cwd, home) {
+        if !team.iter().any(|t| t.name == member.name) {
+            team.push(member);
+        }
+    }
+}
+
+/// D003: resolve every `[[team]] file = "<path>"` member from its agent `.md`.
+///
+/// Called from `load_config_raw` BEFORE the `.wcode/agents/*.md` discovery fold
+/// and OUTSIDE the `--no-project-config` guard, so (a) a file member wins over a
+/// discovered same-named `.md` — the fold's dedup compares the RESOLVED name, so
+/// D-C2's "TOML wins" holds instead of self-colliding — and (b) a global
+/// `[[team]] file =` still resolves when project discovery is off.
+///
+/// The path is relative to `cwd` unless absolute. The file supplies `name`,
+/// `role`, `tools`, `model`, `effort`, `read_only`, `base_url` and `api_key`; a
+/// sibling key in the same `[[team]]` overrides the file's when set. A `name`
+/// present in both and differing is fatal, as is a missing/unreadable file or one
+/// that does not parse into a member. `read_only` is a `bool`, so an inline
+/// `false` cannot override a file's `true` (absent and `false` are one value);
+/// `true` always wins.
+///
+/// Ends with the final-team uniqueness check: a `file` member's name is empty
+/// until here, so `merge`'s early inline-name check cannot see it.
+fn resolve_team_files(team: &mut [TeamMember], cwd: &Path) -> Result<(), ConfigError> {
+    for member in team.iter_mut() {
+        let Some(file) = member.file.take() else {
+            continue;
+        };
+        let path = if file.is_absolute() {
+            file
+        } else {
+            cwd.join(file)
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| ConfigError::Io(format!("[[team]] file {}: {e}", path.display())))?;
+        let resolved = agent_files::parse_agent_md(&text).ok_or_else(|| {
+            ConfigError::TeamMemberFile(format!(
+                "{} does not parse into a member (missing or invalid frontmatter/`name`)",
+                path.display()
+            ))
+        })?;
+
+        // A name given both inline and in the file must agree.
+        if !member.name.is_empty() && member.name != resolved.name {
+            return Err(ConfigError::TeamMemberFile(format!(
+                "{} names `{}` but the entry names `{}`",
+                path.display(),
+                resolved.name,
+                member.name
+            )));
+        }
+        if member.name.is_empty() {
+            member.name = resolved.name;
+        }
+        // A sibling key in the same `[[team]]` overrides the file's when set.
+        if member.role.is_none() {
+            member.role = resolved.role;
+        }
+        if member.model.is_none() {
+            member.model = resolved.model;
+        }
+        if member.tools.is_none() {
+            member.tools = resolved.tools;
+        }
+        if member.base_url.is_none() {
+            member.base_url = resolved.base_url;
+        }
+        if member.api_key.is_none() {
+            member.api_key = resolved.api_key;
+        }
+        if member.effort.is_none() {
+            member.effort = resolved.effort;
+        }
+        if resolved.read_only {
+            member.read_only = true;
+        }
+    }
+
+    // Neither a `name` nor a `file`: the entry addresses no worker. `merge`
+    // cannot catch this — a `file` entry is indistinguishable from a nameless one
+    // until here.
+    if team.iter().any(|m| m.name.trim().is_empty()) {
+        return Err(ConfigError::TeamMemberFile(
+            "a `[[team]]` entry needs a `name` or a `file`".into(),
+        ));
+    }
+
+    // The FINAL team's names must be unique: `merge` saw only the inline names (a
+    // `file` member contributed `""` there), so a `file`/inline collision is
+    // visible only now. A collision with a DISCOVERED `.md` is handled by the
+    // fold's own dedup, which runs after this and compares the resolved name.
+    let mut seen = std::collections::HashSet::new();
+    for member in team.iter() {
+        if !seen.insert(member.name.as_str()) {
+            return Err(ConfigError::DuplicateTeamMember(member.name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// P3a: `--dump-system-prompt` — print the composed prompt (instructions
@@ -2292,6 +2414,184 @@ fn task_items(orchestrator: &Option<crate::agents::Orchestrator>) -> Vec<wcode_t
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // --- D003: `[[team]] file = "<path>"` ------------------------------------
+
+    /// A `[[team]]` entry that points at an agent `.md`.
+    fn tm_with_file(path: &str) -> TeamMember {
+        TeamMember {
+            file: Some(PathBuf::from(path)),
+            ..TeamMember::default()
+        }
+    }
+
+    /// Write an agent `.md` under `dir` and return its path.
+    fn write_agent_md(dir: &Path, name: &str, text: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn resolve_team_files_reads_a_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(
+            &dir.path().join("roles"),
+            "judge.md",
+            "---\nname: judge\ntools: read, grep\nread_only: true\n---\nJudge the diff.\n",
+        );
+        let mut team = vec![tm_with_file("roles/judge.md")];
+        resolve_team_files(&mut team, dir.path()).unwrap();
+
+        assert_eq!(team[0].name, "judge");
+        assert_eq!(team[0].role.as_deref(), Some("Judge the diff."));
+        assert_eq!(team[0].tools, Some(vec!["read".into(), "grep".into()]));
+        assert!(team[0].read_only);
+        assert!(team[0].file.is_none(), "the routing hint is consumed");
+    }
+
+    #[test]
+    fn resolve_team_files_lets_a_sibling_key_override_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(
+            &dir.path().join("r"),
+            "j.md",
+            "---\nname: judge\nmodel: from-file\n---\nFrom the file.\n",
+        );
+        let mut team = vec![TeamMember {
+            model: Some("from-inline".into()),
+            ..tm_with_file("r/j.md")
+        }];
+        resolve_team_files(&mut team, dir.path()).unwrap();
+
+        assert_eq!(team[0].model.as_deref(), Some("from-inline"));
+        // An unset sibling key still comes from the file.
+        assert_eq!(team[0].role.as_deref(), Some("From the file."));
+    }
+
+    #[test]
+    fn resolve_team_files_rejects_a_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(&dir.path().join("r"), "j.md", "---\nname: judge\n---\nBody.\n");
+        let mut team = vec![TeamMember {
+            name: "critic".into(),
+            ..tm_with_file("r/j.md")
+        }];
+        let err = resolve_team_files(&mut team, dir.path()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::TeamMemberFile(ref m) if m.contains("judge") && m.contains("critic")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_team_files_missing_file_is_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut team = vec![tm_with_file("nope.md")];
+        assert!(matches!(
+            resolve_team_files(&mut team, dir.path()).unwrap_err(),
+            ConfigError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_team_files_malformed_file_is_a_team_member_file_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(&dir.path().join("r"), "bad.md", "# no frontmatter at all\n");
+        let mut team = vec![tm_with_file("r/bad.md")];
+        assert!(matches!(
+            resolve_team_files(&mut team, dir.path()).unwrap_err(),
+            ConfigError::TeamMemberFile(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_team_files_rejects_an_entry_with_neither_name_nor_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut team = vec![TeamMember::default()];
+        assert!(matches!(
+            resolve_team_files(&mut team, dir.path()).unwrap_err(),
+            ConfigError::TeamMemberFile(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_team_files_rejects_two_files_resolving_to_one_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(&dir.path().join("a"), "x.md", "---\nname: dup\n---\nA.\n");
+        write_agent_md(&dir.path().join("b"), "y.md", "---\nname: dup\n---\nB.\n");
+        let mut team = vec![tm_with_file("a/x.md"), tm_with_file("b/y.md")];
+        let err = resolve_team_files(&mut team, dir.path()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::DuplicateTeamMember(ref n) if n == "dup"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_team_files_rejects_a_file_member_colliding_with_an_inline_one() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(&dir.path().join("a"), "x.md", "---\nname: judge\n---\nFile.\n");
+        let mut team = vec![
+            TeamMember {
+                name: "judge".into(),
+                ..TeamMember::default()
+            },
+            tm_with_file("a/x.md"),
+        ];
+        assert!(matches!(
+            resolve_team_files(&mut team, dir.path()).unwrap_err(),
+            ConfigError::DuplicateTeamMember(_)
+        ));
+    }
+
+    /// The ordering property (D003 + D-C2): `resolve_team_files` runs BEFORE the
+    /// discovery fold, so a `[[team]] file =` member wins over a discovered
+    /// same-named `.md` instead of self-colliding.
+    #[test]
+    fn a_file_member_wins_over_a_discovered_md_of_the_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // The role file lives OUTSIDE the scanned root; a same-named one INSIDE it.
+        write_agent_md(
+            &dir.path().join("roles"),
+            "judge.md",
+            "---\nname: judge\n---\nFrom the file entry.\n",
+        );
+        write_agent_md(
+            &dir.path().join(".wcode/agents"),
+            "judge.md",
+            "---\nname: judge\n---\nFrom the scan.\n",
+        );
+
+        let mut team = vec![tm_with_file("roles/judge.md")];
+        resolve_team_files(&mut team, dir.path()).unwrap();
+        fold_discovered_members(&mut team, dir.path(), None, true);
+
+        assert_eq!(team.len(), 1, "the discovered same-name member is skipped");
+        assert_eq!(team[0].role.as_deref(), Some("From the file entry."));
+    }
+
+    /// The fold still adds a member the TOML never named — and the opt-out skips it.
+    #[test]
+    fn fold_adds_a_discovered_member_and_respects_the_opt_out() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(
+            &dir.path().join(".wcode/agents"),
+            "scout.md",
+            "---\nname: scout\n---\nScout.\n",
+        );
+
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, dir.path(), None, true);
+        assert_eq!(team.len(), 1);
+        assert_eq!(team[0].name, "scout");
+
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, dir.path(), None, false);
+        assert!(team.is_empty(), "--no-project-config skips the scan");
+    }
+
 
     #[test]
     fn record_root_meta_sets_model_effort_window() {

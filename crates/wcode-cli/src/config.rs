@@ -211,11 +211,21 @@ impl CompactionConfig {
 }
 
 /// A `[team]` member (F3): a worker the orchestrator starts with. Reuses the F2
-/// `WorkerSpec` fields; `name` is required and must be unique.
+/// `WorkerSpec` fields. A member is addressed by `name` — given inline, or
+/// resolved from `file` (an agent `.md`) at load; one of the two is required.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct TeamMember {
     /// The worker's name — its phonebook key (`message`'s `to`). Must be unique.
+    /// Empty only when the name is supplied by `file` (resolved at load); a member
+    /// with neither a `name` nor a `file` is a fatal config error.
+    #[serde(default)]
     pub name: String,
+    /// Resolve this member's name/role/tools/model/effort/read_only from an agent
+    /// `.md` (cwd-relative; absolute allowed). `None` = an inline member. Resolved
+    /// at load by `main.rs::resolve_team_files`; the resolved values are never
+    /// carried into `WorkerSpec`/`MemberRecord`.
+    #[serde(default)]
+    pub file: Option<PathBuf>,
     /// Model id override; `None` inherits the orchestrator's model.
     pub model: Option<String>,
     /// Role text appended to the worker's system prompt.
@@ -577,6 +587,9 @@ pub enum ConfigError {
     Io(String),
     /// Two `[team]` members share a `name` (names are unique phonebook keys).
     DuplicateTeamMember(String),
+    /// An invalid `[[team]] file = …`: a `name` that contradicts the file's, or a
+    /// file that is present but does not parse into a member.
+    TeamMemberFile(String),
     /// An invalid `[theme]` overlay: an unknown role or an unparseable color.
     Theme(String),
     /// An invalid `[workflow]`: an unknown member, a cycle, missing-or-both of
@@ -598,6 +611,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::Theme(msg) => write!(f, "invalid [theme]: {msg}"),
             ConfigError::Workflow(msg) => write!(f, "invalid [workflow]: {msg}"),
+            ConfigError::TeamMemberFile(msg) => write!(f, "invalid [[team]] file: {msg}"),
         }
     }
 }
@@ -762,6 +776,13 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     {
         let mut seen = std::collections::HashSet::new();
         for member in &file.team {
+            // A `[[team]] file = …` entry carries no inline `name` yet (it is
+            // resolved at load), so its sentinel is empty — skip it here or two
+            // file-only entries would collide on `""`. The final-team uniqueness
+            // check lives in `resolve_team_files`.
+            if member.name.is_empty() {
+                continue;
+            }
             if !seen.insert(member.name.as_str()) {
                 return Err(ConfigError::DuplicateTeamMember(member.name.clone()));
             }
@@ -1566,11 +1587,42 @@ name = "reviewer"
     }
 
     #[test]
-    fn nameless_team_member_fails_to_parse() {
-        // `name` is mandatory — a `[[team]]` without it is a parse error.
-        let err = toml::from_str::<FileConfig>("model = \"m\"\n[[team]]\nrole = \"no name\"\n")
-            .unwrap_err();
-        assert!(err.to_string().contains("name"), "names the field: {err}");
+    fn nameless_team_member_parses_and_is_fatal_at_resolve() {
+        // D003: `name` is `#[serde(default)]` so a `[[team]] file = …` entry may
+        // omit it. A member with neither a `name` nor a `file` therefore parses
+        // here (name = "") and is rejected later, by `resolve_team_files` — see
+        // `resolve_team_files_rejects_an_entry_with_neither_name_nor_file`.
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[[team]]\nrole = \"no name\"\n").unwrap();
+        assert_eq!(file.team.len(), 1);
+        assert!(file.team[0].name.is_empty());
+        assert!(file.team[0].file.is_none());
+    }
+
+    #[test]
+    fn two_file_only_team_entries_do_not_collide_in_merge() {
+        // Amendment Q1: both entries carry the empty-name sentinel, so `merge`'s
+        // inline duplicate check must skip blank names — the real names are known
+        // only after `resolve_team_files`.
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m".into()),
+                team: vec![
+                    TeamMember {
+                        file: Some(PathBuf::from("a/x.md")),
+                        ..TeamMember::default()
+                    },
+                    TeamMember {
+                        file: Some(PathBuf::from("b/y.md")),
+                        ..TeamMember::default()
+                    },
+                ],
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.team.len(), 2);
     }
 
     #[test]

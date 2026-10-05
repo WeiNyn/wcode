@@ -97,6 +97,9 @@ pub fn parse_agent_md(text: &str) -> Option<TeamMember> {
 
     Some(TeamMember {
         name,
+        // D003: `file` is a load-time routing hint, resolved (and cleared) by
+        // `main.rs::resolve_team_files`; a scanned `.md` member is already inline.
+        file: None,
         model: fm.model,
         role,
         tools: fm.tools,
