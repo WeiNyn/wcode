@@ -60,7 +60,7 @@ test("FIX A: renderTool carries the target for the row's `.tsum`", () => {
 
 test("FIX A: toolSummary returns '' while running with no content (one running indicator)", () => {
   assert.equal(toolSummary({ callId: "c", name: "n", output: "", done: false, isError: false }), "");
-  // ...and the ONE indicator is the `.tmeta` running-tag, not `.tsum` (webview/chat.ts).
+  // ...and the ONE indicator is the `.tmeta .run` status (V13, `⠋ running…`), not `.tsum`.
 });
 
 test("FIX A: renderBlock drops a tool_call content block (no bare `⚙ name` div)", () => {

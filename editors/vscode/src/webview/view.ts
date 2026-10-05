@@ -243,6 +243,40 @@ export function bodyKind(tool: { hasDiff: boolean }): "review" | "output" {
   return tool.hasDiff ? "review" : "output";
 }
 
+/** A tool row's state (V13): EXACTLY one of three — a tool block is always running or
+ *  done, so there is no idle tool. The colour budget is spent on the two EXCEPTIONS. */
+export type ToolState = "running" | "error" | "complete";
+
+/** Which of the three states a tool row is in. Pure. */
+export function toolState(tool: { done: boolean; isError: boolean }): ToolState {
+  if (!tool.done) return "running";
+  return tool.isError ? "error" : "complete";
+}
+
+/** The meta slot's content for a tool row (V13). `className` is the status colour class
+ *  (`run` / `fail`); a COMPLETE tool carries NO glyph and NO word — the norm is quiet
+ *  (its meta is the `+N −M · 38ms` stat instead). Pure. */
+export interface ToolStatus {
+  className: "run" | "fail" | null;
+  /** The locked-vocabulary glyph (`⠋` running, `✗` failed); "" for a complete tool. */
+  glyph: string;
+  /** The word beside the glyph (`running…` / `failed`); "" for a complete tool. */
+  word: string;
+}
+
+/** The status descriptor for a tool row, off the member-state vocabulary (`memberGlyph`).
+ *  Pure — the ONE place the running/error glyph + word are decided. */
+export function toolStatus(tool: { done: boolean; isError: boolean }): ToolStatus {
+  switch (toolState(tool)) {
+    case "running":
+      return { className: "run", glyph: memberGlyph("running").glyph, word: "running…" };
+    case "error":
+      return { className: "fail", glyph: memberGlyph("failed").glyph, word: "failed" };
+    case "complete":
+      return { className: null, glyph: "", word: "" };
+  }
+}
+
 /** ONE transcript turn (draft `.turn` = grid `rail | content`). */
 export interface Turn {
   /** → `.turn.{role}`; `err` = a turn containing an error block (draft `.turn.err`). */

@@ -416,6 +416,23 @@ details.fold {
   margin: var(--wc-1) 0;
 }
 
+/* V13: a tool row carries EXACTLY one of three states, and the colour is spent on the
+   two EXCEPTIONS — a running tool is "active now" (accent), a failed one is loud (error
+   red), and a COMPLETE tool is NEUTRAL (most tools complete, so a stripe would be flat).
+   The colour is the L1 rule (the row's own edge) plus the ⚙ mark. No fill, no box: the
+   fold stays L1. (`data-live="1"` is the running stamp `renderToolFold` already sets.) */
+details.fold.tool[data-live="1"] {
+  border-left-color: var(--wc-accent);
+}
+
+details.fold.tool[data-live="1"] .tname {
+  color: var(--wc-accent);
+}
+
+details.fold.tool.error .tname {
+  color: var(--vscode-errorForeground);
+}
+
 /* The tool fold's rule is NEUTRAL (plan §1.5d): identity comes from the ⚙ glyph,
    not from colour — so the accent stays reserved for "active now". */
 details.fold.tool {
@@ -511,6 +528,16 @@ details.fold.thinking .tsum {
 
 .tmeta .del {
   color: var(--vscode-charts-red);
+}
+
+/* The status meta (V13): the run is accent, the failure error-red. A COMPLETE tool takes
+   neither — its meta is the dim `+N −M · 38ms` stat above. */
+.tmeta .run {
+  color: var(--wc-accent);
+}
+
+.tmeta .fail {
+  color: var(--vscode-errorForeground);
 }
 
 .fold .inner {
@@ -1100,13 +1127,6 @@ textarea#input:focus {
 .body th {
   background: var(--vscode-textBlockQuote-background);
   font-weight: 600;
-}
-
-/* ------------------------------------- the tool fold's running tag (v2) */
-
-.fold .running-tag {
-  color: var(--vscode-charts-yellow);
-  font-size: var(--wc-fs-meta);
 }
 
 /* ------------------------------------- the two-pane surface (rail + main) */

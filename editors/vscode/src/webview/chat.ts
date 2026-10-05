@@ -33,6 +33,7 @@ import {
   panelHeader,
   outputHead,
   bodyKind,
+  toolStatus,
   rosterRows,
   selectionRef,
   toggleFold,
@@ -571,9 +572,28 @@ function reviewBlock(tool: RenderedTool, hunk: ReviewHunk, verdict: Verdict): HT
   return wrap;
 }
 
-/** The tool head's `+N −M · 38ms` meta, or null when it has neither. */
+/** The tool head's meta slot: `⠋ running…` / `✗ failed` (V13), or the `+N −M · 38ms`
+ *  stat for a COMPLETE tool ("the exception is loud, the norm is quiet"), or null. */
 function toolMeta(tool: RenderedTool): HTMLElement | null {
   const meta = el("span", "tmeta");
+  const status = toolStatus(tool);
+  if (status.className !== null) {
+    // RUNNING / ERROR (V13): a status glyph + word in the state's own colour, and NO stat
+    // — the colour and the glyph ARE the message, and a failure's numbers would be noise.
+    const span = el("span", status.className);
+    if (status.className === "run") {
+      // The running glyph SPINS (the surface's first animation, reduced-motion gated).
+      const glyph = el("span", "spin", status.glyph);
+      glyph.setAttribute("aria-hidden", "true");
+      span.appendChild(glyph);
+      span.appendChild(document.createTextNode(` ${status.word}`));
+    } else {
+      span.appendChild(document.createTextNode(`${status.glyph} ${status.word}`));
+    }
+    meta.appendChild(span);
+    return meta;
+  }
+  // COMPLETE: the `+N −M · 38ms` stat, dim, NO glyph (the norm is quiet).
   const stat = typeof tool.diff === "string" && tool.diff !== "" ? diffStat(tool.diff) : null;
   const hasStat = stat !== null && (stat.added > 0 || stat.removed > 0);
   if (stat !== null && stat.added > 0) meta.appendChild(el("span", "add", `+${stat.added}`));
@@ -581,16 +601,9 @@ function toolMeta(tool: RenderedTool): HTMLElement | null {
     if (stat.added > 0) meta.appendChild(document.createTextNode(" "));
     meta.appendChild(el("span", "del", `−${stat.removed}`));
   }
-  if (tool.done) {
-    if (typeof tool.durationMs === "number") {
-      if (hasStat) meta.appendChild(document.createTextNode(" · "));
-      meta.appendChild(document.createTextNode(`${tool.durationMs}ms`));
-    }
-  } else {
+  if (typeof tool.durationMs === "number") {
     if (hasStat) meta.appendChild(document.createTextNode(" · "));
-    // The tool row's ONE running indicator (right-aligned `.tmeta`, the same slot
-    // that carries `+N −M · 38ms` once done); `.tsum` above never repeats it.
-    meta.appendChild(el("span", "running-tag", "running…"));
+    meta.appendChild(document.createTextNode(`${tool.durationMs}ms`));
   }
   return meta.childNodes.length > 0 ? meta : null;
 }

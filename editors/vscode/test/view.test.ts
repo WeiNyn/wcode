@@ -4,12 +4,14 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { initialState, reduce, type RosterItem, type SessionMember, type ViewState } from "../src/reducer.ts";
+import { initialState, memberGlyph, reduce, type RosterItem, type SessionMember, type ViewState } from "../src/reducer.ts";
 import { renderState, type RenderedBlock, type RenderedState } from "../src/render.ts";
 import { parseToWebview, type PanelSessionInfo, type ToWebview, type ViewMode } from "../src/webview.ts";
 import {
   classNames,
   bodyKind,
+  toolState,
+  toolStatus,
   outputHead,
   avatarStack,
   composerControls,
@@ -394,6 +396,37 @@ test("classNames composes the content-element classes", () => {
   assert.equal(classNames({ kind: "notice", html: "", live: false }), "body notice");
   assert.equal(classNames({ kind: "error", html: "", live: false }), "body error");
   assert.equal(classNames({ kind: "btw", html: "", live: false }), "body btw");
+});
+
+/* -------------------------------------------------- V13: tool status */
+
+test("toolState: a tool row is EXACTLY one of running / error / complete", () => {
+  assert.equal(toolState({ done: false, isError: false }), "running");
+  assert.equal(toolState({ done: true, isError: true }), "error");
+  assert.equal(toolState({ done: true, isError: false }), "complete");
+  // `isError` only lands at `tool_execution_end`, so a not-done row is running.
+  assert.equal(toolState({ done: false, isError: true }), "running", "running wins while not done");
+});
+
+test("toolStatus: the exceptions carry a glyph + word; complete is quiet", () => {
+  assert.deepEqual(toolStatus({ done: false, isError: false }), {
+    className: "run",
+    glyph: "⠋",
+    word: "running…",
+  });
+  assert.deepEqual(toolStatus({ done: true, isError: true }), {
+    className: "fail",
+    glyph: "✗",
+    word: "failed",
+  });
+  assert.deepEqual(
+    toolStatus({ done: true, isError: false }),
+    { className: null, glyph: "", word: "" },
+    "a COMPLETE tool carries no glyph and no colour",
+  );
+  // The glyphs are the LOCKED member-state vocabulary, not new art.
+  assert.equal(toolStatus({ done: false, isError: false }).glyph, memberGlyph("running").glyph);
+  assert.equal(toolStatus({ done: true, isError: true }).glyph, memberGlyph("failed").glyph);
 });
 
 /* ------------------------------------------------- V12: tool activity */
