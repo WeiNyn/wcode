@@ -1023,6 +1023,11 @@ struct Runtime {
     orchestrator: Option<crate::agents::Orchestrator>,
 }
 
+/// The exact line printed when a `[workflow]` template is present but no
+/// `--task`/`WCODE_TASK` drives it. LOCKED text (asserted by
+/// `f1_inert_notice_text_is_stable`).
+const INERT_WORKFLOW_NOTICE: &str = "workflow: present but inert (no --task)";
+
 /// P5: load instructions (`--no-instructions` → `Mode::Off`) and skills; build
 /// the hooks; build the orchestrator when `--agents` (its `WorkerTemplate` needs
 /// `cwd` and `setup.active_group.members_dir`). Then the guards: `--peer` /
@@ -1051,9 +1056,6 @@ fn check_task_args(
     }
     if args.timeout.is_some() && args.task.is_none() {
         return Err("--timeout requires --task".into());
-    }
-    if workflow.is_some_and(|w| w.uses_task()) && args.task.is_none() {
-        return Err("[workflow] uses {{task}} but no --task/WCODE_TASK was given".into());
     }
     Ok(())
 }
@@ -1139,9 +1141,11 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         eprintln!("error: {msg}");
         std::process::exit(2);
     }
-    if cfg.workflow.is_some() && orchestrator.is_none() {
-        eprintln!("error: [workflow] requires --agents");
-        std::process::exit(2);
+    // LOCKED: a [workflow] with no --task is INERT — notice, then boot
+    // normally (interactive). Printed whenever a template is present but no
+    // task drives it (`uses_task()` is irrelevant to inertness now).
+    if cfg.workflow.is_some() && args.task.is_none() {
+        eprintln!("{INERT_WORKFLOW_NOTICE}");
     }
     if !cfg.team.is_empty() && orchestrator.is_none() {
         eprintln!("error: [team] requires --agents");
@@ -1251,7 +1255,11 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // resolve) and BEFORE the scheduler spawn. Nodes are created in TOPOLOGICAL
     // order (Blocker 1), mapping each id to its numeric Task id before resolving
     // the deps.
-    if should_instantiate_workflow(setup.resuming_group, cfg.workflow.is_some())
+    if should_instantiate_workflow(
+        setup.resuming_group,
+        cfg.workflow.is_some(),
+        args.task.is_some(),
+    )
         && let Some(o) = &orchestrator
         && let Some(workflow) = &cfg.workflow
     {
@@ -2175,11 +2183,17 @@ mod workflow_seed_tests {
     }
 }
 
-/// Whether to instantiate a `[workflow]` template at boot: a fresh (non-resumed)
-/// session with a workflow configured. A resume loads the persisted plan (P4) and
-/// must NOT re-seed it (else the plan grows 2N after N resumes).
-fn should_instantiate_workflow(resuming_group: bool, has_workflow: bool) -> bool {
-    !resuming_group && has_workflow
+/// Whether to instantiate a `[workflow]` template at boot: a fresh
+/// (non-resumed) session with a workflow configured **and a task to run it
+/// on**. A resume loads the persisted plan (P4) and must NOT re-seed it (else
+/// the plan grows 2N after N resumes); a template with no task is inert (see
+/// [`INERT_WORKFLOW_NOTICE`]).
+fn should_instantiate_workflow(
+    resuming_group: bool,
+    has_workflow: bool,
+    has_task: bool,
+) -> bool {
+    !resuming_group && has_workflow && has_task
 }
 
 /// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so a
@@ -2491,18 +2505,53 @@ mod tests {
     }
 
     #[test]
-    fn workflow_is_not_instantiated_on_resume() {
+    fn f1_should_instantiate_only_with_a_task() {
         assert!(
-            should_instantiate_workflow(false, true),
-            "a fresh session with a [workflow] instantiates it"
+            should_instantiate_workflow(false, true, true),
+            "a fresh session with a [workflow] AND a task instantiates it"
         );
         assert!(
-            !should_instantiate_workflow(true, true),
+            !should_instantiate_workflow(false, true, false),
+            "a [workflow] with no --task is inert (never instantiated)"
+        );
+        assert!(
+            !should_instantiate_workflow(true, true, true),
             "a resume must use the loaded plan, never re-seed it"
         );
         assert!(
-            !should_instantiate_workflow(false, false),
+            !should_instantiate_workflow(false, false, true),
             "no [workflow] → nothing to instantiate"
+        );
+    }
+
+    #[test]
+    fn f1_workflow_without_a_task_is_inert_not_an_error() {
+        use crate::config::{Workflow, WorkflowNode};
+        // A `{{task}}`-bearing template with no task is INERT: the guard that
+        // used to `exit(2)` is gone, so `check_task_args` returns Ok. This is
+        // the regression the fence is about (D001).
+        let templated = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                id: "a".into(),
+                title: Some("Explore: {{task}}".into()),
+                ..Default::default()
+            }],
+        };
+        assert_eq!(
+            check_task_args(&parsed(&[]), Some(&templated), true),
+            Ok(()),
+            "a {{task}} template without a task must not error"
+        );
+        assert!(!should_instantiate_workflow(false, true, false));
+    }
+
+    #[test]
+    fn f1_inert_notice_text_is_stable() {
+        // LOCKED text, asserted so a refactor cannot silently reword it.
+        assert_eq!(
+            INERT_WORKFLOW_NOTICE,
+            "workflow: present but inert (no --task)"
         );
     }
 
@@ -2891,16 +2940,8 @@ mod tests {
 
     #[test]
     fn task_guards_reject_misconfiguration() {
-        use crate::config::{Workflow, WorkflowNode};
+        use crate::config::Workflow;
         let plain = Workflow::default();
-        let templated = Workflow {
-            max_attempts: None,
-            nodes: vec![WorkflowNode {
-                id: "a".into(),
-                title: Some("Explore: {{task}}".into()),
-                ..Default::default()
-            }],
-        };
         // --task without [workflow].
         assert_eq!(
             check_task_args(&parsed(&["--task", "x"]), None, true),

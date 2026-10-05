@@ -298,6 +298,9 @@ pub fn node_title(node: &WorkflowNode, task: Option<&str>) -> String {
 
 impl Workflow {
     /// `true` iff any node title contains the `{{task}}` placeholder.
+    /// Kept as a documented helper (the boot fence no longer reads it — a
+    /// `[workflow]` is inert without a task regardless); a unit test pins it.
+    #[allow(dead_code)]
     pub fn uses_task(&self) -> bool {
         self.nodes.iter().any(|n| {
             n.title

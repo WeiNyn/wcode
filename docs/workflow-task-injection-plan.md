@@ -518,16 +518,18 @@ The shipped code enforces it at every seam:
 
 | seam | no task → | anchor |
 |---|---|---|
-| boot guards | every `--task`/`--timeout` case is skipped (`args.task.is_none()`); the `uses_task()` case only fires for a `{{task}}` overlay | `main.rs:tIhUo` |
+| boot guards | every `--task`/`--timeout` case is skipped (`args.task.is_none()`) | `main.rs:tIhUo` |
 | `dispatch` | the `else if args.task.is_some()` arm is not taken → the pre-feature `else` (TUI/REPL) runs | `main.rs:1392` |
 | `choose_tui` | the added `|| args.task.is_some()` is false → the pre-feature decision | `main.rs:1743` |
 | title resolution | `node_title(node, None)` = `title` verbatim, else `id` → the pre-feature `create(node.id, …)` | `config.rs:x56tz` |
 | scheduler / tasks | `dispatch_content` (`scheduler.rs:fd3M2`) and `terminal_code` (`tasks.rs:909`) are never reached on the interactive path | — |
 
-**The one intentional non-inert case:** a *template* that opts in to `{{task}}`
-run without a task `exit(2)`s (`main.rs:IAMr0`). That is the guard's job — a
-pipeline must not silently mis-title its nodes — and it only affects configs that
-chose to use `{{task}}`.
+**There is no longer a non-inert case.** A `[workflow]` without a task is inert
+whether or not its titles carry `{{task}}`: the boot prints a one-line notice
+(`workflow: present but inert (no --task)`) and starts the interactive team,
+exactly like a run with no `[workflow]` at all. The old `uses_task()` `exit(2)`
+(`main.rs:IAMr0`) is gone — instantiation is fenced by the task, not by the
+presence of the placeholder (D001).
 
 ### 12.3 What to pin (tests)
 
