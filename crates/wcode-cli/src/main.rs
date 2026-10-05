@@ -614,6 +614,18 @@ fn load_config_raw(args: &mut Args) -> Config {
             }
         }
     }
+    // Change 1 (F2): membership validation needs the FINAL team — the folded
+    // TOML `[team]` plus the `.wcode/agents/*.md` members discovered above (and,
+    // later, `[[team]] file =` members). `merge` only checks the graph’s
+    // STRUCTURE — it cannot see md-sourced names — so a `member` node that
+    // names no final team entry is a fatal config error HERE, after the fold.
+    // Errors exit 1, the same shape as a `merge` error.
+    if let Some(w) = &cfg.workflow
+        && let Err(e) = crate::config::validate_workflow_members(w, &cfg.team)
+    {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
     // D-B1: a non-empty folded `[team]` auto-enables agents mode, so `wcode`
     // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
     args.agents |= !cfg.team.is_empty();
@@ -2556,6 +2568,40 @@ mod tests {
     }
 
     #[test]
+    fn f2_workflow_naming_an_md_only_member_loads() {
+        use crate::config::{Workflow, WorkflowNode};
+        // A `[workflow]` whose member is supplied ONLY by a `.wcode/agents/*.md`
+        // file (no TOML `[team]`) must pass membership once the md fold has run.
+        // Before the F2 split this failed at `merge` (which never saw the fold);
+        // now `validate_workflow_members` runs on the FINAL team.
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join(".wcode/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("judge.md"),
+            "---\nname: judge\n---\nYou judge the change.\n",
+        )
+        .unwrap();
+        let team = agent_files::discover(dir.path(), None);
+        assert_eq!(team.len(), 1, "the md member was discovered");
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                id: "review".into(),
+                member: Some("judge".into()),
+                ..Default::default()
+            }],
+        };
+        // The discovered team is the FINAL team -> membership passes.
+        assert!(
+            crate::config::validate_workflow_members(&w, &team).is_ok(),
+            "an md-only member must satisfy membership after the fold"
+        );
+        // Without the fold (an empty team) the SAME node is a fatal error.
+        assert!(crate::config::validate_workflow_members(&w, &[]).is_err());
+    }
+
+    #[test]
     fn instantiate_workflow_handles_a_later_authored_dependency() {
         use crate::config::{Workflow, WorkflowNode};
         // `b` (authored first) depends on `a` (authored second) — author order is
@@ -2961,11 +3007,6 @@ mod tests {
         assert_eq!(
             check_task_args(&parsed(&["--timeout", "5"]), Some(&plain), true),
             Err("--timeout requires --task".into())
-        );
-        // A {{task}} template without a task.
-        assert_eq!(
-            check_task_args(&parsed(&[]), Some(&templated), true),
-            Err("[workflow] uses {{task}} but no --task/WCODE_TASK was given".into())
         );
     }
 

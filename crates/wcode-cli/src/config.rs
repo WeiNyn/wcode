@@ -767,10 +767,13 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             }
         }
     }
-    // `[workflow]` validation — after the team block, so member names are known.
+    // `[workflow]` STRUCTURE only (D14): the shape of the graph is checked
+    // here. Membership (`member` names a `[team]` entry) needs the FINAL team
+    // — the `.wcode/agents/*.md` fold and `[[team]] file =` resolution happen
+    // later, in `main.rs::load_config_raw` — so it runs there, via
+    // `validate_workflow_members`.
     if let Some(workflow) = &file.workflow {
-        let team_names: Vec<String> = file.team.iter().map(|m| m.name.clone()).collect();
-        validate_workflow(workflow, &team_names)?;
+        validate_workflow_structure(workflow)?;
     }
 
     // `[theme]` is presentation-only, but a bad role or color is a hard error —
@@ -822,11 +825,15 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     })
 }
 
-/// Reject a malformed `[workflow]` at load time (D14 style): unique node ids;
-/// every `depends_on` names a sibling id; exactly one of `member`|`script`; a
-/// `member` names a `[team]` member; a `script` is non-empty; a `gate` has
-/// deps; and the graph is ACYCLIC. `Err(ConfigError::Workflow(msg))`.
-fn validate_workflow(w: &Workflow, team_names: &[String]) -> Result<(), ConfigError> {
+/// Reject a malformed `[workflow]` STRUCTURE at load time (D14 style): unique
+/// node ids; every `depends_on` names a sibling id; exactly one of
+/// `member`|`script`; a `script` is non-empty; a `gate` has deps; and the
+/// graph is ACYCLIC. Membership is NOT checked here — a `member` node may
+/// name a team entry supplied by a `.wcode/agents/*.md` file or a
+/// `[[team]] file = …`, which fold/resolve AFTER `merge`; see
+/// [`validate_workflow_members`], called from `main.rs::load_config_raw` on
+/// the FINAL team. `Err(ConfigError::Workflow(msg))`.
+pub(crate) fn validate_workflow_structure(w: &Workflow) -> Result<(), ConfigError> {
     let bad = ConfigError::Workflow;
     if w.nodes.is_empty() {
         return Err(bad(
@@ -853,19 +860,12 @@ fn validate_workflow(w: &Workflow, team_names: &[String]) -> Result<(), ConfigEr
                     node.id
                 )));
             }
-            (Some(m), None) => {
-                if !team_names.iter().any(|n| n == m) {
-                    return Err(bad(format!(
-                        "node `{}`: member `{m}` is not a [team] member",
-                        node.id
-                    )));
-                }
-            }
             (None, Some(cmd)) => {
                 if cmd.trim().is_empty() {
                     return Err(bad(format!("node `{}`: empty script", node.id)));
                 }
             }
+            (Some(_), None) => {}
         }
         for dep in &node.depends_on {
             if !ids.contains(dep.as_str()) {
@@ -886,10 +886,33 @@ fn validate_workflow(w: &Workflow, team_names: &[String]) -> Result<(), ConfigEr
     Ok(())
 }
 
+/// Reject a `[workflow]` whose `member` nodes name no `[team]` entry —
+/// checked against the FINAL team (folded TOML + `.wcode/agents/*.md` +
+/// resolved `[[team]] file = …`), so call it from
+/// `main.rs::load_config_raw` after all folds/resolution. EVERY `member` node
+/// must match a team name: a `[workflow]` that reaches here with no team and a
+/// `member` node is still an error (a `script`-only workflow trivially passes).
+/// `Err(ConfigError::Workflow(msg))`.
+pub(crate) fn validate_workflow_members(
+    w: &Workflow,
+    team: &[TeamMember],
+) -> Result<(), ConfigError> {
+    for node in &w.nodes {
+        let Some(m) = &node.member else { continue };
+        if !team.iter().any(|t| &t.name == m) {
+            return Err(ConfigError::Workflow(format!(
+                "node `{}`: member `{m}` is not a [team] member",
+                node.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A topological order of `[workflow]` nodes (Kahn's algorithm), so boot
 /// instantiation creates each dependency before its dependents regardless of
 /// author order. `Err` on a cycle — including a self-edge. Shared by
-/// [`validate_workflow`] and `main.rs::instantiate_workflow`.
+/// [`validate_workflow_structure`] and `main.rs::instantiate_workflow`.
 pub(crate) fn topo_order(w: &Workflow) -> Result<Vec<&WorkflowNode>, ConfigError> {
     use std::collections::{HashMap, VecDeque};
     let pos: HashMap<&str, usize> = w
@@ -1594,6 +1617,79 @@ name = "reviewer"
     }
 
     #[test]
+    fn structure_still_rejects_cycle_dup_and_dangling_dep() {
+        // The structural phase (called from `merge`) still catches graph
+        // errors without needing a team.
+        let node = |id: &str, member: Option<&str>, deps: &[&str]| WorkflowNode {
+            id: id.into(),
+            member: member.map(String::from),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let dup = validate_workflow_structure(&Workflow {
+            max_attempts: None,
+            nodes: vec![node("a", Some("w1"), &[]), node("a", Some("w1"), &[])],
+        })
+        .unwrap_err();
+        assert!(matches!(dup, ConfigError::Workflow(m) if m.contains("duplicate")));
+
+        let dangling = validate_workflow_structure(&Workflow {
+            max_attempts: None,
+            nodes: vec![node("a", Some("w1"), &["ghost"])],
+        })
+        .unwrap_err();
+        assert!(matches!(dangling, ConfigError::Workflow(m) if m.contains("not a node id")));
+
+        let cycle = validate_workflow_structure(&Workflow {
+            max_attempts: None,
+            nodes: vec![node("a", Some("w1"), &["b"]), node("b", Some("w1"), &["a"])],
+        })
+        .unwrap_err();
+        assert!(matches!(cycle, ConfigError::Workflow(m) if m.contains("acyclic")));
+    }
+
+    #[test]
+    fn structure_accepts_a_well_formed_graph_without_a_team() {
+        // A `member`-node workflow with NO `[team]` passes the STRUCTURAL
+        // check: membership is deferred to the FINAL team.
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                id: "review".into(),
+                member: Some("judge".into()),
+                ..Default::default()
+            }],
+        };
+        assert!(validate_workflow_structure(&w).is_ok());
+    }
+
+    #[test]
+    fn membership_defers_to_the_final_team() {
+        // `validate_workflow_members` keys off the team it is handed: an empty
+        // team -> the node is a fatal error; a matching name -> Ok. This is the
+        // regression that proves membership runs on the FINAL team (amendment 4).
+        let w = Workflow {
+            max_attempts: None,
+            nodes: vec![WorkflowNode {
+                id: "review".into(),
+                member: Some("judge".into()),
+                ..Default::default()
+            }],
+        };
+        let err = validate_workflow_members(&w, &[]).unwrap_err();
+        assert!(matches!(err, ConfigError::Workflow(m) if m.contains("not a [team] member")));
+        assert!(
+            validate_workflow_members(
+                &w,
+                &[TeamMember {
+                    name: "judge".into(),
+                    ..Default::default()
+                }],
+            )
+            .is_ok()
+        );
+    }
+    #[test]
     fn workflow_rejects_a_bad_node() {
         let both = merge_workflow(
             "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\nscript = \"true\"\n",
@@ -1601,9 +1697,25 @@ name = "reviewer"
         assert!(matches!(both, ConfigError::Workflow(m) if m.contains("exactly one")));
         let neither = merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\n");
         assert!(matches!(neither, ConfigError::Workflow(m) if m.contains("needs one")));
-        let bad_member =
-            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"ghost\"\n");
-        assert!(matches!(bad_member, ConfigError::Workflow(m) if m.contains("not a [team] member")));
+        // After the split, `merge` no longer checks membership — a `member`
+        // node names a FINAL-team entry, so the check is exercised directly.
+        let bad_member = validate_workflow_members(
+            &Workflow {
+                max_attempts: None,
+                nodes: vec![WorkflowNode {
+                    id: "a".into(),
+                    member: Some("ghost".into()),
+                    ..Default::default()
+                }],
+            },
+            &[TeamMember {
+                name: "w1".into(),
+                ..Default::default()
+            }],
+        );
+        assert!(
+            matches!(bad_member, Err(ConfigError::Workflow(m)) if m.contains("not a [team] member"))
+        );
         let empty_script =
             merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nscript = \"  \"\n");
         assert!(matches!(empty_script, ConfigError::Workflow(m) if m.contains("empty script")));
@@ -1719,7 +1831,7 @@ name = "reviewer"
              [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ntitle = \"Explore: {{task}}\"\n",
         )
         .unwrap();
-        // A `{{task}}` title passes load validation (unchanged `validate_workflow`).
+        // A `{{task}}` title passes load validation (`validate_workflow_structure`).
         let cfg = merge(EnvLike::default(), file).unwrap();
         assert_eq!(
             cfg.workflow.unwrap().nodes[0].title.as_deref(),
