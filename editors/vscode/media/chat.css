@@ -433,13 +433,12 @@ details.fold.tool.error .tname {
   color: var(--vscode-errorForeground);
 }
 
-/* The tool fold's rule carries the STATUS (V13, plan §1.5e): accent while running
-   (above), errorForeground on failure (below), and NEUTRAL when complete: the base
-   rule IS the complete (quiet) state, the two exceptions override it. */
+/* The tool fold's rule carries the STATUS (V13/V13r, plan §1.5e): GREEN when complete,
+   accent (blue) while running, errorForeground (red) on failure — the three states read
+   by HUE alone. The base rule IS complete; the two exceptions override it. */
 details.fold.tool {
-  border-left-color: var(--vscode-panel-border);
+  border-left-color: var(--vscode-charts-green);
 }
-
 details.fold.tool.error {
   border-left-color: var(--vscode-errorForeground);
 }
@@ -482,10 +481,10 @@ details.fold:not([open]) > summary .chev::before {
   content: "▸";
 }
 
-/* The TOOL mark is the ACTION mark: the ⚙ glyph + the name at weight 700, still NEUTRAL
-   (no accent — a finished tool is not "active now"). A thinking block is the ASIDE, so it
-   is DEMOTED instead: dim, weight 400, an italic summary. That contrast is what tells an
-   action from an aside (V12). */
+/* The TOOL mark is the ACTION mark: the ⚙ glyph + the name at weight 700, carrying the
+   row's STATUS hue (V13r: GREEN complete, accent running, red failed). A thinking block is
+   the ASIDE, so it is DEMOTED instead: dim, weight 400, an italic summary. That contrast
+   is what tells an action from an aside (V12). */
 .tname {
   color: var(--vscode-foreground);
   font-family: var(--vscode-editor-font-family);
@@ -494,6 +493,9 @@ details.fold:not([open]) > summary .chev::before {
 
 /* The tool line reads at FULL strength (scoped, so the thinking label is unaffected). */
 details.fold.tool .tname {
+  /* The ⚙ mark takes the row's STATUS hue too: green complete, accent running, red
+     failed (the two exception rules below/above override this base). */
+  color: var(--vscode-charts-green);
   font-weight: 700;
 }
 

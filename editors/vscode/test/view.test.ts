@@ -429,7 +429,41 @@ test("toolStatus: the exceptions carry a glyph + word; complete is quiet", () =>
   assert.equal(toolStatus({ done: true, isError: true }).glyph, memberGlyph("failed").glyph);
 });
 
-/* ------------------------------------------------- V12: tool activity */
+    test("the three tool-status colours are GREEN / BLUE / RED in the sheet (V13r)", () => {
+      // No pure helper carries the colour: the palette is the theme's own tokens in CSS,
+      // so this is the behavioural check that the three states read by HUE alone.
+      const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+      assert.match(
+        css,
+        /details\.fold\.tool \{[^}]*border-left-color: var\(--vscode-charts-green\)/,
+        "complete: the base rule is GREEN",
+      );
+      assert.match(
+        css,
+        /details\.fold\.tool \.tname \{[^}]*color: var\(--vscode-charts-green\)/,
+        "complete: the ⚙ mark is GREEN",
+      );
+      assert.match(
+        css,
+        /details\.fold\.tool\[data-live="1"\] \{[^}]*border-left-color: var\(--wc-accent\)/,
+        "running: the rule is accent (BLUE)",
+      );
+      assert.match(
+        css,
+        /details\.fold\.tool\[data-live="1"\] \.tname \{[^}]*color: var\(--wc-accent\)/,
+        "running: the ⚙ mark is accent",
+      );
+      assert.match(
+        css,
+        /details\.fold\.tool\.error \{[^}]*border-left-color: var\(--vscode-errorForeground\)/,
+        "error: the rule is RED",
+      );
+      assert.match(
+        css,
+        /details\.fold\.tool\.error \.tname \{[^}]*color: var\(--vscode-errorForeground\)/,
+        "error: the ⚙ mark is RED",
+      );
+    });
 
 test("outputHead: the output card's head is `⚙ {tool} · output`", () => {
   assert.equal(outputHead("bash"), "⚙ bash · output");
