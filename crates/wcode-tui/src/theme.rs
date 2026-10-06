@@ -23,7 +23,8 @@ pub(crate) struct Theme {
     pub accent: Style,
     /// The workhorse: secondary chrome and quiet prose.
     pub dim: Style,
-    /// A low-emphasis grey, distinct from [`Theme::border`]: e.g. the team strip's
+    /// A low-emphasis grey, distinct from [`Theme::border`] above the named-16
+    /// tier (they share one quiet grey there, D29): e.g. the team strip's
     /// `done` state.
     pub muted: Style,
     /// The overlay and popup borders and their titles.
@@ -58,12 +59,13 @@ pub(crate) struct Theme {
 
 impl Theme {
     /// The default palette — a handful of named ANSI colors. Assistant prose
-    /// stays default and dim stays the workhorse (`tui-design.md` §1.3).
+    /// stays default; `dim` is the workhorse grey and `muted`/`border` the quiet
+    /// pair (`tui-design.md` §1.3, D29).
     const fn colored() -> Self {
         Theme {
             accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            dim: Style::new().add_modifier(Modifier::DIM),
-            muted: Style::new().fg(Color::Gray),
+            dim: Style::new().fg(Color::Gray),
+            muted: Style::new().fg(Color::DarkGray),
             border: Style::new().fg(Color::DarkGray),
             user: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             body: Style::new(),
@@ -75,9 +77,7 @@ impl Theme {
             heading_sub: Style::new().fg(Color::Magenta),
             link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             tool_name: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            thinking: Style::new()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::DIM.union(Modifier::ITALIC)),
+            thinking: Style::new().fg(Color::Magenta).add_modifier(Modifier::ITALIC),
             diff_add: Style::new().fg(Color::Green),
             diff_del: Style::new().fg(Color::Red),
         }
@@ -264,7 +264,7 @@ const DEFAULT: Palette = Palette {
     fg: Color::Reset,
     bg: Color::Reset,
     accent: Color::Cyan,
-    muted: Color::Gray,
+    muted: Color::DarkGray,
     border: Color::DarkGray,
     code: Color::Yellow,
     red: Color::Red,
@@ -394,8 +394,9 @@ pub fn names() -> Vec<&'static str> {
 
 impl Theme {
     /// ALL 17 roles from a palette (NOT an overlay). Starts from the palette-B
-    /// MODIFIER skeleton (`Theme::colored()`) so only `fg` varies per role; the
-    /// `body`/`dim` fg stay `None` (prose = the terminal default; `dim` = DIM).
+    /// skeleton (`Theme::colored()`) so only `fg` varies per role; the `body` fg
+    /// stays `None` (prose = the terminal default) and `dim` takes the D29 grey
+    /// ramp for `mode` (no palette defines a `dim`).
     ///
     /// Per-role Rgb gating, EXPLICIT — the per-`Color` mirror of
     /// [`ThemeSpec::into_theme`]'s per-string rule (Q5): an `Rgb` palette color
@@ -423,7 +424,37 @@ impl Theme {
         set(&mut theme.thinking, p.magenta);
         set(&mut theme.link, p.blue);
         set(&mut theme.tool_name, p.blue);
+        apply_grey_ramp(&mut theme, mode, false);
         theme
+    }
+}
+
+/// The D29 grey ramp for a color `mode`: `(dim, muted, border)`. `dim` is the
+/// universal workhorse grey (no palette defines one); `muted`/`border` are the
+/// palette-B steps. `Plain` has no color lever, so callers keep the modifier.
+fn grey_ramp(mode: ColorMode) -> (Color, Color, Color) {
+    match mode {
+        ColorMode::Plain | ColorMode::Named => (Color::Gray, Color::DarkGray, Color::DarkGray),
+        ColorMode::Indexed => (Color::Indexed(250), Color::Indexed(243), Color::Indexed(238)),
+        ColorMode::Rgb => (
+            Color::Rgb(0xa9, 0xb1, 0xba),
+            Color::Rgb(0x7d, 0x87, 0x90),
+            Color::Rgb(0x3b, 0x42, 0x52),
+        ),
+    }
+}
+
+/// Give a color theme the D29 greys: `dim` always; `muted`/`border` too when
+/// `palette_b` (other presets keep their own greys — "hues unchanged").
+fn apply_grey_ramp(theme: &mut Theme, mode: ColorMode, palette_b: bool) {
+    if mode == ColorMode::Plain {
+        return; // no color lever: the grey roles stay modifiers
+    }
+    let (dim, muted, border) = grey_ramp(mode);
+    theme.dim.fg = Some(dim);
+    if palette_b {
+        theme.muted.fg = Some(muted);
+        theme.border.fg = Some(border);
     }
 }
 
@@ -518,10 +549,15 @@ impl ThemeSpec {
     /// color mode. [`parse_theme_table`] validated the values; a stray one
     /// cannot reach here.
     fn into_theme(self, mode: ColorMode) -> Theme {
+        // Palette B is the `default` preset or no preset at all.
+        let palette_b = matches!(self.preset.as_deref(), None | Some("default"));
         let mut theme = match self.preset.as_deref().and_then(preset) {
             Some(p) => Theme::from_palette(p, mode),
             None => Theme::colored(),
         };
+        // D29: the grey ramp — `dim` for every color theme, and palette B's
+        // `muted`/`border` too; other presets keep their own greys.
+        apply_grey_ramp(&mut theme, mode, palette_b);
         for (role, value) in &self.roles {
             let Ok(color) = parse_color(value) else {
                 continue;
@@ -696,6 +732,58 @@ mod tests {
     }
 
     #[test]
+    fn dim_carries_an_explicit_grey_and_no_dim_modifier() {
+        // D29: `dim` is an explicit grey under color, not the `DIM` modifier.
+        let colored = Theme::colored();
+        assert!(colored.dim.fg.is_some(), "dim must carry an explicit grey");
+        assert!(
+            !colored.dim.add_modifier.contains(Modifier::DIM),
+            "dim must not use the DIM modifier under color"
+        );
+        // `thinking` drops DIM too, keeping magenta + italic.
+        assert!(!colored.thinking.add_modifier.contains(Modifier::DIM));
+        assert!(colored.thinking.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(colored.thinking.fg, Some(Color::Magenta));
+
+        // NO_COLOR has no color lever, so `dim` keeps the modifier.
+        assert!(
+            Theme::plain().dim.add_modifier.contains(Modifier::DIM),
+            "NO_COLOR keeps the DIM modifier"
+        );
+    }
+
+    #[test]
+    fn each_tier_yields_its_own_grey_steps() {
+        // D29: the grey ramp is picked per color mode (palette B — the `default`
+        // preset / no preset). Each literal below is pinned, so a transposed
+        // 238/243, a 250→251 typo, or a swapped hex byte would fail.
+        let named = ThemeSpec::default().into_theme(ColorMode::Named);
+        assert_eq!(named.dim.fg, Some(Color::Gray));
+        assert_eq!(named.muted.fg, Some(Color::DarkGray));
+        assert_eq!(named.border.fg, Some(Color::DarkGray));
+
+        let indexed = ThemeSpec::default().into_theme(ColorMode::Indexed);
+        assert_eq!(indexed.dim.fg, Some(Color::Indexed(250)));
+        assert_eq!(indexed.muted.fg, Some(Color::Indexed(243)));
+        assert_eq!(indexed.border.fg, Some(Color::Indexed(238)));
+
+        let rgb = ThemeSpec::default().into_theme(ColorMode::Rgb);
+        assert_eq!(rgb.dim.fg, Some(Color::Rgb(0xa9, 0xb1, 0xba)));
+        assert_eq!(rgb.muted.fg, Some(Color::Rgb(0x7d, 0x87, 0x90)));
+        assert_eq!(rgb.border.fg, Some(Color::Rgb(0x3b, 0x42, 0x52)));
+
+        // The three steps are distinct within a tier — except Named-16, where
+        // `muted` and `border` share the one quiet grey (documented, D29).
+        assert_ne!(named.dim.fg, named.muted.fg);
+        assert_eq!(named.muted.fg, named.border.fg, "the named-16 coincidence");
+        for (label, tier) in [("indexed", &indexed), ("rgb", &rgb)] {
+            assert_ne!(tier.dim.fg, tier.muted.fg, "{label}: dim vs muted");
+            assert_ne!(tier.muted.fg, tier.border.fg, "{label}: muted vs border");
+            assert_ne!(tier.dim.fg, tier.border.fg, "{label}: dim vs border");
+        }
+    }
+
+    #[test]
     fn the_colored_theme_signals_errors_in_red() {
         assert_eq!(Theme::colored().error.fg, Some(Color::Red));
     }
@@ -704,7 +792,11 @@ mod tests {
     fn the_semantic_palette_keeps_roles_distinct() {
         // Palette "B": roles that used to be aliases now read as themselves.
         let t = Theme::colored();
-        assert_ne!(t.muted.fg, t.border.fg, "muted (Gray) vs border (DarkGray)");
+        // D29: `muted`/`border` share the one named-16 quiet grey but diverge
+        // above it (243 vs 238, #7d8790 vs #3b4252).
+        assert_eq!(t.muted.fg, t.border.fg, "both the named-16 quiet grey");
+        let rgb = ThemeSpec::default().into_theme(ColorMode::Rgb);
+        assert_ne!(rgb.muted.fg, rgb.border.fg, "muted vs border, truecolor");
         assert_ne!(t.code.fg, t.warn.fg, "code (Yellow) vs warn (LightYellow)");
         assert_ne!(t.tool_name, t.link, "tool_name (bold) vs link (underline)");
         assert!(
@@ -858,7 +950,7 @@ mod tests {
     fn the_default_preset_is_palette_b() {
         let theme = Theme::from_palette(preset("default").unwrap(), ColorMode::Named);
         assert_eq!(theme.error.fg, Some(Color::Red));
-        assert_eq!(theme.muted.fg, Some(Color::Gray));
+        assert_eq!(theme.muted.fg, Some(Color::DarkGray), "D29 named grey");
         assert_eq!(theme.border.fg, Some(Color::DarkGray));
         assert_eq!(theme.warn.fg, Some(Color::LightYellow));
         assert_eq!(
@@ -867,7 +959,7 @@ mod tests {
             "code stays distinct from warn (palette B)"
         );
         assert_eq!(theme.body.fg, None, "prose stays the terminal default");
-        assert_eq!(theme.dim.fg, None, "dim stays a modifier-only role");
+        assert_eq!(theme.dim.fg, Some(Color::Gray), "dim carries the D29 grey");
     }
 
     #[test]

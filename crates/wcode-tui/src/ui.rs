@@ -1073,7 +1073,7 @@ fn corner_titles(
     let effort = app.status().effort.clone();
     let tl = |text: &str| -> Vec<Span<'static>> {
         let (head, rest) = split_at_char(text, project.chars().count());
-        let mut spans = vec![Span::styled(head, accent())];
+        let mut spans = vec![Span::styled(head, muted())];
         if !rest.is_empty() {
             spans.push(Span::styled(rest, dim()));
         }
@@ -1091,11 +1091,15 @@ fn corner_titles(
     let (top_left, top_right) = pick_titles(&top_levels, avail);
 
     // --- bottom row: the gauge   ·   `⏻ plan · ▤ browse · {state} · ↑ N` -----
-    let state = match (app.running(), app.run_elapsed()) {
-        (true, Some(d)) => format!("⠹ running {}", format_ms(d.as_millis() as u64)),
-        (true, None) => "⠹ running".to_string(),
-        (false, _) if app.asking() => "⠹ btw…".to_string(),
-        (false, _) => "⏸ idle".to_string(),
+    let (state, state_style) = match (app.running(), app.run_elapsed()) {
+        (true, Some(d)) => (
+            format!("⠹ running {}", format_ms(d.as_millis() as u64)),
+            accent(),
+        ),
+        (true, None) => ("⠹ running".to_string(), accent()),
+        // A pending `/btw` is the other in-flight state — accent, like running.
+        (false, _) if app.asking() => ("⠹ btw…".to_string(), accent()),
+        (false, _) => ("⏸ idle".to_string(), dim()),
     };
     let br = |show_plan: bool, show_browse: bool, show_scroll: bool| -> Vec<Span<'static>> {
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1111,7 +1115,7 @@ fn corner_titles(
         if !spans.is_empty() {
             spans.push(sep());
         }
-        spans.push(Span::styled(state.clone(), dim()));
+        spans.push(Span::styled(state.clone(), state_style));
         if show_scroll && app.scroll() > 0 {
             spans.push(sep());
             spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
@@ -3069,6 +3073,38 @@ mod tests {
         assert!(text.contains("zephyr-9"), "model top-right:\n{text}");
         assert!(text.contains("high"), "effort missing:\n{text}");
         assert!(text.contains("⏸ idle"), "state bottom-right:\n{text}");
+    }
+
+    #[test]
+    fn the_project_is_muted_and_the_run_state_is_accent() {
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        let area = Rect::new(0, 0, 100, 3);
+
+        // Idle: the project recedes to `muted`, the state stays `dim` (D4b).
+        let (tl, _tr, _bl, br) = corner_titles(&app, area);
+        assert_eq!(tl.spans[0].content, "wcode");
+        assert_eq!(tl.spans[0].style, muted(), "project → muted");
+        let state = br
+            .spans
+            .iter()
+            .find(|s| s.content.contains("idle"))
+            .expect("the state span");
+        assert_eq!(state.style, dim(), "idle state → dim");
+
+        // Running: the state takes the accent budget.
+        let id = app.focused_id().clone();
+        app.handle(AppEvent::Agent(
+            id,
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        let (_tl, _tr, _bl, br) = corner_titles(&app, area);
+        let state = br
+            .spans
+            .iter()
+            .find(|s| s.content.contains("running"))
+            .expect("the state span");
+        assert_eq!(state.style, accent(), "running state → accent");
     }
 
     #[test]

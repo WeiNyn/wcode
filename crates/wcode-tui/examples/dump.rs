@@ -47,6 +47,11 @@ Rationale and edge cases are in the [design note](https://example.com/config).";
 const SIZES: [(u16, u16); 3] = [(80, 24), (120, 40), (48, 20)];
 
 fn main() -> std::io::Result<()> {
+    // Mirror the real TUI's `theme::install`: resolve palette B (or the
+    // `NO_COLOR` plain theme) through the color-mode ladder. Without this the
+    // headless path would use the static seed and ignore `NO_COLOR`.
+    wcode_tui::set_theme("default").expect("the `default` preset exists");
+
     let out = target_dir().join("tui-render");
     fs::create_dir_all(&out)?;
 
