@@ -5,9 +5,10 @@
 #   wcode --agents --config .wcode/workflow.toml --task "add dark mode"
 #   WCODE_CONFIG=.wcode/workflow.toml wcode --agents --task "add dark mode"
 #
-# This file requires a task: its node titles carry {{task}}, and the boot guard
-# exits 2 if none is given. For the INTERACTIVE dev loop (no injected task; watch
-# the team work in the TUI) use .wcode/team.toml instead.
+# This file's node titles carry {{task}}, so it is only useful WITH one. Without
+# --task it is inert (see D001 below) — it does not block the boot. For the
+# INTERACTIVE dev loop (no injected task; watch the team work in the TUI) use
+# .wcode/team.toml instead.
 #
 # D001 — a [workflow] instantiates ONLY when --task/WCODE_TASK is present. Loaded
 # without a task it is INERT: wcode prints "workflow: present but inert (no

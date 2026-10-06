@@ -106,7 +106,8 @@ if !cfg.team.iter().any(|t| t.name == member.name) {
 }
 ```
 
-(`crates/wcode-cli/src/main.rs:MC499`). So during migration from TOML to `.md`,
+(`crates/wcode-cli/src/main.rs`, `fold_discovered_members` — the `t.name ==
+member.name` guard). So during migration from TOML to `.md`,
 deleting the TOML block is part of the change: leaving both silently discards
 the markdown role. `[[team]] file = "<path>"` (D003) is the resolver that makes
 a TOML entry point at a `.md` file explicitly — implement that rather than

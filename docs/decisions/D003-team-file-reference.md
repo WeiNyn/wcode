@@ -24,7 +24,8 @@ for member in agent_files::discover(&cwd, home.as_deref()) {
 }
 ```
 
-(`crates/wcode-cli/src/main.rs:YGsc5`, guard `:MC499`). A preset that names the
+(`crates/wcode-cli/src/main.rs`, `fold_discovered_members` — the
+`t.name == member.name` guard). A preset that names the
 same member as a discovered file silently loses the whole md role.
 
 ## Decision

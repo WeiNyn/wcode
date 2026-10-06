@@ -8,9 +8,10 @@
 ## Context
 
 `should_instantiate_workflow(resuming_group, has_workflow)` returns
-`!resuming_group && has_workflow` (`crates/wcode-cli/src/main.rs:3Tsl0`; body
-`uluIe`) and is called with `cfg.workflow.is_some()`
-(`crates/wcode-cli/src/main.rs:GbCBX`). The predicate never reads `args.task`.
+`should_instantiate_workflow` in `crates/wcode-cli/src/main.rs`, before this
+change) and is called with `cfg.workflow.is_some()`
+(`load_config_raw`'s workflow-instantiation call site). The predicate never
+reads `args.task`.
 Two shapes therefore diverge:
 
 - A `[workflow]` whose node titles carry **no** `{{task}}` template instantiates
@@ -19,7 +20,7 @@ Two shapes therefore diverge:
 - A `[workflow]` whose node titles **use** `{{task}}` without `--task` /
   `WCODE_TASK` is a boot error: `check_task_args` returns
   `"[workflow] uses {{task}} but no --task/WCODE_TASK was given"`
-  (`crates/wcode-cli/src/main.rs:IAMr0`) and the CLI exits 2.
+  (`check_task_args` in `crates/wcode-cli/src/main.rs`) and the CLI exits 2.
 
 So the DAG (the scheduler-driven, headless run) and the interactive team path
 are mutually exclusive in practice, and one of the two failure modes is silent.

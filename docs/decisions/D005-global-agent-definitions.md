@@ -10,12 +10,13 @@
 body `DMdtQ`), and `agent_files::discover_global` already scans
 `<home>/agents/**/*.md` (`crates/wcode-cli/src/agent_files.rs:jmdEk`) — i.e.
 `~/.config/wcode/agents/`. But `README.md` documents only the project form,
-`./.wcode/agents/**/*.md` (`README.md:U8wUO`).
+`./.wcode/agents/**/*.md` (the README's agent section — it named no global path).
 
 The `--help` text says `--no-project-config`/`WCODE_PROJECT_CONFIG=off` disables
 the global scan too: "disable ALL auto-discovery: ./.wcode/{config,team}.toml,
 ./.wcode/agents/, and ~/.config/wcode/agents/"
-(`crates/wcode-cli/src/main.rs:3vCf7`, `:Lqk9P`). That contradicts
+(the `USAGE` const and the `WCODE_PROJECT_CONFIG` env line in
+`crates/wcode-cli/src/main.rs`). That contradicts
 `docs/project-team-loading.md:zQnrT` (D-A5), which frames only "layers 1 and 4"
 as surviving — the global config plus an explicit `--config` — not the global
 agents scan.

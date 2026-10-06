@@ -276,8 +276,8 @@ auto-discovery only — the `./.wcode/{config,team}.toml` overlays and the
 `./.wcode/agents/` scan. The global `config.toml` and the global
 `~/.config/wcode/agents/` scan are not project config and still load.
 
-The repo ships `.wcode/team.toml` as exactly this — the orchestrator workflow and
-`[tools] grep/find = true`, with the members in `.wcode/agents/*.md` and the
+The repo ships `.wcode/team.toml` as exactly this — the `[orchestrator]` guidelines
+and `[tools] grep/find = true`, with the members in `.wcode/agents/*.md` and the
 provider/model left in the global config — so here `wcode` (or `wcode --agents`)
 starts the full team with no flags.
 

@@ -132,8 +132,11 @@ Exact commands and expected output:
 - `cargo clippy --workspace --all-targets` — clean (exit 0, no warnings).
 - `sh .wcode/skills/skill-authoring/scripts/validate_skill.sh` — exit 0, no
   `file: reason` lines.
-- `cargo run -p wcode-cli -- --dump-system-prompt | sed -n '/Available skills/,/^$/p'`
-  — lists every discovered skill.
+- `cargo run -p wcode-cli -- --dump-system-prompt | grep -E '^- [a-z][a-z-]* — .* \(read '`
+  — one line per discovered skill (the trailing `(read <path>)` is what
+  distinguishes a skill row from a team-roster row, which uses the same bullet form;
+  and a `sed -n '/Available skills/,/^$/p'` range prints only the header, since a
+  blank line follows it immediately).
 - P1 regression tests (named): `should_instantiate_workflow` gated on the task,
   and workflow validation running after the `.md` fold.
 
@@ -151,13 +154,15 @@ Exact commands and expected output:
 
 ```sh
 # 1. The skills fold into the prompt (no network).
-cargo run -p wcode-cli -- --dump-system-prompt | sed -n '/Available skills/,/^$/p'
+cargo run -p wcode-cli -- --dump-system-prompt | grep -E '^- [a-z][a-z-]* — .* \(read '
 
 # 2. The validator passes over the suite.
 sh .wcode/skills/skill-authoring/scripts/validate_skill.sh ; echo "exit=$?"
 
 # 3. The standard team starts from the markdown roles (no [[team]] in either TOML).
-grep -c '\[\[team\]\]' .wcode/team.toml .wcode/workflow.toml   # both 0
+grep -cE '^\[\[team\]\]' .wcode/team.toml .wcode/workflow.toml   # both 0 — `-E`, or
+# BRE reads `[[team]]` as a character class (the explanatory comments mention the
+# form in prose, so the pattern must also be anchored to the line start)
 cargo run -p wcode-cli -- --agents            # prints the team roster
 
 # 4. A [workflow] without --task is inert (D001) and prints a notice.
@@ -165,7 +170,7 @@ cargo run -p wcode-cli -- --config .wcode/workflow.toml --agents   # notice, no 
 ```
 
 Look for: every skill name in the `# Available skills` section; `exit=0` from
-the validator; a roster naming the four members; the one-line notice instead of
+the validator; a roster naming all six members; the one-line notice instead of
 an unseeded DAG run.
 
 ## 8. Expected outcome
