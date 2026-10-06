@@ -96,6 +96,12 @@ cap_ms = 8000              # optional; cap on a single backoff wait
 ttft_ms = 60000            # optional; time-to-first-token timeout (0 disables)
 idle_ms = 120000           # optional; inter-item idle timeout (0 disables)
 
+[workspace]
+# Whole-file compare-and-swap on mutations: wcode auto-attaches the digest from
+# its last `read` to a mutation and refuses the write if the file changed since
+# (a concurrent edit, a formatter), so a stale edit cannot silently clobber.
+digest_cas = true          # optional; true|false — default ON
+
 [theme]
 # TUI theme, presentation-only. `name` selects a built-in preset —
 # default | dark | light | gruvbox-dark | nord | solarized-dark | solarized-light.
@@ -298,11 +304,15 @@ wcode --list-themes          # print the built-in theme names, exit
 wcode --theme nord           # select a theme preset (or `[theme] name` in config)
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
+wcode --detect-endpoint      # when base_url is unset, probe common local endpoints
+wcode --dump-config          # print the resolved endpoint/base_url/model and key SOURCES, exit
 wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
 wcode --tui                  # force the full-screen TUI (default on a TTY)
 wcode --no-tui               # force the line REPL (pipes/CI)
 wcode serve --stdio          # serve the frame protocol over stdin/stdout (any platform; implies serve)
+wcode --peer explorer=/tmp/wcode/explorer.sock  # register a remote peer for `message` (repeatable)
+wcode serve --name w7 --owner agent:orchestrator  # serve this session as <owner>'s worker
 ```
 
 The interactive path: with no `-p`, `wcode` starts a full-screen TUI when stdin
@@ -350,6 +360,8 @@ REPL commands (unknown `/...` lines go to the LLM as prompt text):
 | `/sessions` | list sessions, `*` marks the current one |
 | `/usage` | print aggregate token usage for the current conversation (input/output, plus cache read/write when reported) |
 | `/btw <question>` | a tool-free side question answered from the current context (never committed); a dim `btw: …` prints while it is in flight — the TUI's status corner shows `⠹ btw…` until the reply |
+| `/plan [on|off]` | toggle (bare) or set plan mode: the editing tools are disabled and mutating shell commands refused (the `PlanModeHooks` denylist), and a `# Plan mode` section is appended to the system prompt — explore and propose, then record the plan as a todo list and `/plan off` to execute |
+| `/verify` | render the plan's progress: the last cached todo checklist, its done count, and whether anything is unfinished |
 | `/compact [prompt]` | summarize older messages now, keeping the most recent; an optional `prompt` focuses the summary |
 | `/skills` | list the discovered `SKILL.md` packages (name, description, file) |
 | `/skill <name> [args]` | force-load a skill's body into a turn — for when the model doesn't pick it up from the prompt section on its own; extra `args` become the task |
@@ -359,6 +371,12 @@ Effort fans out per endpoint: Chat sends `reasoning_effort`, Responses
 sends `reasoning: { effort }`, unset sends nothing. Model listing only
 returns id metadata — no capability flags — so effort support stays
 user-managed.
+
+Plan mode (`/plan [on|off]` in the REPL or the TUI) is a kernel `Hooks` policy
+(`PlanModeHooks`) over a shared on/off handle: while on, the editing tools are
+refused and mutating shell commands are blocked, and the `# Plan mode` section
+(`PLAN_SECTION`) is appended to the system prompt. It is never persisted — a
+`/new` or `/resume` starts with plan mode off.
 
 Ctrl-C aborts the run in flight and stays in the REPL; when idle it exits.
 Output: text streams to stdout, thinking and tool output are dimmed
@@ -380,6 +398,12 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | `edits` | apply a batch of anchor-range edits (`{edits: [{path,from,to?,replacement,…}]}`) to **one file** in a single call. Every op resolves against the same snapshot and the batch is atomic — any stale/ambiguous/overlapping op aborts with nothing written |
 | `replace` | exact string replace without a read for quick unique substitutions; fails on 0 or (without `replace_all`) multiple matches |
 | `write` | create/overwrite; parents created automatically. Content is written byte-for-byte — indentation preserved, never reformatted |
+| `todo` | maintain a session-local todo list — call with `todos` to replace the whole list (each item `content` + `status` pending/in_progress/completed), or with no args to read it back. Always registered, every session (workers included) |
+| `session_search` | search prior session transcripts: `scope:all` (default) scans every session in the store, grouped by session, excluding the current one unless `include_current`; `scope:current` reads this session (including turns a compaction replaced with a summary) and also takes `turns{start,end}` and `stats`. Terms are ANDed, case-insensitive; thinking/tool text is skipped unless `include_tools`. Read-only, always registered |
+| `spawn` | spawn a worker agent for a task — it runs its own session and reports its result back. Returns the worker's address (use it with `message`). Optional `model`/`role`/`tools`/`base_url`/`api_key`/`read_only`/`effort`; `to` defines the worker on a served peer (`--peer`/`[peers]` name or `agent:<id>`) instead of in-process. Root-only |
+| `message` | send a message to another agent session: `to` is the recipient's address (omit → your orchestrator); `mode` is `wake` (default), `notify`, `interrupt`, or `ask` |
+| `peers` | list the peers you can message, as `name -> address [state]` |
+| `task` | plan and track the team's tasks: `op` is `create` (optional `deps`/`gate`), `assign`, `depends`, `complete`, `reject`, `reset`, or `list`. Root-only |
 
 `edit`/`replace`/`write` share a mutation lock and write via a temp file +
 rename, so concurrent file mutation can't interleave or truncate.
@@ -462,6 +486,12 @@ On a clean interactive exit (`/exit`, or EOF; the TUI's `/exit`) wcode prints th
 exact command to bring the session back, e.g.
 `resume: wcode --resume <sessions>/<id>/root.jsonl --model <id> --agents` for a
 team — copy-paste it to relaunch. A remote (`--socket`) session prints nothing.
+
+With a team, each root session lives in its own **group directory**
+`<millis>_<id>/` holding `root.jsonl`, a `manifest.json` (the team topology),
+and one `members/<name>.jsonl` per worker — so a team survives a crash and
+`--resume` rebuilds the whole team (the root's history plus each member's).
+Legacy flat `<millis>_<id>.jsonl` files still list and resume as bare roots.
 
 ## Philosophy
 
