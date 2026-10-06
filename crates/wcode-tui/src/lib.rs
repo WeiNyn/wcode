@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
+use ratatui::style::{Color, Modifier};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{MissedTickBehavior, interval};
 use wcode_harness::event::AgentEvent;
@@ -45,6 +46,136 @@ pub fn theme_names() -> Vec<&'static str> {
 /// Apply a catalog preset at runtime (the `/theme` / `--theme` entry).
 pub fn set_theme(name: &str) -> Result<(), String> {
     theme::set_preset(name)
+}
+
+/// DEV-ONLY — a development helper for `examples/dump.rs`, **not** a supported
+/// API (no semver promise; it may change or be removed without notice). Draws
+/// the **real** `ui::draw` headlessly onto a `ratatui::backend::TestBackend`
+/// and returns the frame as a `String`, with an ANSI SGR run per cell
+/// (fg/bg/modifier) so `cat file.ansi` shows the colors on a real terminal; no
+/// live terminal, no alt screen. `#[doc(hidden)]`; the private `ui`/`draw` stay
+/// private, so this is the one seam an example can call.
+///
+/// Unlike [`run`], the headless path never calls `theme::install`, so `NO_COLOR`
+/// is not applied — the frame reflects the process theme exactly as-is.
+#[doc(hidden)]
+pub fn render_text(app: &mut App, width: u16, height: u16) -> String {
+    render_frame(app, width, height, Paint::Ansi)
+}
+
+/// DEV-ONLY: like [`render_text`], but symbols only — one glyph per cell, no
+/// escape sequences (a plain whole-frame snapshot for diffs and review).
+#[doc(hidden)]
+pub fn render_plain(app: &mut App, width: u16, height: u16) -> String {
+    render_frame(app, width, height, Paint::Plain)
+}
+
+/// Whether [`render_frame`] encodes SGR runs or emits bare symbols.
+#[derive(Clone, Copy)]
+enum Paint {
+    Ansi,
+    Plain,
+}
+
+/// DEV-ONLY shared headless renderer (see [`render_text`]).
+fn render_frame(app: &mut App, width: u16, height: u16, paint: Paint) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a TestBackend");
+    // Mirror `draw` (lib.rs:673): a theme `set` bumped the process generation,
+    // so invalidate the baked caches before the frame and clear the dirty flag
+    // after it — a headless frame must match a live one byte for byte.
+    app.sync_theme();
+    terminal
+        .draw(|frame| ui::draw(frame, app))
+        .expect("a draw onto a TestBackend");
+    app.clear_dirty();
+    let buffer = terminal.backend().buffer();
+
+    let mut out = String::new();
+    for y in 0..buffer.area.height {
+        // The SGR params last emitted on this row, so a run is encoded only when
+        // the style actually changes — keeps the file small and readable.
+        let mut last: Option<String> = None;
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            if let Paint::Ansi = paint {
+                let params = sgr_params(cell.fg, cell.bg, cell.modifier);
+                if last.as_deref() != Some(params.as_str()) {
+                    out.push_str("\u{1b}[0m"); // reset, then the new run
+                    if !params.is_empty() {
+                        out.push_str("\u{1b}[");
+                        out.push_str(&params);
+                        out.push('m');
+                    }
+                    last = Some(params);
+                }
+            }
+            out.push_str(cell.symbol());
+        }
+        if let Paint::Ansi = paint {
+            out.push_str("\u{1b}[0m"); // reset at end of row
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The SGR parameter list for a cell's style — empty for the default (reset)
+/// style, so the row's `\u{1b}[0m` already covers it.
+fn sgr_params(fg: Color, bg: Color, modifier: Modifier) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (bit, code) in [
+        (Modifier::BOLD, "1"),
+        (Modifier::DIM, "2"),
+        (Modifier::ITALIC, "3"),
+        (Modifier::UNDERLINED, "4"),
+        (Modifier::SLOW_BLINK, "5"),
+        (Modifier::RAPID_BLINK, "6"),
+        (Modifier::REVERSED, "7"),
+        (Modifier::HIDDEN, "8"),
+        (Modifier::CROSSED_OUT, "9"),
+    ] {
+        if modifier.contains(bit) {
+            parts.push(code.to_string());
+        }
+    }
+    if let Some(code) = color_params(fg, false) {
+        parts.push(code);
+    }
+    if let Some(code) = color_params(bg, true) {
+        parts.push(code);
+    }
+    parts.join(";")
+}
+
+/// The SGR parameter for a color, or `None` for [`Color::Reset`] (the terminal
+/// default). `background` selects the 40/48 family over 30/38.
+fn color_params(color: Color, background: bool) -> Option<String> {
+    let base = if background { 40 } else { 30 };
+    let ext = if background { 48 } else { 38 };
+    Some(match color {
+        Color::Reset => return None,
+        Color::Black => base.to_string(),
+        Color::Red => (base + 1).to_string(),
+        Color::Green => (base + 2).to_string(),
+        Color::Yellow => (base + 3).to_string(),
+        Color::Blue => (base + 4).to_string(),
+        Color::Magenta => (base + 5).to_string(),
+        Color::Cyan => (base + 6).to_string(),
+        Color::Gray => (base + 7).to_string(),
+        Color::DarkGray => (base + 60).to_string(),
+        Color::LightRed => (base + 61).to_string(),
+        Color::LightGreen => (base + 62).to_string(),
+        Color::LightYellow => (base + 63).to_string(),
+        Color::LightBlue => (base + 64).to_string(),
+        Color::LightMagenta => (base + 65).to_string(),
+        Color::LightCyan => (base + 66).to_string(),
+        Color::White => (base + 67).to_string(),
+        Color::Rgb(r, g, b) => format!("{ext};2;{r};{g};{b}"),
+        Color::Indexed(i) => format!("{ext};5;{i}"),
+    })
 }
 
 /// A surface's live state, shown in the team strip and by `/team`.
@@ -852,5 +983,186 @@ mod abort_signal_tests {
     fn idle_quit_is_not_abandoned() {
         let app = App::new();
         assert_eq!(outcome_of(&app), Outcome::Quit);
+    }
+}
+
+/// Tests for the DEV-ONLY headless renderer ([`render_text`] / [`render_plain`])
+/// and its SGR encoder. `cargo test` never runs an example's `main`, so these are
+/// the only guard on the encoder the `dump` example relies on.
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+
+    /// Commit a plain text block into the default root surface.
+    fn push_text(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Text { text: text.into() }],
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    // ---- the encoder: `color_params` ----
+
+    #[test]
+    fn color_params_is_none_only_for_reset() {
+        assert_eq!(color_params(Color::Reset, false), None);
+        assert_eq!(color_params(Color::Reset, true), None);
+    }
+
+    #[test]
+    fn color_params_splits_basic_bright_and_extended_families() {
+        // Basic 30/40.
+        assert_eq!(color_params(Color::Black, false).as_deref(), Some("30"));
+        assert_eq!(color_params(Color::Gray, false).as_deref(), Some("37"));
+        assert_eq!(color_params(Color::Red, true).as_deref(), Some("41"));
+        // Bright 90/100.
+        assert_eq!(color_params(Color::DarkGray, false).as_deref(), Some("90"));
+        assert_eq!(color_params(Color::LightCyan, false).as_deref(), Some("96"));
+        assert_eq!(color_params(Color::White, true).as_deref(), Some("107"));
+        // Extended 38/48.
+        assert_eq!(
+            color_params(Color::Rgb(1, 2, 3), false).as_deref(),
+            Some("38;2;1;2;3")
+        );
+        assert_eq!(
+            color_params(Color::Rgb(1, 2, 3), true).as_deref(),
+            Some("48;2;1;2;3")
+        );
+        assert_eq!(
+            color_params(Color::Indexed(200), false).as_deref(),
+            Some("38;5;200")
+        );
+        assert_eq!(
+            color_params(Color::Indexed(200), true).as_deref(),
+            Some("48;5;200")
+        );
+    }
+
+    // ---- the encoder: `sgr_params` ----
+
+    #[test]
+    fn sgr_params_orders_modifiers_then_fg_then_bg() {
+        // A dropped or duplicated part, or a wrong order, fails this.
+        assert_eq!(
+            sgr_params(
+                Color::Red,
+                Color::Blue,
+                Modifier::BOLD | Modifier::ITALIC | Modifier::REVERSED
+            ),
+            "1;3;7;31;44"
+        );
+        assert_eq!(
+            sgr_params(Color::Reset, Color::Reset, Modifier::all()),
+            "1;2;3;4;5;6;7;8;9"
+        );
+    }
+
+    #[test]
+    fn sgr_params_is_empty_for_the_default_style() {
+        // The empty string is what makes `render_frame` emit a bare reset.
+        assert_eq!(sgr_params(Color::Reset, Color::Reset, Modifier::empty()), "");
+        // A modifier-only cell emits just its code — no color part.
+        assert_eq!(sgr_params(Color::Reset, Color::Reset, Modifier::BOLD), "1");
+        assert_eq!(sgr_params(Color::Reset, Color::Reset, Modifier::DIM), "2");
+    }
+
+    #[test]
+    fn sgr_params_carries_rgb_and_indexed_at_both_ends() {
+        assert_eq!(
+            sgr_params(
+                Color::Rgb(10, 20, 30),
+                Color::Rgb(40, 50, 60),
+                Modifier::empty()
+            ),
+            "38;2;10;20;30;48;2;40;50;60"
+        );
+        assert_eq!(
+            sgr_params(Color::Indexed(9), Color::Indexed(10), Modifier::empty()),
+            "38;5;9;48;5;10"
+        );
+    }
+
+    // ---- the frame: `render_plain` ----
+
+    #[test]
+    fn render_plain_has_w_times_h_symbols_plus_h_newlines() {
+        let mut app = App::new();
+        push_text(&mut app, "plain-marker-123");
+        let (w, h) = (40u16, 12u16);
+        let frame = render_plain(&mut app, w, h);
+        assert!(
+            frame.contains("plain-marker-123"),
+            "fixture text is missing:\n{frame}"
+        );
+        assert!(!frame.contains('\u{1b}'), "plain mode must be escape-free");
+        assert_eq!(frame.matches('\n').count(), h as usize, "one newline per row");
+        assert_eq!(
+            frame.chars().count(),
+            (w as usize) * (h as usize) + h as usize,
+            "one symbol per cell, plus a newline per row"
+        );
+    }
+
+    // ---- the frame: `render_text` ----
+
+    #[test]
+    fn render_text_emits_a_bold_run_for_a_bold_cell() {
+        let mut app = App::new();
+        push_text(&mut app, "bold-run-marker");
+        // The user block's `❯` is accent = Cyan+Bold, so the run carries `1`.
+        // (A bold-ONLY cell is impossible in the default colored theme; the
+        // bold-only encoding is pinned by `sgr_params_is_empty_for_the_default_style`.)
+        let frame = render_text(&mut app, 40, 12);
+        assert!(frame.contains("\u{1b}[1;36m"), "no bold+color run:\n{frame:?}");
+        // A modifier-only cell — the dim session line — emits just its code.
+        app.set_status(Status {
+            session: Some("abcdef0123456789".into()),
+            ..Default::default()
+        });
+        let frame = render_text(&mut app, 40, 12);
+        assert!(frame.contains("\u{1b}[2m"), "no dim-only run:\n{frame:?}");
+    }
+
+    #[test]
+    fn render_text_encodes_a_default_cell_as_a_bare_reset() {
+        let mut app = App::new();
+        // A session line is dim, so its end is a styled → default transition.
+        app.set_status(Status {
+            session: Some("abcdef0123456789".into()),
+            ..Default::default()
+        });
+        push_text(&mut app, "x");
+        let frame = render_text(&mut app, 40, 12);
+        // A default cell resets and emits NOTHING else: the reset is followed
+        // straight by the default symbol (the padding space), not an SGR run.
+        assert!(
+            frame.contains("\u{1b}[0m "),
+            "a default cell must emit a bare reset:\n{frame:?}"
+        );
+    }
+
+    #[test]
+    fn render_text_closes_every_row_with_a_reset() {
+        let mut app = App::new();
+        push_text(&mut app, "row-reset-marker");
+        let (w, h) = (60u16, 10u16);
+        let frame = render_text(&mut app, w, h);
+        let mut lines = frame.split('\n');
+        for row in 0..h {
+            let line = lines.next().expect("a row");
+            assert!(
+                line.ends_with("\u{1b}[0m"),
+                "row {row} does not end in a reset: {line:?}"
+            );
+        }
+        assert_eq!(lines.next(), Some(""), "exactly h rows");
     }
 }

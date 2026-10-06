@@ -25,3 +25,6 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # Only the `demo` example defines a scripted tool, which needs the async-trait
 # macro; the library itself stays free of it.
 async-trait = { workspace = true }
+# The `dump` example builds tool-call arguments (a `serde_json::Value` on
+# `ContentBlock::ToolCall`); the library itself never names serde_json.
+serde_json = { workspace = true }
