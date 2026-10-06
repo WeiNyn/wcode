@@ -326,13 +326,21 @@ quit · `Ctrl-Y` copy the last reply (OSC-52) · `Ctrl-T` expand/collapse every
 tool's output · `Ctrl-N`/`Shift-Tab` (or `Alt-1..9`) switch surface · `Ctrl-B`
 toggle the sidebar · `Ctrl-A`/`E`/`W`/`U`/`K` readline-style input editing.
 `Ctrl-G` enters **browse mode**, a `▌` cursor over the transcript (`j`/`k` next/
-prev, `g`/`G` first/last, `Enter` expand/collapse the selected block, `y` copy
-it, `Esc`/`q`/`Ctrl-G` leave). `F1` (or `/help`) opens the full keymap. The input
+prev, `g`/`G` first/last, `Home`/`End` jump to the top/bottom block in view,
+`{`/`}` previous/next block, `/` search the transcript with `n`/`N` repeating,
+`Enter`/`Space` expand/collapse the selected block, `y` copy it, `?` help,
+`Esc`/`q`/`Ctrl-G` leave). The mouse is captured: click a block to select it in
+browse, click a sidebar row to focus that surface, drag across the transcript to
+select and copy its text (left button only; a modal owns the mouse). `F1` (or
+`/help`) opens the full keymap. The rounded input box carries the chrome in its
+four corners (project · ⎇ branch · model · effort · the context gauge · the
+mode/state), and a **working-team band** sits above the box — one dim row per
+member while it runs. The input
 box wraps and grows (capped at 8 rows, or half the screen, then scrolls to the
 cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/theme [name]` (bare `/theme` opens a picker), `/compact [text]`, `/usage`, `/copy`, `/team`,
-`/surface`, `/help` — the
+`/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
@@ -343,8 +351,9 @@ the REPL.
 `--agents` and a team, each member runs as its own **surface** (the root, plus one
 per member): input and `/`-commands go to the **focused** surface — switch with
 `/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a
-right-hand sidebar lists the members (`label · model · state`, idle/running/done,
-the focused one bolded; shown at ≥ 60 columns, `Ctrl-B` toggles it). `/team`
+**left-docked** sidebar (30 columns wide, shown only when the terminal is ≥ 80
+columns; `Ctrl-B` toggles it) with **Team / Todos / Changes** sections, the
+focused row marked by a `*`. `/team`
 prints the roster.
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
