@@ -910,3 +910,11 @@ test("the V14 composition is in the sheet: spine, head, alignment, rhythm, the w
     "the running fold's faint accent wash",
   );
 });
+
+test("a turn never shrinks: the transcript scrolls, so a `you` message can't be clipped", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  // `.turn` must pin `flex: 0 0 auto`. `.turn.you` sets `overflow: hidden`, which zeroes its
+  // flex auto-minimum; in the scrolling `.transcript` column a too-tall transcript would then
+  // dump every bit of flex-shrink onto the user messages and clip them out of view.
+  assert.match(css, /\.turn \{[^}]*flex: 0 0 auto/, "a turn keeps its content height");
+});

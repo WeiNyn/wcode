@@ -298,6 +298,11 @@ body {
   display: grid;
   grid-template-columns: 3px 1fr;
   gap: var(--wc-3);
+  /* A turn keeps its content height: the transcript SCROLLS, it must never squeeze. Without
+     this, a `you` turn's `overflow: hidden` forces its auto minimum to 0, so an over-tall
+     transcript dumps ALL its flex-shrink onto the user messages and clips them out of view
+     (worst in All mode, where the merged transcript is tallest). */
+  flex: 0 0 auto;
 }
 
 /* A SPEAKER CHANGE is a bigger beat; a continuation keeps the transcript's tight --wc-2. */
