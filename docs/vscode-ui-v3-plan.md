@@ -475,7 +475,7 @@ change), which the shipped template (`turn ${role}${sw}`) does not emit yet.
 | `running…` cell | `view.ts:pQS7R` | **removed** (the glyph + the fold tag carry it) |
 | `lastError` cell | `view.ts:DBXdl` | **removed** from the header; the failure **already** renders as the transcript's `error` block (`reducer.ts:306`, `.body.error` `media/chat.css:348`) — nothing new is added |
 | model cell | `view.ts:8Ft2X` | **moved** → the disclosure |
-| `ctx N` cell | `view.ts:cj7nC` | **kept** → a monochrome meter; the window is ✗ new |
+| `ctx N` cell | `view.ts:cj7nC` | **kept** → a monochrome meter; the window is now on the wire (`SessionInfo.context_window`, v2 V4b) |
 | `{n} members` cell | `view.ts:vpYZ3` | **removed** (the rail's head shows the count) |
 | `#modes` band | `chat.ts:XilT1` | **moved** → into the header |
 | `#ribbon` + "Show all" | `chat.ts:et41X`, `:2Ujpw` | **removed** (duplicate control; the sentence goes) |
@@ -519,13 +519,13 @@ change), which the shipped template (`turn ${role}${sw}`) does not emit yet.
    structure by L1/L2, never by a fourth treatment. The two classes stay **distinct** in
    the contract (the renderer still chooses one), so this is a CSS-only fold. `.body.notice`
    is also where non-error notices land, so the class stops being a no-op.
-6. **The context window is ✗ new**, so the meter's denominator does not exist. v3
+6. **The context window was ✗ new** at plan time, so the meter's denominator did not exist. v3
    designs the *slot* and **the V6 default is the plain text `ctx 42k`**: no `▰`,
    no denominator, no `▰▰▰▱▱ 42 / ?`. `.meter` is a text token, and the `▰▰▰▱▱`
    gauge bar exists **only** behind V11 (the prototype carries it as a labelled
    preview, never as the default). The shape matches what the in-flight review SKETCH
    at `view.ts:89` proposes. **The sketch is not shipped and
-   v3 does not assume it.** Same for **effort** (✗ new) in the disclosure.
+   v3 does not assume it.** Same for **effort** (✗ new at plan time) in the disclosure. **Update (v2 V4b):** the window (`SessionInfo.context_window`) and the effort (`SessionInfo.effort`) have since landed on the wire.
 7. **The working pill is an in-flow band; it does not overlay the transcript.** This
    **supersedes** the earlier floating-pill design. Because the band is a sibling of
    `.transcript` inside `.main` (already a flex column), it needs **no positioned
@@ -558,8 +558,8 @@ existing data; `✗ new` = new plumbing or a decision.
 | composer 7 → 4 | delete the `Model:` span + hint (`chat.ts:reM8I`,`:JpHql`); gate `Stop` on `status.running` (`chat.ts:nFrit`, `reducer.ts:tDvbE`) | ✔ data exists |
 | delete dead `.chipbtn` | `media/chat.css:Cnla7` (+ `:hover`,`:focus-visible`) | ✔ CSS only |
 | `.body.notice` / `.body.btw` (folded into ONE L1 rule) | `view.ts:2wb8h`,`:VPBGw` already emit both classes | ✔ CSS only |
-| context meter **gauge + denominator** (`▰▰▰▱▱ 42k / 200k`); **the V6 default is the text `ctx 42k`** | `status.contextUsed` is the numerator; **the window is never serialized** (`limits::model_limit` is kernel-internal) | **✗ new (flagged)** — V6 ships `ctx 42k`; the gauge waits on V11 |
-| effort in the disclosure | `SetEffort` exists; the current effort is not on the wire | **✗ new (flagged)** — the row is hidden while absent |
+| context meter **gauge + denominator** (`▰▰▰▱▱ 42k / 200k`); **the V6 default is the text `ctx 42k`** | `status.contextUsed` is the numerator; the window **landed on the wire** (`SessionInfo.context_window`, v2 V4b) | ✔ denominator landed (V4b); V6 shipped `ctx 42k` |
+| effort in the disclosure | `SetEffort` exists; the current effort **landed on the wire** (`SessionInfo.effort`, v2 V4b) | ✔ landed (V4b) |
 | tool status colour (running / error / complete) | the DOM already carries the state: `.fold.tool.error` (from `block.tool.isError`) and `[data-live]` (set when `!tool.done`, `chat.ts:449`); `RenderedTool.done`/`isError` (`render.ts`) need no change | ✔ no new wire; ◑ CSS + the meta content |
 | transcript composition (V14: head, spine, alignment, rhythm) | all CSS over the existing DOM: `.turn`/`.rail`/`.who` are already emitted by `renderTurn` (`chat.ts:568`); the `you` fill goes on `.turn.you` (**no wrapper class**: `renderTurn` emits a class-less content div, `chat.ts:619`); the only new hooks are a `.turn.new` marker (a speaker change) and the `.who::after` hairline | ✔ no new wire; ◑ CSS + one class |
 | tool output card (L2b → L2a) + the tool mark at weight 700 + `thinking` demoted | `RenderedTool.name` (`render.ts:QWZjR`) and `outputText` (`:iKvzO`) already reach the webview; the head reuses the existing `.card`/`.chead`/`.mini`; the rest is CSS only | ✔ no new wire; ◑ one head |

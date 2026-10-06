@@ -60,11 +60,11 @@ the boxes as each task completes and keep the status table current.
 | 51 | Workflow task injection: `--task` (`WCODE_TASK`) + `{{task}}` node titles, headless run (see [`workflow-task-injection-plan.md`](workflow-task-injection-plan.md)) | ☑ landed — `2cd53c7` (P1 schema), `4a4a891` (plan), `452c196` (P2+P3 CLI/guards/headless), `c26c590` (P3 fold: wall-clock `--timeout`, summary on every exit, `changed()`-Err) |
 | 52 | Project team loading: auto-discovered `.wcode/config.toml` + `team.toml` (team > config; `--config` on top) + markdown agent files (`.wcode/agents/*.md`) + team auto-enables agents (see [`project-team-loading.md`](project-team-loading.md)) | ☑ shipped — `ccf6e17` (overlay fold + `--no-project-config`), `6c79445` (frontmatter extraction), `1b3802f` (`.wcode/agents/*.md` discovery + auto-agents), `53a70c3` (opt-out hardening); second-layer APPROVED; docs in this commit |
 | 53 | VS Code extension: P0-P4 (see [`vscode-extension-plan.md`](vscode-extension-plan.md)) | ◐ P0-P3 shipped, each second-layer APPROVED — `7762120` (`serve --stdio`), `efaf67a`/`05baf91` (spine + panel), `20b8ac9` (diffs), P3 (team surface). P4 (per-edit approval) not started — optional; the plan-gate already covers the flow |
-| 54 | VS Code surface UI/UX rework (see [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md)) | ◐ P1 (`f276183`) + P2 (`ae10444`) + P3 (`b9ffdba`) + P4 (`38099bc`) + P5 (`5f6e81a`) shipped, each second-layer APPROVED; P6 (approval gate, optional) next (gauge + model picker deferred — need protocol) |
-| 55 | VS Code surface v2: one dockable surface, All/Focus, pickers, gauge, `/resume` (see [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md)) | ◐ V1 (`3332998`) + V2 (`7c29470`) + V3 (`51469b0`) shipped; V3.5 (rail swatches/collapse, peer turns, tool targets, All-by-`seq`) + V4a (client `/` menu + host pickers) + V5 (`/resume`, client-side) in flight (this change); **V4b** (wire: model list / effort / window + gauge) open |
+| 54 | VS Code surface UI/UX rework (see [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md)) | ◐ P1 (`f276183`) + P2 (`ae10444`) + P3 (`b9ffdba`) + P4 (`38099bc`) + P5 (`5f6e81a`) shipped, each second-layer APPROVED; only the optional P6 (approval gate) remains — the gauge + `/model` picker shipped with item 55 |
+| 55 | VS Code surface v2: one dockable surface, All/Focus, pickers, gauge, `/resume` (see [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md)) | ☑ V4b done — V1 (`3332998`) + V2 (`7c29470`) + V3 (`51469b0`) + V3.5 (rail swatches/collapse, peer turns, tool targets, All-by-`seq`) + V4a (client `/` menu + host pickers) + V4b (wire: `ListModels`/`SetEffort`/`context_window` + header gauge + `/model` picker) + V5 (`/resume`, client-side) landed — V1–V5 complete |
 | 56 | VS Code surface v3: curation + a real visual system (see [`vscode-ui-v3-plan.md`](vscode-ui-v3-plan.md)) | ☑ shipped, each second-layer APPROVED — V8 `3fcd09c`, V6 `4c4735d`, V7 `8663d89`, V9 `a14b641`, V10 `d66cc4f`, V11a `8896332`, V11b `f37dba4`, V12 `80ebb2a`, V13 `38a3a42`, V13r (green/blue/red tool colours) `910c9f5`, V14 (transcript A composition) `6d4f6f8`; plus the `/model` + `/effort` pickers `c389a35` (V4b B4/B5/B6) and the rendered em-dash cleanup `78c6d6f`. Header 16→5 cells, three bands→one, team→one home + an in-flow working pill, composer 7→2; the `--wc-1…5` grid + type scale + L1/L2a/L2b; the gauge + effort row; tool status colour (running blue / error red / complete green); the turn head + spine + role-aware rhythm |
 | 57 | Skills, roles, teams & the brainstorm-first workflow: roles as `.wcode/agents/*.md`, an eight-skill suite, `[[team]] file =` presets, and `[workflow]` fenced to `--task` (see [work/W001-skills-roles-teams-workflow.md](work/W001-skills-roles-teams-workflow.md)) | ☑ shipped — `a399d94`/`2d273d8`/`2739b94`/`ee71bb5`/`9d10eb0`/`09457d0`/`967857b`; 1113 tests + clippy clean; live-verified (the team forms from the role files, a workflow naming md-only members loads, a `[workflow]` is inert without `--task`, the global agent scan survives `--no-project-config`). P8 deferred — see W001 §9 |
-| 58 | Docs taxonomy Phase 2: move the ~36 top-level `docs/*.md` into `docs/{plans,designs,analysis}/` (D004) | ☐ todo — 112 `docs/*.md` references across 45 files (README, AGENTS.md, Rust doc comments) need a link sweep + a link check |
+| 58 | Docs taxonomy Phase 2: move the ~36 top-level `docs/*.md` into `docs/{plans,designs,analysis}/` (D004) | ☐ todo — ≈144 `docs/*.md` references across ≈56 files (README, AGENTS.md, Rust doc comments) need a link sweep + a link check |
 
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`
@@ -1101,14 +1101,11 @@ FIX A: the provider model is settle (not overlay) and precedence is profile > fl
 11. **11** one-shot remote-delivery flush — a small transport fix that also
     hardens the `message` tool.
 12. **12** TUI polish: tool output, theme, keys — presentation-only; see
-12. **12** TUI polish: tool output, theme, keys — presentation-only; see
-12. **12** TUI polish: tool output, theme, keys — presentation-only; see
     [`tui-polish-plan.md`](tui-polish-plan.md).
 13. **13** TUI browse mode — select a block, then act on it; see
     [`tui-browse-plan.md`](tui-browse-plan.md).
 14. **14** TUI palette & theming — presentation-only; see
     [`tui-theming-plan.md`](tui-theming-plan.md).
-15. **15** TUI team sidebar: status + live action — presentation-only (+ a socket fix);
 15. **15** TUI team sidebar: status + live action — presentation-only (+ a socket fix);
     see [`tui-sidebar-plan.md`](tui-sidebar-plan.md).
 16. **16** session groups — team persistence/resume; see [`session-groups.md`](session-groups.md). Done.

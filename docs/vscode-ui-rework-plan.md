@@ -1,6 +1,6 @@
 # VS Code surface — UI/UX rework plan
 
-**Status:** design locked; P1 not started.
+**Status:** P1–P5 shipped, each second-layer APPROVED; the context gauge and the `/model` + `/effort` pickers landed in [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) V4b. Only the optional **P6** (approval gate) remains — see §7.
 **Companion docs:** the *why* is [`design/vscode-ui-exploration.md`](design/vscode-ui-exploration.md);
 the *what* is the prototype [`design/vscode-ui-draft.html`](design/vscode-ui-draft.html);
 the transport/client spine is [`vscode-extension-plan.md`](vscode-extension-plan.md)
@@ -54,8 +54,8 @@ plumbing (protocol / kernel / client I/O) or a decision.
 | draft element | data source | verdict |
 |---|---|---|
 | header r1: state dot, `ready`, session id, target chip, plan chip | `PanelSessionInfo` + `RenderedState.status`/`target` (`panel.ts:b4faR`, `render.ts:59Wvn`) | ✔ existing |
-| header r2: model · effort | target member `model` (`reducer.ts:xSLIN`); **effort is not on the wire** | ◑ model; ✗ effort (show model only) |
-| header r2: context gauge `▰▰▰▱▱ 42k / 128k` | `contextUsed` exists (`reducer.ts:2BU6k`); **a context window is not exposed** | ◑ numerator; ✗ denominator |
+| header r2: model · effort | target member `model` (`reducer.ts:xSLIN`); **effort** now rides the wire (`SessionInfo.effort`, v2 V4b) | ✔ model + effort |
+| header r2: context gauge `▰▰▰▱▱ 42k / 128k` | `contextUsed` exists (`reducer.ts:2BU6k`); the **window** now rides the wire (`SessionInfo.context_window`, v2 V4b) | ✔ numerator + denominator |
 | header r2: cache clock `⧗ 4m` | not tracked or on the wire | ✗ new (out of scope) |
 | transcript turn grouping + rails + avatars | flat `RenderedBlock[]` (`render.ts:qFotY`) | ◑ compute (group into turns) |
 | thinking fold | `thinking` ContentBlock → `<details>` (`render.ts:qga8T`) | ✔ existing |
@@ -73,18 +73,18 @@ plumbing (protocol / kernel / client I/O) or a decision.
 
 **Frictions named (not papered over):** (a) a wcode presentation diff is
 **exactly one hunk** (`diff.ts:iwLrr`) — the draft's "2 of 2" hunks do not map to
-it, so in-panel review is **one change per tool call**; (b) there is **no context
-window** on the wire, so the gauge shows used tokens (a `▰▱` bar needs a window —
-either a new `limits` field or a fallback); (c) **effort is not on the wire**, so
-the header shows the model only; (d) the sidebar's Sessions section needs on-disk
-session listing, a separate item.
+it, so in-panel review is **one change per tool call**; (b) there was **no context
+window** on the wire (the gauge showed used tokens only) — since landed as
+`SessionInfo.context_window` (v2 V4b), so the `▰▱` bar renders; (c) **effort was not on
+the wire** (the header showed the model only) — since landed as `SessionInfo.effort`;
+(d) the sidebar's Sessions section needs on-disk session listing, a separate item.
 
 ## 4. Phases
 
 | phase | goal | touches | acceptance |
 |---|---|---|---|
 | **P1** | **Panel chrome + transcript + states.** The two-row header, the turn-railed transcript, folded thinking/tool rows with `+N −M · ms`, header-tagged code blocks, the six empty/error states — to the draft. | `webview/view.ts`, `render.ts`, `webview/chat.ts`, `media/chat.css`, their tests | visual parity with the draft's Chat + States screens against the existing snapshot; pure helpers unit-tested; no protocol change |
-| **P2** | **Composer control surface.** Context chips (`@file#line` from the editor selection) and a mode (Plan/Act) control mapping to plan-mode, plus a read-only model display. The context **gauge** (needs a context window) and a **model picker** (needs a selectable-model list) are NOT on the wire — deferred (see §6). | `chat.ts`, `view.ts`, `media/chat.css`, `extension.ts` (selection → submit), `webview.ts` (a new `FromWebview` arm) | a selection becomes a chip and rides into `Submit{text}`; the mode control flips plan-mode and reflects `status.planMode` |
+| **P2** | **Composer control surface.** Context chips (`@file#line` from the editor selection) and a mode (Plan/Act) control mapping to plan-mode, plus a read-only model display. The context **gauge** (needs a context window) and a **model picker** (needs a selectable-model list) were not on the wire at P2 time — **both landed in [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) V4b** (see §6). | `chat.ts`, `view.ts`, `media/chat.css`, `extension.ts` (selection → submit), `webview.ts` (a new `FromWebview` arm) | a selection becomes a chip and rides into `Submit{text}`; the mode control flips plan-mode and reflects `status.planMode` |
 | **P3** | **Working group + target switcher.** The live subagent rows and the header target chip opening a member list. | `view.ts`, `chat.ts`, `media/chat.css` | a running member appears with its `liveAction`; the chip retargets (hydrating) |
 | **P4** | **Change review** (in-panel). A pure review model over a tool's diff; Accept keeps the applied edit, Reject reverts via `reverseApply`; "Open native diff" as the escape hatch. | new `src/review.ts` (+ tests), `chat.ts`, `media/chat.css`, `extension.ts` | a diff renders as a hunk; Accept is a no-op, Reject restores the before-image and says so |
 | **P5** | **Sidebar rework.** Team / Tasks sections to the draft; Sessions deferred to its own item. | `roster.ts`, `reducer.ts` (tree model), `package.json` | the tree shows sections + `☑ done/total`; still push-only |
@@ -116,13 +116,12 @@ Phases are independent commits; P1 is the foundation the rest extend.
 - **Not the workbench chrome** (activity bar, editor tabs, status bar) — VS Code's.
 - The Sessions sidebar section and the cache clock are **out of scope** here; they
   need new plumbing and get their own items if wanted.
-- **Deferred to a protocol item:** the header **context gauge** (`▰▰▰▱▱ N / M`) needs a
-  context window on the wire — `Usage.input_tokens` is the numerator only; the
-  kernel has `limits::model_limit` but never serializes it to clients. A **model
-  picker** (`Model: … ▾`) needs the selectable-model list, also not on the wire
-  (`SetModel` exists; the list does not). P2 ships the model as a **read-only**
-  display and the used-token count in the header; the gauge and the picker wait on
-  a small `Request`/event addition.
+- **Landed in [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) V4b:** the header **context
+  gauge** (`▰▰▰▱▱ N / M`) — the context window now rides the wire
+  (`SessionInfo.context_window`, populated from `limits::model_limit`) — and the **model
+  picker** (`Model: … ▾`), now backed by `Request::ListModels` → `AgentEvent::Models`.
+  P2 ships the model as a **read-only** display; the gauge and the `/model` + `/effort`
+  pickers are backed by these wire additions.
 
 ## 7. Progress
 

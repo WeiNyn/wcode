@@ -1,6 +1,6 @@
 # VS Code surface — v2 plan (one dockable surface)
 
-**Status:** design approved (the sample `design/vscode-ui-v2-draft.html`); V1 not started.
+**Status:** design approved (the sample `design/vscode-ui-v2-draft.html`); V1–V5 landed — see §6.
 **Companion docs:** the sample is [`design/vscode-ui-v2-draft.html`](design/vscode-ui-v2-draft.html);
 the rationale is [`design/vscode-ui-exploration.md`](design/vscode-ui-exploration.md);
 the shipped P1–P5 rework is [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md).
@@ -45,9 +45,9 @@ Dials unchanged: `VARIANCE 3 · MOTION 2 · DENSITY 8`; one accent.
 | All / Focus | client-local mode; **All** needs a MERGED transcript across `ViewState.transcripts` (per session today) | ✗ a new merged-view model |
 | run-following folds | derive `open` from the block's `live`/`tool.done` (open while live, collapsed once done) with a user override | ✔ small change to `chat.ts` |
 | bordered tables | re-add `.body table`/`th`/`td` (dropped in P1) | ✔ CSS only |
-| `/model` picker | `SetModel` exists; the **selectable-model list** is not on the wire | ✗ new wire field |
-| `/effort` picker | `SetEffort` exists; the **current effort** is not on the wire | ✗ new wire field |
-| context gauge | `Usage.input_tokens` is the numerator; the **window** (`limits::model_limit`) is never serialized | ✗ new wire field |
+| `/model` picker | `SetModel` exists; the **selectable-model list** landed on the wire in V4b (`Request::ListModels` → `AgentEvent::Models`) | ✔ V4b |
+| `/effort` picker | `SetEffort` exists; the **current effort** landed on the wire in V4b (`SessionInfo.effort`) | ✔ V4b |
+| context gauge | `Usage.input_tokens` is the numerator; the **window** landed on the wire in V4b (`SessionInfo.context_window`) | ✔ V4b |
 | `/resume` picker | the wire `SessionInfo` is `{id, model, state}` — no cwd, no preview | ✔ **chosen: the extension reads the sessions dir** (V5) |
 | `/resume` cwd filter | sessions record `cwd` in the header (`session.rs:17`); the listing (`session_groups::list_groups`) does not filter | ✔ **chosen: filter client-side** in `sessions.ts` |
 | `/resume` label | the TUI label is `id · age · first line` (`app.rs:744`) | ✔ **chosen: lead with the user message**, drop the id (client-side) |
@@ -61,11 +61,11 @@ Dials unchanged: `VARIANCE 3 · MOTION 2 · DENSITY 8`; one accent.
 | **V3** | **All / Focus.** A client-local mode; All = the merged activity of every member; Focus = the target. | `reducer.ts` (a merged view), `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | All interleaves members (labeled); Focus shows only the target |
 | **V3.5** | **Rail identity + All ordering.** Member swatches (per-member identity colour) with a per-row state ring; a collapsible team rail; peer turns labeled by their sender; tool rows carrying their call target; the All merge in arrival order (a `seq` stamp) instead of per-session runs. | `reducer.ts`, `render.ts`, `webview/view.ts`, `webview/chat.ts`, `media/chat.css` | a row/avatar carries its member's swatch; the rail collapses to avatars; a peer message opens its own labeled turn; a tool row shows its target; All interleaves by arrival |
 | **V4a** | **Client `/` menu + pickers.** A client-side `/` registry (the typeahead menu + a typed `/name arg`), host-dispatched: `/model` `/effort` post a `Request` (typed argument, `requiresArg`); `/resume` `/sessions` open a host `QuickPick`. | `commands.ts` (new), `sessions.ts` (new), `extension.ts`, `surface.ts`, `webview.ts`, `webview/chat.ts`, `media/chat.css` | `/` filters + runs; `/resume` picks a cwd-filtered session; `/model` `/effort` set |
-| **V4b** | **Wire additions + gauge.** A model list, the current effort, and a context window on the wire; pickers backed by them; the header gauge. | `wcode-harness`, `wcode-cli`, `wcode-protocol`, the extension | the gauge shows `used / window`; `/model` and `/effort` list + reflect |
+| **V4b** | **Wire additions + gauge** (landed). A model list (`Request::ListModels` → `AgentEvent::Models`), the current effort (`Request::SetEffort` + `SessionInfo.effort`), and a context window (`SessionInfo.context_window`) on the wire; pickers backed by them; the header gauge. | `wcode-harness`, `wcode-cli`, `wcode-protocol`, the extension | the gauge shows `used / window`; `/model` and `/effort` list + reflect |
 | **V5** | **`/resume` (client-side).** The extension reads the session dir itself — cwd-filtered, labeled by the first user message — and respawns with `--resume <path>`. The CLI listing + wire `Request` are **dropped** from scope. | `extension.ts`, `sessions.ts` (new) | `/resume` lists only this cwd's sessions, labeled by the user message; picking respawns into it |
 
 Phases are independent commits; V1 is small and unblocks the visible regressions;
-V2 is the architectural core; V4b carries the remaining wire additions.
+V2 is the architectural core; V4b carried the remaining wire additions and has landed — V1–V5 are complete.
 
 ## 4. Decisions
 
@@ -112,5 +112,5 @@ V2 is the architectural core; V4b carries the remaining wire additions.
 | V3 | ☑ `51469b0` — All / Focus view mode (merged transcript, origin-bounded turns); second-layer APPROVED (135 tests green) |
 | V3.5 | ☑ (this change) rail swatches + collapse; peer turns labeled by sender; tool targets; All merges by arrival `seq` |
 | V4a | ☑ (this change) client `/` menu + host `QuickPick`/`Request` pickers |
-| V4b | ☐ open — wire additions (a model list, the current effort, a context window) + the header gauge |
+| V4b | ☑ — wire additions landed: `Request::ListModels` → `AgentEvent::Models`, `Request::SetEffort` + `SessionInfo.effort`, `SessionInfo.context_window` (populated for the root and workers, pushed on the roster via `set_context_window`); the header gauge (`webview/chat.ts` `meterNode`) and the `/model` picker (`extension.ts` `pickModel` → `list_models`) ship with them — the `/model` + `/effort` pickers in `c389a35` |
 | V5 | ☑ (this change) `/resume`, client-side (the extension reads the session dir) |
