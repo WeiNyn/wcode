@@ -1,7 +1,7 @@
 # VS Code surface — v3 plan (curation + a real visual system)
 
-**Status:** design proposed. The prototype [`design/vscode-ui-v3-draft.html`](design/vscode-ui-v3-draft.html)
-IS the spec. V6–V13 shipped (each second-layer APPROVED); **V13r and V14 proposed**.
+**Status:** shipped. The prototype [`design/vscode-ui-v3-draft.html`](design/vscode-ui-v3-draft.html)
+IS the spec. V6–V14 shipped (each second-layer APPROVED).
 **Companion docs:** the rationale is [`design/vscode-ui-exploration.md`](design/vscode-ui-exploration.md);
 v1's locked UI is [`vscode-ui-rework-plan.md`](vscode-ui-rework-plan.md) (P1–P5 shipped);
 v2's one-dockable-surface plan is [`vscode-ui-v2-plan.md`](vscode-ui-v2-plan.md) (V1–V5 shipped, V4b open).
@@ -673,5 +673,5 @@ existing data; `✗ new` = new plumbing or a decision.
 | V11b client gauge + effort row | ☑ `f37dba4` |
 | V12 tool activity identification | ☑ `80ebb2a` |
 | V13 tool status colour | ☑ `38a3a42` |
-| V13r tool status colours revised (green / blue / red) | ☐ proposed |
-| V14 transcript composition | ☐ proposed |
+| V13r tool status colours revised (green / blue / red) | ☑ `910c9f5` |
+| V14 transcript composition | ☑ `6d4f6f8` + `0abc18c` |
