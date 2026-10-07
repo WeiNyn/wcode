@@ -230,7 +230,7 @@ pub fn color_mode() -> ColorMode {
 /// - A `light` preset is meaningful only on a **light** terminal: the UI has no
 ///   `bg` role (prose background is the terminal's), and the palette's `fg`/`bg`
 ///   reach **only** the syntect theme.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     /// Default code foreground (syntect `settings.foreground`); the UI `body`
     /// stays `None` (prose = the terminal default).
@@ -393,15 +393,19 @@ pub fn names() -> Vec<&'static str> {
 }
 
 impl Theme {
-    /// ALL 17 roles from a palette (NOT an overlay). Starts from the palette-B
-    /// skeleton (`Theme::colored()`) so only `fg` varies per role; the `body` fg
-    /// stays `None` (prose = the terminal default) and `dim` takes the D29 grey
-    /// ramp for `mode` (no palette defines a `dim`).
+    /// ALL 17 roles from a palette (NOT an overlay). Palette B (`DEFAULT`) takes
+    /// the D30 tier path ([`palette_b`]) — each role's own Named-16 / 256 / hex
+    /// step. Any other preset starts from the palette-B skeleton
+    /// (`Theme::colored()`) so only `fg` varies per role, and its `Rgb` colors
+    /// are gated (below); `dim` still takes the grey ramp.
     ///
     /// Per-role Rgb gating, EXPLICIT — the per-`Color` mirror of
     /// [`ThemeSpec::into_theme`]'s per-string rule (Q5): an `Rgb` palette color
     /// under a non-`Rgb` mode keeps that role's palette-B default.
     fn from_palette(p: &Palette, mode: ColorMode) -> Theme {
+        if *p == DEFAULT {
+            return palette_b(mode); // palette B resolves through its D30 tiers
+        }
         let mut theme = Theme::colored();
         let set = |slot: &mut Style, color: Color| {
             if matches!(color, Color::Rgb(..)) && mode != ColorMode::Rgb {
@@ -424,7 +428,7 @@ impl Theme {
         set(&mut theme.thinking, p.magenta);
         set(&mut theme.link, p.blue);
         set(&mut theme.tool_name, p.blue);
-        apply_grey_ramp(&mut theme, mode, false);
+        apply_dim_ramp(&mut theme, mode);
         theme
     }
 }
@@ -444,18 +448,69 @@ fn grey_ramp(mode: ColorMode) -> (Color, Color, Color) {
     }
 }
 
-/// Give a color theme the D29 greys: `dim` always; `muted`/`border` too when
-/// `palette_b` (other presets keep their own greys — "hues unchanged").
-fn apply_grey_ramp(theme: &mut Theme, mode: ColorMode, palette_b: bool) {
+/// Palette B's universal `dim` grey for a color `mode` — the only grey ramp a
+/// named preset inherits (no palette defines a `dim`). `Plain` has no color
+/// lever, so the caller keeps the modifier.
+fn apply_dim_ramp(theme: &mut Theme, mode: ColorMode) {
     if mode == ColorMode::Plain {
-        return; // no color lever: the grey roles stay modifiers
+        return;
     }
+    theme.dim.fg = Some(grey_ramp(mode).0);
+}
+
+/// Palette B at a color tier (D30): `Theme::colored()` with every role's `fg`
+/// set to its tier step for `mode` — the Named-16 hues, their 256 indices, or
+/// their truecolor hexes. `body` keeps no `fg` (prose = the terminal default).
+fn palette_b(mode: ColorMode) -> Theme {
+    let mut theme = Theme::colored();
     let (dim, muted, border) = grey_ramp(mode);
     theme.dim.fg = Some(dim);
-    if palette_b {
-        theme.muted.fg = Some(muted);
-        theme.border.fg = Some(border);
-    }
+    theme.muted.fg = Some(muted);
+    theme.border.fg = Some(border);
+    // `(accent, red, green, warn, code, magenta, blue)` — the chromatic hues.
+    let (accent, red, green, warn, code, magenta, blue) = match mode {
+        ColorMode::Plain | ColorMode::Named => (
+            Color::Cyan,
+            Color::Red,
+            Color::Green,
+            Color::LightYellow,
+            Color::Yellow,
+            Color::Magenta,
+            Color::Blue,
+        ),
+        ColorMode::Indexed => (
+            Color::Indexed(45),
+            Color::Indexed(203),
+            Color::Indexed(114),
+            Color::Indexed(180),
+            Color::Indexed(180),
+            Color::Indexed(176),
+            Color::Indexed(39),
+        ),
+        ColorMode::Rgb => (
+            Color::Rgb(0x56, 0xb6, 0xc2),
+            Color::Rgb(0xe0, 0x6c, 0x75),
+            Color::Rgb(0x98, 0xc3, 0x79),
+            Color::Rgb(0xd6, 0xb0, 0x6a),
+            Color::Rgb(0xd6, 0xb0, 0x6a),
+            Color::Rgb(0xc6, 0x78, 0xdd),
+            Color::Rgb(0x61, 0xaf, 0xef),
+        ),
+    };
+    theme.accent.fg = Some(accent);
+    theme.user.fg = Some(accent);
+    theme.error.fg = Some(red);
+    theme.diff_del.fg = Some(red);
+    theme.success.fg = Some(green);
+    theme.diff_add.fg = Some(green);
+    theme.warn.fg = Some(warn);
+    theme.code.fg = Some(code);
+    theme.heading.fg = Some(magenta);
+    theme.heading_sub.fg = Some(magenta);
+    theme.thinking.fg = Some(magenta);
+    theme.link.fg = Some(blue);
+    theme.tool_name.fg = Some(blue);
+    theme
 }
 
 /// Map a ratatui color to syntect: ONLY an `Rgb` maps; `Reset`/named → `None`
@@ -549,15 +604,12 @@ impl ThemeSpec {
     /// color mode. [`parse_theme_table`] validated the values; a stray one
     /// cannot reach here.
     fn into_theme(self, mode: ColorMode) -> Theme {
-        // Palette B is the `default` preset or no preset at all.
-        let palette_b = matches!(self.preset.as_deref(), None | Some("default"));
         let mut theme = match self.preset.as_deref().and_then(preset) {
+            // Palette B resolves through its D30 tiers; a hex preset degrades
+            // per-role under a non-`Rgb` mode (see `from_palette`).
             Some(p) => Theme::from_palette(p, mode),
-            None => Theme::colored(),
+            None => palette_b(mode),
         };
-        // D29: the grey ramp — `dim` for every color theme, and palette B's
-        // `muted`/`border` too; other presets keep their own greys.
-        apply_grey_ramp(&mut theme, mode, palette_b);
         for (role, value) in &self.roles {
             let Ok(color) = parse_color(value) else {
                 continue;
@@ -784,6 +836,68 @@ mod tests {
     }
 
     #[test]
+    fn each_role_resolves_its_tier_value() {
+        // D30: the whole 17-role matrix for palette B, per color mode. Every
+        // literal is pinned, so a wrong tier value fails.
+        let named = ThemeSpec::default().into_theme(ColorMode::Named);
+        assert_eq!(named.accent.fg, Some(Color::Cyan));
+        assert_eq!(named.dim.fg, Some(Color::Gray));
+        assert_eq!(named.muted.fg, Some(Color::DarkGray));
+        assert_eq!(named.border.fg, Some(Color::DarkGray));
+        assert_eq!(named.user.fg, Some(Color::Cyan));
+        assert_eq!(named.body.fg, None);
+        assert_eq!(named.error.fg, Some(Color::Red));
+        assert_eq!(named.success.fg, Some(Color::Green));
+        assert_eq!(named.warn.fg, Some(Color::LightYellow));
+        assert_eq!(named.code.fg, Some(Color::Yellow));
+        assert_eq!(named.heading.fg, Some(Color::Magenta));
+        assert_eq!(named.heading_sub.fg, Some(Color::Magenta));
+        assert_eq!(named.link.fg, Some(Color::Blue));
+        assert_eq!(named.tool_name.fg, Some(Color::Blue));
+        assert_eq!(named.thinking.fg, Some(Color::Magenta));
+        assert_eq!(named.diff_add.fg, Some(Color::Green));
+        assert_eq!(named.diff_del.fg, Some(Color::Red));
+
+        let indexed = ThemeSpec::default().into_theme(ColorMode::Indexed);
+        assert_eq!(indexed.accent.fg, Some(Color::Indexed(45)));
+        assert_eq!(indexed.dim.fg, Some(Color::Indexed(250)));
+        assert_eq!(indexed.muted.fg, Some(Color::Indexed(243)));
+        assert_eq!(indexed.border.fg, Some(Color::Indexed(238)));
+        assert_eq!(indexed.user.fg, Some(Color::Indexed(45)));
+        assert_eq!(indexed.body.fg, None);
+        assert_eq!(indexed.error.fg, Some(Color::Indexed(203)));
+        assert_eq!(indexed.success.fg, Some(Color::Indexed(114)));
+        assert_eq!(indexed.warn.fg, Some(Color::Indexed(180)));
+        assert_eq!(indexed.code.fg, Some(Color::Indexed(180)));
+        assert_eq!(indexed.heading.fg, Some(Color::Indexed(176)));
+        assert_eq!(indexed.heading_sub.fg, Some(Color::Indexed(176)));
+        assert_eq!(indexed.link.fg, Some(Color::Indexed(39)));
+        assert_eq!(indexed.tool_name.fg, Some(Color::Indexed(39)));
+        assert_eq!(indexed.thinking.fg, Some(Color::Indexed(176)));
+        assert_eq!(indexed.diff_add.fg, Some(Color::Indexed(114)));
+        assert_eq!(indexed.diff_del.fg, Some(Color::Indexed(203)));
+
+        let rgb = ThemeSpec::default().into_theme(ColorMode::Rgb);
+        assert_eq!(rgb.accent.fg, Some(Color::Rgb(0x56, 0xb6, 0xc2)));
+        assert_eq!(rgb.dim.fg, Some(Color::Rgb(0xa9, 0xb1, 0xba)));
+        assert_eq!(rgb.muted.fg, Some(Color::Rgb(0x7d, 0x87, 0x90)));
+        assert_eq!(rgb.border.fg, Some(Color::Rgb(0x3b, 0x42, 0x52)));
+        assert_eq!(rgb.user.fg, Some(Color::Rgb(0x56, 0xb6, 0xc2)));
+        assert_eq!(rgb.body.fg, None);
+        assert_eq!(rgb.error.fg, Some(Color::Rgb(0xe0, 0x6c, 0x75)));
+        assert_eq!(rgb.success.fg, Some(Color::Rgb(0x98, 0xc3, 0x79)));
+        assert_eq!(rgb.warn.fg, Some(Color::Rgb(0xd6, 0xb0, 0x6a)));
+        assert_eq!(rgb.code.fg, Some(Color::Rgb(0xd6, 0xb0, 0x6a)));
+        assert_eq!(rgb.heading.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
+        assert_eq!(rgb.heading_sub.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
+        assert_eq!(rgb.link.fg, Some(Color::Rgb(0x61, 0xaf, 0xef)));
+        assert_eq!(rgb.tool_name.fg, Some(Color::Rgb(0x61, 0xaf, 0xef)));
+        assert_eq!(rgb.thinking.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
+        assert_eq!(rgb.diff_add.fg, Some(Color::Rgb(0x98, 0xc3, 0x79)));
+        assert_eq!(rgb.diff_del.fg, Some(Color::Rgb(0xe0, 0x6c, 0x75)));
+    }
+
+    #[test]
     fn the_colored_theme_signals_errors_in_red() {
         assert_eq!(Theme::colored().error.fg, Some(Color::Red));
     }
@@ -844,8 +958,8 @@ mod tests {
         assert_eq!(theme.tool_name.fg, Some(Color::LightGreen));
         assert!(theme.link.add_modifier.contains(Modifier::UNDERLINED));
         assert!(theme.tool_name.add_modifier.contains(Modifier::BOLD));
-        // Untouched roles keep palette B.
-        let base = Theme::colored();
+        // Untouched roles keep palette B at the chosen tier (D30).
+        let base = ThemeSpec::default().into_theme(ColorMode::Rgb);
         assert_eq!(theme.error.fg, base.error.fg);
         assert_eq!(theme.heading, base.heading);
     }
@@ -896,8 +1010,6 @@ mod tests {
     fn hex_overrides_are_honored_only_under_truecolor() {
         let roles = BTreeMap::from([("accent".to_string(), "#ff00cc".to_string())]);
         let spec = parse_theme(&roles).unwrap();
-        let base = Theme::colored(); // accent == Cyan + Bold
-
         assert_eq!(
             spec.clone().into_theme(ColorMode::Rgb).accent.fg,
             Some(Color::Rgb(0xff, 0x00, 0xcc)),
@@ -905,9 +1017,11 @@ mod tests {
         );
         for degraded in [ColorMode::Plain, ColorMode::Named, ColorMode::Indexed] {
             let theme = spec.clone().into_theme(degraded);
+            // D30: a role's palette-B default is its tier step for the mode.
+            let tier = ThemeSpec::default().into_theme(degraded).accent.fg;
             assert_eq!(
-                theme.accent.fg, base.accent.fg,
-                "hex degrades to the role's palette default under {degraded:?}"
+                theme.accent.fg, tier,
+                "hex degrades to the role's palette-B tier under {degraded:?}"
             );
             assert!(
                 theme.accent.add_modifier.contains(Modifier::BOLD),
