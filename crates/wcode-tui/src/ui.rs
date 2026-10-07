@@ -26,6 +26,9 @@ const THINK_CONT: &str = "       ";
 
 /// Indent for a tool's body lines, aligning under the `⚙` marker column.
 const TOOL_INDENT: &str = "     ";
+/// The tool block's own gutter before the panel frame (matching the other
+/// blocks' 3-column indent).
+const PANEL_INDENT: &str = "   ";
 /// Output lines a collapsed tool shows before a `… +N more` hint.
 const TOOL_PREVIEW_LINES: usize = 4;
 /// Output lines a fully expanded tool shows before the hint returns.
@@ -526,7 +529,7 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
         Block::Assistant(content) => content_lines(content, width, false),
-        Block::Tool(tool) => tool_lines(tool, width),
+        Block::Tool(tool) => tool_panel_lines(tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
@@ -568,92 +571,250 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
     lines
 }
 
-/// The changed file (dim), appended to a tool's `⚙` header when it touched one.
-/// The tool's INPUT target (`Tool::target`), falling back to the changed path —
-/// the `command`/`path`/`pattern` the call named, clipped to one line so a long
-/// command never floods the header.
-fn target_span(tool: &Tool) -> Option<Span<'static>> {
-    let target = tool.target.as_ref().or(tool.path.as_ref())?;
-    let first = target.lines().next().unwrap_or(target.as_str());
-    let clipped = if first.chars().count() > 60 {
-        let (cut, _) = split_at_char(first, 59);
-        format!("{cut}…")
-    } else {
-        first.to_string()
+/// Render a tool as a panel (D31). Three branches, mirroring the old
+/// `tool_lines`:
+///   1. LIVE (`!tool.done`): header + the live tail; no `✓` row yet.
+///   2. DIFF (`tool.diff`): the diff body inside the panel.
+///   3. DONE: header + the body + the `✓`/`✗` summary row.
+///
+/// A tool ERROR forces expanded (a failure is never hidden). The command WRAPS
+/// under its value column and is never clipped; params stay visible expanded.
+fn tool_panel_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+    let content_w = panel_content_width(width);
+    let params = panel_param_lines(&tool.params, content_w);
+    // The params block supersedes the old header target; when the call carried
+    // no recognizable params, the target/path still rides the header (never
+    // clipped to one line — the rule is sized to it).
+    let name_text = match tool.target.as_ref().or(tool.path.as_ref()) {
+        Some(target) if params.is_empty() => format!("⚙ {}  {target}", tool.name),
+        _ => format!("⚙ {}", tool.name),
     };
-    Some(Span::styled(format!("  {clipped}"), dim()))
+    let name = Span::styled(name_text, tool_name());
+    let expanded = tool.expanded || tool.is_error;
+    let affordances = header_affordances(expanded);
+    let body = tool_panel_body(tool, content_w, expanded);
+    panel_frame(name, affordances, params, body, width)
 }
 
-fn tool_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
-    // A live tool: the header, then (collapsed) its last non-blank line or
-    // (expanded) the tail of the live output, because it grows downward.
+/// The panel's top-right affordance text: `"▸ ⧉"` collapsed, `"▾ ⧉"` expanded.
+/// The toggle glyph first, `⧉` last, one space between. D32 (slice 4) swaps this
+/// `&'static str` for spans whose byte range gives the `▸`/`⧉` hit regions.
+fn header_affordances(expanded: bool) -> &'static str {
+    if expanded {
+        "▾ ⧉"
+    } else {
+        "▸ ⧉"
+    }
+}
+
+/// The content region inside a panel of `width` columns: the panel minus the
+/// block indent and the two border columns.
+fn panel_content_width(width: usize) -> usize {
+    width
+        .saturating_sub(PANEL_INDENT.chars().count() + 2)
+        .max(1)
+}
+
+/// One `key  value` row: the key in `dim()` padded to `key_col`, the value in
+/// body strength, continuations aligned under the value column. A value with no
+/// spaces hard-breaks (`wrap_line`). Returns ≥1 line.
+fn param_row(key: &str, value: &str, key_col: usize, width: usize) -> Vec<Line<'static>> {
+    let indent = TOOL_INDENT.chars().count();
+    let value_col = indent + key_col + 2;
+    let avail = width.saturating_sub(value_col).max(1);
+    let chars: Vec<char> = value.chars().collect();
+    let body = theme::theme().body;
+    let mut out = Vec::new();
+    for (i, seg) in wrap_line(&chars, avail).into_iter().enumerate() {
+        let lead = if i == 0 {
+            let pad = value_col.saturating_sub(indent + key.chars().count());
+            format!("{TOOL_INDENT}{key}{}", " ".repeat(pad))
+        } else {
+            " ".repeat(value_col)
+        };
+        out.push(Line::from(vec![
+            Span::styled(lead, dim()),
+            Span::styled(seg, body),
+        ]));
+    }
+    out
+}
+
+/// The params block: one [`param_row`] per `(key, value)`, keys aligned to the
+/// longest. Empty `params` → no rows.
+fn panel_param_lines(params: &[(String, String)], width: usize) -> Vec<Line<'static>> {
+    if params.is_empty() {
+        return Vec::new();
+    }
+    let key_col = params
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    params
+        .iter()
+        .flat_map(|(key, value)| param_row(key, value, key_col, width))
+        .collect()
+}
+
+/// The panel body for `tool`, honoring the three `tool_lines` branches.
+fn tool_panel_body(tool: &Tool, content_w: usize, expanded: bool) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+
+    // 1. LIVE — the growing tail; no `✓` row yet.
     if !tool.done {
-        let mut header = vec![
-            Span::styled("   ⚙ ", dim()),
-            Span::styled(tool.name.clone(), tool_name()),
-        ];
-        header.extend(target_span(tool));
-        let mut lines = vec![Line::from(header)];
-        if tool.expanded {
-            let body: Vec<&str> = tool.output.lines().collect();
-            lines.extend(tool_body(&body, width, TOOL_EXPANDED_LINES, dim(), true));
-            if let Some(hint) = more_hint(body.len().saturating_sub(TOOL_EXPANDED_LINES), false) {
-                lines.push(hint);
+        if expanded {
+            let all: Vec<&str> = tool.output.lines().collect();
+            out.extend(tool_body(&all, content_w, TOOL_EXPANDED_LINES, dim(), true));
+            if let Some(hint) = more_hint(all.len().saturating_sub(TOOL_EXPANDED_LINES), false) {
+                out.push(hint);
             }
         } else if let Some(tail) = last_line(&tool.output) {
-            lines.push(Line::from(vec![
-                Span::styled(TOOL_INDENT, dim()),
-                Span::styled(tail, dim()),
-            ]));
+            out.push(prefixed(TOOL_INDENT, &tail, dim()));
         }
-        return lines;
+        return out;
     }
 
+    // 2. DIFF — the change's body, then the `+a −r` summary.
     if let Some(diff) = &tool.diff {
-        return diff_lines(tool, diff);
+        let all: Vec<&str> = diff.lines().collect();
+        let limit = if expanded {
+            TOOL_EXPANDED_LINES
+        } else {
+            TOOL_DIFF_PREVIEW_LINES
+        };
+        let take = all.len().min(limit);
+        for raw in &all[..take] {
+            let style = match raw.chars().next() {
+                Some('+') => added_style(),
+                Some('-') => removed_style(),
+                _ => dim(),
+            };
+            out.push(prefixed(TOOL_INDENT, raw, style));
+        }
+        if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
+            out.push(hint);
+        }
+        let (added, removed) = crate::app::diff_counts(diff);
+        out.push(tool_summary_row(tool, &format!("+{added} −{removed}")));
+        return out;
     }
 
+    // 3. DONE — the body, then the `✓`/`✗` summary row.
+    let (note, wide) = summary_line(&tool.output);
+    if expanded {
+        let all: Vec<&str> = tool.output.lines().collect();
+        out.extend(tool_body(&all, content_w, all.len(), dim(), false));
+        // The summary is in the body now, so the note is dropped (never twice).
+        out.push(tool_summary_row(tool, ""));
+    } else {
+        let body = body_after_summary(&tool.output);
+        out.extend(tool_body(&body, content_w, TOOL_PREVIEW_LINES, dim(), false));
+        let more = body.len().saturating_sub(TOOL_PREVIEW_LINES);
+        if let Some(hint) = more_hint(more, wide) {
+            out.push(hint);
+        }
+        out.push(tool_summary_row(tool, &note));
+    }
+    out
+}
+
+/// The `✓`/`✗ name · note · ms` summary row shared by the done and diff branches.
+fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
     let (mark, style) = if tool.is_error {
         ("✗", error_style())
     } else {
         ("✓", success())
     };
-    let expanded = tool.expanded || tool.is_error;
-    let (note, wide) = summary_line(&tool.output);
-    // The ⚙ start line persists — so the command/target stays visible — and the
-    // ✓/✗ end line sits below it: two separated lines, matching `diff_lines`.
-    let mut header = vec![
-        Span::styled("   ⚙ ", dim()),
-        Span::styled(tool.name.clone(), tool_name()),
-    ];
-    header.extend(target_span(tool));
     let mut spans = vec![
-        Span::styled(format!("   {mark} "), style),
+        Span::styled(format!("{mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
-    if !expanded && !note.is_empty() {
+    if !note.is_empty() {
         spans.push(Span::styled(format!(" · {note}"), dim()));
     }
     if let Some(ms) = tool.duration_ms {
         spans.push(Span::styled(format!(" · {}", format_ms(ms)), dim()));
     }
-    let mut lines = vec![Line::from(header), Line::from(spans)];
+    Line::from(spans)
+}
 
-    // Collapsed: the summary above plus a preview of the rest. Expanded: the
-    // summary is dropped (a line is never shown twice) and the whole output is
-    // drawn, wrapped char-exact — so no line, however long, is left unreachable.
-    if expanded {
-        let all: Vec<&str> = tool.output.lines().collect();
-        lines.extend(tool_body(&all, width, all.len(), dim(), false));
-    } else {
-        let body = body_after_summary(&tool.output);
-        lines.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, dim(), false));
-        let more_lines = body.len().saturating_sub(TOOL_PREVIEW_LINES);
-        if let Some(hint) = more_hint(more_lines, wide) {
-            lines.push(hint);
-        }
+/// Wrap `params` + `body` in the rounded frame. The top rule carries `⚙ name`
+/// (left) and the affordances (right-aligned, A4); the mid `├──┤` rule appears
+/// IFF both `params` and `body` are non-empty (A1). Every row is padded to
+/// `width`.
+fn panel_frame(
+    name: Span<'static>,
+    affordances: &'static str,
+    params: Vec<Line<'static>>,
+    body: Vec<Line<'static>>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let indent = PANEL_INDENT;
+    let panel_w = width.saturating_sub(indent.chars().count()).max(4);
+    let has_params = !params.is_empty();
+    let has_body = !body.is_empty();
+
+    let mut out = Vec::with_capacity(params.len() + body.len() + 3);
+    let mut top = vec![Span::styled(indent.to_string(), border())];
+    top.extend(panel_top_spans(&name, affordances, panel_w));
+    out.push(Line::from(top));
+    for line in &params {
+        out.push(panel_content_row(indent, line, panel_w));
     }
-    lines
+    if has_params && has_body {
+        out.push(panel_rule(indent, '├', '┤', panel_w));
+    }
+    for line in &body {
+        out.push(panel_content_row(indent, line, panel_w));
+    }
+    out.push(panel_rule(indent, '╰', '╯', panel_w));
+    out
+}
+
+/// The top rule's spans (without the block indent): `╭─ {name} ─────
+/// {affordances} ─╮`. A4 — `affordances` starts at column `panel_w - 2 -
+/// affordances.len()`, so slice 4 can read its hit region off the cached row.
+fn panel_top_spans(name: &Span<'static>, affordances: &str, panel_w: usize) -> Vec<Span<'static>> {
+    let name_w = name.content.chars().count();
+    let aff_w = affordances.chars().count();
+    // `╭─ ` + name + ` ` + fill + ` ` + affordances + `─╮`
+    let fixed = 3 + name_w + 1 + 1 + aff_w + 2;
+    let fill = panel_w.saturating_sub(fixed);
+    vec![
+        Span::styled("╭─ ".to_string(), border()),
+        name.clone(),
+        Span::styled(" ".to_string(), border()),
+        Span::styled("─".repeat(fill), border()),
+        Span::styled(" ".to_string(), border()),
+        Span::styled(affordances.to_string(), dim()),
+        Span::styled("─╮".to_string(), border()),
+    ]
+}
+
+/// One framed content row: `│` + `line` + padding + `│`, exactly `panel_w` wide
+/// (plus the block indent).
+fn panel_content_row(indent: &str, line: &Line<'static>, panel_w: usize) -> Line<'static> {
+    let inner = panel_w.saturating_sub(2);
+    let line_w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = inner.saturating_sub(line_w);
+    let mut spans = vec![
+        Span::styled(indent.to_string(), border()),
+        Span::styled("│".to_string(), border()),
+    ];
+    spans.extend(line.spans.iter().cloned());
+    spans.push(Span::styled(" ".repeat(pad), border()));
+    spans.push(Span::styled("│".to_string(), border()));
+    Line::from(spans)
+}
+
+/// A framed horizontal rule (`├──┤` or `╰──╯`), exactly `panel_w` wide.
+fn panel_rule(indent: &str, open: char, close: char, panel_w: usize) -> Line<'static> {
+    let inner = panel_w.saturating_sub(2);
+    Line::from(vec![
+        Span::styled(indent.to_string(), border()),
+        Span::styled(format!("{open}{}{close}", "─".repeat(inner)), border()),
+    ])
 }
 
 /// A re-shown change (`/changes`): the file, then its styled diff body.
@@ -675,54 +836,6 @@ fn diff_block_lines(path: &str, diff: &str) -> Vec<Line<'static>> {
             Span::styled(raw.to_string(), style),
         ]));
     }
-    lines
-}
-
-/// A done tool that changed a file: its edit shown as a diff under the `⚙`
-/// line, with a `+a −r` summary. The diff is UI-only (`ToolOutput::diff`), so
-/// it never reached the model.
-fn diff_lines(tool: &Tool, diff: &str) -> Vec<Line<'static>> {
-    let mut header = vec![
-        Span::styled("   ⚙ ", dim()),
-        Span::styled(tool.name.clone(), tool_name()),
-    ];
-    header.extend(target_span(tool));
-    let mut lines = vec![Line::from(header)];
-
-    // Collapsed shows a preview; expanded (or a failure) shows the whole diff.
-    let all: Vec<&str> = diff.lines().collect();
-    let limit = if tool.expanded || tool.is_error {
-        TOOL_EXPANDED_LINES
-    } else {
-        TOOL_DIFF_PREVIEW_LINES
-    };
-    let take = all.len().min(limit);
-    for raw in &all[..take] {
-        let style = match raw.chars().next() {
-            Some('+') => added_style(),
-            Some('-') => removed_style(),
-            _ => dim(),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(TOOL_INDENT, dim()),
-            Span::styled((*raw).to_string(), style),
-        ]));
-    }
-    if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
-        lines.push(hint);
-    }
-
-    let (added, removed) = crate::app::diff_counts(diff);
-    let (mark, style) = if tool.is_error {
-        ("✗", error_style())
-    } else {
-        ("✓", success())
-    };
-    lines.push(Line::from(vec![
-        Span::styled(format!("   {mark} "), style),
-        Span::styled(tool.name.clone(), tool_name()),
-        Span::styled(format!(" · +{added} −{removed}"), dim()),
-    ]));
     lines
 }
 
@@ -2882,6 +2995,7 @@ mod tests {
                 diff: diff.map(str::to_string),
                 path: Some("f.rs".into()),
                 duration_ms: None,
+                params: Vec::new(),
             })
         };
         let blocks = [
@@ -2950,15 +3064,15 @@ mod tests {
 
         let collapsed = buffer_text(&render(&mut app, 70, 30));
         assert!(!collapsed.contains("line-20"), "collapsed hides the tail:\n{collapsed}");
-        // The bar covers the whole block: ⚙ header + ✓ status + 4 preview
-        // lines + the hint.
-        assert_eq!(barred(&collapsed).len(), 7, "{collapsed}");
+        // The bar covers the whole panel block: top rule + 4 preview lines +
+        // the hint + the ✓ status row + the bottom rule.
+        assert_eq!(barred(&collapsed).len(), 8, "{collapsed}");
 
         app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 30));
         assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
-        // ⚙ header + ✓ status + all 20 output lines.
-        assert_eq!(barred(&expanded).len(), 22, "{expanded}");
+        // Top rule + all 20 output lines + the ✓ status row + the bottom rule.
+        assert_eq!(barred(&expanded).len(), 23, "{expanded}");
     }
 
     #[test]
@@ -3242,4 +3356,141 @@ mod tests {
         assert!(text.contains("✓ bash"), "the ✓ end line is missing:\n{text}");
     }
 
+    // ---- slice 3 (D31): the tool panel — params, the mid rule, affordances ----
+
+    /// Commit the assistant block carrying a `bash` call's `cmd`/`cwd` args, so
+    /// the `Tool` block gets a populated `params` (D31). One call id: `"t"`.
+    fn push_bash_call(app: &mut App, cmd: &str, cwd: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({ "cmd": cmd, "cwd": cwd }),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    /// Push a running `bash` tool (start only): params present, body empty.
+    fn push_bash_live(app: &mut App, cmd: &str, cwd: &str) {
+        push_bash_call(app, cmd, cwd);
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "bash".into(),
+            },
+        ));
+    }
+
+    /// Push a finished `bash` tool (start → end) with its call's `cmd`/`cwd`.
+    fn push_bash_panel(app: &mut App, cmd: &str, cwd: &str, output: &str) {
+        push_bash_live(app, cmd, cwd);
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: "bash".into(),
+                output: output.into(),
+                is_error: false,
+                diff: None,
+                path: None,
+                duration_ms: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn a_bash_panel_shows_the_full_command_unclipped() {
+        let mut app = App::new();
+        let cmd = "cargo test -p wcode-cli --all-targets -- --nocapture --color=always";
+        assert!(
+            cmd.chars().count() > 60,
+            "the fixture must exceed the old 60-char clip"
+        );
+        push_bash_panel(&mut app, cmd, "/Users/wei/Workspace/wcode", "ok");
+        let text = buffer_text(&render(&mut app, 100, 20));
+        assert!(
+            text.contains(cmd),
+            "the whole command must render unclipped:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_tool_panel_shows_its_params() {
+        let mut app = App::new();
+        push_bash_panel(&mut app, "cargo test", "/Users/wei/Workspace/wcode", "ok");
+        let text = buffer_text(&render(&mut app, 100, 20));
+        let cmd_row = text
+            .lines()
+            .find(|l| l.contains("cmd"))
+            .expect("a cmd key row");
+        assert!(
+            cmd_row.contains("cargo test"),
+            "the cmd value rides its key row:\n{text}"
+        );
+        let cwd_row = text
+            .lines()
+            .find(|l| l.contains("cwd"))
+            .expect("a cwd key row");
+        assert!(
+            cwd_row.contains("/Users/wei/Workspace/wcode"),
+            "the cwd value rides its key row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_params_body_rule_appears_only_when_both_are_present() {
+        // params + body → the mid `├──┤` rule shows.
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "line one\nline two");
+        let both = buffer_text(&render(&mut app, 80, 20));
+        assert!(both.contains('├'), "the rule shows with params + body:\n{both}");
+
+        // params, no body → no rule (a live tool that produced nothing yet).
+        let mut app = App::new();
+        push_bash_live(&mut app, "ls", "/w");
+        let params_only = buffer_text(&render(&mut app, 80, 20));
+        assert!(
+            !params_only.contains('├'),
+            "no rule with params and no body:\n{params_only}"
+        );
+
+        // body, no params → no rule (the call carried no recognizable args).
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "line one\nline two", false, None);
+        let body_only = buffer_text(&render(&mut app, 80, 20));
+        assert!(
+            !body_only.contains('├'),
+            "no rule with body and no params:\n{body_only}"
+        );
+    }
+
+    #[test]
+    fn panel_affordances_are_right_aligned_at_the_documented_column() {
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "ok");
+        let width = 80usize;
+        let text = buffer_text(&render(&mut app, width as u16, 20));
+        let header = text
+            .lines()
+            .find(|l| l.contains("⚙ bash"))
+            .expect("the panel header row");
+        let col = header
+            .chars()
+            .position(|c| c == '▸')
+            .expect("the collapse affordance");
+        assert_eq!(
+            col,
+            width - 2 - "▸ ⧉".chars().count(),
+            "the affordances are right-aligned at width - 2 - len:\n{header}"
+        );
+    }
 }

@@ -164,6 +164,11 @@ pub struct Tool {
     /// tool is still running, or for a tool reseeded from a resumed session
     /// (the transcript has no timing).
     pub duration_ms: Option<u64>,
+    /// The call's keyed input params, in display order, for the panel's params
+    /// block (D31). `(key, value)` pairs; empty when the call carried no
+    /// recognizable argument — the panel then draws no params rows (never an
+    /// empty key row).
+    pub params: Vec<(String, String)>,
 }
 
 /// A file the run changed, recorded from the UI-only `ToolExecutionEnd` fields.
@@ -561,26 +566,27 @@ fn tasks_text(tasks: &[TaskItem]) -> String {
         .join("\n")
 }
 
-/// The argument keys a tool call may name in its label, most specific first.
-const ACTION_KEYS: [&str; 9] = [
-    "path",
-    "file_path",
-    "file",
-    "pattern",
-    "command",
-    "cmd",
-    "query",
-    "url",
-    "name",
-];
+/// The panel's param keys for a named tool, in display order. `bash` →
+/// `command`, `cmd`, `cwd` (the real arg is `command`; `cmd` is the design's
+/// alias); `read` → `path`, `offset`, `limit`; `edit`/`write` → `path`; `grep` →
+/// `pattern`, `path`; `find` → `pattern`. Falls back to [`ACTION_KEYS`].
+fn tool_param_keys(name: &str) -> &'static [&'static str] {
+    match name {
+        "bash" => &["command", "cmd", "cwd"],
+        "read" => &["path", "offset", "limit"],
+        "edit" | "write" => &["path"],
+        "grep" => &["pattern", "path"],
+        "find" => &["pattern"],
+        _ => &ACTION_KEYS,
+    }
+}
 
-/// The team strip's action label for a tool call: `"{name} {target}"`, where the
-/// target is the first present string argument among [`ACTION_KEYS`] on the
-/// committed assistant block whose `ToolCall` id matches `call_id` (§3). No
-/// matching call, or no recognizable argument, falls back to just `"{name}"`.
-fn call_target(transcript: &[Block], call_id: &str) -> Option<String> {
-    // The arguments ride the committed assistant block; scan from the end, as a
-    // call id is unique to the newest turn that carries it.
+/// The first value of `key_order` the matching `ToolCall` presents, or `None` —
+/// the shared transcript scan behind [`call_target`] and [`call_params`]. A
+/// scalar is stringified (`str` as-is; a number via `as_i64`/`as_u64`/`as_f64`;
+/// a bool as `true`/`false`); `null`, an object, an array, or an absent key are
+/// skipped. Never names `serde_json` (it stays a dev-dependency).
+fn call_arg(transcript: &[Block], call_id: &str, key_order: &[&str]) -> Option<String> {
     for block in transcript.iter().rev() {
         let Block::Assistant(content) = block else {
             continue;
@@ -591,12 +597,52 @@ fn call_target(transcript: &[Block], call_id: &str) -> Option<String> {
         let Some(ContentBlock::ToolCall { arguments, .. }) = call else {
             continue;
         };
-        return ACTION_KEYS
-            .iter()
-            .find_map(|key| arguments.get(*key).and_then(|v| v.as_str()))
-            .map(str::to_string);
+        return key_order.iter().find_map(|key| {
+            let v = arguments.get(*key)?;
+            if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else if let Some(n) = v.as_i64() {
+                Some(n.to_string())
+            } else if let Some(n) = v.as_u64() {
+                Some(n.to_string())
+            } else if let Some(n) = v.as_f64() {
+                Some(n.to_string())
+            } else {
+                v.as_bool().map(|b| b.to_string())
+            }
+        });
     }
     None
+}
+
+/// The call's params as ordered `(key, value)` pairs for its panel — every key
+/// in [`tool_param_keys(name)`] the call presents, in that order. Empty when no
+/// matching `ToolCall` (the panel then draws no params rows).
+fn call_params(transcript: &[Block], call_id: &str, name: &str) -> Vec<(String, String)> {
+    tool_param_keys(name)
+        .iter()
+        .filter_map(|key| call_arg(transcript, call_id, &[*key]).map(|v| ((*key).to_string(), v)))
+        .collect()
+}
+/// The argument keys a tool call may name in its label, most specific first.
+const ACTION_KEYS: [&str; 10] = [
+    "path",
+    "file_path",
+    "file",
+    "pattern",
+    "command",
+    "cmd",
+    "cwd",
+    "query",
+    "url",
+    "name",
+];
+
+/// The team strip's action-label target — [`call_arg`] with [`ACTION_KEYS`]
+/// order (A3: order and signature unchanged). No matching call, or no
+/// recognizable argument, is `None`.
+fn call_target(transcript: &[Block], call_id: &str) -> Option<String> {
+    call_arg(transcript, call_id, &ACTION_KEYS)
 }
 
 /// The team strip's action label for a tool call: `"{name} {target}"`, where the
@@ -1217,6 +1263,7 @@ impl Surface {
                 self.last_action_at = Some(*action_seq);
                 *action_seq += 1;
                 let target = call_target(&self.transcript, &call_id);
+                let params = call_params(&self.transcript, &call_id, &name);
                 self.push_block(Block::Tool(Tool {
                     name,
                     target,
@@ -1227,6 +1274,7 @@ impl Surface {
                     diff: None,
                     path: None,
                     duration_ms: None,
+                    params,
                 }));
                 true
             }
@@ -1501,6 +1549,7 @@ impl Surface {
                     // Recover the call's target from the preceding assistant
                     // block's `ToolCall` arguments, so a replayed block shows it.
                     let target = call_target(&self.transcript, tool_call_id);
+                    let params = call_params(&self.transcript, tool_call_id, name);
                     self.push_block(Block::Tool(Tool {
                         name: name.clone(),
                         target,
@@ -1511,6 +1560,7 @@ impl Surface {
                         diff: None,
                         path: None,
                         duration_ms: None,
+                        params,
                     }));
                 }
             }
@@ -6780,5 +6830,164 @@ mod live_cache_tests {
             "no live block after a flush"
         );
         assert!(!app.transcript().is_empty(), "the message was committed");
+    }
+
+    // ---- slice 3 (D31): the panel's params extractor ----
+
+    /// Commit an assistant block carrying one `ToolCall` with `args` (JSON).
+    fn with_tool_call(app: &mut App, id: &str, name: &str, args: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: id.into(),
+                        name: name.into(),
+                        arguments: args.parse().expect("valid JSON args"),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn call_params_returns_cmd_and_cwd_for_bash() {
+        let mut app = App::new();
+        with_tool_call(&mut app, "t1", "bash", r#"{"cmd":"ls -la","cwd":"/x","n":3}"#);
+        assert_eq!(
+            call_params(app.transcript(), "t1", "bash"),
+            vec![
+                ("cmd".to_string(), "ls -la".to_string()),
+                ("cwd".to_string(), "/x".to_string()),
+            ],
+            "order from tool_param_keys; the unknown `n` is dropped"
+        );
+    }
+
+    #[test]
+    fn call_params_stringifies_numeric_args() {
+        let mut app = App::new();
+        with_tool_call(&mut app, "t1", "read", r#"{"path":"a.rs","offset":10}"#);
+        assert_eq!(
+            call_params(app.transcript(), "t1", "read"),
+            vec![
+                ("path".to_string(), "a.rs".to_string()),
+                ("offset".to_string(), "10".to_string()),
+            ],
+            "a non-string scalar is stringified, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn call_params_falls_back_to_action_keys() {
+        let mut app = App::new();
+        with_tool_call(&mut app, "t1", "mystery", r#"{"url":"http://x"}"#);
+        assert_eq!(
+            call_params(app.transcript(), "t1", "mystery"),
+            vec![("url".to_string(), "http://x".to_string())],
+            "an unknown tool uses ACTION_KEYS order"
+        );
+    }
+
+    #[test]
+    fn call_params_is_empty_without_a_matching_call() {
+        let app = App::new();
+        assert!(call_params(app.transcript(), "nope", "bash").is_empty());
+        assert_eq!(call_target(app.transcript(), "nope"), None);
+    }
+
+    #[test]
+    fn call_target_still_returns_the_first_param() {
+        let mut app = App::new();
+        with_tool_call(&mut app, "t1", "read", r#"{"path":"a.rs","offset":10}"#);
+        assert_eq!(call_target(app.transcript(), "t1").as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn call_target_keeps_action_keys_order_not_the_tool_map() {
+        // grep: ACTION_KEYS lists `path` before `pattern`; the tool map is the
+        // reverse. `call_target` must follow ACTION_KEYS (the team-strip contract).
+        let mut app = App::new();
+        with_tool_call(
+            &mut app,
+            "t1",
+            "grep",
+            r#"{"path":"a.rs","pattern":"fn main"}"#,
+        );
+        assert_eq!(
+            call_target(app.transcript(), "t1").as_deref(),
+            Some("a.rs"),
+            "ACTION_KEYS order (path first)"
+        );
+        assert_eq!(
+            call_params(app.transcript(), "t1", "grep")
+                .first()
+                .map(|(k, _)| k.as_str()),
+            Some("pattern"),
+            "the tool map order (pattern first)"
+        );
+    }
+
+    // ---- slice 3 (D31): a panel toggle re-renders exactly its block ----
+
+    /// A finished `Block::Tool` carrying `params` (D31).
+    fn panel_tool(name: &str, params: Vec<(String, String)>) -> Block {
+        Block::Tool(Tool {
+            name: name.into(),
+            target: None,
+            output: "line one\nline two".into(),
+            done: true,
+            is_error: false,
+            expanded: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+            params,
+        })
+    }
+
+    /// Re-render every committed block at `width` — one frame through the cache.
+    fn committed_frame(app: &mut App, width: usize) {
+        let n = app.transcript().len();
+        let mut out: Vec<Line<'static>> = Vec::new();
+        for i in 0..n {
+            let _ = app.focused_mut().append_block_lines(i, width, &mut out);
+        }
+    }
+
+    #[test]
+    fn a_panel_toggle_bumps_only_its_block_rev() {
+        let mut app = App::new();
+        app.focused_mut()
+            .push_block(panel_tool("bash", vec![("cmd".into(), "ls".into())]));
+        app.focused_mut().push_block(panel_tool("read", Vec::new()));
+
+        let width = 80;
+        committed_frame(&mut app, width);
+        let misses = app.focused().cache_misses();
+        let before = app.surfaces[0].block_revs.clone();
+
+        // Browse-select block 0 and toggle it (the `Enter` path).
+        app.surfaces[0].selected = Some(0);
+        app.toggle_selected();
+
+        let after = app.surfaces[0].block_revs.clone();
+        let moved: Vec<usize> = before
+            .iter()
+            .zip(&after)
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i))
+            .collect();
+        assert_eq!(moved, vec![0], "only the toggled block's rev bumps");
+
+        committed_frame(&mut app, width);
+        assert_eq!(
+            app.focused().cache_misses(),
+            misses + 1,
+            "exactly the toggled block re-renders"
+        );
     }
 }
