@@ -12,6 +12,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, BorderType, Borders, Clear, Paragraph};
+use wcode_harness::event::{TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
@@ -578,6 +579,7 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
+        Block::Todos(todos) => todos_lines(todos, width),
     }
 }
 
@@ -943,6 +945,33 @@ fn panel_rule(indent: &str, open: char, close: char, panel_w: usize) -> Line<'st
         Span::styled(indent.to_string(), border()),
         Span::styled(format!("{open}{}{close}", "─".repeat(inner)), border()),
     ])
+}
+
+/// A committed todos block (D35): a `── todos  d/t ──` header, then one `☑`/`☐`
+/// row per item. Completed text is `muted`, everything else `body`; the glyphs and
+/// header are `dim`. Rendered live in the transcript (the `Todo` feed updates it).
+fn todos_lines(todos: &[TodoItem], width: usize) -> Vec<Line<'static>> {
+    let done = todos
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
+    let head = format!("   ── todos  {done}/{} ", todos.len());
+    let fill = width.saturating_sub(head.chars().count());
+    let mut out = vec![Line::from(vec![
+        Span::styled(head, dim()),
+        Span::styled("─".repeat(fill), dim()),
+    ])];
+    for item in todos {
+        let (mark, text_style) = match item.status {
+            TodoStatus::Completed => ("☑", muted()),
+            _ => ("☐", theme::theme().body),
+        };
+        out.push(Line::from(vec![
+            Span::styled(format!("   {mark} "), dim()),
+            Span::styled(item.content.clone(), text_style),
+        ]));
+    }
+    out
 }
 
 /// A re-shown change (`/changes`): the file, then its styled diff body.
@@ -1556,7 +1585,7 @@ fn state_style(state: TeamState) -> Style {
 }
 
 /// Draw the docked left sidebar: one fixed-width column stacking the “more
-/// info” the bands cannot all show at once — **Team**, **Todos**, **Changes**.
+/// info” the bands cannot all show at once — **agents**, **changes**.
 /// Each section is a dim header line followed by its rows; an
 /// empty section keeps its header with a dim `—` placeholder, so the stack
 /// does not jump as data arrives.
@@ -1567,12 +1596,11 @@ fn state_style(state: TeamState) -> Style {
 /// draws nothing.
 ///
 /// Data, per section:
-/// - Team    → [`App::member_rows`] (`label`, [`crate::TeamState`], focused,
+/// - agents  → [`App::member_rows`] (`label`, [`crate::TeamState`], focused,
 ///   live action); glyph `state.glyph()` styled by `state_style(state)`.
 ///   `member_rows` drops `last_action_at`, so a per-member elapsed is not
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
-/// - Todos   → [`App::last_todos`] (`☑`/`☐` + `content`, header `done/total`).
-/// - Changes → [`App::changes`] (`path · +added −removed`).
+/// - changes → [`App::changes`] (`path · +added −removed`).
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1580,8 +1608,8 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     let w = area.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ---- Team -----------------------------------------------------------
-    lines.push(Line::from(Span::styled("Team", dim())));
+    // ---- agents ---------------------------------------------------------
+    lines.push(Line::from(Span::styled("agents", dim())));
     // Publish each drawn member row for hit-testing. `member_rows_indexed`
     // borrows `app` immutably; that borrow ends before `set_sidebar_hit` needs
     // `&mut app`, so iterate the owned rows BY VALUE and collect `(index, y)`.
@@ -1591,7 +1619,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(Line::from(Span::styled("  —", dim())));
     }
     let bottom = area.y.saturating_add(area.height);
-    // The "Team" header owns area.y.
+    // The "agents" header owns area.y.
     for (n, (idx, label, state, focused, action)) in indexed.into_iter().enumerate() {
         let y = area.y + 1 + n as u16;
         if y < bottom {
@@ -1620,40 +1648,14 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
 
     app.set_sidebar_hit(area, members);
 
-    // ---- Todos ----------------------------------------------------------
-    match app.last_todos() {
-        Some(todos) if !todos.is_empty() => {
-            let done = todos
-                .iter()
-                .filter(|t| t.status == wcode_harness::event::TodoStatus::Completed)
-                .count();
-            lines.push(Line::from(Span::styled(
-                format!("Todos  ☑ {done}/{}", todos.len()),
-                dim(),
-            )));
-            for t in todos {
-                let mark = if t.status == wcode_harness::event::TodoStatus::Completed {
-                    "☑"
-                } else {
-                    "☐"
-                };
-                lines.push(clipped_row(vec![(format!("  {mark} {}", t.content), dim())], w));
-            }
-        }
-        _ => {
-            lines.push(Line::from(Span::styled("Todos", dim())));
-            lines.push(Line::from(Span::styled("  —", dim())));
-        }
-    }
-
-    // ---- Changes --------------------------------------------------------
+    // ---- changes --------------------------------------------------------
     let changes = app.changes();
     if changes.is_empty() {
-        lines.push(Line::from(Span::styled("Changes", dim())));
+        lines.push(Line::from(Span::styled("changes", dim())));
         lines.push(Line::from(Span::styled("  —", dim())));
     } else {
         lines.push(Line::from(Span::styled(
-            format!("Changes  {}", changes.len()),
+            format!("changes  {}", changes.len()),
             dim(),
         )));
         for c in changes {
@@ -3261,9 +3263,15 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('b')));
         let frame = buffer_text(&render(&mut app, 100, 24));
         // Section headers are sidebar-only (the strip/status never spell these).
-        for header in ["Team", "Todos", "Changes"] {
+        // Two sections only (D35): the member list and the change list. Todos
+        // moved to the transcript, so its section header is gone.
+        for header in ["agents", "changes"] {
             assert!(frame.contains(header), "missing {header} header:\n{frame}");
         }
+        assert!(
+            !frame.contains("Todos"),
+            "the Todos sidebar section must be gone:\n{frame}"
+        );
         assert!(frame.contains("explorer"), "member row missing:\n{frame}");
         // The member row is NUMBERED (D34), so `Alt-N` is visible not guessed.
         assert!(
@@ -3297,7 +3305,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Ctrl('b')));
         let narrow = buffer_text(&render(&mut app, 60, 20)); // < SIDEBAR_MIN_WIDTH
         assert!(
-            !narrow.contains("Changes"),
+            !narrow.contains("agents"),
             "no panel under the width threshold:\n{narrow}"
         );
     }
@@ -3815,5 +3823,42 @@ mod tests {
             text.contains("should appear once the row is clicked"),
             "the click expands the thinking:\n{text}"
         );
+    }
+
+    // ---- slice 7 (D35): the todo checklist lives in the transcript ----
+
+    #[test]
+    fn todos_render_in_the_transcript() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::Todo {
+                todos: vec![
+                    TodoItem {
+                        content: "map the seam".into(),
+                        status: TodoStatus::Pending,
+                    },
+                    TodoItem {
+                        content: "write the test".into(),
+                        status: TodoStatus::Completed,
+                    },
+                    TodoItem {
+                        content: "run the suite".into(),
+                        status: TodoStatus::Pending,
+                    },
+                ],
+            },
+        ));
+        let frame = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            frame.contains("── todos  1/3 ──"),
+            "the todos header:\n{frame}"
+        );
+        assert!(
+            frame.contains("☑ write the test"),
+            "the completed row:\n{frame}"
+        );
+        assert!(frame.contains("☐ map the seam"), "a pending row:\n{frame}");
+        assert!(frame.contains("☐ run the suite"), "a pending row:\n{frame}");
     }
 }

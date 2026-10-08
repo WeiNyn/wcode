@@ -142,6 +142,9 @@ pub enum Block {
     Btw(String),
     /// A changed file's diff, re-shown from `/changes` (not the live render).
     Diff { path: String, diff: String },
+    /// The `todo` tool's live checklist in the transcript (D35). ONE block that
+    /// updates in place as the `AgentEvent::Todo` feed advances.
+    Todos(Vec<TodoItem>),
 }
 
 impl Block {
@@ -252,6 +255,14 @@ fn copy_text(block: &Block) -> Option<String> {
             .join("\n"),
         Block::Tool(tool) => tool.output.clone(),
         Block::Diff { diff, .. } => diff.clone(),
+        Block::Todos(todos) => todos
+            .iter()
+            .map(|t| match t.status {
+                TodoStatus::Completed => format!("☑ {}", t.content),
+                _ => format!("☐ {}", t.content),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
     (!text.trim().is_empty()).then_some(text)
 }
@@ -1385,11 +1396,18 @@ impl Surface {
                 true
             }
             AgentEvent::Todo { todos } => {
-                // Minimal v1: a notice. A dedicated panel is a follow-on. This arm
-                // runs for a local run AND a socket client — the point of routing
-                // `todo` through the event seam.
+                // D35: the checklist is a first-class transcript block that updates
+                // IN PLACE (one block, not a notice per change). This arm runs for a
+                // local run AND a socket client — the point of routing `todo`
+                // through the event seam.
                 self.last_todos = Some(todos.clone());
-                self.push_block(Block::Notice(render_todos(&todos)));
+                match self.transcript.iter().rposition(|b| matches!(b, Block::Todos(_))) {
+                    Some(i) => {
+                        self.transcript[i] = Block::Todos(todos);
+                        self.bump_rev(i);
+                    }
+                    None => self.push_block(Block::Todos(todos)),
+                }
                 true
             }
             AgentEvent::CompactionSkipped { reason } => {
@@ -4116,7 +4134,7 @@ mod tests {
     }
 
     #[test]
-    fn a_todo_event_renders_a_notice() {
+    fn a_todo_event_renders_the_todos_block() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
             root(),
@@ -4134,12 +4152,31 @@ mod tests {
             },
         ));
         match app.transcript().last() {
-            Some(Block::Notice(text)) => {
-                assert!(text.contains("[ ] step one"), "{text}");
-                assert!(text.contains("[x] step two"), "{text}");
+            Some(Block::Todos(todos)) => {
+                assert_eq!(todos.len(), 2);
+                assert_eq!(todos[0].content, "step one");
+                assert_eq!(todos[1].status, TodoStatus::Completed);
             }
-            other => panic!("expected a todo notice, got {other:?}"),
+            other => panic!("expected a todos block, got {other:?}"),
         }
+
+        // A second `Todo` event updates the SAME block IN PLACE (D35) — no new
+        // block per change.
+        let before = app.transcript().len();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Todo {
+                todos: vec![TodoItem {
+                    content: "step three".into(),
+                    status: TodoStatus::Completed,
+                }],
+            },
+        ));
+        assert_eq!(app.transcript().len(), before, "updated in place, not appended");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Todos(t)) if t.len() == 1 && t[0].content == "step three"
+        ));
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use wcode_harness::event::AgentEvent;
+use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason, Usage};
 use wcode_harness::protocol::SessionId;
 use serde_json::json;
@@ -156,6 +156,27 @@ fn fixture() -> App {
         AgentEvent::Compaction {
             summarized: 12,
             kept: 4,
+        },
+    ));
+
+    // The live todo checklist (D35): a first-class block in the transcript.
+    app.handle(AppEvent::Agent(
+        root.clone(),
+        AgentEvent::Todo {
+            todos: vec![
+                TodoItem {
+                    content: "map the seam".into(),
+                    status: TodoStatus::Pending,
+                },
+                TodoItem {
+                    content: "write the test".into(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    content: "run the suite".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
         },
     ));
 
