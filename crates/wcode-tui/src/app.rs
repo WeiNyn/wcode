@@ -1077,9 +1077,6 @@ pub struct Surface {
     /// and `/team`; cleared at run start/end so it reflects the current run
     /// only (§3).
     last_action: Option<String>,
-    /// Monotonic stamp of the last action, for ordering members by recency
-    /// (active first, then most recent action first) in the team strip.
-    last_action_at: Option<u64>,
     /// A `Cancel` was sent; the next `AgentEnd` is rendered as an abort.
     cancelled: bool,
     /// Provider-reported input tokens of the last turn: how full the context was.
@@ -1163,7 +1160,6 @@ impl Surface {
             finished: false,
             failed: false,
             last_action: None,
-            last_action_at: None,
             cancelled: false,
             context_used: None,
             plan_pending: None,
@@ -1357,9 +1353,8 @@ impl Surface {
     }
 
     /// Apply one agent event. Returns `true` when the surface changed, so `App`
-    /// can mark itself dirty (the surface owns no `dirty` flag). `action_seq`
-    /// is the app-wide monotonic clock for stamping action recency.
-    fn apply(&mut self, event: AgentEvent, action_seq: &mut u64) -> bool {
+    /// can mark itself dirty (the surface owns no `dirty` flag).
+    fn apply(&mut self, event: AgentEvent) -> bool {
         match event {
             AgentEvent::MessageStart { message } => {
                 if matches!(message, AgentMessage::Assistant { .. }) {
@@ -1387,8 +1382,6 @@ impl Surface {
                 // The committed assistant block carries this call's arguments
                 // (§3), so resolve a short "name target" label for the team strip.
                 self.last_action = Some(action_label(&self.transcript, &call_id, &name));
-                self.last_action_at = Some(*action_seq);
-                *action_seq += 1;
                 let target = call_target(&self.transcript, &call_id);
                 let params = call_params(&self.transcript, &call_id, &name);
                 self.push_block(Block::Tool(Tool {
@@ -1956,9 +1949,6 @@ pub struct App {
     /// set idle (SIGTERM-idle is a plain quit).
     force_quit: bool,
     actions: Vec<Action>,
-    /// Monotonic clock stamping the last action of each member, so the team
-    /// strip can order members active-first then by action recency.
-    action_seq: u64,
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
     /// The open browse search prompt, if any — see [`BrowseSearch`].
@@ -2029,7 +2019,6 @@ impl App {
             should_quit: false,
             force_quit: false,
             actions: Vec::new(),
-            action_seq: 0,
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -2941,7 +2930,7 @@ impl App {
                 // Route to the surface that owns this session; an unknown id is
                 // ignored (a stray/duplicate event must not panic).
                 if let Some(idx) = self.surface_index(&id)
-                    && self.surfaces[idx].apply(event, &mut self.action_seq)
+                    && self.surfaces[idx].apply(event)
                 {
                     self.dirty = true;
                 }
@@ -3906,12 +3895,6 @@ impl App {
     /// and the `/changes` overlay both render it.
     pub(crate) fn change_tree(&self) -> Vec<ChangeRow> {
         self.focused().change_tree()
-    }
-
-    /// The latest `Todo` list, for the status chip (`☑ done/total`) — an
-    /// accessor over `Surface::last_todos` (set in the `Todo` arm).
-    pub fn last_todos(&self) -> Option<&[TodoItem]> {
-        self.focused().last_todos.as_deref()
     }
 
     /// Time since this surface's run started — INJECTED by the loop (see

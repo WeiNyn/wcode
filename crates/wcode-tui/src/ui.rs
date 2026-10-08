@@ -1653,7 +1653,7 @@ fn change_tree_lines(rows: &[ChangeRow], width: usize) -> Vec<Line<'static>> {
 /// Data, per section:
 /// - agents  → [`App::member_rows`] (`label`, [`crate::TeamState`], focused,
 ///   live action); glyph `state.glyph()` styled by `state_style(state)`.
-///   `member_rows` drops `last_action_at`, so a per-member elapsed is not
+///   `member_rows` carries no per-member elapsed, so the elapsed is not
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
 /// - changes → [`App::change_tree`] (a directory tree, D36).
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
