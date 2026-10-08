@@ -26,7 +26,7 @@ TUI reads as the same product, given a full screen.
    sits at **col 6** (`╭─ name`) and the body two columns past the frame's `│`.
 3. **A small palette, dim is the workhorse.** The 17 roles live in one place —
    `theme.rs` (`accent, dim, muted, border, user, body, error, success, warn,
-   code, heading, link, tool_name, thinking, diff_add, diff_del`). Accent (cyan)
+   code, heading, heading_sub, link, tool_name, thinking, diff_add, diff_del`). Accent (cyan)
    for the user prompt and running state; red for errors; green for success;
    yellow for inline code; a green→yellow→red gauge for context fill. Assistant
    prose stays default and `dim` stays the workhorse.
@@ -205,9 +205,11 @@ blank pane.
 - **Diff / changes** (D36) — a `/changes` selection re-shows the file's diff;
   the run's changeset renders as a directory **tree** (`├─`/`└─`, stats
   right-aligned) in the sidebar and the `/changes` modal.
-- **Affordances** (D32) — a block's first row carries a `▸`/`▾` disclosure and a
-  `⧉` copy cell, right-aligned at the panel's columns; click toggles/copies, and
-  browse `Enter`/`Space` and `y` are the keyboard parity.
+- **Affordances** (D32) — every **expandable** block (a tool panel, or an
+  assistant block whose first content is thinking) carries a `▸`/`▾` disclosure
+  and a `⧉` copy cell on its first row, right-aligned at the panel's columns;
+  click toggles/copies, and browse `Enter`/`Space` and `y` are the keyboard
+  parity.
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
 continuation lines align under the text, as in draft B's `···` block). The
@@ -250,7 +252,7 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    is in flight). There is **no session row and no status row**.
 The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored
 green→yellow→red by fill, then `used / limit`. Corner titles clip with `…` then
-drop least-important-first (top: branch, then the session id; bottom: the
+drop least-important-first (top: the session id, then branch; bottom: the
 gauge). The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is

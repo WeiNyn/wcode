@@ -5,6 +5,10 @@ Status: **☑ phases 1–2 landed.** Companion to
 visual spec) and [`tui-polish-plan.md`](tui-polish-plan.md) (the pass this
 extends). `wcode-tui` only; the kernel and the protocol are untouched.
 
+> **Superseded in part by the shipped [`tui-design.md`](tui-design.md) (§4).**
+> The `▤ browse` token now rides the **input box's bottom-right corner** (there is
+> no status band), and expand/copy on a block **shipped** (D32).
+
 ## Problem
 
 Every transcript shortcut is **position-blind**. `Ctrl-T` acts on *every* tool

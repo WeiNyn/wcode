@@ -4,6 +4,11 @@ Status: **S1 (glyph + live action, model dropped) and S2 (socket roster model) l
 **D28** in [`team-and-tui-plan.md`](team-and-tui-plan.md). Presentation-only, inside
 `crates/wcode-tui`.
 
+> **Superseded in part by the shipped [`tui-design.md`](tui-design.md) (§4).**
+> The sidebar now has **two** numbered sections (`agents` + a `changes` tree);
+> the canonical order drives `Alt-N` (D34), todos moved to the transcript (D35),
+> and the phantom `Context` section was never shipped.
+
 ## 1. Problem
 
 The sidebar renders one line per member: `name · model · state`
