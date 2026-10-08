@@ -610,7 +610,7 @@ fn content_lines(
     thinking_open: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for block in content {
+    for (i, block) in content.iter().enumerate() {
         match block {
             ContentBlock::Text { text } => {
                 lines.extend(markdown::render(text, width));
@@ -620,7 +620,10 @@ fn content_lines(
                     // In-flight: stream inline, expanded — as before D33.
                     lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, thinking()));
                 } else {
-                    lines.extend(thinking_block_lines(text, width, thinking_open));
+                    // The affordance belongs to the block's FIRST line only (the
+                    // publish requires `content.first()` to be `Thinking`), so
+                    // only the leading thinking row draws `▸`/`▾`/`⧉`.
+                    lines.extend(thinking_block_lines(text, width, thinking_open, i == 0));
                 }
             }
             ContentBlock::ToolCall { .. } => {}
@@ -638,8 +641,13 @@ fn content_lines(
 /// A committed thinking block (D33): the collapsed `··· thinking · N chars
 /// ▸ ⧉` row, plus the `thinking`-styled body when expanded. No panel frame —
 /// thinking is lighter than a tool, so a bare affordance row keeps it cheap.
-fn thinking_block_lines(text: &str, width: usize, open: bool) -> Vec<Line<'static>> {
-    let mut out = vec![thinking_header_line(width, text.chars().count(), open)];
+fn thinking_block_lines(
+    text: &str,
+    width: usize,
+    open: bool,
+    affordance: bool,
+) -> Vec<Line<'static>> {
+    let mut out = vec![thinking_header_line(width, text.chars().count(), open, affordance)];
     if open {
         out.extend(wrap(text, width, THINK_CONT, THINK_CONT, thinking()));
     }
@@ -649,10 +657,23 @@ fn thinking_block_lines(text: &str, width: usize, open: bool) -> Vec<Line<'stati
 /// The thinking block's header row: `··· thinking · N chars` (dim) with the
 /// `▸`/`▾`/`⧉` affordance run right-aligned at the SAME columns a tool panel
 /// uses (`header_affordance_cols`), so one publish geometry serves both.
-fn thinking_header_line(width: usize, chars: usize, open: bool) -> Line<'static> {
+/// Without a published region the glyphs are SUPPRESSED — a drawn affordance
+/// must always route a click (the D32 invariant).
+fn thinking_header_line(
+    width: usize,
+    chars: usize,
+    open: bool,
+    affordance: bool,
+) -> Line<'static> {
+    let head = format!("thinking · {chars} chars");
+    if !affordance {
+        return Line::from(vec![
+            Span::styled(THINK_FIRST.to_string(), dim()),
+            Span::styled(head, dim()),
+        ]);
+    }
     let panel_w = width.saturating_sub(PANEL_INDENT.chars().count()).max(4);
     let (toggle_col, _) = header_affordance_cols(panel_w);
-    let head = format!("thinking · {chars} chars");
     let used = THINK_FIRST.chars().count() + head.chars().count();
     // The `▸` sits at the SAME screen column as a tool panel's (`header_affordance_cols`
     // is panel-local; THINK_FIRST already carries the 3-column indent).
@@ -3896,6 +3917,40 @@ mod tests {
             "the body shows when expanded:\n{expanded}"
         );
         assert!(expanded.contains('▾'), "the toggle glyph flips:\n{expanded}");
+    }
+
+    #[test]
+    fn only_the_first_thinking_row_draws_the_affordance() {
+        let mut app = App::new();
+        // Two thinking contents in ONE committed block. Only the first is the
+        // block's first line, so only it has a published hit region (the publish
+        // requires `content.first()` to be `Thinking`); the second must not draw a
+        // dead `▸ ⧉`.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![
+                        ContentBlock::Thinking {
+                            text: "first thought".into(),
+                        },
+                        ContentBlock::Thinking {
+                            text: "second thought".into(),
+                        },
+                    ],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        let rows: Vec<&str> = text.lines().filter(|l| l.contains("thinking ·")).collect();
+        assert_eq!(rows.len(), 2, "two thinking rows:\n{text}");
+        assert_eq!(text.matches('▸').count(), 1, "exactly one toggle glyph:\n{text}");
+        assert_eq!(text.matches('⧉').count(), 1, "exactly one copy glyph:\n{text}");
+        assert!(rows[0].contains('▸'), "the first row draws it:\n{text}");
+        assert!(!rows[1].contains('▸'), "the second row does not:\n{text}");
     }
 
     #[test]
