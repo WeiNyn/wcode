@@ -101,7 +101,7 @@ async fn a_submitted_turn_streams_into_the_transcript() {
     assert_eq!(app.context_used(), Some(1234));
     assert_eq!(app.transcript()[0], Block::User("hi".into()));
     match app.transcript().last() {
-        Some(Block::Assistant(content)) => assert_eq!(text_of(content), "hello"),
+        Some(Block::Assistant { content, .. }) => assert_eq!(text_of(content), "hello"),
         other => panic!("expected the assistant block, got {other:?}"),
     }
 }

@@ -43,6 +43,12 @@ pub enum LoadError {
 
 Rationale and edge cases are in the [design note](https://example.com/config).";
 
+/// The assistant's reasoning — committed collapsed to a `··· thinking · N chars`
+/// row (D33), so the dump shows the one-liner.
+const THINKING: &str = "\
+I should confirm how anchors hash indentation, then read edit.rs before \
+answering; the rule is that the hash covers the raw line, so reindenting moves it.";
+
 /// The sizes dumped — the width ladder (narrow, base, wide).
 const SIZES: [(u16, u16); 3] = [(80, 24), (120, 40), (48, 20)];
 
@@ -160,6 +166,9 @@ fn fixture() -> App {
         AgentEvent::MessageEnd {
             message: AgentMessage::Assistant {
                 content: vec![
+                    ContentBlock::Thinking {
+                        text: THINKING.into(),
+                    },
                     ContentBlock::Text {
                         text: ASSISTANT_MD.into(),
                     },

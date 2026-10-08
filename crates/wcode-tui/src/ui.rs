@@ -465,7 +465,16 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .enumerate()
         .filter_map(|(i, range)| {
-            if !matches!(app.transcript()[i], Block::Tool(_)) {
+            // A panel, or an assistant block whose thinking leads — its collapsed
+            // `▸`/`⧉` row is the block's FIRST line (D33).
+            let has_affordance = match &app.transcript()[i] {
+                Block::Tool(_) => true,
+                Block::Assistant { content, .. } => {
+                    matches!(content.first(), Some(ContentBlock::Thinking { .. }))
+                }
+                _ => false,
+            };
+            if !has_affordance {
                 return None;
             }
             let row = range.start.checked_sub(start)?;
@@ -560,7 +569,10 @@ fn paint_bar(line: &mut Line<'static>) {
 pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
-        Block::Assistant(content) => content_lines(content, width, false),
+        Block::Assistant {
+            content,
+            thinking_open,
+        } => content_lines(content, width, false, *thinking_open),
         Block::Tool(tool) => tool_panel_lines(tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
@@ -574,14 +586,21 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
 /// Empty for a non-assistant message.
 pub(crate) fn live_lines(message: &AgentMessage, width: usize) -> Vec<Line<'static>> {
     match message {
-        AgentMessage::Assistant { content, .. } => content_lines(content, width, true),
+        AgentMessage::Assistant { content, .. } => content_lines(content, width, true, false),
         _ => Vec::new(),
     }
 }
 
 /// Render an assistant message's blocks in order, dropping tool calls (their
-/// own line carries them). `live` appends a cursor to the last line.
-fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line<'static>> {
+/// own line carries them). `live` renders thinking inline (in-flight) and
+/// appends a cursor to the last line; a committed block draws thinking as the
+/// collapsed row unless `thinking_open` (D33).
+fn content_lines(
+    content: &[ContentBlock],
+    width: usize,
+    live: bool,
+    thinking_open: bool,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for block in content {
         match block {
@@ -589,7 +608,12 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
                 lines.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
-                lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, thinking()));
+                if live {
+                    // In-flight: stream inline, expanded — as before D33.
+                    lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, thinking()));
+                } else {
+                    lines.extend(thinking_block_lines(text, width, thinking_open));
+                }
             }
             ContentBlock::ToolCall { .. } => {}
         }
@@ -601,6 +625,40 @@ fn content_lines(content: &[ContentBlock], width: usize, live: bool) -> Vec<Line
         }
     }
     lines
+}
+
+/// A committed thinking block (D33): the collapsed `··· thinking · N chars
+/// ▸ ⧉` row, plus the `thinking`-styled body when expanded. No panel frame —
+/// thinking is lighter than a tool, so a bare affordance row keeps it cheap.
+fn thinking_block_lines(text: &str, width: usize, open: bool) -> Vec<Line<'static>> {
+    let mut out = vec![thinking_header_line(width, text.chars().count(), open)];
+    if open {
+        out.extend(wrap(text, width, THINK_CONT, THINK_CONT, thinking()));
+    }
+    out
+}
+
+/// The thinking block's header row: `··· thinking · N chars` (dim) with the
+/// `▸`/`▾`/`⧉` affordance run right-aligned at the SAME columns a tool panel
+/// uses (`header_affordance_cols`), so one publish geometry serves both.
+fn thinking_header_line(width: usize, chars: usize, open: bool) -> Line<'static> {
+    let panel_w = width.saturating_sub(PANEL_INDENT.chars().count()).max(4);
+    let (toggle_col, _) = header_affordance_cols(panel_w);
+    let head = format!("thinking · {chars} chars");
+    let used = THINK_FIRST.chars().count() + head.chars().count();
+    // The `▸` sits at the SAME screen column as a tool panel's (`header_affordance_cols`
+    // is panel-local; THINK_FIRST already carries the 3-column indent).
+    let target = PANEL_INDENT.chars().count() + toggle_col as usize;
+    let fill = target.saturating_sub(used);
+    let glyph = if open { "▾" } else { "▸" };
+    Line::from(vec![
+        Span::styled(THINK_FIRST.to_string(), dim()),
+        Span::styled(head, dim()),
+        Span::styled(" ".repeat(fill), dim()),
+        Span::styled(glyph.to_string(), dim()),
+        Span::styled(" ".to_string(), dim()),
+        Span::styled("⧉".to_string(), dim()),
+    ])
 }
 
 /// Render a tool as a panel (D31). Three branches, mirroring the old
@@ -3043,7 +3101,7 @@ mod tests {
     #[test]
     fn paint_bar_never_shifts_a_text_row() {
         // Every block kind the transcript can draw.
-        let assistant = Block::Assistant(vec![
+        let assistant = Block::assistant(vec![
             ContentBlock::Text {
                 text: "# Heading\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n\
                        text `code` and [link](http://x) and **bold**"
@@ -3108,7 +3166,7 @@ mod tests {
         // Mirror `paint_bar_never_shifts_a_text_row`: a restyle must not move a glyph.
         for block in [
             Block::User("hi there".into()),
-            Block::Assistant(vec![ContentBlock::Text {
+            Block::assistant(vec![ContentBlock::Text {
                 text: "# Head\n\ntext `code` and **bold**".into(),
             }]),
             Block::Notice("a note".into()),
@@ -3618,5 +3676,134 @@ mod tests {
         terminal = render(&mut app, 80, 20);
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▾", "the toggle flips");
+    }
+
+    // ---- slice 5 (D33): thinking collapses on commit, expands on toggle ----
+
+    /// Commit an assistant block whose content is a single thinking block.
+    fn push_thinking(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Thinking { text: text.into() }],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    #[test]
+    fn thinking_renders_one_line_until_expanded() {
+        let mut app = App::new();
+        let reasoning = "a reasoning paragraph that is long enough to wrap \
+                         across more than one line when it finally expands";
+        push_thinking(&mut app, reasoning);
+
+        let collapsed = buffer_text(&render(&mut app, 80, 24));
+        let rows: Vec<&str> = collapsed
+            .lines()
+            .filter(|l| l.contains("thinking ·"))
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one thinking row:\n{collapsed}");
+        assert!(
+            rows[0].contains(&format!("thinking · {} chars", reasoning.chars().count())),
+            "the row carries the char count:\n{collapsed}"
+        );
+        assert!(
+            !collapsed.contains("long enough to wrap"),
+            "the body is hidden while collapsed:\n{collapsed}"
+        );
+
+        // Browse-select the block and expand via `Enter`.
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Enter));
+        let expanded = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            expanded.contains("long enough to wrap"),
+            "the body shows when expanded:\n{expanded}"
+        );
+        assert!(expanded.contains('▾'), "the toggle glyph flips:\n{expanded}");
+    }
+
+    #[test]
+    fn thinking_auto_collapses_on_turn_end() {
+        let mut app = App::new();
+        let reasoning = "reasoning that is visible only while the turn streams";
+        // In-flight: a `MessageStart` (uncommitted) renders thinking inline.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageStart {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Thinking {
+                        text: reasoning.into(),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        let live = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            live.contains("visible only while the turn streams"),
+            "in-flight thinking streams inline:\n{live}"
+        );
+        assert!(
+            !live.contains("thinking ·"),
+            "no collapsed row while in-flight:\n{live}"
+        );
+
+        // The turn ends: the block commits collapsed to the one-liner.
+        push_thinking(&mut app, reasoning);
+        let done = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            !done.contains("visible only while the turn streams"),
+            "the body hides once committed:\n{done}"
+        );
+        assert!(
+            done.contains(&format!("thinking · {} chars", reasoning.chars().count())),
+            "the committed block shows the one-liner:\n{done}"
+        );
+    }
+
+    #[test]
+    fn a_rendered_thinking_row_publishes_a_clickable_toggle() {
+        let mut app = App::new();
+        let reasoning = "reasoning that should appear once the row is clicked";
+        push_thinking(&mut app, reasoning);
+        let _ = render(&mut app, 80, 24);
+
+        // The committed thinking row publishes exactly one affordance record.
+        let (block, toggle) = {
+            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+            assert_eq!(
+                hit.affordances.len(),
+                1,
+                "the thinking row publishes its affordance"
+            );
+            let a = &hit.affordances[0];
+            (a.block, a.toggle)
+        };
+        assert!(matches!(&app.transcript()[block], Block::Assistant { .. }));
+
+        // A click on the published toggle cell expands the row.
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: toggle.x + 1,
+            row: toggle.y,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: toggle.x + 1,
+            row: toggle.y,
+        }));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            text.contains("should appear once the row is clicked"),
+            "the click expands the thinking:\n{text}"
+        );
     }
 }

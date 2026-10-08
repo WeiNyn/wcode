@@ -126,7 +126,14 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     User(String),
-    Assistant(Vec<ContentBlock>),
+    Assistant {
+        /// The message's content blocks (text, thinking, tool calls).
+        content: Vec<ContentBlock>,
+        /// Whether the message's thinking is expanded (D33). `false` — the commit
+        /// default — draws the collapsed `··· thinking · N chars ▸ ⧉` row; the `▸`
+        /// affordance (or browse `Enter`) flips it.
+        thinking_open: bool,
+    },
     Tool(Tool),
     Notice(String),
     Error(String),
@@ -135,6 +142,17 @@ pub enum Block {
     Btw(String),
     /// A changed file's diff, re-shown from `/changes` (not the live render).
     Diff { path: String, diff: String },
+}
+
+impl Block {
+    /// A committed assistant message, its thinking collapsed (D33); the `▸`
+    /// affordance (or browse `Enter`) expands it.
+    pub(crate) fn assistant(content: Vec<ContentBlock>) -> Self {
+        Block::Assistant {
+            content,
+            thinking_open: false,
+        }
+    }
 }
 
 /// One tool invocation, from `ToolExecutionStart` to `ToolExecutionEnd`.
@@ -223,7 +241,7 @@ fn copy_text(block: &Block) -> Option<String> {
         | Block::Notice(text)
         | Block::Error(text)
         | Block::Btw(text) => text.clone(),
-        Block::Assistant(content) => content
+        Block::Assistant { content, .. } => content
             .iter()
             .filter_map(|c| match c {
                 ContentBlock::Text { text } => Some(text.as_str()),
@@ -588,7 +606,7 @@ fn tool_param_keys(name: &str) -> &'static [&'static str] {
 /// skipped. Never names `serde_json` (it stays a dev-dependency).
 fn call_arg(transcript: &[Block], call_id: &str, key_order: &[&str]) -> Option<String> {
     for block in transcript.iter().rev() {
-        let Block::Assistant(content) = block else {
+        let Block::Assistant { content, .. } = block else {
             continue;
         };
         let call = content
@@ -1426,7 +1444,7 @@ impl Surface {
         if let AgentMessage::Assistant { content, .. } = message
             && !content.is_empty()
         {
-            self.push_block(Block::Assistant(content));
+            self.push_block(Block::assistant(content));
         }
     }
 
@@ -1474,7 +1492,7 @@ impl Surface {
     /// The text of the most recent assistant reply, if any.
     fn last_assistant_text(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|block| match block {
-            Block::Assistant(content) => {
+            Block::Assistant { content, .. } => {
                 let text: String = content
                     .iter()
                     .filter_map(|c| match c {
@@ -1536,7 +1554,7 @@ impl Surface {
                     // can name the call's target (§3); the renderer ignores them.
                     let visible = content.to_vec();
                     if !visible.is_empty() {
-                        self.push_block(Block::Assistant(visible));
+                        self.push_block(Block::assistant(visible));
                     }
                     self.record_usage(message);
                 }
@@ -2416,14 +2434,22 @@ impl App {
     }
 
     /// Toggle block `i`'s detail. A no-op (silent) unless the block is expandable —
-    /// `Block::Tool` today, `Thinking` per D33. Bumps block `i`'s rev so the
-    /// `(rev, width)` cache re-renders its `▸`/`▾` glyph next frame.
+    /// a `Block::Tool` panel, or a committed assistant block with thinking (D33).
+    /// Bumps block `i`'s rev so the `(rev, width)` cache re-renders its glyph.
     fn toggle_block(&mut self, i: usize) {
-        let toggled = if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(i) {
-            tool.expanded = !tool.expanded;
-            true
-        } else {
-            false
+        let toggled = match self.focused_mut().transcript.get_mut(i) {
+            Some(Block::Tool(tool)) => {
+                tool.expanded = !tool.expanded;
+                true
+            }
+            // A committed assistant block with thinking: expand/collapse it (D33).
+            Some(Block::Assistant { content, thinking_open })
+                if content.iter().any(|c| matches!(c, ContentBlock::Thinking { .. })) =>
+            {
+                *thinking_open = !*thinking_open;
+                true
+            }
+            _ => false,
         };
         if toggled {
             self.focused_mut().bump_rev(i);
@@ -4024,7 +4050,7 @@ mod tests {
         assert!(!app.running());
         assert_eq!(
             app.transcript().last(),
-            Some(&Block::Assistant(vec![ContentBlock::Text {
+            Some(&Block::assistant(vec![ContentBlock::Text {
                 text: "hello".into()
             }]))
         );
@@ -4256,7 +4282,7 @@ mod tests {
         // team strip reads its target (§3).
         assert_eq!(
             app.transcript()[2],
-            Block::Assistant(vec![
+            Block::assistant(vec![
                 ContentBlock::Text {
                     text: "earlier answer".into()
                 },
@@ -5496,6 +5522,36 @@ mod tests {
             "neither the off-screen panel nor the visible one is toggled"
         );
     }
+
+    #[test]
+    fn toggle_selected_covers_a_thinking_block() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::Thinking {
+                        text: "reasoning".into(),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        let open = |a: &App| {
+            matches!(&a.transcript()[0], Block::Assistant { thinking_open, .. } if *thinking_open)
+        };
+
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse selects the assistant block
+        assert_eq!(app.selected(), Some(0));
+        assert!(!open(&app), "a committed thinking block starts collapsed");
+
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(open(&app), "Enter expands the thinking");
+        app.handle(AppEvent::Key(Key::Char(' ')));
+        assert!(!open(&app), "Space collapses it again");
+    }
     #[test]
     fn click_a_block_enters_browse_and_selects_it() {
         let mut app = App::new();
@@ -6314,7 +6370,7 @@ mod tests {
         // A seed on a non-empty transcript drops its divider at the end, so index
         // 0 still names the same block.
         app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
-        assert!(matches!(app.transcript()[0], Block::Assistant(_)));
+        assert!(matches!(app.transcript()[0], Block::Assistant { .. }));
         assert_eq!(app.selected(), Some(0));
     }
 
