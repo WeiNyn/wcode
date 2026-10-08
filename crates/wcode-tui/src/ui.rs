@@ -3549,6 +3549,8 @@ mod tests {
         let mut app = App::new();
         typed(&mut app, "/");
         let comp = buffer_text(&render(&mut app, 80, 24));
+        assert!(comp.contains("commands"), "the completion popup is drawn:\n{comp}");
+        assert!(comp.contains('╭'), "the completion border is rounded:\n{comp}");
         assert!(!comp.contains('┌'), "a square corner remains in the completion:\n{comp}");
     }
 
