@@ -1681,6 +1681,49 @@ pub(crate) struct TranscriptHit {
     /// clamp a drag's column to the row's char count. Chars map to cells 1:1
     /// (wide glyphs count as one), matching `markdown::disp` (plan §WYSIWYG).
     pub(crate) rows: Vec<String>,
+    /// The visible panels' affordance cells, in screen coordinates (D32). Empty
+    /// when no panel top rule is on screen this frame. Recomputed every frame.
+    pub(crate) affordances: Vec<AffordanceHit>,
+}
+
+/// One panel affordance cell's role (D32): `Toggle` is the `▸`/`▾` glyph, `Copy`
+/// is `⧉`. Both are one column wide and sit on the same row, so the KIND — not the
+/// row — disambiguates them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AffordanceKind {
+    Toggle,
+    Copy,
+}
+
+/// One visible panel block's affordance cells, in SCREEN coordinates (the
+/// transcript band's origin, not the block's). Published by `draw_transcript`
+/// every frame and never cached, so it is always in sync with the drawn glyphs
+/// (the `(rev, width)` render cache holds `Line`s, not geometry).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AffordanceHit {
+    /// Index into the FOCUSED surface's `transcript` (a committed block, never
+    /// the live block).
+    pub(crate) block: usize,
+    /// The `▸`/`▾` glyph cell on the panel's top rule (1 col wide, 1 row tall).
+    pub(crate) toggle: Rect,
+    /// The `⧉` glyph cell on the same row (1 col wide).
+    pub(crate) copy: Rect,
+}
+
+impl AffordanceHit {
+    /// Which affordance, if any, contains screen cell `(row, col)` — the
+    /// app-wide `(row, col)` argument order (`block_at`, `sidebar_member_at`).
+    /// `Toggle` and `Copy` never overlap, so at most one matches.
+    pub(crate) fn kind_at(&self, row: u16, col: u16) -> Option<AffordanceKind> {
+        let point = (col, row).into();
+        if self.toggle.contains(point) {
+            Some(AffordanceKind::Toggle)
+        } else if self.copy.contains(point) {
+            Some(AffordanceKind::Copy)
+        } else {
+            None
+        }
+    }
 }
 
 /// The open sidebar as drawn: its rect and each member row's `(surface index, y)`.
@@ -1775,6 +1818,10 @@ pub struct App {
     /// The latest cell a mouse gesture reached (`Down`/`Drag`). Compared to
     /// `mouse_down` on `Up` to tell a click (same cell) from a drag (moved).
     mouse_focus: (u16, u16),
+    /// The panel affordance cell under the button at the last `Down`, if any.
+    /// Resolved to a toggle/copy on a click `Up`, discarded on a drag. Overwritten
+    /// on EVERY `Down` (a miss stores `None`).
+    mouse_affordance: Option<(usize, AffordanceKind)>,
     /// The live transcript text selection in global line/char space, normalized
     /// `(min, max)` — `None` when nothing is selected. Cleared on the next `Down`
     /// in the transcript; read by the renderer's highlight pass.
@@ -1824,6 +1871,7 @@ impl App {
             hit: HitMap::default(),
             mouse_down: None,
             mouse_focus: (0, 0),
+            mouse_affordance: None,
             text_sel: None,
         }
     }
@@ -2364,22 +2412,44 @@ impl App {
         }
     }
 
-    /// `Enter` / `Space` in browse: toggle the selected block's detail. Only a
-    /// tool block has expansion state today — a no-op elsewhere, and silent (no
-    /// notice noise).
-    fn toggle_selected(&mut self) {
-        let Some(idx) = self.focused().selected else {
-            return;
-        };
-        let toggled = if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(idx) {
+    /// Toggle block `i`'s detail. A no-op (silent) unless the block is expandable —
+    /// `Block::Tool` today, `Thinking` per D33. Bumps block `i`'s rev so the
+    /// `(rev, width)` cache re-renders its `▸`/`▾` glyph next frame.
+    fn toggle_block(&mut self, i: usize) {
+        let toggled = if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(i) {
             tool.expanded = !tool.expanded;
             true
         } else {
             false
         };
         if toggled {
-            self.focused_mut().bump_rev(idx);
+            self.focused_mut().bump_rev(i);
             self.dirty = true;
+        }
+    }
+
+    /// Copy block `i`'s text via `copy_text`: push `Action::Copy` (OSC-52) plus a
+    /// `copied N chars to the clipboard` notice; a block with nothing to copy becomes
+    /// a `nothing to copy` notice. The index-addressed form of `copy_selected`; the
+    /// live block is never addressed.
+    fn copy_block(&mut self, i: usize) {
+        let text = self.focused().transcript.get(i).and_then(copy_text);
+        match text {
+            Some(text) => {
+                let chars = text.chars().count();
+                self.actions.push(Action::Copy(text));
+                self.notice(format!("copied {chars} chars to the clipboard"));
+            }
+            None => self.notice("nothing to copy"),
+        }
+    }
+
+    /// `Enter` / `Space` in browse: toggle the selected block's detail. Only a
+    /// tool block has expansion state today — a no-op elsewhere, and silent (no
+    /// notice noise).
+    fn toggle_selected(&mut self) {
+        if let Some(idx) = self.focused().selected {
+            self.toggle_block(idx);
         }
     }
 
@@ -2387,16 +2457,8 @@ impl App {
     /// `Action::Copy` and a `copied N chars to the clipboard` notice). Nothing to
     /// copy becomes a notice, with no action pushed.
     fn copy_selected(&mut self) {
-        let selected = self.focused().selected;
-        let text = selected
-            .and_then(|idx| self.focused().transcript.get(idx))
-            .and_then(copy_text);
-        match text {
-            Some(text) => {
-                let chars = text.chars().count();
-                self.actions.push(Action::Copy(text));
-                self.notice(format!("copied {chars} chars to the clipboard"));
-            }
+        match self.focused().selected {
+            Some(idx) => self.copy_block(idx),
             None => self.notice("nothing to copy"),
         }
     }
@@ -2442,8 +2504,19 @@ impl App {
     /// `draw_transcript` after it measured and sliced the window). `top_line` is
     /// the global line at the rect's top row; `rows` is the plain text of each
     /// visible row.
-    pub(crate) fn set_transcript_hit(&mut self, rect: Rect, top_line: usize, rows: Vec<String>) {
-        self.hit.transcript = Some(TranscriptHit { rect, top_line, rows });
+    pub(crate) fn set_transcript_hit(
+        &mut self,
+        rect: Rect,
+        top_line: usize,
+        rows: Vec<String>,
+        affordances: Vec<AffordanceHit>,
+    ) {
+        self.hit.transcript = Some(TranscriptHit {
+            rect,
+            top_line,
+            rows,
+            affordances,
+        });
     }
 
     /// Publish the open sidebar for hit-testing (called by `draw_sidebar`).
@@ -2468,9 +2541,24 @@ impl App {
         }
     }
 
+    /// The affordance `(block, kind)` under screen cell `(row, col)`, or `None`.
+    /// Scans the focused `TranscriptHit.affordances`; the `(row, col)` order matches
+    /// `block_at` / `sidebar_member_at`.
+    fn affordance_at(&self, row: u16, col: u16) -> Option<(usize, AffordanceKind)> {
+        let hit = self.hit.transcript.as_ref()?;
+        hit.affordances
+            .iter()
+            .find_map(|a| a.kind_at(row, col).map(|kind| (a.block, kind)))
+    }
+
     /// Button down. Records the cell; a hit on a sidebar member row focuses that
     /// surface and stops (the sidebar has no drag semantics). A miss is a no-op.
     fn on_mouse_down(&mut self, col: u16, row: u16) {
+        // Capture the affordance under the button FIRST — before the sidebar
+        // early-return and the text-select anchor — so every Down overwrites the
+        // candidate (a miss stores `None`). The anchor below is still set
+        // (non-consuming), so a drag starting on a glyph still selects text.
+        self.mouse_affordance = self.affordance_at(row, col);
         self.mouse_down = Some((col, row));
         self.mouse_focus = (col, row);
         if let Some(idx) = self.sidebar_member_at(row, col) {
@@ -2507,6 +2595,7 @@ impl App {
     /// consulted — `mouse_focus` already carries the latest gesture cell.
     fn on_mouse_up(&mut self) {
         let down = self.mouse_down.take();
+        let aff = self.mouse_affordance.take();
         let moved = down.is_some_and(|d| d != self.mouse_focus);
         if moved {
             // A drag: copy the selected text (WYSIWYG — see `selected_text`). An
@@ -2515,6 +2604,13 @@ impl App {
                 let chars = text.chars().count();
                 self.actions.push(Action::Copy(text));
                 self.notice(format!("copied {chars} chars to the clipboard"));
+            }
+        } else if let Some((i, kind)) = aff {
+            // A click on a panel glyph toggles / copies THAT block; it never
+            // enters browse and never selects a block.
+            match kind {
+                AffordanceKind::Toggle => self.toggle_block(i),
+                AffordanceKind::Copy => self.copy_block(i),
             }
         } else if down.is_some()
             && let Some(i) = self.block_at(self.mouse_focus.1, self.mouse_focus.0)
@@ -5191,12 +5287,187 @@ mod tests {
         Rect::new(x, y, w, h)
     }
 
+    /// A finished tool block (a panel) for the D32 click tests.
+    fn panel_block(name: &str) -> Block {
+        Block::Tool(Tool {
+            name: name.into(),
+            target: None,
+            output: "one\ntwo".into(),
+            done: true,
+            is_error: false,
+            expanded: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+            params: Vec::new(),
+        })
+    }
+
+    /// An `AffordanceHit` for `block`, with 1x1 `toggle`/`copy` cells on `row` at
+    /// `toggle_col` and `toggle_col + 2` (the A4 spacing).
+    fn affordance(block: usize, toggle_col: u16, row: u16) -> AffordanceHit {
+        AffordanceHit {
+            block,
+            toggle: rect(toggle_col, row, 1, 1),
+            copy: rect(toggle_col + 2, row, 1, 1),
+        }
+    }
+
+    #[test]
+    fn clicking_a_panel_header_toggles_only_that_block() {
+        let mut app = App::new();
+        app.focused_mut().push_block(panel_block("bash"));
+        app.focused_mut().push_block(panel_block("read"));
+        app.set_block_ranges(vec![0..3, 4..7]);
+        // Two visible panels: block 0's top rule at global line 0 (row 0), block 1's
+        // at global line 4 (row 4).
+        app.set_transcript_hit(
+            rect(0, 0, 40, 12),
+            0,
+            vec![String::new(); 12],
+            vec![affordance(0, 4, 0), affordance(1, 4, 4)],
+        );
+
+        // Click the FIRST panel's toggle glyph (col 4, row 0).
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: 4,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: 4,
+            row: 0,
+        }));
+
+        assert_eq!(app.mode(), Mode::Input, "a glyph click never enters browse");
+        assert_eq!(app.selected(), None, "a glyph click never selects a block");
+        let expanded: Vec<bool> = app
+            .transcript()
+            .iter()
+            .map(|b| matches!(b, Block::Tool(t) if t.expanded))
+            .collect();
+        assert_eq!(expanded, vec![true, false], "only the clicked block toggled");
+    }
+
+    #[test]
+    fn clicking_copy_yields_the_block_text() {
+        let mut app = App::new();
+        app.focused_mut().push_block(panel_block("bash"));
+        app.set_block_ranges(std::iter::once(0..3).collect());
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec![String::new(); 10],
+            vec![affordance(0, 4, 0)],
+        );
+
+        // Click the `⧉` glyph (toggle_col + 2 = col 6).
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: 6,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: 6,
+            row: 0,
+        }));
+
+        assert_eq!(app.mode(), Mode::Input, "a copy click never enters browse");
+        assert_eq!(app.selected(), None, "a copy click never selects a block");
+        assert_eq!(app.take_actions(), vec![Action::Copy("one\ntwo".into())]);
+    }
+
+    #[test]
+    fn a_drag_starting_on_an_affordance_still_selects_text() {
+        let mut app = App::new();
+        app.focused_mut().push_block(panel_block("bash"));
+        app.set_block_ranges(std::iter::once(0..3).collect());
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec!["hello".into(), String::new(), String::new()],
+            vec![affordance(0, 4, 0)],
+        );
+
+        // Down ON the `⧉` glyph (col 6, row 0), drag left to col 0, release: the drag
+        // arm wins, copying the dragged text and NEVER toggling the panel.
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: 6,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Drag,
+            col: 0,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: 0,
+            row: 0,
+        }));
+
+        assert_eq!(app.take_actions(), vec![Action::Copy("hello".into())]);
+        let expanded = matches!(app.transcript().first(), Some(Block::Tool(t)) if t.expanded);
+        assert!(!expanded, "a drag from a glyph never toggles the panel");
+    }
+
+    #[test]
+    fn an_off_screen_affordance_click_is_a_no_op() {
+        let mut app = App::new();
+        // Block 0 (global lines 0..3) sits OFF-SCREEN ABOVE the window (top line
+        // 5). Block 1 (lines 8..11) is visible, its top rule at global line 8 →
+        // row 3.
+        app.focused_mut().push_block(panel_block("bash"));
+        app.focused_mut().push_block(panel_block("read"));
+        app.set_block_ranges(vec![0..3, 8..11]);
+        // `draw_transcript` publishes ONLY the visible panel's cells.
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            5,
+            vec![String::new(); 10],
+            vec![affordance(1, 4, 3)],
+        );
+
+        // Click where the OFF-SCREEN block 0's toggle glyph would be (row 0).
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: 4,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: 4,
+            row: 0,
+        }));
+
+        assert_eq!(app.mode(), Mode::Input, "no affordance, no browse");
+        assert_eq!(app.selected(), None, "no affordance, no selection");
+        assert!(app.take_actions().is_empty(), "no affordance, no action");
+        let expanded: Vec<bool> = app
+            .transcript()
+            .iter()
+            .map(|b| matches!(b, Block::Tool(t) if t.expanded))
+            .collect();
+        assert_eq!(
+            expanded,
+            vec![false, false],
+            "neither the off-screen panel nor the visible one is toggled"
+        );
+    }
     #[test]
     fn click_a_block_enters_browse_and_selects_it() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("one"), assistant("two")]);
         app.set_block_ranges(vec![0..1, 2..3]); // two committed blocks
-        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["one".into(), "".into(), "two".into()]);
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec!["one".into(), "".into(), "two".into()],
+            vec![],
+        );
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 2, row: 0 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 2, row: 0 }));
         assert_eq!(app.mode(), Mode::Browse, "a click enters browse");
@@ -5224,7 +5495,12 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
         app.set_block_ranges(std::iter::once(0..1).collect());
-        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["hello".into()]);
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec!["hello".into()],
+            vec![],
+        );
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 0, row: 0 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: 3, row: 0 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 3, row: 0 }));
@@ -5237,7 +5513,12 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
         app.set_block_ranges(std::iter::once(0..1).collect());
-        app.set_transcript_hit(rect(0, 0, 40, 10), 0, vec!["hello".into()]);
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec!["hello".into()],
+            vec![],
+        );
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 1, row: 0 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 1, row: 0 }));
         assert!(app.take_actions().iter().all(|a| !matches!(a, Action::Copy(_))));

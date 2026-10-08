@@ -15,7 +15,7 @@ use ratatui::widgets::{Block as WidgetBlock, BorderType, Borders, Clear, Paragra
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{App, Block, InputView, KEYS, Mode, Overlay, Picker, Tool};
+use crate::app::{AffordanceHit, App, Block, InputView, KEYS, Mode, Overlay, Picker, Tool};
 use crate::markdown;
 use crate::theme;
 
@@ -407,7 +407,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let height = area.height as usize;
     let total = lines.len();
     let grew = total != app.total_lines();
-    app.set_block_ranges(ranges);
+    app.set_block_ranges(ranges.clone());
     // Follow the tail unless the user has scrolled up; the renderer measures
     // the transcript and reconciles the scroll window.
     app.sync_scroll(total, height, area.width as usize);
@@ -451,7 +451,35 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    app.set_transcript_hit(area, start, rows_text);
+    // D32 — publish the panel affordance cells. A panel's top rule is its block's
+    // FIRST line, so a visible panel block contributes two 1x1 cells on that row.
+    // The rects are pure functions of (kind, width, range) — recomputed every
+    // frame, never cached (the (rev, width) cache stores `Line`s, not geometry).
+    let panel_w = (area.width as usize)
+        .saturating_sub(PANEL_INDENT.chars().count())
+        .max(4);
+    let (toggle_col, copy_col) = header_affordance_cols(panel_w);
+    let ind_w = PANEL_INDENT.chars().count() as u16;
+    let affordances: Vec<AffordanceHit> = ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(i, range)| {
+            if !matches!(app.transcript()[i], Block::Tool(_)) {
+                return None;
+            }
+            let row = range.start.checked_sub(start)?;
+            if row >= window.len() {
+                return None;
+            }
+            let y = area.y + row as u16;
+            Some(AffordanceHit {
+                block: i,
+                toggle: Rect::new(area.x + ind_w + toggle_col, y, 1, 1),
+                copy: Rect::new(area.x + ind_w + copy_col, y, 1, 1),
+            })
+        })
+        .collect();
+    app.set_transcript_hit(area, start, rows_text, affordances);
     frame.render_widget(Paragraph::new(window), area);
 }
 
@@ -593,17 +621,49 @@ fn tool_panel_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     let affordances = header_affordances(expanded);
     let body = tool_panel_body(tool, content_w, expanded);
-    panel_frame(name, affordances, params, body, width)
+    panel_frame(name, &affordances, params, body, width)
 }
 
-/// The panel's top-right affordance text: `"▸ ⧉"` collapsed, `"▾ ⧉"` expanded.
-/// The toggle glyph first, `⧉` last, one space between. D32 (slice 4) swaps this
-/// `&'static str` for spans whose byte range gives the `▸`/`⧉` hit regions.
-fn header_affordances(expanded: bool) -> &'static str {
-    if expanded {
-        "▾ ⧉"
-    } else {
-        "▸ ⧉"
+/// The top-right affordance run — toggle glyph, separating space, copy glyph — as
+/// separate spans so a caller can address each glyph's cell. D32 (slice 4).
+struct HeaderAffordances {
+    toggle: Span<'static>,
+    gap: Span<'static>,
+    copy: Span<'static>,
+}
+
+impl HeaderAffordances {
+    /// The run's column count (`"▸ ⧉"` == 3). It drives the A4 right-alignment, so
+    /// the rendered top rule stays byte-identical to the pre-D32 single span.
+    const WIDTH: usize = 3;
+
+    /// The run's column count (== the old `"▸ ⧉".chars().count()`).
+    fn width(&self) -> usize {
+        Self::WIDTH
+    }
+
+    /// `[toggle, gap, copy]`, in draw order.
+    fn spans(&self) -> Vec<Span<'static>> {
+        vec![self.toggle.clone(), self.gap.clone(), self.copy.clone()]
+    }
+}
+
+/// The two affordance CELLS, 0-based from the panel's own left edge (excluding
+/// `PANEL_INDENT`): `toggle_col = panel_w - 2 - WIDTH`, `copy_col = toggle_col + 2`.
+fn header_affordance_cols(panel_w: usize) -> (u16, u16) {
+    let toggle_col = panel_w.saturating_sub(2 + HeaderAffordances::WIDTH);
+    (toggle_col as u16, (toggle_col + 2) as u16)
+}
+
+/// The panel's top-right affordance run: the toggle glyph (`▸` collapsed, `▾`
+/// expanded), a separating space, and the copy glyph `⧉` — each as its own span so
+/// the D32 hit cells can be derived from `panel_w`.
+fn header_affordances(expanded: bool) -> HeaderAffordances {
+    let toggle = if expanded { "▾" } else { "▸" };
+    HeaderAffordances {
+        toggle: Span::styled(toggle.to_string(), dim()),
+        gap: Span::styled(" ".to_string(), dim()),
+        copy: Span::styled("⧉".to_string(), dim()),
     }
 }
 
@@ -745,7 +805,7 @@ fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
 /// `width`.
 fn panel_frame(
     name: Span<'static>,
-    affordances: &'static str,
+    affordances: &HeaderAffordances,
     params: Vec<Line<'static>>,
     body: Vec<Line<'static>>,
     width: usize,
@@ -773,23 +833,29 @@ fn panel_frame(
 }
 
 /// The top rule's spans (without the block indent): `╭─ {name} ─────
-/// {affordances} ─╮`. A4 — `affordances` starts at column `panel_w - 2 -
-/// affordances.len()`, so slice 4 can read its hit region off the cached row.
-fn panel_top_spans(name: &Span<'static>, affordances: &str, panel_w: usize) -> Vec<Span<'static>> {
+/// {affordances} ─╮`. A4 — the affordance run starts at column
+/// `panel_w - 2 - affordances.width()`, so slice 4 reads its hit cells from there
+/// while the rendered glyphs stay byte-identical to the pre-D32 span.
+fn panel_top_spans(
+    name: &Span<'static>,
+    affordances: &HeaderAffordances,
+    panel_w: usize,
+) -> Vec<Span<'static>> {
     let name_w = name.content.chars().count();
-    let aff_w = affordances.chars().count();
+    let aff_w = affordances.width();
     // `╭─ ` + name + ` ` + fill + ` ` + affordances + `─╮`
     let fixed = 3 + name_w + 1 + 1 + aff_w + 2;
     let fill = panel_w.saturating_sub(fixed);
-    vec![
+    let mut spans = vec![
         Span::styled("╭─ ".to_string(), border()),
         name.clone(),
         Span::styled(" ".to_string(), border()),
         Span::styled("─".repeat(fill), border()),
         Span::styled(" ".to_string(), border()),
-        Span::styled(affordances.to_string(), dim()),
-        Span::styled("─╮".to_string(), border()),
-    ]
+    ];
+    spans.extend(affordances.spans());
+    spans.push(Span::styled("─╮".to_string(), border()));
+    spans
 }
 
 /// One framed content row: `│` + `line` + padding + `│`, exactly `panel_w` wide
@@ -3492,5 +3558,50 @@ mod tests {
             width - 2 - "▸ ⧉".chars().count(),
             "the affordances are right-aligned at width - 2 - len:\n{header}"
         );
+    }
+
+    #[test]
+    fn a_rendered_panel_publishes_cells_on_the_drawn_glyphs() {
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "ok");
+        let mut terminal = render(&mut app, 80, 20);
+
+        // The published cells are exactly where the glyphs are drawn.
+        let (block, toggle, copy) = {
+            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+            assert_eq!(hit.affordances.len(), 1, "one panel → one affordance record");
+            let a = &hit.affordances[0];
+            (a.block, a.toggle, a.copy)
+        };
+        assert!(
+            matches!(&app.transcript()[block], Block::Tool(_)),
+            "the affordance names the panel block"
+        );
+        {
+            let buf = terminal.backend().buffer();
+            assert_eq!(buf[(toggle.x, toggle.y)].symbol(), "▸", "the toggle cell");
+            assert_eq!(buf[(copy.x, copy.y)].symbol(), "⧉", "the copy cell");
+        }
+        assert_eq!(copy.y, toggle.y, "both glyphs share the top-rule row");
+        assert_eq!(copy.x, toggle.x + 2, "the A4 gap between the glyphs");
+
+        // End to end: a click on the drawn `▸` expands the panel.
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: toggle.x,
+            row: toggle.y,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: toggle.x,
+            row: toggle.y,
+        }));
+        let expanded = matches!(&app.transcript()[block], Block::Tool(t) if t.expanded);
+        assert!(expanded, "clicking the drawn ▸ expands the panel");
+
+        // The freshly toggled frame draws `▾` in the same cell.
+        terminal = render(&mut app, 80, 20);
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(toggle.x, toggle.y)].symbol(), "▾", "the toggle flips");
     }
 }
