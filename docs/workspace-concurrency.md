@@ -52,7 +52,8 @@ allocation — and, being model-initiated, it would be advisory anyway. Dropped
   `write` (+`expected_digest`, refuse on mismatch).
 - `crates/wcode-cli/src/workspace.rs` (new): a `WorkspaceHooks` impl — the
   policy: auto-attach the session's last-read digest to a mutation, refuse a
-  stale write.
+  stale write, and **refresh** the cache after a successful mutation (so
+  read → edit → edit needs no re-read; see §5.5).
 - Kernel gains nothing new: `Hooks` already provides every interception needed
   (`transform_tool_input` to attach the digest to a call; `after_tool_call` to
   capture the digest `read` emitted). The whole policy is an added `Hooks`
@@ -72,6 +73,13 @@ allocation — and, being model-initiated, it would be advisory anyway. Dropped
    (48 bits); no crypto dependency. D4 truncates the display regardless, so a
    crypto hash buys no forgery resistance beyond the prefix — and the CAS is an
    optimistic-concurrency check, not a security boundary.
+5. **Refresh after a mutation** → **the tool's success output carries the
+   post-write digest as a trailer; the hook harvests it.** Each mutator's
+   success arm appends `# <path> digest <hex>` (hashed from the exact bytes it
+   wrote — never a re-read, so no TOCTOU), and `after_tool_call` refreshes the
+   cache from that last line. read → edit → edit therefore needs no re-read,
+   while a genuine peer rewrite between two edits still refuses (D1); a no-op or
+   erroring arm appends nothing.
 
 ## 6. Non-goals
 

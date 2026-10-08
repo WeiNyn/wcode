@@ -69,7 +69,8 @@ impl TypedTool for Write {
         let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &args.content).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
-                output: format!("wrote {} bytes to {}", args.content.len(), args.path),
+                output: format!("wrote {} bytes to {}", args.content.len(), args.path)
+                    + &super::digest_note(&args.path, &args.content),
                 is_error: false,
                 diff,
                 path: Some(args.path.clone()),
@@ -88,6 +89,30 @@ impl TypedTool for Write {
 mod tests {
     use super::*;
     use super::super::anchor;
+
+    #[tokio::test]
+    async fn write_success_appends_the_post_write_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Write::new(Arc::new(tokio::sync::Mutex::new(())))
+            .execute(
+                WriteArgs {
+                    path: "new.txt".into(),
+                    content: "hello\n".into(),
+                    expected_digest: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let last = out.output.lines().last().unwrap();
+        assert_eq!(
+            crate::workspace::parse_digest_header(last),
+            Some(anchor::file_digest(b"hello\n")),
+            "the last line is the post-write digest trailer: {}",
+            out.output
+        );
+    }
 
     #[tokio::test]
     async fn stale_digest_refuses_the_write() {

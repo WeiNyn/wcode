@@ -95,9 +95,10 @@ impl TypedTool for Replace {
         let diff = super::diff::unified(&content, &updated);
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
         let tmp = super::temp_path(&path);
-        match std::fs::write(&tmp, updated).and_then(|_| std::fs::rename(&tmp, &path)) {
+        match std::fs::write(&tmp, &updated).and_then(|_| std::fs::rename(&tmp, &path)) {
             Ok(_) => ToolOutput {
-                output: format!("replaced in {}", args.path),
+                output: format!("replaced in {}", args.path)
+                    + &super::digest_note(&args.path, &updated),
                 is_error: false,
                 diff,
                 path: Some(args.path.clone()),
@@ -116,6 +117,24 @@ impl TypedTool for Replace {
 mod tests {
     use super::*;
     use super::super::anchor;
+
+    #[tokio::test]
+    async fn replace_success_appends_the_post_replace_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha beta").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = tool()
+            .execute(args("f.txt", "beta", "BETA", None), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let last = out.output.lines().last().unwrap();
+        assert_eq!(
+            crate::workspace::parse_digest_header(last),
+            Some(anchor::file_digest(b"alpha BETA")),
+            "the last line is the post-replace digest trailer: {}",
+            out.output
+        );
+    }
 
     #[tokio::test]
     async fn stale_digest_refuses_the_replace() {

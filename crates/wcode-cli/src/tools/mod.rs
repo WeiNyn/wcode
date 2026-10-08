@@ -156,6 +156,26 @@ pub(crate) fn stale_digest_guard(
     })
 }
 
+/// The trailer appended to a mutator's SUCCESS output: the post-write whole-file
+/// digest in read's `# <path> digest <hex>` shape, so `after_tool_call` harvests
+/// it with the same parser ([`crate::workspace::parse_digest_header`]). The
+/// leading `\n` makes it the LAST line of `ToolOutput::output`.
+///
+/// Contract:
+/// - Returns `"\n" + digest_header(path, &file_digest(written.as_bytes()))`
+///   (so it both starts and ends with `\n`).
+/// - `written` is the EXACT post-write bytes (`edit`/`edits`/`replace`: `updated`;
+///   `write`: `args.content`), hashed — never a re-read (W004 §4.4, no TOCTOU
+///   against a concurrent peer).
+/// - The result never contains `anchor::ANCHOR_SEP`, so it is never an anchor
+///   line (mirrors `header_roundtrips_and_is_not_an_anchor_line`).
+/// - Pure, total, no I/O, no panics.
+pub(crate) fn digest_note(path: &str, written: &str) -> String {
+    format!(
+        "\n{}",
+        crate::workspace::digest_header(path, &anchor::file_digest(written.as_bytes()))
+    )
+}
 /// Same-directory temp name for atomic write+rename mutations. PID-suffixed so
 /// two wcode processes editing the same file can't clobber each other's temp
 /// (rename is still atomic — last writer wins, never a truncation), and it
@@ -187,6 +207,22 @@ pub(crate) fn test_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_note_is_a_newline_prefixed_digest_header() {
+        let written = "a = 10\nb = 2\n";
+        let note = digest_note("f.txt", written);
+        assert_eq!(
+            note,
+            format!(
+                "\n{}",
+                crate::workspace::digest_header("f.txt", &anchor::file_digest(written.as_bytes()))
+            )
+        );
+        assert!(note.starts_with('\n'));
+        assert!(note.ends_with('\n'));
+        assert!(!note.contains(anchor::ANCHOR_SEP));
+    }
 
     fn names(cfg: &ToolsConfig) -> Vec<String> {
         default_tools(cfg, &std::env::temp_dir(), background::Background::new())

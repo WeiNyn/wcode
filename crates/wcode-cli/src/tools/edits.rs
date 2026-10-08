@@ -325,7 +325,7 @@ impl TypedTool for Edits {
                         "edited {} ({total} range{} applied: {summary}). Region now:\n{echo}",
                         args.edits[0].path,
                         if total == 1 { "" } else { "s" },
-                    ),
+                    ) + &super::digest_note(&args.edits[0].path, &updated),
                     is_error: false,
                     diff,
                     path: Some(args.edits[0].path.clone()),
@@ -344,6 +344,31 @@ impl TypedTool for Edits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn edits_success_appends_the_post_edit_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a");
+        let out = tool()
+            .execute(
+                EditsArgs {
+                    expected_digest: None,
+                    edits: vec![op("f.txt", &ha, None, "A")],
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let last = out.output.lines().last().unwrap();
+        assert_eq!(
+            crate::workspace::parse_digest_header(last),
+            Some(anchor::file_digest(b"A\nb\n")),
+            "the last line is the post-edit digest trailer: {}",
+            out.output
+        );
+    }
 
     #[tokio::test]
     async fn stale_digest_refuses_the_batch() {

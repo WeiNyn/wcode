@@ -88,6 +88,20 @@ pub(crate) fn parse_digest_header(line: &str) -> Option<String> {
         .map(|(_, digest)| digest.to_string())
 }
 
+/// Harvest the digest a `# … digest …` line carries; `from_end` picks the end.
+/// `from_end == false` — read's published contract, EXACTLY today's
+///   `text.lines().next().and_then(parse_digest_header)` (line 1 only).
+/// `from_end == true` — a mutation trailer, the LAST parseable line:
+///   `text.lines().rev().find_map(parse_digest_header)`.
+/// Only our trailer parses; summary/echo lines are non-`# ` or anchor-prefixed
+/// (W004 §4.3). Returns `None` when no line parses (a miss).
+fn harvest_digest(text: &str, from_end: bool) -> Option<String> {
+    if from_end {
+        text.lines().rev().find_map(parse_digest_header)
+    } else {
+        text.lines().next().and_then(parse_digest_header)
+    }
+}
 /// The whole-file-CAS refusal, mirroring `E_STALE_ANCHOR`'s shape (D1).
 ///
 /// The three existing `E_STALE_ANCHOR` literals are left untouched; this is the
@@ -167,13 +181,35 @@ impl WorkspaceHooks {
         let Some(path) = args.get("path").and_then(|p| p.as_str()) else {
             return;
         };
-        let Some(digest) = out.output.lines().next().and_then(parse_digest_header) else {
+        let Some(digest) = harvest_digest(&out.output, false) else {
             return;
         };
         self.last_read
             .lock()
             .unwrap()
             .insert(cache_key(path), digest);
+    }
+
+    /// Refresh the cache after a SUCCESSFUL mutation: record the post-write digest
+    /// the tool appended as its output trailer. `from_end=true` ignores the
+    /// summary and any echoed anchor lines and takes the last parseable line
+    /// (W004 §4.3).
+    ///
+    /// `name`/`args` are the TRANSFORMED call's (the hook receives `hook_call`;
+    /// `loop_.rs`), so `args` never carries an injected `expected_digest` for us
+    /// to misread. No-op on a miss: an unknown mutator (`target_path` → `None`)
+    /// or a non-error output with no parseable trailer.
+    fn note_mutation(&self, name: &str, args: &serde_json::Value, out: &ToolOutput) {
+        let Some(path) = self.target_path(name, args) else {
+            return;
+        };
+        let Some(digest) = harvest_digest(&out.output, true) else {
+            return;
+        };
+        self.last_read
+            .lock()
+            .unwrap()
+            .insert(cache_key(&path), digest);
     }
 }
 
@@ -202,13 +238,18 @@ impl Hooks for WorkspaceHooks {
         }
     }
 
-    /// Harvest a `read`'s digest into the cache so the next mutation of that
-    /// path is armed. `out.is_error` ⇒ skip; `!digest_cas` ⇒ skip.
+    /// Harvest a successful tool's digest into the cache so the next mutation of
+    /// that path is armed: a `read` (its header line) or any mutator (its output
+    /// trailer). `out.is_error` ⇒ skip; `!digest_cas` ⇒ skip.
     async fn after_tool_call(&self, call: &ToolCall, out: &mut ToolOutput) {
-        if !self.digest_cas || call.name != "read" || out.is_error {
+        if !self.digest_cas || out.is_error {
             return;
         }
-        self.note_read(&call.arguments, out);
+        if call.name == "read" {
+            self.note_read(&call.arguments, out);
+        } else if MUTATOR_TOOLS.contains(&call.name.as_str()) {
+            self.note_mutation(&call.name, &call.arguments, out);
+        }
     }
 }
 
@@ -327,6 +368,24 @@ mod tests {
         };
         h.after_tool_call(&rc, &mut out).await;
         assert!(h.last_read.lock().unwrap().get(&cache_key("g.txt")).is_none());
+    }
+
+    #[tokio::test]
+    async fn note_mutation_arms_the_cache_from_the_last_line() {
+        let h = WorkspaceHooks::new(true);
+        let c = call("edit", serde_json::json!({"path": "f.txt"}));
+        let mut out = ToolOutput {
+            output: format!(
+                "edited f.txt (line 1; 1 range). Region now:\n{}",
+                digest_header("f.txt", "deadbeef0000")
+            ),
+            ..ToolOutput::default()
+        };
+        h.after_tool_call(&c, &mut out).await;
+        assert_eq!(
+            h.last_read.lock().unwrap().get(&cache_key("f.txt")),
+            Some(&"deadbeef0000".to_string())
+        );
     }
 
     #[test]
@@ -644,6 +703,283 @@ mod chain {
         let mut w2 = write_call("f.txt", "NEW");
         set.transform_tool_input(&mut w2).await;
         assert_eq!(w2.arguments[EXPECTED_DIGEST_KEY], "cafebabe0000");
+    }
+
+    /// The headline regression: read → edit → edit with NO re-read in between.
+    /// Drives the real `Read`/`Edit` tools + the real `WorkspaceHooks` through
+    /// both seams, so the loop's real order (read headers ⇄ parser, trailer ⇄
+    /// cache) is exercised — not a fake.
+    #[tokio::test]
+    async fn a_second_edit_without_a_reread_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+        let h = WorkspaceHooks::new(true);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        // 1. The real `read` emits the header; the hook caches its digest.
+        let mut out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(false),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        h.after_tool_call(&read_call("f.txt"), &mut out).await;
+
+        // 2. edit1: the hook arms it with the read digest; the real `edit` applies.
+        let mut e1 = ToolCall {
+            id: "e1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("a = 1"),
+                "replacement": "a = 10",
+            }),
+        };
+        h.transform_tool_input(&mut e1).await;
+        let eargs1: EditArgs = serde_json::from_value(e1.arguments.clone()).unwrap();
+        let mut out1 = Edit::new(lock.clone()).execute(eargs1, &ctx).await;
+        assert!(!out1.is_error, "{}", out1.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 10\nb = 2\n");
+
+        // 3. after_tool_call harvests edit1's trailer → the POST-edit1 digest.
+        h.after_tool_call(&e1, &mut out1).await;
+
+        // 4. edit2: the hook arms it with the refreshed (post-edit1) digest.
+        let mut e2 = ToolCall {
+            id: "e2".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("a = 10"),
+                "replacement": "a = 100",
+            }),
+        };
+        h.transform_tool_input(&mut e2).await;
+        assert_eq!(
+            e2.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"a = 10\nb = 2\n"),
+            "the cache was refreshed to the post-edit1 digest"
+        );
+        let eargs2: EditArgs = serde_json::from_value(e2.arguments.clone()).unwrap();
+        let out2 = Edit::new(lock).execute(eargs2, &ctx).await;
+        assert!(
+            !out2.is_error,
+            "a second edit must not need a re-read: {}",
+            out2.output
+        );
+        assert!(!out2.output.contains("E_STALE_DIGEST"), "{}", out2.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 100\nb = 2\n");
+    }
+
+    /// The safety property (D1): the refresh must not mask a real peer rewrite.
+    /// A peer `std::fs::write` lands between the two edits — edit2 is armed with
+    /// the post-edit1 digest, sees the peer's bytes, and refuses with
+    /// `E_STALE_DIGEST`, leaving the peer file byte-for-byte untouched.
+    #[tokio::test]
+    async fn a_peer_rewrite_between_two_edits_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+        let h = WorkspaceHooks::new(true);
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        let mut out = Read
+            .execute(
+                ReadArgs {
+                    path: "f.txt".into(),
+                    offset: None,
+                    limit: None,
+                    plain: Some(false),
+                    from: None,
+                    context: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        h.after_tool_call(&read_call("f.txt"), &mut out).await;
+
+        let mut e1 = ToolCall {
+            id: "e1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("a = 1"),
+                "replacement": "a = 10",
+            }),
+        };
+        h.transform_tool_input(&mut e1).await;
+        let eargs1: EditArgs = serde_json::from_value(e1.arguments.clone()).unwrap();
+        let mut out1 = Edit::new(lock.clone()).execute(eargs1, &ctx).await;
+        assert!(!out1.is_error, "{}", out1.output);
+        h.after_tool_call(&e1, &mut out1).await;
+
+        // A peer rewrites the file out-of-band: the armed post-edit1 digest is stale.
+        std::fs::write(&path, "peer\n").unwrap();
+
+        let mut e2 = ToolCall {
+            id: "e2".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": "f.txt",
+                "from": anchor::anchor("peer"),
+                "replacement": "x",
+            }),
+        };
+        h.transform_tool_input(&mut e2).await;
+        assert_eq!(
+            e2.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"a = 10\nb = 2\n"),
+            "the post-edit1 digest is still attached"
+        );
+        let eargs2: EditArgs = serde_json::from_value(e2.arguments.clone()).unwrap();
+        let out2 = Edit::new(lock).execute(eargs2, &ctx).await;
+        assert!(out2.is_error, "a stale edit must refuse: {}", out2.output);
+        assert!(out2.output.contains("E_STALE_DIGEST"), "{}", out2.output);
+        // Non-destructive: the peer's content is byte-for-byte untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "peer\n");
+    }
+
+    /// SENTINEL framing: pre-seed a digest that is NOT the file's real digest, so
+    /// a wrong refresh (the bug this guards) would be observable — a real refresh
+    /// would overwrite it. A no-op `edit` writes nothing, so the cache and the
+    /// output must be unchanged.
+    #[tokio::test]
+    async fn a_noop_edit_does_not_refresh_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+        let h = WorkspaceHooks::new(true);
+        h.last_read
+            .lock()
+            .unwrap()
+            .insert(cache_key("f.txt"), "sentinel00000".into());
+
+        // replacement == original ⇒ applied == 0 ⇒ the no-op arm (is_error:false).
+        let eargs = EditArgs {
+            path: "f.txt".into(),
+            from: anchor::anchor("a = 1"),
+            to: None,
+            replacement: "a = 1".into(),
+            old_string: None,
+            replace_all: None,
+            expected_digest: None,
+        };
+        let mut out = Edit::new(Arc::new(tokio::sync::Mutex::new(())))
+            .execute(eargs, &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let call = ToolCall {
+            id: "e1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({"path": "f.txt"}),
+        };
+        h.after_tool_call(&call, &mut out).await;
+
+        assert_eq!(
+            h.last_read.lock().unwrap().get(&cache_key("f.txt")),
+            Some(&"sentinel00000".to_string()),
+            "a no-op edit must leave the cache untouched"
+        );
+        let last = out.output.lines().last().unwrap();
+        assert!(
+            parse_digest_header(last).is_none(),
+            "a no-op edit emits no trailer: {last}"
+        );
+    }
+
+    /// SENTINEL framing: a guard that wrongly refreshed on error would be caught.
+    /// The real `edit` refuses on a wrong digest (`is_error:true`); the hook's
+    /// `out.is_error` short-circuit leaves the cache as the sentinel.
+    #[tokio::test]
+    async fn a_failed_edit_does_not_refresh_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\n").unwrap();
+        let (ctx, _rx) = test_ctx(dir.path());
+        let h = WorkspaceHooks::new(true);
+        h.last_read
+            .lock()
+            .unwrap()
+            .insert(cache_key("f.txt"), "sentinel00000".into());
+
+        let eargs = EditArgs {
+            path: "f.txt".into(),
+            from: anchor::anchor("a = 1"),
+            to: None,
+            replacement: "a = 10".into(),
+            old_string: None,
+            replace_all: None,
+            expected_digest: Some("000000000000".into()),
+        };
+        let mut out = Edit::new(Arc::new(tokio::sync::Mutex::new(())))
+            .execute(eargs, &ctx)
+            .await;
+        assert!(out.is_error, "{}", out.output);
+        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
+        let call = ToolCall {
+            id: "e1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({"path": "f.txt"}),
+        };
+        h.after_tool_call(&call, &mut out).await;
+
+        assert_eq!(
+            h.last_read.lock().unwrap().get(&cache_key("f.txt")),
+            Some(&"sentinel00000".to_string()),
+            "a failed edit must leave the cache untouched"
+        );
+        let last = out.output.lines().last().unwrap();
+        assert!(parse_digest_header(last).is_none(), "{last}");
+    }
+
+    /// An unguarded `write` (no `expected_digest`, empty cache) still wrote known
+    /// bytes, so its success output carries the trailer and the next mutation's
+    /// `transform_tool_input` attaches the post-write digest (decision 4).
+    #[tokio::test]
+    async fn an_unguarded_write_success_arms_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        let (ctx, _rx) = test_ctx(dir.path());
+        let h = WorkspaceHooks::new(true);
+
+        let mut w = ToolCall {
+            id: "w1".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({ "path": "f.txt", "content": "new bytes\n" }),
+        };
+        h.transform_tool_input(&mut w).await;
+        assert!(
+            w.arguments.get(EXPECTED_DIGEST_KEY).is_none(),
+            "an empty cache attaches nothing"
+        );
+
+        let wargs: WriteArgs = serde_json::from_value(w.arguments.clone()).unwrap();
+        let mut out = Write::new(Arc::new(tokio::sync::Mutex::new(())))
+            .execute(wargs, &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new bytes\n");
+
+        h.after_tool_call(&w, &mut out).await;
+
+        let mut next = write_call("f.txt", "again");
+        h.transform_tool_input(&mut next).await;
+        assert_eq!(
+            next.arguments[EXPECTED_DIGEST_KEY],
+            anchor::file_digest(b"new bytes\n"),
+            "the unguarded write armed the cache"
+        );
     }
 
     /// Item 20.3 — a `plain: true` read has no header, so it arms nothing.

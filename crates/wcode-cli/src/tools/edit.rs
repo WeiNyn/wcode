@@ -237,7 +237,7 @@ impl TypedTool for Edit {
                         applied,
                         if applied == 1 { "" } else { "s" },
                         fresh
-                    ),
+                    ) + &super::digest_note(&args.path, &updated),
                     is_error: false,
                     diff,
                     path: Some(args.path.clone()),
@@ -302,6 +302,51 @@ fn stale_message(args: &EditArgs, lines: &[String], anchors: &[String]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn edit_success_appends_the_post_edit_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a = 1");
+        let out = tool()
+            .execute(args("f.txt", &ha, None, "a = 10", None, None), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        let last = out.output.lines().last().unwrap();
+        assert_eq!(
+            crate::workspace::parse_digest_header(last),
+            Some(anchor::file_digest(b"a = 10\nb = 2\n")),
+            "the last line is the post-edit digest trailer: {}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_trailer_is_not_an_anchor_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a = 1\nb = 2\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let ha = anchor::anchor("a = 1");
+        let out = tool()
+            .execute(args("f.txt", &ha, None, "a = 10", None, None), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        // The echoed "Region now:" lines are anchor-prefixed, but none parses as
+        // a digest header.
+        let mid = out
+            .output
+            .lines()
+            .find(|l| l.contains(crate::tools::anchor::ANCHOR_SEP))
+            .expect("the edit echoes an anchor line");
+        assert_eq!(crate::workspace::parse_digest_header(mid), None);
+        let last = out.output.lines().last().unwrap();
+        assert!(!last.contains(crate::tools::anchor::ANCHOR_SEP), "{last}");
+        assert_eq!(
+            crate::workspace::parse_digest_header(last),
+            Some(anchor::file_digest(b"a = 10\nb = 2\n"))
+        );
+    }
 
     #[tokio::test]
     async fn stale_digest_refuses_the_edit() {
