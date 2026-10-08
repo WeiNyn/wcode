@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="dense" data-screen="chat">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode · VS Code surface · modern direction D · native</title>
+<style>
+/* ============================================================================
+   wcode · VS Code surface · MODERN DIRECTION D — "native" (prototype)
+
+   A STANCE, not a skin. The panel is dated because the webview re-draws VS
+   Code's own widgets: a rail that wants to be a TreeView, a header that wants
+   to be a status bar, popovers and pickers that already exist in the host. It
+   is modern when it STOPS IMITATING the host — the team is a real TreeView,
+   the live status is a real status-bar item, the pickers are VS Code's own
+   QuickPick, and the settings are settings.json. The webview shrinks to the one
+   thing only it can do: the transcript and the composer.
+
+   This deliberately re-opens the shipped v3 non-goal "not the workbench chrome
+   (activity bar, title bar, editor tabs, status bar)". That re-open IS the
+   direction. It also re-opens v3 decision 3 ("the team has ONE home: the rail")
+   — the home moves OUT of the webview.
+
+   NOTE: the workbench around the wcode tab (activity bar, sidebar frame, tab
+   strip, status bar) is THE HOST, drawn here as gallery chrome for context; it
+   is not a wcode surface and it invents no wcode glyph. The chevrons `▸`/`▾`
+   are VS Code's TreeView affordance (and the locked vocabulary); the marks in
+   the activity bar are placeholders, drawn `aria-hidden`.
+
+   Locked invariants kept (docs/vscode-ui-v3-plan.md is the shipped spec):
+     - colour is ONLY --vscode-* plus the ONE accent --wc-accent ("active now");
+     - the shipped scale is REUSED: --wc-1..5, --wc-fs-meta/ui/body/code,
+       --wc-radius 6px. NO new token.
+     - the glyph vocabulary is the locked TUI set: ❯ ⚙ ✓ ✗ ⋯ ▌ ⠋ ● ○. Nothing new.
+     - zero remote assets, one accent, reduced-motion honoured, no "—" rendered.
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  --vscode-editor-background:#1f1f1f;
+  --vscode-editor-foreground:#cccccc;
+  --vscode-sideBar-background:#181818;
+  --vscode-sideBar-foreground:#cccccc;
+  --vscode-sideBar-border:#2b2b2b;
+  --vscode-sideBarSectionHeader-background:#181818;
+  --vscode-panel-border:#2b2b2b;
+  --vscode-descriptionForeground:#9d9d9d;
+  --vscode-foreground:#cccccc;
+  --vscode-focusBorder:#0078d4;
+  --vscode-input-background:#313131;
+  --vscode-input-foreground:#cccccc;
+  --vscode-input-border:#3c3c3c;
+  --vscode-input-placeholderForeground:#989898;
+  --vscode-button-background:#0078d4;
+  --vscode-button-foreground:#ffffff;
+  --vscode-button-secondaryBackground:#313131;
+  --vscode-button-secondaryForeground:#cccccc;
+  --vscode-list-hoverBackground:#2a2d2e;
+  --vscode-list-activeSelectionBackground:#04395e;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#4d4d4d;
+  --vscode-badge-foreground:#f8f8f8;
+  --vscode-textCodeBlock-background:#1a1a1a;
+  --vscode-textBlockQuote-background:#232323;
+  --vscode-textLink-foreground:#4daafc;
+  --vscode-errorForeground:#f14c4c;
+  --vscode-charts-blue:#3794ff;
+  --vscode-charts-green:#89d185;
+  --vscode-charts-yellow:#cca700;
+  --vscode-charts-purple:#b180d7;
+  --vscode-charts-orange:#d18616;
+  --vscode-charts-red:#f14c4c;
+  --vscode-editorWidget-background:#252526;
+  --vscode-editorWidget-border:#454545;
+  --vscode-widget-shadow:rgba(0,0,0,.36);
+  /* the host's own chrome (this direction USES these) */
+  --vscode-activityBar-background:#333333;
+  --vscode-activityBar-foreground:#ffffff;
+  --vscode-activityBar-inactiveForeground:#ffffff99;
+  --vscode-statusBar-background:#007acc;
+  --vscode-statusBar-foreground:#ffffff;
+  --vscode-statusBarItem-hoverBackground:#ffffff1f;
+  --vscode-titleBar-activeBackground:#3c3c3c;
+  --vscode-titleBar-activeForeground:#cccccc;
+  --vscode-tab-activeBackground:#1f1f1f;
+  --vscode-tab-inactiveBackground:#2d2d2d;
+  --vscode-tab-activeForeground:#ffffff;
+  --vscode-tab-inactiveForeground:#ffffff80;
+  --vscode-editorGroup-border:#2b2b2b;
+  --vscode-editor-font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --vscode-font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --vscode-font-size:13px;
+
+  /* --- the shipped wcode system: LENGTHS and TYPE SIZES only, never a colour - */
+  --wc-1:4px; --wc-2:8px; --wc-3:12px; --wc-4:16px; --wc-5:24px;
+  --wc-fs-meta:11px; --wc-fs-ui:12px; --wc-fs-body:13px; --wc-fs-code:.9em;
+  --wc-radius:6px;
+  --wc-accent:var(--vscode-charts-blue);
+}
+html[data-theme="light"]{
+  color-scheme: light;
+  --vscode-editor-background:#ffffff; --vscode-editor-foreground:#3b3b3b;
+  --vscode-sideBar-background:#f8f8f8; --vscode-sideBar-foreground:#3b3b3b; --vscode-sideBar-border:#e7e7e7;
+  --vscode-panel-border:#e7e7e7; --vscode-descriptionForeground:#717171; --vscode-foreground:#3b3b3b;
+  --vscode-input-background:#ffffff; --vscode-input-foreground:#3b3b3b; --vscode-input-border:#cecece;
+  --vscode-input-placeholderForeground:#767676; --vscode-button-secondaryBackground:#e5e5e5;
+  --vscode-button-secondaryForeground:#3b3b3b; --vscode-list-hoverBackground:#e8e8e8;
+  --vscode-list-activeSelectionBackground:#0060c0; --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#c4c4c4; --vscode-badge-foreground:#333333;
+  --vscode-textCodeBlock-background:#f3f3f3; --vscode-textBlockQuote-background:#f3f3f3;
+  --vscode-textLink-foreground:#006ab1; --vscode-errorForeground:#e51400;
+  --vscode-editorWidget-background:#f3f3f3; --vscode-editorWidget-border:#c8c8c8;
+  --vscode-widget-shadow:rgba(0,0,0,.16);
+  --vscode-activityBar-background:#2c2c2c; --vscode-activityBar-foreground:#ffffff;
+  --vscode-activityBar-inactiveForeground:#ffffff99;
+  --vscode-statusBar-background:#007acc; --vscode-statusBar-foreground:#ffffff;
+  --vscode-titleBar-activeBackground:#dddddd; --vscode-titleBar-activeForeground:#333333;
+  --vscode-tab-activeBackground:#ffffff; --vscode-tab-inactiveBackground:#ececec;
+  --vscode-tab-activeForeground:#333333; --vscode-tab-inactiveForeground:#33333380;
+  --vscode-editorGroup-border:#e7e7e7;
+}
+html[data-density="dense"]{
+  --wc-1:2px; --wc-2:4px; --wc-3:8px; --wc-4:10px; --wc-5:16px;
+  --wc-fs-meta:10px; --wc-fs-ui:11.5px; --wc-fs-body:12px;
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:#0d0d0d; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-font-family); font-size:var(--wc-fs-body);
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.mono{ font-family:var(--vscode-editor-font-family); }
+.grow{ flex:1; }
+
+.draft{ max-width:1100px; margin:0 auto; padding:20px 20px 6px; color:#c9c9c9; }
+.draft h1{ font-size:15px; font-weight:600; margin:0 0 2px; }
+.draft .sub{ color:#8a8a8a; font-size:12px; margin:0 0 10px; max-width:94ch; }
+.draft .read{
+  font-family:var(--vscode-editor-font-family); font-size:11.5px;
+  color:#9cd0ff; background:#12202b; border:1px solid #1d3446;
+  border-radius:6px; padding:8px 10px; margin:0 0 10px; white-space:pre-wrap;
+}
+.dials{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px; }
+.dial{ font-family:var(--vscode-editor-font-family); font-size:11px;
+  border:1px solid #333; border-radius:999px; padding:2px 9px; color:#a8a8a8; }
+.dial b{ color:#e6e6e6; font-weight:600; }
+.toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px; }
+.toolbar .sp{ flex:1; }
+.tbtn{ font:inherit; font-size:12px; color:#cfe6ff; background:#15222e;
+  border:1px solid #24384a; border-radius:6px; padding:4px 10px; cursor:pointer; }
+.tbtn:hover{ background:#1b2c3b; }
+.tbtn:focus-visible{ outline:2px solid var(--wc-accent); outline-offset:2px; }
+.tbtn[aria-pressed="true"]{ background:var(--wc-accent); color:#fff; border-color:transparent; }
+
+/* =========================================== the workbench frame (THE HOST)
+   Stands in for a VS Code window. Not a --vscode-* surface of the wcode view;
+   it is the host the wcode parts now live in. */
+.workbench{
+  max-width:1100px; margin:0 auto 12px; height:760px;
+  border:1px solid #2b2b2b; border-radius:8px; overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex; flex-direction:column;
+  background:var(--vscode-editor-background);
+}
+.tbar{
+  flex:0 0 auto; height:34px; display:flex; align-items:center; justify-content:center;
+  background:var(--vscode-titleBar-activeBackground); color:var(--vscode-titleBar-activeForeground);
+  font-size:var(--wc-fs-ui); position:relative;
+}
+.tbar .menu{ position:absolute; left:12px; opacity:.85; }
+.tbar .win{ position:absolute; right:12px; display:flex; gap:var(--wc-2); opacity:.85; }
+.tbar .win i{ width:11px; height:11px; border-radius:50%; background:var(--vscode-titleBar-activeForeground); opacity:.35; display:inline-block; }
+.mid{ flex:1 1 auto; display:flex; min-height:0; }
+
+/* the activity bar: the host's. The marks are placeholders, aria-hidden. */
+.activity{
+  flex:0 0 48px; background:var(--vscode-activityBar-background);
+  display:flex; flex-direction:column; align-items:center; padding-top:var(--wc-2); gap:var(--wc-2);
+}
+.activity .a{ width:48px; height:44px; display:grid; place-items:center;
+  color:var(--vscode-activityBar-inactiveForeground); border-left:2px solid transparent; }
+.activity .a.on{ color:var(--vscode-activityBar-foreground); border-left-color:var(--vscode-activityBar-foreground); }
+.activity .a i{ width:18px; height:18px; border-radius:3px; background:currentColor; opacity:.7; display:block; }
+.activity .a .wc{ font:inherit; font-family:var(--vscode-editor-font-family); font-weight:700; font-size:14px; opacity:1; }
+
+/* the sidebar: the REAL TreeView (the team's new home) */
+.sidebar{
+  flex:0 0 236px; background:var(--vscode-sideBar-background); color:var(--vscode-sideBar-foreground);
+  border-right:1px solid var(--vscode-sideBar-border); display:flex; flex-direction:column; min-height:0;
+}
+.sh{ display:flex; align-items:center; gap:var(--wc-1); padding:0 var(--wc-3); height:30px;
+  font-size:var(--wc-fs-meta); text-transform:uppercase; letter-spacing:.05em;
+  color:var(--vscode-descriptionForeground); }
+.sh .tw{ cursor:pointer; }
+.tree{ list-style:none; margin:0; padding:0; }
+.tree li{ display:flex; align-items:center; gap:var(--wc-1);
+  padding:0 var(--wc-2) 0 var(--wc-2); height:22px; font-size:var(--wc-fs-ui); cursor:pointer; position:relative; }
+.tree li:hover{ background:var(--vscode-list-hoverBackground); }
+.tree li.focus{ background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
+.tree .tw{ width:16px; text-align:center; color:var(--vscode-descriptionForeground); }
+.tree .ic{ width:16px; text-align:center; font-family:var(--vscode-editor-font-family); font-weight:700; }
+.tree .nm{ font-weight:400; }
+.tree .act{ margin-left:auto; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tree li.focus .act{ color:var(--vscode-list-activeSelectionForeground); opacity:.85; }
+.tree li.child{ padding-left:var(--wc-4); }
+.glyph{ font-family:var(--vscode-editor-font-family); font-weight:700; }
+.g-run{ color:var(--wc-accent); } .g-done{ color:var(--vscode-charts-green); }
+.g-err{ color:var(--vscode-errorForeground); } .g-idle{ color:var(--vscode-descriptionForeground); }
+.spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; }
+@keyframes wc-spin{ to{ transform:rotate(360deg); } }
+
+/* the editor area: a tab, and the webview's LAST remaining job */
+.editorarea{ flex:1 1 auto; display:flex; flex-direction:column; min-width:0; min-height:0; }
+.tabs{ flex:0 0 auto; height:35px; display:flex; align-items:stretch;
+  background:var(--vscode-editorGroup-border); border-bottom:1px solid var(--vscode-editorGroup-border); }
+.tab{ display:flex; align-items:center; gap:var(--wc-2); padding:0 var(--wc-3);
+  font-size:var(--wc-fs-ui); background:var(--vscode-tab-activeBackground); color:var(--vscode-tab-activeForeground);
+  border-right:1px solid var(--vscode-editorGroup-border); }
+.tab.other{ background:var(--vscode-tab-inactiveBackground); color:var(--vscode-tab-inactiveForeground); }
+.tab .close{ opacity:.7; }
+.wview{ flex:1 1 auto; display:flex; flex-direction:column; min-height:0; background:var(--vscode-editor-background); }
+
+/* the webview: transcript + composer, and nothing else. No rail, no header. */
+.transcript{ flex:1 1 auto; overflow:auto; min-height:0; padding:var(--wc-3) var(--wc-4);
+  display:flex; flex-direction:column; gap:var(--wc-2); }
+.turn{ display:grid; grid-template-columns:3px 1fr; gap:var(--wc-2); }
+.turn.new{ margin-top:var(--wc-3); }
+.rail{ border:0; background:var(--sw, var(--vscode-panel-border)); border-radius:2px; }
+.turn.you .rail{ background:var(--vscode-descriptionForeground); }
+.turn.wcode .rail{ background:var(--sw, var(--wc-accent)); }
+.rail,.turn.you .rail,.turn.wcode .rail{ background:var(--vscode-panel-border); }
+.turn.you .rail{ background:var(--vscode-descriptionForeground); }
+.who{ display:flex; align-items:center; gap:var(--wc-2); margin:0 0 var(--wc-1); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground); }
+.who .name{ color:var(--vscode-foreground); font-weight:600; }
+.body{ line-height:1.55; overflow-wrap:anywhere; }
+.body p{ margin:0 0 var(--wc-1); } .body p:last-child{ margin-bottom:0; }
+.body a{ color:var(--vscode-textLink-foreground); }
+.body code{ font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  background:var(--vscode-textCodeBlock-background); border-radius:3px; padding:0 3px; }
+.body.live::after{ content:"▌"; margin-left:2px; color:var(--wc-accent); animation:wc-blink 1.1s steps(1) infinite; }
+@keyframes wc-blink{ 50%{ opacity:0; } }
+.tool{ margin:var(--wc-1) 0; border-left:2px solid var(--vscode-charts-green); }
+.tool > summary{ list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:var(--wc-2);
+  padding:var(--wc-1) var(--wc-2); font-size:var(--wc-fs-ui); color:var(--vscode-descriptionForeground); }
+.tool > summary::-webkit-details-marker{ display:none; }
+.tool .chev{ width:9px; font-size:var(--wc-fs-meta); }
+.tool[open] > summary .chev::before{ content:"▾"; } .tool:not([open]) > summary .chev::before{ content:"▸"; }
+.tool .mark{ font-family:var(--vscode-editor-font-family); font-weight:700; color:var(--vscode-charts-green); }
+.tool[data-live="1"]{ border-left-color:var(--wc-accent); } .tool[data-live="1"] .mark{ color:var(--wc-accent); }
+.tool .meta{ margin-left:auto; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); white-space:nowrap; }
+.tool .meta .run{ color:var(--wc-accent); }
+.tool .inner{ padding:0 var(--wc-2) var(--wc-2) 22px; }
+.tool .inner pre{ margin:0; padding:var(--wc-2); border:1px solid var(--vscode-panel-border);
+  border-radius:var(--wc-radius); background:var(--vscode-textCodeBlock-background);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code); white-space:pre-wrap; }
+
+.composer{ flex:0 0 auto; border-top:1px solid var(--vscode-panel-border);
+  padding:var(--wc-2) var(--wc-4) var(--wc-3); display:flex; flex-direction:column; gap:var(--wc-1); }
+.row{ display:flex; align-items:center; gap:var(--wc-2); border:1px solid var(--vscode-input-border);
+  border-radius:var(--wc-radius); background:var(--vscode-input-background); padding:var(--wc-2) var(--wc-3); }
+.row:focus-within{ border-color:var(--vscode-focusBorder); outline:1px solid var(--vscode-focusBorder); }
+textarea{ flex:1; width:100%; resize:none; min-height:20px; max-height:120px; border:0; background:none;
+  color:var(--vscode-input-foreground); font-family:var(--vscode-editor-font-family);
+  font-size:var(--wc-fs-ui); line-height:1.5; padding:0; outline:none; }
+textarea::placeholder{ color:var(--vscode-input-placeholderForeground); }
+.send{ font:inherit; font-size:var(--wc-fs-ui); border:0; border-radius:4px; padding:2px var(--wc-3);
+  cursor:pointer; background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+.send:hover{ opacity:.92; } .send:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+
+/* the status bar: the host's. The wcode item is a real StatusBarItem. */
+.statusbar{
+  flex:0 0 auto; height:22px; display:flex; align-items:center; gap:var(--wc-3);
+  background:var(--vscode-statusBar-background); color:var(--vscode-statusBar-foreground);
+  font-size:var(--wc-fs-ui); padding:0 var(--wc-3);
+}
+.sbitem{ display:inline-flex; align-items:center; gap:var(--wc-1); padding:0 var(--wc-1); height:22px; cursor:pointer; }
+.sbitem:hover{ background:var(--vscode-statusBarItem-hoverBackground); }
+.statusbar .grow{ flex:1; }
+
+/* ======================== the parts that LEFT the webview (gallery cards)
+   Shown beside the workbench to make the re-homing legible. */
+.outside{ max-width:1100px; margin:0 auto 40px; display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media (max-width:760px){ .outside{ grid-template-columns:1fr; } }
+.card{ border:1px solid var(--vscode-editorWidget-border); border-radius:8px; overflow:hidden; background:var(--vscode-editorWidget-background); color:var(--vscode-editor-foreground); }
+.card h3{ margin:0; padding:8px 12px; font-size:12px; font-weight:600; border-bottom:1px solid var(--vscode-editorWidget-border);
+  color:var(--vscode-foreground); background:var(--vscode-textBlockQuote-background); }
+.card pre{ margin:0; padding:12px; font-family:var(--vscode-editor-font-family); font-size:11.5px; white-space:pre-wrap; overflow:auto; }
+.card .note{ padding:8px 12px; font-size:11.5px; color:var(--vscode-descriptionForeground); border-top:1px solid var(--vscode-editorWidget-border); }
+/* the QuickPick: a floating host widget (gallery), shown as the picker mock */
+.qp{ padding:8px; }
+.qp .qin{ display:flex; align-items:center; gap:var(--wc-2); border:1px solid var(--vscode-input-border);
+  border-radius:4px; background:var(--vscode-input-background); padding:4px 8px; font-family:var(--vscode-editor-font-family); font-size:12px; }
+.qp .qin .q{ opacity:.8; }
+.qp ul{ list-style:none; margin:8px 0 0; padding:0; }
+.qp li{ padding:3px 8px; border-radius:4px; font-size:12px; display:flex; gap:8px; align-items:baseline; }
+.qp li.sel{ background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
+.qp li .h{ margin-left:auto; color:var(--vscode-descriptionForeground); font-size:11px; }
+.qp li.sel .h{ color:var(--vscode-list-activeSelectionForeground); opacity:.85; }
+
+@media (prefers-reduced-motion: reduce){
+  /* one animation in the surface: the ⠋ spinner. Off under reduced motion. */
+  .spin, .body.live::after{ animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="draft">
+  <h1>wcode · VS Code surface · modern direction D · native</h1>
+  <p class="sub">
+    The host-native stance: stop re-drawing VS Code. The team is a real TreeView,
+    the live status is a real status-bar item, the pickers are VS Code's QuickPick,
+    and the settings are settings.json. The webview becomes the transcript and the
+    composer and nothing else. The two lower cards show the parts that leave it.
+  </p>
+  <p class="read">Reading this as: a web screen (the VS Code workbench around a minimal webview), for a developer driving a multi-agent session inside VS Code, in VS Code's own native parts (TreeView, status bar, QuickPick, settings), with the dominant constraint that the surface uses the host's real components instead of re-drawing them.</p>
+  <div class="dials">
+    <span class="dial">VARIANCE <b>3</b></span>
+    <span class="dial">MOTION <b>1</b></span>
+    <span class="dial">DENSITY <b>7</b></span>
+    <span class="dial">new tokens <b>0</b></span>
+    <span class="dial">accents <b>1</b></span>
+    <span class="dial">external requests <b>0</b></span>
+  </div>
+  <div class="toolbar">
+    <button class="tbtn" id="tFocus" aria-pressed="false">Tree: focus on Team</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSim" aria-pressed="false">Steps: running</button>
+    <button class="tbtn" id="tTheme" aria-pressed="false">Theme: dark</button>
+  </div>
+</div>
+
+<!-- ============================================ THE WORKBENCH (the host) -->
+<div class="workbench" id="app" role="group" aria-label="VS Code with the wcode parts hosted natively">
+  <div class="tbar" aria-hidden="true">
+    <span class="menu">wcode</span>
+    <span>wcode: chat.ts</span>
+    <span class="win"><i></i><i></i><i></i></span>
+  </div>
+
+  <div class="mid">
+    <!-- the activity bar (the host's) -->
+    <nav class="activity" aria-label="Activity bar">
+      <span class="a" aria-hidden="true"><i></i></span>
+      <span class="a" aria-hidden="true"><i></i></span>
+      <span class="a" aria-hidden="true"><i></i></span>
+      <span class="a on" aria-label="wcode"><span class="wc">❯</span></span>
+      <span class="a" aria-hidden="true"><i></i></span>
+    </nav>
+
+    <!-- the sidebar: a REAL TreeView. This is where the team lives now. -->
+    <aside class="sidebar" aria-label="wcode tree view">
+      <div class="sh"><span class="tw" aria-hidden="true">▾</span>wcode</div>
+      <ul class="tree" role="tree" aria-label="wcode">
+        <li class="child focus" role="treeitem" aria-selected="true">
+          <span class="tw" aria-hidden="true">▾</span>
+          <span class="ic glyph g-run spin" aria-hidden="true">⠋</span>
+          <span class="nm">orchestrator</span>
+          <span class="act">editing chat.css</span>
+        </li>
+        <li class="child" role="treeitem">
+          <span class="tw" aria-hidden="true">▾</span>
+          <span class="ic glyph g-run spin" aria-hidden="true">⠋</span>
+          <span class="nm">explorer</span>
+          <span class="act">grep onOpenDiff</span>
+        </li>
+        <li class="child" role="treeitem">
+          <span class="tw" aria-hidden="true">▾</span>
+          <span class="ic glyph g-idle" aria-hidden="true">○</span>
+          <span class="nm">developer</span>
+          <span class="act">waiting</span>
+        </li>
+        <li class="child" role="treeitem">
+          <span class="tw" aria-hidden="true">▾</span>
+          <span class="ic glyph g-done" aria-hidden="true">✓</span>
+          <span class="nm">reviewer</span>
+          <span class="act">turn done</span>
+        </li>
+      </ul>
+      <div class="sh" style="border-top:1px solid var(--vscode-sideBar-border)"><span class="tw" aria-hidden="true">▸</span>Tasks</div>
+    </aside>
+
+    <!-- the editor: a tab, and the webview's LAST job -->
+    <div class="editorarea">
+      <div class="tabs" aria-label="Editor tabs">
+        <div class="tab"><span aria-hidden="true">❯</span>wcode <span class="close" aria-hidden="true">×</span></div>
+        <div class="tab other">chat.ts <span class="close" aria-hidden="true">×</span></div>
+      </div>
+
+      <section class="wview" role="log" aria-label="Transcript">
+        <div class="transcript">
+          <div class="turn wcode new" style="--sw:var(--wc-accent)">
+            <div class="rail" aria-hidden="true"></div>
+            <div>
+              <div class="who"><span class="name">orchestrator</span></div>
+              <details class="tool" open data-live="1">
+                <summary><span class="chev" aria-hidden="true"></span><span class="mark">⚙ bash</span><span>cargo test</span>
+                  <span class="meta"><span class="run"><span class="spin" aria-hidden="true">⠋</span> running…</span></span></summary>
+                <div class="inner"><pre>running 145 tests
+test view::fold_open ... ok</pre></div>
+              </details>
+              <div class="body"><p class="live">The team moved to the TreeView on the left; the status moved to the status bar below. This webview is only the transcript and the composer now.</p></div>
+            </div>
+          </div>
+          <div class="turn you new">
+            <div class="rail" aria-hidden="true"></div>
+            <div>
+              <div class="who"><span class="name">you</span></div>
+              <div class="body"><p>Then show me the parts you took out of the webview.</p></div>
+            </div>
+          </div>
+        </div>
+        <footer class="composer">
+          <div class="row">
+            <textarea id="input" rows="1" spellcheck="false" aria-label="Message wcode" placeholder="Message wcode…"></textarea>
+            <button class="send" id="send" type="button">Send</button>
+            <button class="send" id="stop" type="button" hidden>Stop</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  </div>
+
+  <!-- the status bar (the host's). The wcode item is a real StatusBarItem. -->
+  <div class="statusbar" role="status" aria-label="Status bar">
+    <span class="sbitem" id="sbwcode" title="wcode: 3 members running"><span class="glyph g-run spin" aria-hidden="true">⠋</span> wcode</span>
+    <span class="sbitem" title="Team">3 members</span>
+    <span class="sbitem" title="Context">ctx 42k</span>
+    <span class="grow"></span>
+    <span class="sbitem" title="Branch">main</span>
+  </div>
+</div>
+
+<!-- ============================ the parts that LEFT the webview (gallery) -->
+<div class="outside">
+  <div class="card">
+    <h3>Settings: a settings.json panel, not an in-panel picker</h3>
+    <pre>{
+  "wcode.path": "wcode",
+  "wcode.defaultModel": "gpt-5-codex",
+  "wcode.autoApproveTools": ["read", "grep", "find"]
+}</pre>
+    <p class="note">The model and the approval policy are settings, so they live where VS Code keeps every setting. The webview stops rendering them.</p>
+  </div>
+
+  <div class="card">
+    <h3>Pickers: VS Code's QuickPick, not a hand-rolled menu</h3>
+    <div class="qp">
+      <div class="qin"><span class="q" aria-hidden="true">&gt;</span><span class="mono">/resume</span></div>
+      <ul role="listbox" aria-label="Resume a session">
+        <li class="sel" role="option" aria-selected="true"><span class="mono">root-1</span><span>/Users/wei/Workspace/wcode</span><span class="h">2h ago</span></li>
+        <li role="option"><span class="mono">root-2</span><span>/Users/wei/Workspace/wcode</span><span class="h">yesterday</span></li>
+        <li role="option"><span class="mono">root-3</span><span>/Users/wei/tmp/scratch</span><span class="h">3d ago</span></li>
+      </ul>
+    </div>
+    <p class="note">Type to filter, arrows to move, Enter to run. The host draws it, so it matches every other picker in the editor.</p>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function () {
+  var root = document.documentElement;
+  var tTheme = document.getElementById("tTheme");
+  tTheme.addEventListener("click", function () {
+    var light = root.dataset.theme === "light";
+    root.dataset.theme = light ? "dark" : "light";
+    tTheme.textContent = "Theme: " + (light ? "dark" : "light");
+  });
+
+  /* the TreeView is the host's; the prototype only moves the focus ring. */
+  var tFocus = document.getElementById("tFocus");
+  var items = Array.prototype.slice.call(document.querySelectorAll(".tree li"));
+  tFocus.addEventListener("click", function () {
+    var i = items.findIndex(function (x) { return x.classList.contains("focus"); });
+    var next = (i + 1) % items.length;
+    items.forEach(function (x, idx) { x.classList.toggle("focus", idx === next); });
+    tFocus.textContent = "Tree: focus on " + items[next].querySelector(".nm").textContent;
+  });
+
+  /* the run simulation: the status-bar item and the spinner follow the run. */
+  var tSim = document.getElementById("tSim");
+  var spins = Array.prototype.slice.call(document.querySelectorAll(".spin"));
+  spins.forEach(function (g) { g.dataset.on = g.textContent; });
+  var simDone = false;
+  function setGlyphs(done) {
+    spins.forEach(function (g) {
+      if (done) { g.textContent = "✓"; g.className = "ic glyph g-done"; }
+      else { g.textContent = "⠋"; g.className = "ic glyph g-run spin"; }
+    });
+    var sb = document.getElementById("sbwcode");
+    sb.innerHTML = done ? '<span class="glyph g-done" aria-hidden="true">✓</span> wcode' : '<span class="glyph g-run spin" aria-hidden="true">⠋</span> wcode';
+    sb.title = done ? "wcode: idle" : "wcode: 3 members running";
+  }
+  tSim.addEventListener("click", function () {
+    simDone = !simDone;
+    document.querySelectorAll(".tool[data-live]").forEach(function (d) {
+      var run = d.querySelector(".run");
+      if (simDone) { d.removeAttribute("open"); d.removeAttribute("data-live"); if (run) { run.textContent = "1.2s"; run.className = "dur"; } }
+      else { d.setAttribute("open", ""); d.setAttribute("data-live", "1"); if (run) { run.innerHTML = '<span class="spin" aria-hidden="true">⠋</span> running…'; run.className = "run"; } }
+    });
+    setGlyphs(simDone);
+    document.getElementById("stop").hidden = simDone;
+    tSim.textContent = "Steps: " + (simDone ? "done" : "running");
+  });
+  document.getElementById("stop").hidden = false;
+})();
+</script>
+</body>
+</html>

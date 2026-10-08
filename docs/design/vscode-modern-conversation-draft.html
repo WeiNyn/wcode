@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="calm" data-screen="chat">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode · VS Code surface · modern direction C · conversation</title>
+<style>
+/* ============================================================================
+   wcode · VS Code surface · MODERN DIRECTION C — "conversation" (prototype)
+
+   A STANCE, not a skin. The panel is dated because three stacked chrome bands
+   and a permanent rail compete with the thing you actually read. It is modern
+   when the CONVERSATION is the hero: one full-width column, chrome that fades
+   in only while you are near it, and the team as a compact line you open on
+   demand rather than a sidebar that is always there.
+
+   This deliberately re-opens the shipped v3 decision 3 ("the team has ONE home:
+   the rail"). It is a draft, and the re-open is the point.
+
+   Locked invariants kept (docs/vscode-ui-v3-plan.md is the shipped spec):
+     - colour is ONLY --vscode-* plus the ONE accent --wc-accent ("active now");
+     - the shipped scale is REUSED: --wc-1..5, --wc-fs-meta/ui/body/code,
+       --wc-radius 6px. NO new token.
+     - the glyph vocabulary is the locked TUI set: ❯ ⚙ ✓ ✗ ⋯ ▌ ⠋ ● ○. Nothing new.
+     - zero remote assets, one accent, reduced-motion honoured, no "—" rendered.
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  --vscode-editor-background:#1f1f1f;
+  --vscode-editor-foreground:#cccccc;
+  --vscode-sideBar-background:#181818;
+  --vscode-sideBar-foreground:#cccccc;
+  --vscode-sideBar-border:#2b2b2b;
+  --vscode-panel-border:#2b2b2b;
+  --vscode-descriptionForeground:#9d9d9d;
+  --vscode-foreground:#cccccc;
+  --vscode-focusBorder:#0078d4;
+  --vscode-input-background:#313131;
+  --vscode-input-foreground:#cccccc;
+  --vscode-input-border:#3c3c3c;
+  --vscode-input-placeholderForeground:#989898;
+  --vscode-button-background:#0078d4;
+  --vscode-button-foreground:#ffffff;
+  --vscode-button-secondaryBackground:#313131;
+  --vscode-button-secondaryForeground:#cccccc;
+  --vscode-list-hoverBackground:#2a2d2e;
+  --vscode-list-activeSelectionBackground:#04395e;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#4d4d4d;
+  --vscode-badge-foreground:#f8f8f8;
+  --vscode-textCodeBlock-background:#1a1a1a;
+  --vscode-textBlockQuote-background:#232323;
+  --vscode-textLink-foreground:#4daafc;
+  --vscode-errorForeground:#f14c4c;
+  --vscode-charts-blue:#3794ff;
+  --vscode-charts-green:#89d185;
+  --vscode-charts-yellow:#cca700;
+  --vscode-charts-purple:#b180d7;
+  --vscode-charts-orange:#d18616;
+  --vscode-charts-red:#f14c4c;
+  --vscode-editorWidget-background:#252526;
+  --vscode-editorWidget-border:#454545;
+  --vscode-widget-shadow:rgba(0,0,0,.36);
+  --vscode-editor-font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --vscode-font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --vscode-font-size:13px;
+
+  /* --- the shipped wcode system: LENGTHS and TYPE SIZES only, never a colour - */
+  --wc-1:4px; --wc-2:8px; --wc-3:12px; --wc-4:16px; --wc-5:24px;
+  --wc-fs-meta:11px; --wc-fs-ui:12px; --wc-fs-body:13px; --wc-fs-code:.9em;
+  --wc-radius:6px;
+  --wc-accent:var(--vscode-charts-blue);
+}
+html[data-theme="light"]{
+  color-scheme: light;
+  --vscode-editor-background:#ffffff; --vscode-editor-foreground:#3b3b3b;
+  --vscode-sideBar-background:#f8f8f8; --vscode-sideBar-foreground:#3b3b3b; --vscode-sideBar-border:#e7e7e7;
+  --vscode-panel-border:#e7e7e7; --vscode-descriptionForeground:#717171; --vscode-foreground:#3b3b3b;
+  --vscode-input-background:#ffffff; --vscode-input-foreground:#3b3b3b; --vscode-input-border:#cecece;
+  --vscode-input-placeholderForeground:#767676; --vscode-button-secondaryBackground:#e5e5e5;
+  --vscode-button-secondaryForeground:#3b3b3b; --vscode-list-hoverBackground:#e8e8e8;
+  --vscode-list-activeSelectionBackground:#0060c0; --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#c4c4c4; --vscode-badge-foreground:#333333;
+  --vscode-textCodeBlock-background:#f3f3f3; --vscode-textBlockQuote-background:#f3f3f3;
+  --vscode-textLink-foreground:#006ab1; --vscode-errorForeground:#e51400;
+  --vscode-editorWidget-background:#f3f3f3; --vscode-editorWidget-border:#c8c8c8;
+  --vscode-widget-shadow:rgba(0,0,0,.16);
+}
+html[data-density="dense"]{
+  --wc-1:2px; --wc-2:4px; --wc-3:8px; --wc-4:10px; --wc-5:16px;
+  --wc-fs-meta:10px; --wc-fs-ui:11.5px; --wc-fs-body:12px;
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:#0d0d0d; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-font-family); font-size:var(--wc-fs-body);
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.mono{ font-family:var(--vscode-editor-font-family); }
+.grow{ flex:1; }
+
+.draft{ max-width:1100px; margin:0 auto; padding:20px 20px 6px; color:#c9c9c9; }
+.draft h1{ font-size:15px; font-weight:600; margin:0 0 2px; }
+.draft .sub{ color:#8a8a8a; font-size:12px; margin:0 0 10px; max-width:94ch; }
+.draft .read{
+  font-family:var(--vscode-editor-font-family); font-size:11.5px;
+  color:#9cd0ff; background:#12202b; border:1px solid #1d3446;
+  border-radius:6px; padding:8px 10px; margin:0 0 10px; white-space:pre-wrap;
+}
+.dials{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px; }
+.dial{ font-family:var(--vscode-editor-font-family); font-size:11px;
+  border:1px solid #333; border-radius:999px; padding:2px 9px; color:#a8a8a8; }
+.dial b{ color:#e6e6e6; font-weight:600; }
+.toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px; }
+.toolbar .sp{ flex:1; }
+.tbtn{ font:inherit; font-size:12px; color:#cfe6ff; background:#15222e;
+  border:1px solid #24384a; border-radius:6px; padding:4px 10px; cursor:pointer; }
+.tbtn:hover{ background:#1b2c3b; }
+.tbtn:focus-visible{ outline:2px solid var(--wc-accent); outline-offset:2px; }
+.tbtn[aria-pressed="true"]{ background:var(--wc-accent); color:#fff; border-color:transparent; }
+
+.app{
+  max-width:1100px; margin:0 auto 40px; height:800px;
+  border:1px solid #2b2b2b; border-radius:8px; overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex; flex-direction:column; position:relative;
+  background:var(--vscode-editor-background);
+}
+.app[data-width="sidebar"]{ max-width:380px; height:760px; }
+
+/* =========================================== the chrome that RECEDES
+   One thin line that lives at the top and dims itself until you are near it.
+   The conversation, not the chrome, is what you look at. */
+.top{
+  flex:0 0 auto; display:flex; align-items:center; gap:var(--wc-2);
+  padding:var(--wc-1) var(--wc-3);
+  border-bottom:1px solid var(--vscode-panel-border);
+  font-size:var(--wc-fs-ui); background:var(--vscode-editor-background);
+  opacity:.62; transition:opacity .16s ease;
+}
+.top:hover, .top:focus-within{ opacity:1; }
+@media (prefers-reduced-motion: reduce){ .top{ transition:none; } }
+.ident{ display:inline-flex; align-items:center; gap:var(--wc-1); min-width:0; }
+.ident .name{ font-weight:600; color:var(--vscode-foreground); }
+.glyph{ font-family:var(--vscode-editor-font-family); font-weight:700; }
+.g-run{ color:var(--wc-accent); }
+.g-done{ color:var(--vscode-charts-green); }
+.g-err{ color:var(--vscode-errorForeground); }
+.g-idle{ color:var(--vscode-descriptionForeground); }
+.spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; }
+@keyframes wc-spin{ to{ transform:rotate(360deg); } }
+.meter{ font-family:var(--vscode-editor-font-family); color:var(--vscode-descriptionForeground); white-space:nowrap; }
+.meter b{ color:var(--vscode-foreground); font-weight:600; }
+
+.ghost{
+  font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  background:none; border:1px solid transparent; border-radius:4px; padding:0 var(--wc-2); cursor:pointer;
+}
+.ghost:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.ghost:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.ghost[aria-expanded="true"]{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+
+/* the ONE popover, reused for the team (the target menu in v3 uses the same). */
+.popwrap{ position:relative; display:inline-flex; }
+.pop{
+  position:absolute; top:calc(100% + var(--wc-1)); right:0; z-index:20; min-width:250px;
+  padding:var(--wc-1); background:var(--vscode-editorWidget-background);
+  border:1px solid var(--vscode-editorWidget-border); border-radius:var(--wc-radius);
+  box-shadow:0 6px 18px var(--vscode-widget-shadow);
+}
+.pop[hidden]{ display:none; }
+.pop .rhead{ padding:var(--wc-1) var(--wc-2); font-size:var(--wc-fs-meta);
+  text-transform:uppercase; letter-spacing:.06em; color:var(--vscode-descriptionForeground); }
+.pop .mrow{
+  display:grid; grid-template-columns:14px 1fr auto; gap:var(--wc-2); align-items:baseline;
+  padding:var(--wc-1) var(--wc-2); cursor:pointer; font-size:var(--wc-fs-ui);
+  border-left:2px solid var(--sw, transparent); border-radius:4px;
+}
+.pop .mrow:hover{ background:var(--vscode-list-hoverBackground); }
+.pop .mrow.sel{ background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
+.pop .mrow .act{ grid-column:2; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground); }
+.pop .mrow.sel .act{ color:var(--vscode-list-activeSelectionForeground); opacity:.85; }
+.pop .mrow .name{ font-weight:600; }
+
+/* ====================================================== THE CONVERSATION
+   Full width, generous. No rail column, no 216px of sidebar stealing the
+   measure. Turns keep their composition (the 3px spine, the head, the `you`
+   alignment) — that is the ONE thing v3 got right, so it is kept. */
+.transcript{
+  flex:1 1 auto; overflow:auto; min-height:0;
+  padding:var(--wc-4) var(--wc-5) var(--wc-4);
+  display:flex; flex-direction:column; gap:var(--wc-2);
+}
+.turn{ display:grid; grid-template-columns:3px 1fr; gap:var(--wc-3); position:relative; }
+.turn.new{ margin-top:var(--wc-4); }
+.turn[hidden]{ display:none; }
+.rail{ border:0; background:var(--sw, var(--vscode-panel-border)); border-radius:2px; }
+.turn.you .rail{ background:var(--vscode-descriptionForeground); }
+.turn.wcode .rail{ background:var(--sw, var(--wc-accent)); }
+.turn.err .rail{ background:var(--vscode-errorForeground); }
+.turn.you{ margin-left:var(--wc-5); background:var(--vscode-textBlockQuote-background);
+  border-radius:var(--wc-radius); padding:var(--wc-2) var(--wc-3) var(--wc-2) 0; overflow:hidden; }
+.who{ display:flex; align-items:center; gap:var(--wc-2); margin:0 0 var(--wc-2); font-size:var(--wc-fs-ui); }
+.who .av{ width:17px; height:17px; border-radius:5px; display:grid; place-items:center;
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); font-weight:700;
+  background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); }
+.who.wcode .av{ background:color-mix(in srgb, var(--sw, var(--wc-accent)) 20%, transparent); color:var(--sw, var(--wc-accent)); }
+.who .name{ color:var(--vscode-foreground); font-weight:700; }
+.who::after{ content:""; flex:1; height:1px; background:var(--vscode-panel-border); }
+.turn.you .who::after{ display:none; }
+.turn.you .who{ margin-bottom:var(--wc-1); }
+
+/* THE TURN TOOLBAR: the chrome that RECEDES. It is not on screen until you
+   hover the turn (or reach it with the keyboard) — then the actions appear.
+   This is where v3's always-on chrome goes. */
+.tactions{ display:flex; gap:var(--wc-1); margin-top:var(--wc-1); height:0; overflow:hidden; opacity:0;
+  transition:opacity .12s ease; }
+.turn:hover .tactions, .turn:focus-within .tactions{ height:auto; opacity:1; }
+@media (prefers-reduced-motion: reduce){ .tactions{ transition:none; } }
+.tact{ font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  background:none; border:1px solid var(--vscode-panel-border); border-radius:4px;
+  padding:0 var(--wc-1); cursor:pointer; }
+.tact:hover{ background:var(--vscode-list-hoverBackground); color:var(--vscode-foreground); }
+.tact:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+
+.body{ line-height:1.6; overflow-wrap:anywhere; }
+.body p{ margin:0 0 var(--wc-2); }
+.body p:last-child{ margin-bottom:0; }
+.body a{ color:var(--vscode-textLink-foreground); }
+.body code{ font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  background:var(--vscode-textCodeBlock-background); border-radius:3px; padding:0 3px; }
+.body.live::after{ content:"▌"; margin-left:2px; color:var(--wc-accent); animation:wc-blink 1.1s steps(1) infinite; }
+@keyframes wc-blink{ 50%{ opacity:0; } }
+
+.tool{ margin:var(--wc-1) 0; border-left:2px solid var(--vscode-panel-border); }
+.tool > summary{ list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:var(--wc-2);
+  padding:var(--wc-1) var(--wc-2); font-size:var(--wc-fs-ui); color:var(--vscode-descriptionForeground); }
+.tool > summary::-webkit-details-marker{ display:none; }
+.tool > summary:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:-1px; }
+.tool .chev{ width:9px; font-size:var(--wc-fs-meta); }
+.tool[open] > summary .chev::before{ content:"▾"; }
+.tool:not([open]) > summary .chev::before{ content:"▸"; }
+.tool .mark{ font-family:var(--vscode-editor-font-family); font-weight:700; color:var(--vscode-charts-green); }
+.tool[data-live="1"]{ border-left-color:var(--wc-accent); background:color-mix(in srgb, var(--wc-accent) 6%, transparent); border-radius:0 var(--wc-radius) var(--wc-radius) 0; }
+.tool[data-live="1"] .mark{ color:var(--wc-accent); }
+.tool.error{ border-left-color:var(--vscode-errorForeground); }
+.tool.error .mark{ color:var(--vscode-errorForeground); }
+.tool .meta{ margin-left:auto; font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta); white-space:nowrap; }
+.tool .meta .add{ color:var(--vscode-charts-green); }
+.tool .meta .del{ color:var(--vscode-charts-red); }
+.tool .meta .run{ color:var(--wc-accent); }
+.tool .inner{ padding:0 var(--wc-2) var(--wc-2) 22px; }
+.tool .inner pre{ margin:0; padding:var(--wc-2); border:1px solid var(--vscode-panel-border);
+  border-radius:var(--wc-radius); background:var(--vscode-textCodeBlock-background);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  white-space:pre-wrap; overflow:auto; max-height:200px; }
+
+/* ============================================================== composer
+   Minimal: a single row pinned to the bottom. Nothing else lives here. */
+.composer{
+  flex:0 0 auto; border-top:1px solid var(--vscode-panel-border);
+  padding:var(--wc-2) var(--wc-5) var(--wc-3);
+  display:flex; flex-direction:column; gap:var(--wc-1);
+}
+.row{ display:flex; align-items:flex-end; gap:var(--wc-2);
+  border:1px solid var(--vscode-input-border); border-radius:var(--wc-radius);
+  background:var(--vscode-input-background); padding:var(--wc-2) var(--wc-3); }
+.row:focus-within{ border-color:var(--vscode-focusBorder); outline:1px solid var(--vscode-focusBorder); }
+textarea{ flex:1; width:100%; resize:none; min-height:22px; max-height:140px;
+  border:0; background:none; color:var(--vscode-input-foreground);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-ui);
+  line-height:1.5; padding:0; outline:none; }
+textarea::placeholder{ color:var(--vscode-input-placeholderForeground); }
+.send{ font:inherit; font-size:var(--wc-fs-ui); border:0; border-radius:4px; padding:2px var(--wc-3);
+  cursor:pointer; background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+.send:hover{ opacity:.92; }
+.send:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:1px; }
+.send[hidden]{ display:none; }
+.hint{ font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground); }
+
+@media (max-width:560px){ .transcript{ padding:var(--wc-3); } .composer{ padding:var(--wc-2) var(--wc-3); } }
+@media (prefers-reduced-motion: reduce){
+  /* both animations off: the ⠋ spinner and the ▌ live cursor. */
+  .spin, .body.live::after{ animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="draft">
+  <h1>wcode · VS Code surface · modern direction C · conversation</h1>
+  <p class="sub">
+    The conversation-forward stance: the transcript gets the whole panel, the
+    permanent rail is gone, and every other control is transient. The top line
+    dims until you are near it; each turn offers its own actions on hover. The
+    team opens from a single header button (or the key). Hover a turn to see its
+    toolbar; click Team for the roster.
+  </p>
+  <p class="read">Reading this as: a web screen (the VS Code webview), for a developer reading a multi-agent session inside VS Code, in VS Code's own theme-variable language (only --vscode-* tokens for colour), with the dominant constraint that the transcript gets the whole panel and every other control is transient.</p>
+  <div class="dials">
+    <span class="dial">VARIANCE <b>2</b></span>
+    <span class="dial">MOTION <b>2</b></span>
+    <span class="dial">DENSITY <b>5</b></span>
+    <span class="dial">new tokens <b>0</b></span>
+    <span class="dial">accents <b>1</b></span>
+    <span class="dial">external requests <b>0</b></span>
+  </div>
+  <div class="toolbar">
+    <button class="tbtn" id="tTeam" aria-pressed="false">Team: closed</button>
+    <button class="tbtn" id="tFocus" aria-pressed="false">View: All</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSidebar" aria-pressed="false">Dock: sidebar</button>
+    <button class="tbtn" id="tEditor" aria-pressed="true">Dock: editor</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSim" aria-pressed="false">Steps: running</button>
+    <button class="tbtn" id="tTheme" aria-pressed="false">Theme: dark</button>
+  </div>
+</div>
+
+<div class="app" id="app" data-width="editor" data-mode="all"
+     role="group" aria-label="wcode: a conversation-forward surface for a multi-agent session">
+
+  <!-- =========================================== the thin, receding top line -->
+  <header class="top" role="banner">
+    <span class="ident">
+      <span class="glyph g-run spin" id="hGlyph" aria-hidden="true">⠋</span>
+      <span class="name" id="targetName">orchestrator</span>
+    </span>
+    <span class="meter">ctx <b>42k</b></span>
+    <span class="grow"></span>
+    <span class="meter" id="workingLine"><span class="glyph g-run spin" aria-hidden="true">⠋</span> 2 working</span>
+    <span class="popwrap">
+      <button class="ghost" id="team" type="button" aria-haspopup="true" aria-expanded="false">Team (4)</button>
+      <div class="pop" id="teampop" hidden role="group" aria-label="Team">
+        <div class="rhead">Team</div>
+        <div class="mrow sel" data-target="orchestrator" style="--sw:var(--vscode-charts-blue)">
+          <span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="name">orchestrator</span><span class="act">editing chat.css</span></div>
+        <div class="mrow" data-target="explorer" style="--sw:var(--vscode-charts-green)">
+          <span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="name">explorer</span><span class="act">grep onOpenDiff</span></div>
+        <div class="mrow" data-target="developer" style="--sw:var(--vscode-charts-orange)">
+          <span class="glyph g-idle" aria-hidden="true">○</span><span class="name">developer</span><span class="act">waiting on orchestrator</span></div>
+        <div class="mrow" data-target="reviewer" style="--sw:var(--vscode-charts-purple)">
+          <span class="glyph g-done" aria-hidden="true">✓</span><span class="name">reviewer</span><span class="act">turn done</span></div>
+      </div>
+    </span>
+    <span class="popwrap">
+      <button class="ghost" id="more" type="button" aria-haspopup="true" aria-expanded="false" aria-label="Session details">▾</button>
+      <div class="pop" id="pop" hidden role="group" aria-label="Session details">
+        <div class="rhead">Session</div>
+        <div class="mrow" style="grid-template-columns:1fr auto"><span class="name mono">root-1</span><span class="act">model gpt-5-codex</span></div>
+      </div>
+    </span>
+  </header>
+
+  <!-- ====================================================== the conversation -->
+  <section class="transcript" id="transcript" role="log" aria-label="Transcript">
+
+    <div class="turn you new">
+      <div class="rail" aria-hidden="true"></div>
+      <div>
+        <div class="who"><span class="av" aria-hidden="true">Y</span><span class="name">you</span></div>
+        <div class="body"><p>Make the conversation the whole panel. Drop the rail. If I want the team, I will ask for it.</p></div>
+        <div class="tactions">
+          <button class="tact" type="button">Copy</button>
+          <button class="tact" type="button">Edit</button>
+          <button class="tact" type="button">Retry</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="turn wcode new" data-member="root" style="--sw:var(--vscode-charts-blue)">
+      <div class="rail" aria-hidden="true"></div>
+      <div>
+        <div class="who wcode"><span class="av" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
+        <details class="tool" open data-live="1">
+          <summary><span class="chev" aria-hidden="true"></span><span class="mark">⚙ bash</span><span>cargo test</span>
+            <span class="meta"><span class="run"><span class="spin" aria-hidden="true">⠋</span> running…</span></span></summary>
+          <div class="inner"><pre>running 145 tests
+test view::fold_open ... ok</pre></div>
+        </details>
+        <div class="body"><p class="live">The rail is gone; the transcript is full width now. Hover this turn and the actions appear. That is the point: chrome only when you are near it.</p></div>
+        <div class="tactions">
+          <button class="tact" type="button">Copy</button>
+          <button class="tact" type="button">Show diff</button>
+          <button class="tact" type="button">Steer</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="turn wcode" data-member="root" style="--sw:var(--vscode-charts-blue)">
+      <div class="rail" aria-hidden="true"></div>
+      <div>
+        <div class="who wcode"><span class="av" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
+        <div class="body"><p>Handing the render to the reviewer. Click Team above to see who is where.</p></div>
+      </div>
+    </div>
+
+    <div class="turn wcode new" data-member="w1" style="--sw:var(--vscode-charts-green)">
+      <div class="rail" aria-hidden="true"></div>
+      <div>
+        <div class="who wcode"><span class="av" aria-hidden="true">E</span><span class="name">explorer</span></div>
+        <div class="body"><p>The diff hook is at <code>chat.ts:88</code>.</p></div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ============================================================== composer -->
+  <footer class="composer">
+    <div class="row">
+      <textarea id="input" rows="1" spellcheck="false" aria-label="Message wcode"
+        placeholder="Message wcode…"></textarea>
+      <button class="send" id="send" type="button">Send</button>
+      <button class="send" id="stop" type="button" hidden>Stop</button>
+    </div>
+    <span class="hint">Enter to send. Shift Enter for a newline. Esc to cancel.</span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+(function () {
+  var app = document.getElementById("app");
+  var root = document.documentElement;
+
+  function press(btns, on) { btns.forEach(function (b) { b.setAttribute("aria-pressed", b === on ? "true" : "false"); }); }
+
+  var tTheme = document.getElementById("tTheme");
+  tTheme.addEventListener("click", function () {
+    var light = root.dataset.theme === "light";
+    root.dataset.theme = light ? "dark" : "light";
+    tTheme.textContent = "Theme: " + (light ? "dark" : "light");
+  });
+
+  var tEditor = document.getElementById("tEditor");
+  var tSidebar = document.getElementById("tSidebar");
+  tEditor.addEventListener("click", function () { app.dataset.width = "editor"; press([tEditor, tSidebar], tEditor); });
+  tSidebar.addEventListener("click", function () { app.dataset.width = "sidebar"; press([tEditor, tSidebar], tSidebar); });
+
+  /* the team, on demand: the ONE popover. */
+  var team = document.getElementById("team");
+  var teampop = document.getElementById("teampop");
+  var tTeam = document.getElementById("tTeam");
+  function openTeam(on) {
+    teampop.hidden = !on;
+    team.setAttribute("aria-expanded", on ? "true" : "false");
+    tTeam.textContent = "Team: " + (on ? "open" : "closed");
+    tTeam.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  team.addEventListener("click", function () { openTeam(teampop.hidden); });
+  tTeam.addEventListener("click", function () { openTeam(teampop.hidden); });
+
+  var mrows = Array.prototype.slice.call(teampop.querySelectorAll(".mrow"));
+  var targetName = document.getElementById("targetName");
+  mrows.forEach(function (r) {
+    r.addEventListener("click", function () {
+      mrows.forEach(function (x) { x.classList.toggle("sel", x === r); });
+      targetName.textContent = r.dataset.target;
+      openTeam(false);
+    });
+  });
+
+  var more = document.getElementById("more");
+  var pop = document.getElementById("pop");
+  more.addEventListener("click", function () { var on = more.getAttribute("aria-expanded") === "true"; more.setAttribute("aria-expanded", on ? "false" : "true"); pop.hidden = on; });
+  document.addEventListener("click", function (event) {
+    if (!event.target.closest(".popwrap")) { if (!teampop.hidden) openTeam(false); if (!pop.hidden) { pop.hidden = true; more.setAttribute("aria-expanded", "false"); } }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    if (!teampop.hidden) { openTeam(false); team.focus(); }
+    if (!pop.hidden) { pop.hidden = true; more.setAttribute("aria-expanded", "false"); more.focus(); }
+  });
+
+  /* focus mode: all speakers in All; only the target's turns in Focus. */
+  var tFocus = document.getElementById("tFocus");
+  var turns = Array.prototype.slice.call(document.querySelectorAll(".transcript .turn"));
+  var focusOn = false;
+  tFocus.addEventListener("click", function () {
+    focusOn = !focusOn;
+    app.dataset.mode = focusOn ? "focus" : "all";
+    turns.forEach(function (t) { t.hidden = focusOn && t.dataset.member === undefined; });
+    tFocus.textContent = "View: " + (focusOn ? "Focus" : "All");
+    tFocus.setAttribute("aria-pressed", focusOn ? "true" : "false");
+  });
+
+  /* the run simulation */
+  var tSim = document.getElementById("tSim");
+  var spins = Array.prototype.slice.call(document.querySelectorAll("#app .spin"));
+  spins.forEach(function (g) { g.dataset.on = g.textContent; });
+  var simDone = false;
+  function setGlyphs(done) {
+    spins.forEach(function (g) {
+      if (done) { g.textContent = "✓"; g.className = "glyph g-done"; }
+      else { g.textContent = g.dataset.on; g.className = "glyph g-run spin"; }
+    });
+    document.getElementById("hGlyph").className = done ? "glyph g-done" : "glyph g-run spin";
+    document.getElementById("workingLine").innerHTML = done ? "team idle" : '<span class="glyph g-run spin" aria-hidden="true">⠋</span> 2 working';
+  }
+  tSim.addEventListener("click", function () {
+    simDone = !simDone;
+    document.querySelectorAll(".transcript .tool[data-live]").forEach(function (d) {
+      var run = d.querySelector(".run");
+      if (simDone) { d.removeAttribute("open"); d.removeAttribute("data-live"); if (run) { run.textContent = "1.2s"; run.className = "dur"; } }
+      else { d.setAttribute("open", ""); d.setAttribute("data-live", "1"); if (run) { run.innerHTML = '<span class="spin" aria-hidden="true">⠋</span> running…'; run.className = "run"; } }
+    });
+    setGlyphs(simDone);
+    document.getElementById("stop").hidden = simDone;
+    tSim.textContent = "Steps: " + (simDone ? "done" : "running");
+  });
+  document.getElementById("stop").hidden = false;
+})();
+</script>
+</body>
+</html>

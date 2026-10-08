@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="calm" data-screen="chat">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode · VS Code surface · modern direction A · editorial</title>
+<style>
+/* ============================================================================
+   wcode · VS Code surface · MODERN DIRECTION A — "editorial" (prototype)
+
+   A STANCE, not a skin. The panel is dated because it is dressed like a widget:
+   a permanent rail, a turn spine, hairlines, a fill on your own words, a pill.
+   It is modern when the words ARE the interface — one quiet column, a byline,
+   and air. Hierarchy is weight + space, never another box.
+
+   Where the shipped v3 surface boxes, this reads. Where it fills, this rests.
+
+   Locked invariants kept (docs/vscode-ui-v3-plan.md is the shipped spec):
+     - colour is ONLY --vscode-* plus the ONE accent --wc-accent ("active now");
+     - the shipped scale is REUSED, not extended: --wc-1..5, --wc-fs-meta/ui/
+       body/code, --wc-radius 6px. NO new token; the air comes from re-spending
+       --wc-5 and from the reading column's width.
+     - the glyph vocabulary is the locked TUI set: ❯ ⚙ ✓ ✗ ⋯ ▌ ⠋ ● ○. Nothing new.
+     - zero remote assets, one accent, reduced-motion honoured, no "—" in a
+       rendered string, no em-dash in any label below.
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  /* VS Code supplies these in the panel; the Dark+ values keep the file honest
+     standalone. Nothing in the surface hardcodes a colour of its own. */
+  --vscode-editor-background:#1f1f1f;
+  --vscode-editor-foreground:#cccccc;
+  --vscode-sideBar-background:#181818;
+  --vscode-sideBar-foreground:#cccccc;
+  --vscode-sideBar-border:#2b2b2b;
+  --vscode-panel-border:#2b2b2b;
+  --vscode-descriptionForeground:#9d9d9d;
+  --vscode-foreground:#cccccc;
+  --vscode-focusBorder:#0078d4;
+  --vscode-input-background:#313131;
+  --vscode-input-foreground:#cccccc;
+  --vscode-input-border:#3c3c3c;
+  --vscode-input-placeholderForeground:#989898;
+  --vscode-button-background:#0078d4;
+  --vscode-button-foreground:#ffffff;
+  --vscode-button-secondaryBackground:#313131;
+  --vscode-button-secondaryForeground:#cccccc;
+  --vscode-list-hoverBackground:#2a2d2e;
+  --vscode-list-activeSelectionBackground:#04395e;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#4d4d4d;
+  --vscode-badge-foreground:#f8f8f8;
+  --vscode-textCodeBlock-background:#1a1a1a;
+  --vscode-textBlockQuote-background:#232323;
+  --vscode-textLink-foreground:#4daafc;
+  --vscode-errorForeground:#f14c4c;
+  --vscode-charts-blue:#3794ff;
+  --vscode-charts-green:#89d185;
+  --vscode-charts-yellow:#cca700;
+  --vscode-charts-purple:#b180d7;
+  --vscode-charts-orange:#d18616;
+  --vscode-charts-red:#f14c4c;
+  --vscode-editorWidget-background:#252526;
+  --vscode-editorWidget-border:#454545;
+  --vscode-widget-shadow:rgba(0,0,0,.36);
+  --vscode-editor-font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --vscode-font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --vscode-font-size:13px;
+
+  /* --- the shipped wcode system: LENGTHS and TYPE SIZES only, never a colour - */
+  --wc-1:4px; --wc-2:8px; --wc-3:12px; --wc-4:16px; --wc-5:24px;
+  --wc-fs-meta:11px; --wc-fs-ui:12px; --wc-fs-body:13px; --wc-fs-code:.9em;
+  --wc-radius:6px;
+  --wc-accent:var(--vscode-charts-blue); /* the one accent: "active now" */
+
+  /* editorial's one local knob, derived from the shipped step, NOT a new token */
+  --ed-measure: 66ch; /* the reading column */
+}
+html[data-theme="light"]{
+  color-scheme: light;
+  --vscode-editor-background:#ffffff;
+  --vscode-editor-foreground:#3b3b3b;
+  --vscode-sideBar-background:#f8f8f8;
+  --vscode-sideBar-foreground:#3b3b3b;
+  --vscode-sideBar-border:#e7e7e7;
+  --vscode-panel-border:#e7e7e7;
+  --vscode-descriptionForeground:#717171;
+  --vscode-foreground:#3b3b3b;
+  --vscode-input-background:#ffffff;
+  --vscode-input-foreground:#3b3b3b;
+  --vscode-input-border:#cecece;
+  --vscode-input-placeholderForeground:#767676;
+  --vscode-button-secondaryBackground:#e5e5e5;
+  --vscode-button-secondaryForeground:#3b3b3b;
+  --vscode-list-hoverBackground:#e8e8e8;
+  --vscode-list-activeSelectionBackground:#0060c0;
+  --vscode-list-activeSelectionForeground:#ffffff;
+  --vscode-badge-background:#c4c4c4;
+  --vscode-badge-foreground:#333333;
+  --vscode-textCodeBlock-background:#f3f3f3;
+  --vscode-textBlockQuote-background:#f3f3f3;
+  --vscode-textLink-foreground:#006ab1;
+  --vscode-errorForeground:#e51400;
+  --vscode-editorWidget-background:#f3f3f3;
+  --vscode-editorWidget-border:#c8c8c8;
+  --vscode-widget-shadow:rgba(0,0,0,.16);
+}
+/* Density is a token switch, not a second design. Editorial's default is calm;
+   the shipped `dense` switch still exists, and is still a token change only. */
+html[data-density="dense"]{
+  --wc-1:2px; --wc-2:4px; --wc-3:8px; --wc-4:10px; --wc-5:16px;
+  --wc-fs-meta:10px; --wc-fs-ui:11.5px; --wc-fs-body:12px;
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:#0d0d0d; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-font-family); font-size:var(--wc-fs-body);
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.mono{ font-family:var(--vscode-editor-font-family); }
+.grow{ flex:1; }
+
+/* ======================================================= the draft's toolbar
+   Gallery chrome: a way to drive the prototype. Not part of the surface. */
+.draft{ max-width:1100px; margin:0 auto; padding:20px 20px 6px; color:#c9c9c9; }
+.draft h1{ font-size:15px; font-weight:600; margin:0 0 2px; }
+.draft .sub{ color:#8a8a8a; font-size:12px; margin:0 0 10px; max-width:94ch; }
+.draft .read{
+  font-family:var(--vscode-editor-font-family); font-size:11.5px;
+  color:#9cd0ff; background:#12202b; border:1px solid #1d3446;
+  border-radius:6px; padding:8px 10px; margin:0 0 10px; white-space:pre-wrap;
+}
+.dials{ display:flex; flex-wrap:wrap; gap:6px; margin:0 0 12px; }
+.dial{ font-family:var(--vscode-editor-font-family); font-size:11px;
+  border:1px solid #333; border-radius:999px; padding:2px 9px; color:#a8a8a8; }
+.dial b{ color:#e6e6e6; font-weight:600; }
+.toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px; }
+.toolbar .sp{ flex:1; }
+.tbtn{
+  font:inherit; font-size:12px; color:#cfe6ff; background:#15222e;
+  border:1px solid #24384a; border-radius:6px; padding:4px 10px; cursor:pointer;
+}
+.tbtn:hover{ background:#1b2c3b; }
+.tbtn:focus-visible{ outline:2px solid var(--wc-accent); outline-offset:2px; }
+.tbtn[aria-pressed="true"]{ background:var(--wc-accent); color:#fff; border-color:transparent; }
+
+/* ================================================================ the app
+   The gallery frame stands in for the docked editor; it is not a --vscode-*
+   token and not part of the surface. */
+.app{
+  max-width:1100px; margin:0 auto 40px; height:800px;
+  border:1px solid #2b2b2b; border-radius:8px; overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex; flex-direction:column; position:relative;
+  background:var(--vscode-editor-background);
+}
+.app[data-width="sidebar"]{ max-width:380px; height:760px; }
+
+/* ======================================================== 1. the masthead
+   No box, no bar: one quiet line, and a rule. The team is a dim caption, not
+   a sidebar. Everything the widget-header shouted, this whispers. */
+.masthead{
+  flex:0 0 auto;
+  padding:var(--wc-3) var(--wc-5) var(--wc-2);
+  border-bottom:1px solid var(--vscode-panel-border);
+}
+.masthead .row1{ display:flex; align-items:baseline; gap:var(--wc-2); }
+.ident{ display:inline-flex; align-items:baseline; gap:var(--wc-1); min-width:0; }
+.ident .name{ font-weight:700; color:var(--vscode-foreground); font-size:var(--wc-fs-ui); }
+.glyph{ font-family:var(--vscode-editor-font-family); font-weight:700; font-size:var(--wc-fs-ui); }
+.g-run{ color:var(--wc-accent); }
+.g-done{ color:var(--vscode-charts-green); }
+.g-err{ color:var(--vscode-errorForeground); }
+.g-idle{ color:var(--vscode-descriptionForeground); }
+.spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; }
+@keyframes wc-spin{ to{ transform:rotate(360deg); } }
+.masthead .status{
+  margin-left:auto; font-family:var(--vscode-editor-font-family);
+  font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  display:inline-flex; gap:var(--wc-2); white-space:nowrap;
+}
+.masthead .team{
+  margin-top:var(--wc-1); font-family:var(--vscode-editor-font-family);
+  font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  display:flex; flex-wrap:wrap; gap:var(--wc-3);
+}
+.masthead .team .m{ display:inline-flex; align-items:baseline; gap:var(--wc-1); }
+.masthead .team .m .act{ opacity:.7; }
+
+/* ============================================================== 2. stream
+   The transcript is a reading column, centered, capped at --ed-measure. There
+   is no rail, no spine, no fill. The beat between speakers is --wc-5. */
+.stream{
+  flex:1 1 auto; overflow:auto; min-height:0;
+  padding:var(--wc-4) var(--wc-4) var(--wc-5);
+  display:flex; flex-direction:column;
+}
+.col{ width:100%; max-width:var(--ed-measure); margin:0 auto; }
+.turn{ margin:0 0 var(--wc-3); }
+.turn.new{ margin-top:var(--wc-5); } /* a speaker change is a paragraph, not a row */
+.turn:first-child{ margin-top:0; }
+.turn[hidden]{ display:none; }
+.byline{
+  display:flex; align-items:baseline; gap:var(--wc-1); margin:0 0 var(--wc-1);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  letter-spacing:.06em; text-transform:uppercase;
+  color:var(--vscode-descriptionForeground);
+}
+.byline .glyph{ font-size:var(--wc-fs-meta); }
+.byline.you{ color:var(--vscode-foreground); }
+.body{ line-height:1.7; overflow-wrap:anywhere; }
+.body p{ margin:0 0 var(--wc-2); }
+.body p:last-child{ margin-bottom:0; }
+.body a{ color:var(--vscode-textLink-foreground); }
+/* This direction DROPS the card from the code block: foreign content is still
+   foreign, so it keeps a fill; a quiet surface is worth more than the boundary.
+   It is the shipped L2b form (fill + radius, no border), reused. */
+pre.quote{
+  margin:var(--wc-2) 0; padding:var(--wc-2) var(--wc-3);
+  background:var(--vscode-textCodeBlock-background); border-radius:var(--wc-radius);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  white-space:pre-wrap; overflow-x:auto;
+}
+.body code, .mono code{
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-code);
+  background:var(--vscode-textCodeBlock-background); border-radius:3px; padding:0 3px;
+}
+.body.live::after{
+  content:"▌"; margin-left:2px; color:var(--wc-accent);
+  animation:wc-blink 1.1s steps(1) infinite;
+}
+@keyframes wc-blink{ 50%{ opacity:0; } }
+
+/* the tool is a sentence, not a fold: a dim line. Expand to a bare fill. */
+.tool{ margin:var(--wc-1) 0; }
+.tool > summary{
+  list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:var(--wc-1);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground); padding:1px 0;
+}
+.tool > summary::-webkit-details-marker{ display:none; }
+.tool > summary:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:2px; }
+.tool .chev{ width:9px; opacity:.7; }
+.tool[open] > summary .chev::before{ content:"▾"; }
+.tool:not([open]) > summary .chev::before{ content:"▸"; }
+.tool .mark{ color:var(--vscode-foreground); font-weight:600; }
+.tool[data-live="1"] .mark{ color:var(--wc-accent); }
+.tool.error .mark{ color:var(--vscode-errorForeground); }
+.tool .meta{ margin-left:auto; white-space:nowrap; }
+.tool .meta .add{ color:var(--vscode-charts-green); }
+.tool .meta .del{ color:var(--vscode-charts-red); }
+.tool .meta .run{ color:var(--wc-accent); }
+.tool .meta .fail{ color:var(--vscode-errorForeground); }
+.tool .inner{ padding:var(--wc-1) 0 var(--wc-2) var(--wc-2); }
+.tool .inner pre{ margin:0; }
+
+/* the thinking aside is a paragraph of small dim italic type — no rule at all */
+.aside{ color:var(--vscode-descriptionForeground); font-style:italic; }
+
+/* ============================================== 3. the one live line, not a pill
+   When something is running, ONE dim type-line sits above the composer. It is
+   not a pill, not a button, not an overlay band. */
+.liveline{
+  flex:0 0 auto; display:none; gap:var(--wc-2); align-items:baseline;
+  padding:var(--wc-1) var(--wc-5);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+}
+#app[data-work="some"] .liveline{ display:flex; }
+.liveline .dots{ color:var(--wc-accent); animation:wc-typing 1.4s ease-in-out infinite; }
+@keyframes wc-typing{ 0%,100%{ opacity:.25; } 50%{ opacity:1; } }
+
+/* ============================================================== 4. composer
+   A field on a page, not a panel: a single line under a hairline. */
+.composer{
+  flex:0 0 auto; border-top:1px solid var(--vscode-panel-border);
+  padding:var(--wc-3) var(--wc-5);
+}
+.composer .inner{ max-width:var(--ed-measure); margin:0 auto; display:flex; flex-direction:column; gap:var(--wc-2); }
+.inputline{
+  display:flex; align-items:baseline; gap:var(--wc-2);
+  border-bottom:1px solid var(--vscode-input-border);
+  padding:var(--wc-1) 0;
+}
+.inputline:focus-within{ border-bottom-color:var(--vscode-focusBorder); }
+.inputline .pfx{ font-family:var(--vscode-editor-font-family); color:var(--wc-accent); font-weight:700; }
+textarea{
+  flex:1; width:100%; resize:none; min-height:22px; max-height:120px;
+  border:0; background:none; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-ui);
+  line-height:1.5; padding:0; outline:none;
+}
+textarea::placeholder{ color:var(--vscode-input-placeholderForeground); }
+.composer .foot{
+  display:flex; align-items:baseline; gap:var(--wc-3);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+}
+.linkbtn{ font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  background:none; border:0; padding:0; cursor:pointer; }
+.linkbtn:hover{ color:var(--vscode-foreground); }
+.linkbtn:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:2px; }
+.linkbtn[aria-pressed="true"]{ color:var(--wc-accent); font-weight:600; }
+.composer .foot .send{ margin-left:auto; color:var(--vscode-foreground); }
+.composer .foot .send:hover{ color:var(--wc-accent); }
+
+/* ================================================= docked at a sidebar width */
+@media (max-width:560px){
+  .masthead{ padding:var(--wc-2) var(--wc-3); }
+  .composer{ padding:var(--wc-2) var(--wc-3); }
+  .stream{ padding:var(--wc-3); }
+}
+@media (prefers-reduced-motion: reduce){
+  /* both animations off: the ⠋ spinner and the ▌ live cursor. */
+  .spin, .body.live::after, .liveline .dots{ animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="draft">
+  <h1>wcode · VS Code surface · modern direction A · editorial</h1>
+  <p class="sub">
+    The quietest stance: the transcript is a reading column, and every piece of
+    chrome that is not content is gone. No rail, no turn spine, no fill on your
+    own words, no header bar and no working pill. Hierarchy is weight and space.
+    Drive it with the toolbar: view mode, dock width, and a run simulation.
+  </p>
+  <p class="read">Reading this as: a web screen (the VS Code webview), for a developer driving a multi-agent session inside VS Code, in VS Code's own theme-variable language (only --vscode-* tokens for colour), with the dominant constraint that nothing may be a container that is not content.</p>
+  <div class="dials">
+    <span class="dial">VARIANCE <b>1</b></span>
+    <span class="dial">MOTION <b>1</b></span>
+    <span class="dial">DENSITY <b>3</b></span>
+    <span class="dial">new tokens <b>0</b></span>
+    <span class="dial">accents <b>1</b></span>
+    <span class="dial">external requests <b>0</b></span>
+  </div>
+  <div class="toolbar">
+    <button class="tbtn" id="tAll" aria-pressed="true">View: All</button>
+    <button class="tbtn" id="tFocus" aria-pressed="false">View: Focus</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tEditor" aria-pressed="true">Dock: editor</button>
+    <button class="tbtn" id="tSidebar" aria-pressed="false">Dock: sidebar</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tSim" aria-pressed="false">Steps: running</button>
+    <button class="tbtn" id="tDensity" aria-pressed="false">Density: calm</button>
+    <button class="tbtn" id="tTheme" aria-pressed="false">Theme: dark</button>
+  </div>
+</div>
+
+<div class="app" id="app" data-width="editor" data-mode="all" data-work="some"
+     role="group" aria-label="wcode: a quiet reading surface for a multi-agent session">
+
+  <!-- ============================================ the masthead: one line, a rule -->
+  <header class="masthead" role="banner">
+    <div class="row1">
+      <span class="ident">
+        <span class="glyph g-run spin" id="hGlyph" aria-hidden="true">⠋</span>
+        <span class="name">orchestrator</span>
+      </span>
+      <span class="status">
+        <span id="stateWord">working</span>
+        <span class="mono">ctx 42k</span>
+      </span>
+    </div>
+    <div class="team" role="list" aria-label="Team">
+      <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator <span class="act">editing chat.css</span></span>
+      <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer <span class="act">grep onOpenDiff</span></span>
+      <span class="m" role="listitem"><span class="glyph g-idle" aria-hidden="true">○</span>developer <span class="act">waiting</span></span>
+      <span class="m" role="listitem"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span></span>
+    </div>
+  </header>
+
+  <!-- ==================================================== the reading column -->
+  <section class="stream" role="log" aria-label="Transcript">
+    <div class="col">
+
+      <div class="turn you new">
+        <div class="byline you">You</div>
+        <div class="body"><p>Drop the rail and the spine. I want this to read like a document, not a control panel.</p></div>
+      </div>
+
+      <div class="turn wcode new">
+        <div class="byline"><span class="glyph" aria-hidden="true">❯</span>orchestrator</div>
+        <div class="body">
+          <p>Done. The transcript is now a single column capped at a comfortable measure. The one thing worth keeping is that your turn and mine are told apart by a byline, not by an indent, a spine or a fill.</p>
+          <p>Here is the rule that made it quiet:</p>
+          <pre class="quote">/* the transport, not the furniture */
+.stream { max-width: 66ch; }
+.turn.new { margin-top: var(--wc-5); }  /* a paragraph break */</pre>
+
+          <details class="tool" open data-live="1">
+            <summary>
+              <span class="chev" aria-hidden="true"></span>
+              <span class="mark">⚙ bash</span>
+              <span>cargo test --workspace</span>
+              <span class="meta"><span class="run"><span class="spin" aria-hidden="true">⠋</span> running…</span></span>
+            </summary>
+            <div class="inner"><pre class="quote">running 145 tests
+test view::fold_open ... ok
+test webview::panel_header ... ok</pre></div>
+          </details>
+
+          <details class="tool">
+            <summary>
+              <span class="chev" aria-hidden="true"></span>
+              <span class="mark">⚙ edit</span>
+              <span>media/chat.css</span>
+              <span class="meta"><span class="add">+24</span> <span class="del">−11</span> · 38ms</span>
+            </summary>
+            <div class="inner"><pre class="quote">.masthead { border-bottom: 1px solid var(--vscode-panel-border); }</pre></div>
+          </details>
+
+          <p class="live">Nothing else changed in the kernel.</p>
+        </div>
+      </div>
+
+      <div class="turn wcode">
+        <div class="byline"><span class="glyph" aria-hidden="true">❯</span>orchestrator</div>
+        <div class="body">
+          <p class="aside">A continuation stays tight; only a speaker change opens a new paragraph.</p>
+        </div>
+      </div>
+
+      <div class="turn wcode new" data-member="w1">
+        <div class="byline"><span class="glyph g-run" aria-hidden="true">⠋</span>explorer</div>
+        <div class="body">
+          <p>The diff hook is at <code>chat.ts:88</code>. Passing it back to you.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ================================================ the one live type-line
+       Not a pill: a dim sentence, shown only while a member is running. -->
+  <div class="liveline" role="status">
+    <span class="dots" aria-hidden="true">⋯</span>
+    <span><b>2</b> working</span>
+    <span>explorer grep onOpenDiff</span>
+  </div>
+
+  <!-- ============================================================ the composer
+       A field on a page: a hairline, a prompt, a placeholder. -->
+  <footer class="composer">
+    <div class="inner">
+      <div class="inputline">
+        <span class="pfx" aria-hidden="true">❯</span>
+        <textarea id="input" rows="1" spellcheck="false" aria-label="Message wcode"
+          placeholder="Message wcode…  (Enter to send, Shift+Enter for a newline)"></textarea>
+      </div>
+      <div class="foot">
+        <button class="linkbtn" type="button" title="Attach the current editor selection">Attach context</button>
+        <span aria-hidden="true">·</span>
+        <button class="linkbtn" id="mAct" type="button" aria-pressed="true">Act</button>
+        <button class="linkbtn" id="mPlan" type="button" aria-pressed="false">Plan</button>
+        <button class="linkbtn" id="stop" class="send" type="button" hidden>Stop</button>
+        <button class="linkbtn send" type="button" id="send">Send</button>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+"use strict";
+(function () {
+  var app = document.getElementById("app");
+  var root = document.documentElement;
+
+  function press(btns, on) {
+    btns.forEach(function (b) { b.setAttribute("aria-pressed", b === on ? "true" : "false"); });
+  }
+
+  var tTheme = document.getElementById("tTheme");
+  tTheme.addEventListener("click", function () {
+    var light = root.dataset.theme === "light";
+    root.dataset.theme = light ? "dark" : "light";
+    tTheme.textContent = "Theme: " + (light ? "dark" : "light");
+  });
+
+  var tDensity = document.getElementById("tDensity");
+  tDensity.addEventListener("click", function () {
+    var dense = root.dataset.density === "dense";
+    root.dataset.density = dense ? "calm" : "dense";
+    tDensity.textContent = "Density: " + (dense ? "calm" : "dense");
+  });
+
+  /* the mode: in All mode every speaker's paragraph shows; in Focus only the
+     target's (the quiet surface has no chip to retarget — you retarget from the
+     masthead's team caption, which stays). */
+  var tAll = document.getElementById("tAll");
+  var tFocus = document.getElementById("tFocus");
+  var turns = Array.prototype.slice.call(document.querySelectorAll(".stream .turn"));
+  function setMode(mode) {
+    app.dataset.mode = mode;
+    var all = mode === "all";
+    turns.forEach(function (t) { t.hidden = !all && t.dataset.member !== undefined; });
+    press([tAll, tFocus], all ? tAll : tFocus);
+    document.getElementById("stateWord").textContent = all ? "all members" : "focused";
+  }
+  tAll.addEventListener("click", function () { setMode("all"); });
+  tFocus.addEventListener("click", function () { setMode("focus"); });
+
+  var tEditor = document.getElementById("tEditor");
+  var tSidebar = document.getElementById("tSidebar");
+  tEditor.addEventListener("click", function () { app.dataset.width = "editor"; press([tEditor, tSidebar], tEditor); });
+  tSidebar.addEventListener("click", function () { app.dataset.width = "sidebar"; press([tEditor, tSidebar], tSidebar); });
+
+  /* the run simulation: spins stop, the live line goes away, Stop hides */
+  var tSim = document.getElementById("tSim");
+  var spins = Array.prototype.slice.call(document.querySelectorAll("#app .spin"));
+  spins.forEach(function (g) { g.dataset.on = g.textContent; });
+  var simDone = false;
+  function setGlyphs(done) {
+    spins.forEach(function (g) {
+      if (done) { g.textContent = "✓"; g.className = "glyph g-done"; }
+      else { g.textContent = g.dataset.on; g.className = "glyph g-run spin"; }
+    });
+    document.getElementById("hGlyph").className = done ? "glyph g-done" : "glyph g-run spin";
+    var sw = document.getElementById("stateWord");
+    sw.textContent = done ? "ready" : (app.dataset.mode === "all" ? "all members" : "focused");
+  }
+  tSim.addEventListener("click", function () {
+    simDone = !simDone;
+    app.dataset.work = simDone ? "none" : "some";
+    document.querySelectorAll(".stream .tool[data-live]").forEach(function (d) {
+      var run = d.querySelector(".run");
+      if (simDone) { d.removeAttribute("open"); d.removeAttribute("data-live"); if (run) { run.textContent = "1.2s"; run.className = "dur"; } }
+      else { d.setAttribute("open", ""); d.setAttribute("data-live", "1"); if (run) { run.innerHTML = '<span class="spin" aria-hidden="true">⠋</span> running…'; run.className = "run"; } }
+    });
+    setGlyphs(simDone);
+    document.getElementById("stop").hidden = simDone;
+    tSim.textContent = "Steps: " + (simDone ? "done" : "running");
+    tSim.setAttribute("aria-pressed", simDone ? "true" : "false");
+  });
+
+  var mAct = document.getElementById("mAct");
+  var mPlan = document.getElementById("mPlan");
+  mAct.addEventListener("click", function () { press([mAct, mPlan], mAct); });
+  mPlan.addEventListener("click", function () { press([mAct, mPlan], mPlan); });
+
+  document.getElementById("stop").hidden = false;
+  setMode("all");
+})();
+</script>
+</body>
+</html>
