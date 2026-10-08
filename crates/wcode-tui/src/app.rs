@@ -5087,6 +5087,43 @@ mod tests {
     }
 
     #[test]
+    fn changes_picker_navigation_skips_directory_rows() {
+        let mut app = App::new();
+        submit(&mut app, "edit");
+        let _ = app.take_actions();
+        tool_end(&mut app, "edit", Some("a/one.rs"), Some("@@ -1 +1 @@\n+1\n"));
+        tool_end(&mut app, "edit", Some("a/two.rs"), Some("@@ -1 +1 @@\n+1\n"));
+        tool_end(&mut app, "edit", Some("b/alpha.rs"), Some("@@ -1 +1 @@\n+1\n"));
+        tool_end(&mut app, "edit", Some("b/beta.rs"), Some("@@ -1 +1 @@\n+1\n"));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
+
+        submit(&mut app, "/changes");
+        let selected = |app: &App| match app.overlay() {
+            Some(Overlay::Pick(p)) => p.selected,
+            other => panic!("expected a changes picker, got {other:?}"),
+        };
+        // Rows: [`a/`, ├ one, └ two, `b/`, ├ alpha, └ beta] (name-sorted).
+        // The picker starts on the FIRST LEAF; Down/Up skip the non-selectable
+        // directory headers.
+        assert_eq!(selected(&app), 1, "starts on the first leaf, not the `a/` header");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(selected(&app), 2, "Down → the next leaf");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(selected(&app), 4, "Down skips the `b/` header to its first leaf");
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(selected(&app), 2, "Up skips the `b/` header back to the leaf");
+
+        // Enter on a leaf still re-shows that file's diff.
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none(), "selecting closes the modal");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Diff { path, .. }) if path == "b/alpha.rs"
+        ));
+    }
+
+    #[test]
     fn changes_with_nothing_says_so() {
         let mut app = App::new();
         submit(&mut app, "/changes");
