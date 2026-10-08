@@ -253,6 +253,14 @@ runtime-spawned worker is thus visible to a `--socket` client.
 | D26 | F4b focus | a `/surface` picker (F1 machinery, `PickerKind::Surface`) **plus** a cycle key; the sidebar highlights the focused surface |
 | D27 | F4b feed | F4b-2 **subsumes** F4a's `TeamUpdate` feed — a surface's own `AgentStart`/`AgentEnd` is the sidebar state, so the forwarder channel goes away |
 | D28 | F4b rows | teammates show **model + state only**; the root keeps the full status line. **Revised** by [`tui-sidebar-plan.md`](tui-sidebar-plan.md): the row is now status glyph + name + live action, and the model is dropped from the sidebar |
+| D29 | TUI palette legibility | the grey ramp: `dim`/`thinking` carry an explicit `fg` (no `DIM` modifier), so secondary text reads at ~7:1 not ~3:1; `DIM` survives only under `NO_COLOR` (no colour lever) |
+| D30 | TUI tier palettes | land the per-mode palettes — each of the 17 roles resolves to its `Named`-16 / `256` / `truecolor` step by `color_mode()`; the capability ladder stays invariant |
+| D31 | TUI tool render | a tool is a **panel**: keyed params rows above a body, the frame carrying the name + affordances; the **`bash` command is shown in full** (wraps, never clipped) |
+| D32 | TUI block affordances | every block carries a disclosure (`▸`/`▾`) and copy (`⧉`) affordance — click the header/`▸`/`⧉`, or browse `Enter`/`Space` and `y` for keyboard parity |
+| D33 | TUI thinking | **in flight** thinking streams expanded inline; on **commit** it collapses to a one-line `··· thinking · N chars ▸ ⧉`, expandable |
+| D34 | TUI surface order | one **canonical order** (root first, then members in creation order — stable) drives the sidebar listing, the working strip, and numbers the sidebar rows; `Alt-1..N` focuses **row N** (not the raw index) |
+| D35 | TUI todos | the `todo` tool's checklist renders as ONE `Block::Todos` in the transcript (updates in place); the sidebar Todos section is **dropped** |
+| D36 | TUI changes | the run's changeset renders as a directory **tree** (`├─`/`└─`, stats right-aligned) in the sidebar and the `/changes` modal |
 
 ## Phased tasks
 
