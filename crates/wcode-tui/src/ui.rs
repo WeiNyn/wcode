@@ -1597,11 +1597,13 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
         if y < bottom {
             members.push((idx, y));
         }
-        // `  ● explorer *  read a.rs` — glyph colored by state, the live
-        // action dim, `*` marks the focused surface. A per-member elapsed is
-        // not exposed, so the focused row carries the run elapsed instead.
+        // `  1 ● explorer *  read a.rs` — the number badge (muted, so `Alt-N` is
+        // visible), the glyph colored by state, the live action dim, `*` marks the
+        // focused surface. A per-member elapsed is not exposed, so the focused row
+        // carries the run elapsed instead.
+        let number = format!("  {}", n + 1);
         let mut head = format!(
-            "  {} {}{}",
+            " {} {}{}",
             state.glyph(),
             label,
             if focused { " *" } else { "" }
@@ -1610,7 +1612,10 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
             head.push_str(&format!("  {}", format_ms(elapsed.as_millis() as u64)));
         }
         let tail = action.map(|a| format!("  {a}")).unwrap_or_default();
-        lines.push(clipped_row(vec![(head, state_style(state)), (tail, dim())], w));
+        lines.push(clipped_row(
+            vec![(number, muted()), (head, state_style(state)), (tail, dim())],
+            w,
+        ));
     }
 
     app.set_sidebar_hit(area, members);
@@ -3260,6 +3265,11 @@ mod tests {
             assert!(frame.contains(header), "missing {header} header:\n{frame}");
         }
         assert!(frame.contains("explorer"), "member row missing:\n{frame}");
+        // The member row is NUMBERED (D34), so `Alt-N` is visible not guessed.
+        assert!(
+            frame.contains("1 ○ explorer"),
+            "the numbered member row is missing:\n{frame}"
+        );
     }
 
     #[test]

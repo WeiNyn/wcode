@@ -804,8 +804,9 @@ mod tests {
             "root surface was not seeded: {:?}",
             app.transcript()
         );
-        // Focus the member surface and confirm it, too, was seeded.
-        app.handle(AppEvent::Key(Key::Alt('2')));
+        // Focus the member surface — `Alt-1` is sidebar row 1, the first member
+        // (never the root, `surfaces[0]`) — and confirm it, too, was seeded.
+        app.handle(AppEvent::Key(Key::Alt('1')));
         assert!(
             app.transcript()
                 .iter()

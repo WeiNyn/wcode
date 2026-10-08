@@ -697,7 +697,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("wheel", "scroll three lines"),
     ("Ctrl-T", "expand / collapse all tool output"),
     ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
-    ("Alt-1..9", "focus the Nth surface"),
+    ("Alt-1..9", "focus sidebar row N"),
     ("Ctrl-G", "browse the transcript"),
     ("Ctrl-B", "toggle the sidebar"),
     ("j / k · g / G", "browse: next / previous · first / last"),
@@ -1943,12 +1943,31 @@ impl App {
         self.surfaces.iter().position(|s| &s.id == id)
     }
 
-    /// Focus the next surface, wrapping.
+    /// The canonical surface order (D34): the root first, then every member in
+    /// CREATION order. Stable — activity never reorders it; it is the single
+    /// source of truth for the sidebar rows, the working strip, and `Alt-1..N`.
+    /// (The invariant `surfaces[0]` is the root makes this the identity today, but
+    /// naming it keeps the three consumers from drifting apart again.)
+    pub(crate) fn canonical_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.surfaces.len()).collect();
+        // Stable sort: the root first, everything else in its (creation) order.
+        order.sort_by_key(|&i| !self.surfaces[i].is_root);
+        order
+    }
+
+    /// Focus the next surface in the canonical order (D34), wrapping.
     fn focus_next(&mut self) {
-        if !self.surfaces.is_empty() {
-            self.focus = (self.focus + 1) % self.surfaces.len();
-            self.dirty = true;
-        }
+        self.focus_step(1);
+    }
+
+    /// Advance focus by `step` positions along [`App::canonical_order`], wrapping.
+    fn focus_step(&mut self, step: isize) {
+        let order = self.canonical_order();
+        let Some(pos) = order.iter().position(|&i| i == self.focus) else {
+            return;
+        };
+        let next = (pos as isize + step).rem_euclid(order.len() as isize) as usize;
+        self.set_focus(order[next]);
     }
 
     /// Focus surface `idx`, if it exists.
@@ -1986,23 +2005,22 @@ impl App {
         self.dirty = true;
     }
 
-    /// `Alt-1..9`: focus the Nth surface. `Alt-0` and an out-of-range N are a
-    /// no-op.
+    /// `Alt-1..9`: focus sidebar row `N` — the Nth MEMBER in
+    /// [`App::canonical_order`] (D34), not raw `surfaces[N - 1]` (which is the root
+    /// for `Alt-1`). `Alt-0` and an out-of-range `N` are a no-op.
     fn focus_digit(&mut self, c: char) {
         if let Some(n) = c.to_digit(10)
             && n >= 1
+            && let Some(&idx) = self.canonical_order().get(n as usize)
         {
-            self.set_focus(n as usize - 1);
+            self.set_focus(idx);
         }
     }
 
-    /// Focus the previous surface, wrapping — the mirror of `focus_next`, bound
-    /// to `Shift-Tab`.
+    /// Focus the previous surface in the canonical order, wrapping — the mirror of
+    /// `focus_next`, bound to `Shift-Tab`.
     fn focus_prev(&mut self) {
-        if !self.surfaces.is_empty() {
-            self.focus = (self.focus + self.surfaces.len() - 1) % self.surfaces.len();
-            self.dirty = true;
-        }
+        self.focus_step(-1);
     }
 
     /// Open the keymap overlay (`F1`).
@@ -2073,45 +2091,30 @@ impl App {
         self.dirty = true;
     }
 
-    /// The RUNNING teammates as `(label, state, action)` — the rows the team
-    /// region above the input box shows. Ordered OLDEST→NEWEST by
-    /// `last_action_at`, so the LATEST event is the BOTTOM row, capped to the 3
-    /// MOST RECENT. The root is excluded (it is the orchestrator, not a
-    /// teammate); idle/done/failed members are dropped entirely.
-    ///
-    /// [`App::member_rows`] cannot serve this: it drops `last_action_at` at its
-    /// sort and keeps every state (active-first). The glyph comes from
-    /// `state.glyph()`. `last_action` is `Some("{tool} {target}")` while a run
-    /// has a live tool (§3), else `None`.
+    /// The RUNNING teammates as `(label, state, action)` — the rows the working
+    /// region above the input box shows. In the canonical order (D34), running
+    /// only, capped to the first 3. The root is excluded (it is the orchestrator,
+    /// not a teammate); idle/done/failed members are dropped entirely. Activity is
+    /// a marker on the row, never a sort key. `last_action` is
+    /// `Some("{tool} {target}")` while a run has a live tool (§3), else `None`.
     ///
     /// RESISTANCE: [`App::run_elapsed`] is the FOCUSED surface only, so a
     /// non-focused running teammate's row cannot show a per-member elapsed — the
     /// same limitation `draw_sidebar` documents.
     pub fn working_team_rows(&self) -> Vec<(&str, TeamState, Option<&str>)> {
-        let mut rows: Vec<_> = self
-            .surfaces
-            .iter()
-            .filter(|s| !s.is_root && s.state() == TeamState::Running)
-            .map(|s| {
-                (
-                    s.label.as_str(),
-                    s.state(),
-                    s.last_action.as_deref(),
-                    s.last_action_at,
-                )
+        self.canonical_order()
+            .into_iter()
+            .filter(|&i| !self.surfaces[i].is_root)
+            .filter(|&i| self.surfaces[i].state() == TeamState::Running)
+            .take(3)
+            .map(|i| {
+                let s = &self.surfaces[i];
+                (s.label.as_str(), s.state(), s.last_action.as_deref())
             })
-            .collect();
-        // oldest → newest (the BOTTOM row is the most recent); stable on ties.
-        rows.sort_by_key(|(_, _, _, at)| at.unwrap_or(0));
-        let keep = rows.len().saturating_sub(3); // drop all but the 3 MOST RECENT
-        rows.into_iter()
-            .skip(keep)
-            .map(|(label, state, action, _)| (label, state, action))
             .collect()
     }
-    /// The non-root surfaces as `(label, state, focused, action)` — the team
-    /// strip and `/team`. Ordered active-first, then by most recent action
-    /// (stable: surface order breaks ties). The action is the current run's
+    /// The non-root surfaces as `(label, state, focused, action)` — the sidebar
+    /// and `/team`, in the canonical order (D34). The action is the current run's
     /// live tool label, if any (§3).
     pub fn member_rows(&self) -> Vec<(&str, TeamState, bool, Option<&str>)> {
         self.member_rows_indexed()
@@ -2683,32 +2686,24 @@ impl App {
         hit.members.iter().find(|(_, y)| *y == row).map(|(idx, _)| *idx)
     }
 
-    /// The non-root surfaces as `(index, label, state, focused, action)` — the
-    /// index-carrying sibling of `member_rows` (which drops the index and now
-    /// delegates here). Same ordering: active-first, then by action recency,
-    /// stable on surface order.
+    /// The non-root surfaces as `(index, label, state, focused, action)`, in the
+    /// canonical order (D34) — the index-carrying sibling of `member_rows` (which
+    /// drops the index and delegates here). Stable: activity never reorders the
+    /// rows; the state glyph is a marker.
     pub(crate) fn member_rows_indexed(&self) -> Vec<(usize, &str, TeamState, bool, Option<&str>)> {
-        let mut rows: Vec<_> = self
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| !s.is_root)
-            .map(|(i, s)| {
+        self.canonical_order()
+            .into_iter()
+            .filter(|&i| !self.surfaces[i].is_root)
+            .map(|i| {
+                let s = &self.surfaces[i];
                 (
                     i,
                     s.label.as_str(),
                     s.state(),
                     i == self.focus,
                     s.last_action.as_deref(),
-                    s.last_action_at,
                 )
             })
-            .collect();
-        rows.sort_by_key(|(_, _, state, _, _, at)| {
-            (*state != TeamState::Running, std::cmp::Reverse(at.unwrap_or(0)))
-        });
-        rows.into_iter()
-            .map(|(i, label, state, focused, action, _)| (i, label, state, focused, action))
             .collect()
     }
 
@@ -5205,8 +5200,7 @@ mod tests {
         assert_eq!(app.member_rows()[0].1, TeamState::Done);
     }
 
-    /// Push one `ToolExecutionStart` into `id`, stamping the action (and its
-    /// recency) the team strip orders by.
+    /// Push one `ToolExecutionStart` into `id`, stamping the member's live action.
     fn member_tool_start(app: &mut App, id: &SessionId, name: &str) {
         app.handle(AppEvent::Agent(
             id.clone(),
@@ -5239,23 +5233,22 @@ mod tests {
         };
         assert_eq!(labels(&app), vec!["a", "b"]);
 
-        // Recency stamps order oldest→newest (the LAST row is the most recent).
-        member_tool_start(&mut app, &b, "read"); // b's action is newer than a's
+        // Activity is a marker, not a sort key: the canonical order is unchanged.
+        member_tool_start(&mut app, &b, "read");
         assert_eq!(labels(&app), vec!["a", "b"]);
 
-        // Cap: with four running members, only the 3 MOST RECENT survive.
+        // Cap: with four running members, the FIRST 3 in canonical order survive.
         app.handle(AppEvent::Agent(c.clone(), AgentEvent::AgentStart));
         app.handle(AppEvent::Agent(d.clone(), AgentEvent::AgentStart));
         member_tool_start(&mut app, &c, "edit");
         member_tool_start(&mut app, &d, "bash");
-        assert_eq!(labels(&app).len(), 3);
-        assert_eq!(*labels(&app).last().unwrap(), "d", "newest is the bottom row");
+        assert_eq!(labels(&app), vec!["a", "b", "c"], "the first three, in order");
 
         // The live action rides the row (as member_rows does).
-        assert_eq!(app.working_team_rows().last().unwrap().2, Some("bash"));
+        assert_eq!(app.working_team_rows().last().unwrap().2, Some("edit"));
     }
     #[test]
-    fn member_rows_order_active_first_then_by_action_recency() {
+    fn member_rows_are_in_canonical_order() {
         let mut app = App::new();
         set_surfaces(&mut app, &["root", "zebra", "alpha", "mike"]);
         let zebra = SessionId::agent("zebra");
@@ -5268,25 +5261,45 @@ mod tests {
                 .collect()
         };
 
-        // All idle with no actions: surface order (stable sort) is preserved.
+        // Creation order, and it STAYS that way — activity never reorders it.
         assert_eq!(labels(&app), vec!["zebra", "alpha", "mike"]);
-        // alpha's action is the more recent: idle members sort by recency.
         member_tool_start(&mut app, &zebra, "read");
         member_tool_start(&mut app, &alpha, "bash");
-        assert_eq!(labels(&app), vec!["alpha", "zebra", "mike"]);
-        // A running member jumps the queue even before any live action.
+        assert_eq!(labels(&app), vec!["zebra", "alpha", "mike"]);
+        // Running does NOT jump the queue.
         app.handle(AppEvent::Agent(mike.clone(), AgentEvent::AgentStart));
-        assert_eq!(labels(&app), vec!["mike", "alpha", "zebra"]);
-        // Among running members, the newest action comes first.
+        assert_eq!(labels(&app), vec!["zebra", "alpha", "mike"]);
         app.handle(AppEvent::Agent(zebra.clone(), AgentEvent::AgentStart));
         member_tool_start(&mut app, &zebra, "edit");
         let rows = app.member_rows();
-        assert_eq!(rows[0].0, "zebra", "newer action wins among running members");
-        assert_eq!(rows[0].3, Some("edit"), "the live action rides the row");
-        assert_eq!(rows[1].0, "mike", "a runner with no action trails");
-        assert_eq!(rows[1].3, None);
-        assert_eq!(rows[2].0, "alpha", "idle members come last, by recency");
-        assert_eq!(rows[2].3, Some("bash"));
+        assert_eq!(rows[0].0, "zebra");
+        assert_eq!(rows[0].3, Some("edit"), "the live action still rides the row");
+        assert_eq!(rows[1].0, "alpha");
+        assert_eq!(rows[1].3, Some("bash"));
+        assert_eq!(rows[2].0, "mike");
+        assert_eq!(rows[2].3, None);
+    }
+
+    #[test]
+    fn canonical_order_is_stable_root_first() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["root", "zebra", "alpha"]);
+        assert_eq!(
+            app.canonical_order(),
+            vec![0, 1, 2],
+            "root first, then members in creation order"
+        );
+        // Activity (a run, a live action) must not reorder it.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("alpha"),
+            AgentEvent::AgentStart,
+        ));
+        member_tool_start(&mut app, &SessionId::agent("zebra"), "read");
+        // `alpha` — the LATER member — acts most recently, so a recency sort would
+        // move it first; the canonical order must not budge.
+        member_tool_start(&mut app, &SessionId::agent("alpha"), "bash");
+        assert_eq!(app.canonical_order(), vec![0, 1, 2]);
+        assert_eq!(app.canonical_order(), vec![0, 1, 2]);
     }
 
     /// A root + one member surface.
@@ -6125,18 +6138,22 @@ mod tests {
     }
 
     #[test]
-    fn alt_digit_focuses_the_nth_surface() {
+    fn alt_n_focuses_the_numbered_sidebar_row() {
         let mut app = App::new();
         set_surfaces(&mut app, &["root", "a", "b"]);
-        app.handle(AppEvent::Key(Key::Alt('3')));
-        assert_eq!(app.focus(), 2, "Alt-3 focuses the third surface");
-        // Alt-0 and an out-of-range surface are a no-op.
+        // Alt-1 focuses the FIRST MEMBER (sidebar row 1) — not `surfaces[0]`, the
+        // root, which the old raw-index mapping wrongly targeted.
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 1, "Alt-1 focuses the first member, not the root");
+        app.handle(AppEvent::Key(Key::Alt('2')));
+        assert_eq!(app.focus(), 2, "Alt-2 focuses the second member");
+        // Alt-0 and an out-of-range row are a no-op.
         app.handle(AppEvent::Key(Key::Alt('0')));
         assert_eq!(app.focus(), 2);
+        app.handle(AppEvent::Key(Key::Alt('3')));
+        assert_eq!(app.focus(), 2, "only two members: Alt-3 is out of range");
         app.handle(AppEvent::Key(Key::Alt('9')));
         assert_eq!(app.focus(), 2);
-        app.handle(AppEvent::Key(Key::Alt('1')));
-        assert_eq!(app.focus(), 0);
     }
 
     #[test]
