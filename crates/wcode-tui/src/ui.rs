@@ -62,6 +62,7 @@ const SIDEBAR_MIN_WIDTH: u16 = 80;
 /// teammate is running.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
+    app.set_terminal_width(full.width);
     // Start every frame from an empty hit map: a closed sidebar / a resize must
     // never leave stale geometry behind (the app holds no layout constants).
     app.clear_hit_map();
@@ -3372,6 +3373,28 @@ mod tests {
         );
         assert!(frame.contains("├─ app.rs"), "a non-last leaf:\n{frame}");
         assert!(frame.contains("└─ ui.rs"), "the last leaf:\n{frame}");
+    }
+
+    #[test]
+    fn the_changes_overlay_right_aligns_the_stats() {
+        let mut app = App::new();
+        push_change(&mut app, "crates/wcode-tui/src/ui.rs", "@@ -1 +1 @@\n+a\n+b\n");
+        push_change(&mut app, "crates/wcode-tui/src/app.rs", "@@ -1 +1 @@\n-a\n+b\n");
+        let _ = render(&mut app, 100, 30); // record the terminal width for the modal
+        typed(&mut app, "/changes");
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 100, 30));
+        // Both leaves' `+a −r` stats end at the same column (D36).
+        // Both leaves' `+a −r` groups start at the same column: the row after the
+        // modal's `│` + the `❯ ` marker is the item, so the `+` column tracks the
+        // padding. (Measuring the row's end would just find the modal's `│`.)
+        let plus: Vec<usize> = text
+            .lines()
+            .filter(|l| l.contains("├─ ") || l.contains("└─ "))
+            .map(|l| l.chars().position(|c| c == '+').expect("a stats row"))
+            .collect();
+        assert_eq!(plus.len(), 2, "two leaves in the overlay:\n{text}");
+        assert_eq!(plus[0], plus[1], "the stats are right-aligned:\n{text}");
     }
 
     #[test]

@@ -267,6 +267,14 @@ pub(crate) fn change_totals(rows: &[ChangeRow]) -> (usize, usize, usize) {
     (files, added, removed)
 }
 
+/// The columns a `/changes` picker item may use, mirroring `ui::draw_picker`: the
+/// modal is `min(terminal - 4, 64)` wide, two border columns narrower inside, and
+/// the `❯ ` row marker takes two more. Lets the tree right-align its stats (D36).
+fn changes_item_width(terminal: u16) -> usize {
+    let modal = (terminal as usize).saturating_sub(4).clamp(1, 64);
+    modal.saturating_sub(4)
+}
+
 /// The changes header (D36): `changes  {n} file(s)  +{a} −{r}`.
 pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> String {
     format!(
@@ -1940,6 +1948,10 @@ pub struct App {
     /// every buffer edit; non-modal (it never owns the keyboard — see [`Completion`]).
     completion: Option<Completion>,
     dirty: bool,
+    /// The full terminal width from the last draw, so a later-opened picker can
+    /// size its rows — `/changes` right-aligns its `+a −r` stats into the modal
+    /// (D36). `0` before the first frame.
+    terminal_width: u16,
     /// Last-seen `theme::generation()`; `sync_theme` bumps `block_revs` on a change.
     theme_gen: u64,
     should_quit: bool,
@@ -2015,6 +2027,7 @@ impl App {
             overlay: None,
             completion: None,
             dirty: true,
+            terminal_width: 0,
             theme_gen: 0,
             should_quit: false,
             force_quit: false,
@@ -3597,6 +3610,7 @@ impl App {
             return;
         }
         let (files, added, removed) = change_totals(&rows);
+        let item_w = changes_item_width(self.terminal_width);
         let mut items = Vec::new();
         let mut values = Vec::new();
         let mut first_leaf = None;
@@ -3617,7 +3631,12 @@ impl App {
                     if first_leaf.is_none() {
                         first_leaf = Some(items.len());
                     }
-                    items.push(format!("{branch} {name}  +{added} −{removed}"));
+                    let left = format!("{branch} {name}");
+                    let stats = format!("+{added} −{removed}");
+                    // Right-align the stats inside the modal (D36); keep one gap.
+                    let used = left.chars().count() + stats.chars().count();
+                    let pad = item_w.saturating_sub(used).max(1);
+                    items.push(format!("{left}{}{stats}", " ".repeat(pad)));
                     values.push(path.clone());
                 }
             }
@@ -3889,6 +3908,12 @@ impl App {
     /// `ui::draw`; a no-op once real content lands).
     pub(crate) fn seed_empty_hint(&mut self) {
         self.focused_mut().seed_hint_if_empty();
+    }
+
+    /// Record the terminal width `ui::draw` measured, so a picker opened on a
+    /// later key can size its rows (D36).
+    pub(crate) fn set_terminal_width(&mut self, width: u16) {
+        self.terminal_width = width;
     }
 
     /// The focused surface's changes tree (D36) — the sidebar `changes` section
