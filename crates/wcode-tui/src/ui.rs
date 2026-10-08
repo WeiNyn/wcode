@@ -26,8 +26,9 @@ use crate::theme;
 const THINK_FIRST: &str = "   ··· ";
 const THINK_CONT: &str = "       ";
 
-/// Indent for a tool's body lines, aligning under the `⚙` marker column.
-const TOOL_INDENT: &str = "     ";
+/// The gutter inside a tool panel: two columns past the frame's `│`, so the
+/// params, the body, and the `✓` summary share the design's column 6 (D31/D32).
+const PANEL_GUTTER: &str = "  ";
 /// The tool block's own gutter before the panel frame (matching the other
 /// blocks' 3-column indent).
 const PANEL_INDENT: &str = "   ";
@@ -40,8 +41,8 @@ const TOOL_DIFF_PREVIEW_LINES: usize = 8;
 
 /// The working-team region appears only when the terminal is at least this wide.
 const TEAM_MIN_WIDTH: u16 = 50;
-/// … and at least this tall, so the session line, the transcript, the team
-/// region, and the input box all leave the transcript something to show.
+/// … and at least this tall, so the transcript, the team region, and the input
+/// box all leave the transcript something to show.
 const TEAM_MIN_HEIGHT: u16 = 8;
 /// The docked left sidebar's fixed width in columns. Its content is clipped
 /// to fit; the bands to its right are NOT reflowed to compensate.
@@ -54,9 +55,10 @@ const SIDEBAR_MIN_WIDTH: u16 = 80;
 /// Draw the full frame. Stateless: everything comes from `app`.
 ///
 /// Bands (top → bottom), in the bands column to the right of the optional
-/// sidebar: a dim `session` line, the transcript, the working-team region
-/// (0..=3 rows), and the rounded input box whose four corners carry the chrome
-/// the old status band used to. The team region collapses to nothing when no
+/// sidebar: the transcript (flex), the working-team region (0..=3 rows — a
+/// rider, only while a member runs), and the rounded input box. The box's
+/// corners carry the chrome the old status band used to. The team region
+/// collapses to nothing when no
 /// teammate is running.
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
@@ -69,6 +71,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // column. When closed (or too narrow) `area` is the full frame untouched,
     // so every geometry below — and every popup/overlay anchor — is
     // byte-identical.
+    // D5: a fresh, empty transcript carries a dim `type a message …` hint.
+    app.seed_empty_hint();
     let (sidebar, area) = if app.sidebar() && full.width >= SIDEBAR_MIN_WIDTH {
         let [sb, bands] = Layout::horizontal([
             Constraint::Length(SIDEBAR_WIDTH),
@@ -108,27 +112,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         working_count as u16
     };
 
-    // The session line (1 row) and at least one transcript row are reserved; the
-    // input box (two borders + the composer) then has priority over the team
-    // region, so a short terminal degrades gracefully instead of overflowing.
-    let session_h = u16::from(app.status().session.is_some());
-    let spare = area.height.saturating_sub(session_h + 1);
+    // At least one transcript row is reserved; the input box (two borders + the
+    // composer) then has priority over the team region, so a short terminal
+    // degrades gracefully instead of overflowing. There is no session band — the
+    // id folds into the box's top-left corner (D1b).
+    let spare = area.height.saturating_sub(1);
     let box_h = (input_height + 2).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
     let areas = Layout::vertical([
-        Constraint::Length(session_h), // session id
-        Constraint::Min(1),         // transcript
-        Constraint::Length(team_h), // working-team region
+        Constraint::Min(1),         // transcript (flexes)
+        Constraint::Length(team_h), // working-team region (a rider, 0..=3)
         Constraint::Length(box_h),  // input box
     ])
     .split(area);
-    let session = areas[0];
-    let body = areas[1];
-    let team = areas[2];
-    let editor = areas[3];
+    let body = areas[0];
+    let team = areas[1];
+    let editor = areas[2];
 
-    draw_session_line(frame, session, app);
     draw_transcript(frame, body, app);
     if team_h > 0 {
         let working = app.working_team_rows();
@@ -179,6 +180,7 @@ fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border())
         .title(Span::styled(" search ", border()));
     let inner = block.inner(rect);
@@ -237,6 +239,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border())
         .title(Span::styled(" keys ", border()));
     let inner = block.inner(rect);
@@ -274,6 +277,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border())
         .title(Span::styled(format!(" {} ", picker.title), border()));
     let inner = block.inner(rect);
@@ -333,6 +337,7 @@ fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border())
         .title(Span::styled(" commands ", border()));
     let inner = block.inner(rect);
@@ -744,7 +749,7 @@ fn panel_content_width(width: usize) -> usize {
 /// body strength, continuations aligned under the value column. A value with no
 /// spaces hard-breaks (`wrap_line`). Returns ≥1 line.
 fn param_row(key: &str, value: &str, key_col: usize, width: usize) -> Vec<Line<'static>> {
-    let indent = TOOL_INDENT.chars().count();
+    let indent = PANEL_GUTTER.chars().count();
     let value_col = indent + key_col + 2;
     let avail = width.saturating_sub(value_col).max(1);
     let chars: Vec<char> = value.chars().collect();
@@ -753,7 +758,7 @@ fn param_row(key: &str, value: &str, key_col: usize, width: usize) -> Vec<Line<'
     for (i, seg) in wrap_line(&chars, avail).into_iter().enumerate() {
         let lead = if i == 0 {
             let pad = value_col.saturating_sub(indent + key.chars().count());
-            format!("{TOOL_INDENT}{key}{}", " ".repeat(pad))
+            format!("{PANEL_GUTTER}{key}{}", " ".repeat(pad))
         } else {
             " ".repeat(value_col)
         };
@@ -795,7 +800,7 @@ fn tool_panel_body(tool: &Tool, content_w: usize, expanded: bool) -> Vec<Line<'s
                 out.push(hint);
             }
         } else if let Some(tail) = last_line(&tool.output) {
-            out.push(prefixed(TOOL_INDENT, &tail, dim()));
+            out.push(prefixed(PANEL_GUTTER, &tail, dim()));
         }
         return out;
     }
@@ -815,7 +820,7 @@ fn tool_panel_body(tool: &Tool, content_w: usize, expanded: bool) -> Vec<Line<'s
                 Some('-') => removed_style(),
                 _ => dim(),
             };
-            out.push(prefixed(TOOL_INDENT, raw, style));
+            out.push(prefixed(PANEL_GUTTER, raw, style));
         }
         if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
             out.push(hint);
@@ -852,7 +857,7 @@ fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
         ("✓", success())
     };
     let mut spans = vec![
-        Span::styled(format!("{mark} "), style),
+        Span::styled(format!("{PANEL_GUTTER}{mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
     if !note.is_empty() {
@@ -1029,10 +1034,10 @@ fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return Vec::new();
     }
-    let avail = width.saturating_sub(TOOL_INDENT.chars().count()).max(1);
+    let avail = width.saturating_sub(PANEL_GUTTER.chars().count()).max(1);
     wrap_input(&lines.join("\n"), avail)
         .into_iter()
-        .map(|row| prefixed(TOOL_INDENT, &row, style))
+        .map(|row| prefixed(PANEL_GUTTER, &row, style))
         .collect()
 }
 
@@ -1044,9 +1049,9 @@ fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
 fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
     let text = if more_lines > 0 {
         let line = if more_lines == 1 { "line" } else { "lines" };
-        format!("{TOOL_INDENT}… +{more_lines} more {line}")
+        format!("{PANEL_GUTTER}… +{more_lines} more {line}")
     } else if wide {
-        format!("{TOOL_INDENT}… the full line is elided")
+        format!("{PANEL_GUTTER}… the full line is elided")
     } else {
         return None;
     };
@@ -1292,16 +1297,6 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
     });
 }
 
-/// The dim `session <short id>` line above the transcript. Blank when no session
-/// id is known (an attached/remote session may not have one).
-fn draw_session_line(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(session) = &app.status().session else {
-        return;
-    };
-    let line = Line::from(Span::styled(format!(" session {}", short_id(session)), dim()));
-    frame.render_widget(Paragraph::new(line), area);
-}
-
 /// Draw the input box: a ROUNDED bordered `Block` wrapping the composer, whose
 /// four corners carry the chrome the old status band used to (project/branch,
 /// model/effort, the context gauge, and the mode/state). The composer renders in
@@ -1341,6 +1336,11 @@ fn corner_titles(
     let project = app.cwd().unwrap_or("wcode").to_string();
     let model = app.status().model.clone();
     let branch = app.git().map(|git| format!("⎇ {git}"));
+    let session = app
+        .status()
+        .session
+        .as_deref()
+        .map(|id| format!("session {}", short_id(id)));
     let effort = app.status().effort.clone();
     let tl = |text: &str| -> Vec<Span<'static>> {
         let (head, rest) = split_at_char(text, project.chars().count());
@@ -1352,6 +1352,14 @@ fn corner_titles(
     };
     let tr = |text: String| -> Vec<Span<'static>> { vec![Span::styled(text, dim())] };
     let top_levels = vec![
+        // Fullest → dropped: `session` goes first (D1b).
+        (
+            tl(&join_title(
+                &join_title(&project, branch.as_deref()),
+                session.as_deref(),
+            )),
+            tr(join_title(&model, effort.as_deref())),
+        ),
         (
             tl(&join_title(&project, branch.as_deref())),
             tr(join_title(&model, effort.as_deref())),
@@ -3449,18 +3457,78 @@ mod tests {
     }
 
     #[test]
-    fn the_session_line_is_the_top_row_above_the_transcript() {
+    fn the_session_id_rides_the_input_box_corner() {
         let mut app = App::new();
         app.set_status(crate::app::Status {
             session: Some("abcdef0123456789".into()),
             ..Default::default()
         });
+        // Real content, so the D5 empty-state hint is not what shows at row 0.
+        push_assistant(&mut app, "hello there");
         let text = buffer_text(&render(&mut app, 80, 12));
+        // D1b: there is no `session` band — the id folds into the box top-left and
+        // the transcript still starts at row 0.
         let first = text.lines().next().unwrap_or_default();
         assert!(
-            first.contains("abcdef01"),
-            "session id is not the top row:\n{text}"
+            first.contains("hello there"),
+            "the transcript starts at row 0 even with a session:\n{text}"
         );
+        assert!(
+            text.contains("session abcdef01"),
+            "the session id is not in the box corner:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_session_reserves_no_session_row() {
+        let mut app = App::new();
+        push_assistant(&mut app, "hello there");
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(
+            !text.contains(" session "),
+            "no session row is reserved without an id:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_surface_shows_the_empty_state_hint() {
+        let mut app = App::new();
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(text.contains("type a message"), "the fresh hint:\n{text}");
+        assert!(text.contains("/help for commands"), "the fresh hint:\n{text}");
+
+        // A resumed session seeds real turns, which retire the hint (D5).
+        app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(
+            !text.contains("type a message"),
+            "the hint must not linger after history:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_overlays_use_rounded_borders() {
+        // The F1 help.
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(1)));
+        let help = buffer_text(&render(&mut app, 80, 24));
+        assert!(help.contains('╭'), "the help border is rounded:\n{help}");
+        assert!(!help.contains('┌'), "a square corner remains in the help:\n{help}");
+
+        // A picker modal.
+        let mut app = App::new();
+        app.set_models(vec!["m1".into()]);
+        typed(&mut app, "/model");
+        app.handle(AppEvent::Key(Key::Enter));
+        let pick = buffer_text(&render(&mut app, 80, 24));
+        assert!(pick.contains('╭'), "the picker border is rounded:\n{pick}");
+        assert!(!pick.contains('┌'), "a square corner remains in the picker:\n{pick}");
+
+        // The `/`-command completion popup.
+        let mut app = App::new();
+        typed(&mut app, "/");
+        let comp = buffer_text(&render(&mut app, 80, 24));
+        assert!(!comp.contains('┌'), "a square corner remains in the completion:\n{comp}");
     }
 
     #[test]
@@ -3655,6 +3723,25 @@ mod tests {
             cwd_row.contains("/Users/wei/Workspace/wcode"),
             "the cwd value rides its key row:\n{text}"
         );
+    }
+
+    #[test]
+    fn the_panel_rows_share_the_gutter() {
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "ok");
+        let text = buffer_text(&render(&mut app, 80, 20));
+        let row = |needle: &str| {
+            text.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} row:\n{text}"))
+        };
+        // The `⚙` header, the params key, and the `✓` summary all start at the
+        // design's column 6 (3 indent + the frame `│` + the 2-col gutter). Char, not
+        // byte, positions — the box-drawing glyphs are multibyte.
+        let col = |row: &str, needle: char| row.chars().position(|c| c == needle);
+        assert_eq!(col(row("⚙ bash"), '⚙'), Some(6), "the header");
+        assert_eq!(col(row("cmd"), 'c'), Some(6), "the params key");
+        assert_eq!(col(row("✓ bash"), '✓'), Some(6), "the summary");
     }
 
     #[test]

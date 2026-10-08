@@ -312,6 +312,11 @@ fn copy_text(block: &Block) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// The fresh-transcript hint (D5): a dim notice telling the user how to begin.
+/// Seeded when an empty transcript is first drawn; retired by the first real
+/// block, so a resumed session never shows it.
+const EMPTY_HINT: &str = "❯ type a message · /help for commands · F1 for keys";
+
 /// Render the `todo` checklist as one line per item, for a transcript notice.
 /// Local to the TUI — `wcode-tui` does not depend on `wcode-cli`, so it cannot
 /// reach the tool's `render`: `[ ]` pending, `[>]` in progress, `[x]` completed.
@@ -1294,9 +1299,32 @@ impl Surface {
     /// Push a committed block, keeping `cache`/`block_revs` index-aligned with
     /// `transcript`. Every transcript push goes through here.
     fn push_block(&mut self, block: Block) {
+        // D5: the first real block retires the empty-state hint.
+        self.clear_hint();
         self.transcript.push(block);
         self.block_revs.push(0);
         self.cache.push(CacheEntry::never());
+    }
+
+    /// Seed the D5 empty-state hint when this is a genuinely empty surface (no
+    /// committed block, no live message). The renderer calls this once per frame;
+    /// it is a no-op after the first block lands.
+    fn seed_hint_if_empty(&mut self) {
+        if self.transcript.is_empty() && self.live.is_none() {
+            self.transcript.push(Block::Notice(EMPTY_HINT.into()));
+            self.block_revs.push(0);
+            self.cache.push(CacheEntry::never());
+        }
+    }
+
+    /// Drop the leading D5 empty-state hint, if present.
+    fn clear_hint(&mut self) {
+        if matches!(self.transcript.first(), Some(Block::Notice(t)) if t.as_str() == EMPTY_HINT)
+        {
+            self.transcript.remove(0);
+            self.block_revs.remove(0);
+            self.cache.remove(0);
+        }
     }
 
     /// Insert a committed block mid-transcript, shifting all three parallel vecs
@@ -1659,6 +1687,8 @@ impl Surface {
         if messages.is_empty() {
             return false;
         }
+        // Replayed history supersedes the D5 empty-state hint.
+        self.clear_hint();
         let start = self.transcript.len();
         for message in messages {
             match message {
@@ -3864,6 +3894,12 @@ impl App {
     /// summing). Empty when nothing changed this run.
     pub fn changes(&self) -> &[Change] {
         &self.focused().changes
+    }
+
+    /// Seed the focused surface's D5 empty-state hint if it is empty (called by
+    /// `ui::draw`; a no-op once real content lands).
+    pub(crate) fn seed_empty_hint(&mut self) {
+        self.focused_mut().seed_hint_if_empty();
     }
 
     /// The focused surface's changes tree (D36) — the sidebar `changes` section
