@@ -238,6 +238,8 @@ indicator a chat app puts above its input.
 
 ### 1.4 The composer: 7 controls → 2 always, 4 at most
 
+**Amended by editorial (W005) — V9's `.seg` is superseded.** The composer mode control becomes a quiet text toggle, not a `.seg`; the `Model:` removal, the `Stop` gate and the hint removal stand. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
+
 **Now** (`chat.ts:OghJl`…`:nFrit`): `@ selection`, `Mode: …`, a read-only `Model: …`
 span (`:l8HCM`), a `spacer`, the hint `Enter to send` (`:JpHql`), `Send`, and `Stop` —
 **always** both, even when nothing is running.
@@ -345,6 +347,8 @@ rail, the `.who` avatar and the collapsed strip — always at the existing low m
 `+N −M` (`:R1gHN`,`:pmb3R`) and the diff (`:MVZAP`,`:m3duW`) — they are semantic, not
 decorative.
 
+**Superseded by editorial (W005) — the six swatches are dropped.** Every home (the rail edge, the turn rail, the `.who` avatar, the collapsed strip) is removed; the team caption's glyph is coloured by state, not identity. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
+
 **(e) Tool activity: the call is a LINE, the output is a CARD (V12).** The user's read of the
 shipped surface: *"the render of tool call and output feel lack of identification."*
 Grounded: the tool fold is an **L1 line** (`media/chat.css:413`) whose rule is explicitly
@@ -404,6 +408,8 @@ chose colour for the complete state, so the amendment is stated openly (V13r bel
   has **five** jobs. The complete-state green is **semantic, not the accent**, so the one-accent
   rule holds: blue = running, green = complete, red = error.
 
+**Superseded by editorial (W005) — V13r.** Complete is no longer green: the tool mark is `--vscode-foreground` (neutral); running stays accent, error red.
+
 *The output: L2b → L2a, because it gains a head.*
 
 ```
@@ -420,6 +426,8 @@ running 145 tests
 - **Exactly one body per fold.** A diff-bearing tool renders the existing `.review` card
   (L2a) as the body; a plain tool renders the new output card (L2a). Either way the fold's
   body is **exactly one L2a**, the fold stays **L1**, and no card nests in a card.
+
+**Superseded by editorial (W005) — V12.** The tool output reverts to a fill-only recess (no card, no head, no `Copy`); the `⚙ {tool}` mark keeps its weight, but identity moves to the dim tool summary line.
 
 **(f) Transcript composition: the turn gets depth (V14).** The shipped transcript reads
 flat because **every turn is the same shape**: `.turn` is a grid `14px 1fr`
@@ -461,6 +469,8 @@ the spine, which replaces an existing L1 rule. **No new element and no new wrapp
 `.turn`/`.rail`/`.who` are already emitted (`chat.ts:568`) and the fill goes on `.turn.you`;
 the **only** change to `renderTurn` is the **`.turn.new` class** on the turn (a speaker
 change), which the shipped template (`turn ${role}${sw}`) does not emit yet.
+
+**Superseded by editorial (W005) — V14.** The spine, the head hairline and the `you` fill are deleted; the `.new` beat survives at `--wc-5`, not `--wc-4`.
 
 ### 1.6 What is KEPT / MOVED / REMOVED
 
@@ -564,6 +574,8 @@ existing data; `✗ new` = new plumbing or a decision.
 | transcript composition (V14: head, spine, alignment, rhythm) | all CSS over the existing DOM: `.turn`/`.rail`/`.who` are already emitted by `renderTurn` (`chat.ts:568`); the `you` fill goes on `.turn.you` (**no wrapper class**: `renderTurn` emits a class-less content div, `chat.ts:619`); the only new hooks are a `.turn.new` marker (a speaker change) and the `.who::after` hairline | ✔ no new wire; ◑ CSS + one class |
 | tool output card (L2b → L2a) + the tool mark at weight 700 + `thinking` demoted | `RenderedTool.name` (`render.ts:QWZjR`) and `outputText` (`:iKvzO`) already reach the webview; the head reuses the existing `.card`/`.chead`/`.mini`; the rest is CSS only | ✔ no new wire; ◑ one head |
 
+**Amended by editorial (W005) — V11b.** The context-meter gauge (`▰▰▰▱▱ 42k / 200k`) is dropped; the masthead shows the plain text `ctx 42k` (decision 12), and the `effort` row goes with the `▾` disclosure.
+
 ---
 
 ## 3. Phases (independently shippable commits)
@@ -593,6 +605,7 @@ existing data; `✗ new` = new plumbing or a decision.
 2. **The All/Focus control lives in the header.** *Amends* the separate `#modes` band
    (`vscode-ui-v2-plan.md` §0 item 3). The `#ribbon` is deleted with it — its "Show all"
    was the same control twice and its sentence restated the control's own label.
+   **Amended by editorial (W005) — the mode stays, the `.seg` goes.** The control lives in the masthead but is restyled as a quiet text toggle (V9); the wire `mode` and the retarget semantics are unchanged. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
 3. **The team has ONE home (the rail) and TWO echoes.** The rail owns the **per-member**
    rows (state glyph + `liveAction`) — that is the detail. Echo (a), the header's target
    chip, owns **identity** (which member you are reading). Echo (b), the **working pill**,
@@ -605,6 +618,7 @@ existing data; `✗ new` = new plumbing or a decision.
    but shipped with three renderings. The header count and the transcript `.group` box
    are removed; the pill is `workingGroup` (`view.ts:KeUWa`) with the predicate
    unchanged and **no new wire data**.
+   **Superseded by editorial (W005).** The rail and the working pill both go: the team becomes a dim caption and the aggregate a non-interactive live type-line. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
 4. **Errors live where they happened — and they already do.** The transcript's `error`
    block (`reducer.ts:306` → `.body.error`, `media/chat.css:348`) is the failure's home;
    v3 only **removes the redundant header cell** (V6) and adds no new row. `status.lastError`
@@ -618,6 +632,7 @@ existing data; `✗ new` = new plumbing or a decision.
    card, the popovers, the bordered tables, the working pill and the tool output card are
    L2a; a peer message is L2b and **nothing else**. There is
    no third treatment and no mixing, so no implementer has to guess. One radius token.
+   **Amended by editorial (W005).** L2a narrows to the change-review card alone: the code block and the tool output become fill-only recesses. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
 6. **Density is a token switch, not a second design.** `[data-density="dense"]` changes
    `--wc-1…5` and `--wc-fs-*` and nothing else — which is also how the system proves it
    is a system.
@@ -639,6 +654,7 @@ existing data; `✗ new` = new plumbing or a decision.
 12. **The V6 meter is the text `ctx 42k`.** No `▰`, no denominator, no
     `▰▰▰▱▱ 42 / ?` — the gauge form is a V11 preview behind a labelled control, never
     the default, so the plan and the prototype cannot disagree.
+    **Amended by editorial (W005) — the *gauge* (V11b) is dropped, not this decision.** The text `ctx 42k` default stands (editorial agrees); what editorial supersedes is the V11b gauge (§2 feasibility row, `:Sw11b`). See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
 
 ---
 
