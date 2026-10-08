@@ -17,6 +17,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
 use crate::app::{AffordanceHit, App, Block, InputView, KEYS, Mode, Overlay, Picker, Tool};
+use crate::app::{ChangeRow, change_totals, changes_header};
 use crate::markdown;
 use crate::theme;
 
@@ -1584,6 +1585,52 @@ fn state_style(state: TeamState) -> Style {
     }
 }
 
+/// The D36 changes tree as sidebar rows: a `Dir` header (dim), then its `File`
+/// leaves as `  ├─ {name}` with the `+a −r` stats RIGHT-aligned. The name is
+/// clipped first, so the stats always survive a narrow sidebar.
+fn change_tree_lines(rows: &[ChangeRow], width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for row in rows {
+        match row {
+            ChangeRow::Dir(dir) => {
+                out.push(clipped_row(vec![(format!("  {dir}"), dim())], width));
+            }
+            ChangeRow::File {
+                branch,
+                name,
+                added,
+                removed,
+                path: _,
+            } => {
+                let prefix = format!("  {branch} ");
+                let plus = format!("+{added}");
+                let minus = format!("−{removed}");
+                let stats_w = plus.chars().count() + 1 + minus.chars().count();
+                let budget = width.saturating_sub(prefix.chars().count() + stats_w + 1);
+                let (name, more) = split_at_char(name, budget);
+                let name = if more.is_empty() {
+                    name
+                } else {
+                    format!("{name}…")
+                };
+                let left = format!("{prefix}{name}");
+                let pad = width.saturating_sub(left.chars().count() + stats_w);
+                out.push(clipped_row(
+                    vec![
+                        (left, theme::theme().body),
+                        (" ".repeat(pad), dim()),
+                        (plus, added_style()),
+                        (" ".to_string(), dim()),
+                        (minus, removed_style()),
+                    ],
+                    width,
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// Draw the docked left sidebar: one fixed-width column stacking the “more
 /// info” the bands cannot all show at once — **agents**, **changes**.
 /// Each section is a dim header line followed by its rows; an
@@ -1600,7 +1647,7 @@ fn state_style(state: TeamState) -> Style {
 ///   live action); glyph `state.glyph()` styled by `state_style(state)`.
 ///   `member_rows` drops `last_action_at`, so a per-member elapsed is not
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
-/// - changes → [`App::changes`] (`path · +added −removed`).
+/// - changes → [`App::change_tree`] (a directory tree, D36).
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -1649,41 +1696,17 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     app.set_sidebar_hit(area, members);
 
     // ---- changes --------------------------------------------------------
-    let changes = app.changes();
-    if changes.is_empty() {
+    let tree = app.change_tree();
+    if tree.is_empty() {
         lines.push(Line::from(Span::styled("changes", dim())));
         lines.push(Line::from(Span::styled("  —", dim())));
     } else {
+        let (files, added, removed) = change_totals(&tree);
         lines.push(Line::from(Span::styled(
-            format!("changes  {}", changes.len()),
+            changes_header(files, added, removed),
             dim(),
         )));
-        for c in changes {
-            // `  src/a.rs · +3 −1` — path dim, `+a` added, `−r` removed. Clip
-            // the path first (reserving the counts) so the numbers stay visible.
-            let sep = " · ";
-            let added = format!("+{}", c.added);
-            let removed = format!("−{}", c.removed);
-            let fixed = 2 + sep.chars().count() + added.chars().count() + 1 + removed.chars().count();
-            let budget = w.saturating_sub(fixed);
-            let (cut, more) = split_at_char(&c.path, budget);
-            let path = if more.is_empty() || budget == 0 {
-                cut
-            } else {
-                let (shorter, _) = split_at_char(&c.path, budget - 1);
-                format!("{shorter}…")
-            };
-            lines.push(clipped_row(
-                vec![
-                    (format!("  {path}"), dim()),
-                    (sep.to_string(), dim()),
-                    (added, added_style()),
-                    (" ".to_string(), dim()),
-                    (removed, removed_style()),
-                ],
-                w,
-            ));
-        }
+        lines.extend(change_tree_lines(&tree, w));
     }
 
     // Borderless by default so a 30-col panel is 30 cols of content; the
@@ -3278,6 +3301,48 @@ mod tests {
             frame.contains("1 ○ explorer"),
             "the numbered member row is missing:\n{frame}"
         );
+    }
+
+    /// Finish one `edit` tool that changed `path` with `diff`.
+    fn push_change(app: &mut App, path: &str, diff: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: "edit".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: "edit".into(),
+                output: "ok".into(),
+                is_error: false,
+                diff: Some(diff.into()),
+                path: Some(path.into()),
+                duration_ms: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn the_sidebar_renders_the_changes_tree() {
+        let mut app = App::new();
+        push_change(&mut app, "crates/wcode-tui/src/ui.rs", "@@ -1 +1 @@\n+a\n+b\n");
+        push_change(&mut app, "crates/wcode-tui/src/app.rs", "@@ -1 +1 @@\n-a\n+b\n");
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
+        let frame = buffer_text(&render(&mut app, 100, 30));
+        assert!(
+            frame.contains("changes  2 files  +3 −1"),
+            "the tree header:\n{frame}"
+        );
+        assert!(
+            frame.contains("crates/wcode-tui/src/"),
+            "the directory line:\n{frame}"
+        );
+        assert!(frame.contains("├─ app.rs"), "a non-last leaf:\n{frame}");
+        assert!(frame.contains("└─ ui.rs"), "the last leaf:\n{frame}");
     }
 
     #[test]

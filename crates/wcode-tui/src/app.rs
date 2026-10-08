@@ -5,6 +5,7 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -230,6 +231,50 @@ pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
     (added, removed)
 }
 
+/// One row of the changes tree (D36). The sidebar and the `/changes` picker both
+/// render these; a `File` leaf carries its full `path` — the picker's selection
+/// value (a `Dir` header is not selectable).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ChangeRow {
+    /// A directory grouping line, e.g. `crates/wcode-tui/src/`.
+    Dir(String),
+    /// A file leaf: the branch connector (`├─` / `└─`), the base name,
+    /// and its `+added −removed` stats.
+    File {
+        branch: &'static str,
+        name: String,
+        added: usize,
+        removed: usize,
+        path: String,
+    },
+}
+
+/// Sum a changes tree's file leaves into `(files, added, removed)`.
+pub(crate) fn change_totals(rows: &[ChangeRow]) -> (usize, usize, usize) {
+    let (mut files, mut added, mut removed) = (0, 0, 0);
+    for row in rows {
+        if let ChangeRow::File {
+            added: a,
+            removed: r,
+            ..
+        } = row
+        {
+            files += 1;
+            added += a;
+            removed += r;
+        }
+    }
+    (files, added, removed)
+}
+
+/// The changes header (D36): `changes  {n} file(s)  +{a} −{r}`.
+pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> String {
+    format!(
+        "changes  {files} file{}  +{added} −{removed}",
+        if files == 1 { "" } else { "s" }
+    )
+}
+
 /// The text `y` copies for a block — `None` when there is nothing to copy.
 ///
 /// - `User` / `Notice` / `Error`: the block's text.
@@ -385,9 +430,34 @@ impl Picker {
         Some(self.values.get(index).map_or(&self.items[index], String::as_str))
     }
 
+    /// Whether item `i` is selectable. An empty `values` list means every row is
+    /// (a plain list, e.g. the model picker); otherwise an empty value marks a
+    /// non-selectable header row (the `/changes` tree's directory lines).
+    fn selectable(&self, i: usize) -> bool {
+        self.values.is_empty() || self.values.get(i).is_some_and(|v| !v.is_empty())
+    }
+
     fn move_selection(&mut self, delta: isize) {
-        let last = self.rows().len().saturating_sub(1) as isize;
-        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+        if delta == 0 {
+            return;
+        }
+        let visible = self.visible_indices();
+        let last = visible.len().saturating_sub(1) as isize;
+        if last < 0 {
+            self.selected = 0;
+            return;
+        }
+        let step = delta.signum();
+        let mut next = (self.selected as isize + delta).clamp(0, last);
+        // Skip non-selectable header rows (the `/changes` tree's directories).
+        while !self.selectable(visible[next as usize]) {
+            let candidate = next + step;
+            if candidate < 0 || candidate > last {
+                return; // no selectable row in that direction: leave the selection
+            }
+            next = candidate;
+        }
+        self.selected = next as usize;
     }
 }
 
@@ -1537,6 +1607,37 @@ impl Surface {
             }
         }
         out
+    }
+
+    /// Group the run's changed files into a directory tree (D36): one `Dir` row
+    /// per PARENT directory, then its `File` leaves (the last leaf in a directory
+    /// gets the `└─` connector). Directories and files are name-sorted for a
+    /// stable order. A file at the repo root (no `/`) groups under `./`.
+    pub(crate) fn change_tree(&self) -> Vec<ChangeRow> {
+        let mut by_dir: BTreeMap<String, Vec<(String, usize, usize, String)>> = BTreeMap::new();
+        for (path, added, removed) in self.changes_by_path() {
+            let (dir, name) = match path.rsplit_once('/') {
+                Some((d, n)) => (format!("{d}/"), n.to_string()),
+                None => ("./".to_string(), path.clone()),
+            };
+            by_dir.entry(dir).or_default().push((name, added, removed, path));
+        }
+        let mut rows = Vec::new();
+        for (dir, mut files) in by_dir {
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            rows.push(ChangeRow::Dir(dir));
+            let last = files.len().saturating_sub(1);
+            for (i, (name, added, removed, path)) in files.into_iter().enumerate() {
+                rows.push(ChangeRow::File {
+                    branch: if i == last { "└─" } else { "├─" },
+                    name,
+                    added,
+                    removed,
+                    path,
+                });
+            }
+        }
+        rows
     }
 
     /// A one-line summary of the run's changes, e.g. `⋯ 2 files changed · +9 −3`.
@@ -3471,23 +3572,48 @@ impl App {
 
     /// Open the `/changes` picker over the files this run changed.
     fn open_changes_picker(&mut self) {
-        let rows = self.focused().changes_by_path();
+        let rows = self.focused().change_tree();
         if rows.is_empty() {
             self.notice("no changes this run");
             return;
         }
+        let (files, added, removed) = change_totals(&rows);
         let mut items = Vec::new();
         let mut values = Vec::new();
-        for (path, added, removed) in rows {
-            items.push(format!("{path} · +{added} −{removed}"));
-            values.push(path);
+        let mut first_leaf = None;
+        for row in &rows {
+            match row {
+                ChangeRow::Dir(dir) => {
+                    // A header row: an empty value marks it non-selectable.
+                    items.push(dir.clone());
+                    values.push(String::new());
+                }
+                ChangeRow::File {
+                    branch,
+                    name,
+                    added,
+                    removed,
+                    path,
+                } => {
+                    if first_leaf.is_none() {
+                        first_leaf = Some(items.len());
+                    }
+                    items.push(format!("{branch} {name}  +{added} −{removed}"));
+                    values.push(path.clone());
+                }
+            }
         }
-        self.overlay = Some(Overlay::Pick(Picker::with_values(
+        let mut picker = Picker::with_values(
             PickerKind::Change,
-            "changes",
+            changes_header(files, added, removed),
             items,
             values,
-        )));
+        );
+        // Start on the first selectable LEAF, not a directory header.
+        if let Some(i) = first_leaf {
+            picker.selected = i;
+        }
+        self.overlay = Some(Overlay::Pick(picker));
         self.dirty = true;
     }
 
@@ -3617,6 +3743,12 @@ impl App {
             self.notice("no match to select");
             return;
         };
+        // A non-selectable header row (the `/changes` tree's directory line):
+        // apply nothing and keep the modal open.
+        if selected.is_empty() {
+            self.overlay = Some(Overlay::Pick(picker));
+            return;
+        }
         match picker.kind {
             PickerKind::Model => {
                 self.focused_mut().status.model.clone_from(&selected);
@@ -3732,6 +3864,12 @@ impl App {
     /// summing). Empty when nothing changed this run.
     pub fn changes(&self) -> &[Change] {
         &self.focused().changes
+    }
+
+    /// The focused surface's changes tree (D36) — the sidebar `changes` section
+    /// and the `/changes` overlay both render it.
+    pub(crate) fn change_tree(&self) -> Vec<ChangeRow> {
+        self.focused().change_tree()
     }
 
     /// The latest `Todo` list, for the status chip (`☑ done/total`) — an
@@ -4866,7 +5004,7 @@ mod tests {
         app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
 
         submit(&mut app, "/changes");
-        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title == "changes"));
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.title.starts_with("changes")));
         app.handle(AppEvent::Key(Key::Enter));
 
         assert!(app.overlay().is_none(), "selecting closes the modal");
@@ -4874,6 +5012,59 @@ mod tests {
             app.transcript().last(),
             Some(Block::Diff { path, .. }) if path == "src/a.rs"
         ));
+    }
+
+    #[test]
+    fn the_changes_tree_groups_files_by_directory() {
+        let mut app = App::new();
+        submit(&mut app, "edit");
+        let _ = app.take_actions();
+        // Three files share one directory; a fourth is at the repo root.
+        tool_end(
+            &mut app,
+            "edit",
+            Some("crates/wcode-tui/src/ui.rs"),
+            Some("@@ -1 +1 @@\n+a\n+b\n+c\n+d\n+e\n+f\n+g\n+h\n"),
+        );
+        tool_end(
+            &mut app,
+            "edit",
+            Some("crates/wcode-tui/src/app.rs"),
+            Some("@@ -1 +1 @@\n-a\n+b\n+c\n"),
+        );
+        tool_end(
+            &mut app,
+            "edit",
+            Some("crates/wcode-tui/src/theme.rs"),
+            Some("@@ -1 +1 @@\n-a\n-b\n-c\n+d\n"),
+        );
+        tool_end(
+            &mut app,
+            "edit",
+            Some("README.md"),
+            Some("@@ -1 +1 @@\n-a\n+b\n"),
+        );
+
+        let leaf = |branch: &'static str, name: &str, added, removed, path: &str| ChangeRow::File {
+            branch,
+            name: name.into(),
+            added,
+            removed,
+            path: path.into(),
+        };
+        // Directories name-sorted; files within a directory name-sorted; the last
+        // leaf in each directory gets the `└─` connector.
+        assert_eq!(
+            app.focused().change_tree(),
+            vec![
+                ChangeRow::Dir("./".into()),
+                leaf("└─", "README.md", 1, 1, "README.md"),
+                ChangeRow::Dir("crates/wcode-tui/src/".into()),
+                leaf("├─", "app.rs", 2, 1, "crates/wcode-tui/src/app.rs"),
+                leaf("├─", "theme.rs", 1, 3, "crates/wcode-tui/src/theme.rs"),
+                leaf("└─", "ui.rs", 8, 0, "crates/wcode-tui/src/ui.rs"),
+            ]
+        );
     }
 
     #[test]
