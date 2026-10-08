@@ -1704,7 +1704,9 @@ pub(crate) struct AffordanceHit {
     /// Index into the FOCUSED surface's `transcript` (a committed block, never
     /// the live block).
     pub(crate) block: usize,
-    /// The `▸`/`▾` glyph cell on the panel's top rule (1 col wide, 1 row tall).
+    /// The panel header ROW's toggle region (1 row tall): from the panel's
+    /// inner-left through the `▸`/`▾` glyph, ending before the gap/`⧉` so it never
+    /// overlaps `copy`. A click anywhere on the header name toggles the block.
     pub(crate) toggle: Rect,
     /// The `⧉` glyph cell on the same row (1 col wide).
     pub(crate) copy: Rect,
@@ -1713,7 +1715,8 @@ pub(crate) struct AffordanceHit {
 impl AffordanceHit {
     /// Which affordance, if any, contains screen cell `(row, col)` — the
     /// app-wide `(row, col)` argument order (`block_at`, `sidebar_member_at`).
-    /// `Toggle` and `Copy` never overlap, so at most one matches.
+    /// `toggle` is checked first and never covers the `⧉` cell (`toggle` ends
+    /// before the gap), so a copy click still resolves to `Copy`.
     pub(crate) fn kind_at(&self, row: u16, col: u16) -> Option<AffordanceKind> {
         let point = (col, row).into();
         if self.toggle.contains(point) {
@@ -5303,13 +5306,15 @@ mod tests {
         })
     }
 
-    /// An `AffordanceHit` for `block`, with 1x1 `toggle`/`copy` cells on `row` at
-    /// `toggle_col` and `toggle_col + 2` (the A4 spacing).
-    fn affordance(block: usize, toggle_col: u16, row: u16) -> AffordanceHit {
+    /// A published panel affordance for `block` on the panel's top-rule `row`: a
+    /// wide `toggle` spanning `[left, left + width)` (the header name + fill + the
+    /// `▸`/`▾` glyph) and the 1x1 `⧉` `copy` cell at `copy_x` (one past the gap).
+    /// Mirrors the `ui` publish: `toggle` is wide and disjoint from `copy`.
+    fn affordance(block: usize, left: u16, width: u16, copy_x: u16, row: u16) -> AffordanceHit {
         AffordanceHit {
             block,
-            toggle: rect(toggle_col, row, 1, 1),
-            copy: rect(toggle_col + 2, row, 1, 1),
+            toggle: rect(left, row, width, 1),
+            copy: rect(copy_x, row, 1, 1),
         }
     }
 
@@ -5325,18 +5330,19 @@ mod tests {
             rect(0, 0, 40, 12),
             0,
             vec![String::new(); 12],
-            vec![affordance(0, 4, 0), affordance(1, 4, 4)],
+            vec![affordance(0, 4, 10, 20, 0), affordance(1, 4, 10, 20, 4)],
         );
 
-        // Click the FIRST panel's toggle glyph (col 4, row 0).
+        // Click the FIRST panel's toggle GLYPH — the last column of its header
+        // toggle region (col 13, row 0).
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
-            col: 4,
+            col: 13,
             row: 0,
         }));
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Up,
-            col: 4,
+            col: 13,
             row: 0,
         }));
 
@@ -5351,18 +5357,19 @@ mod tests {
     }
 
     #[test]
-    fn clicking_copy_yields_the_block_text() {
+    fn clicking_the_panel_header_name_toggles_it() {
         let mut app = App::new();
         app.focused_mut().push_block(panel_block("bash"));
         app.set_block_ranges(std::iter::once(0..3).collect());
+        // A wide header toggle `[4, 14)` with the `⧉` copy cell out at col 20.
         app.set_transcript_hit(
             rect(0, 0, 40, 10),
             0,
             vec![String::new(); 10],
-            vec![affordance(0, 4, 0)],
+            vec![affordance(0, 4, 10, 20, 0)],
         );
 
-        // Click the `⧉` glyph (toggle_col + 2 = col 6).
+        // Click the header NAME area (col 6) — not the `▸` glyph, not `⧉`.
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
             col: 6,
@@ -5371,6 +5378,38 @@ mod tests {
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Up,
             col: 6,
+            row: 0,
+        }));
+
+        assert_eq!(app.mode(), Mode::Input, "a header click never enters browse");
+        assert_eq!(app.selected(), None, "a header click never selects a block");
+        assert!(
+            matches!(app.transcript().first(), Some(Block::Tool(t)) if t.expanded),
+            "clicking the header name expands the panel"
+        );
+    }
+
+    #[test]
+    fn clicking_copy_yields_the_block_text() {
+        let mut app = App::new();
+        app.focused_mut().push_block(panel_block("bash"));
+        app.set_block_ranges(std::iter::once(0..3).collect());
+        app.set_transcript_hit(
+            rect(0, 0, 40, 10),
+            0,
+            vec![String::new(); 10],
+            vec![affordance(0, 4, 10, 20, 0)],
+        );
+
+        // Click the `⧉` glyph (col 20, one past the toggle region).
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: 20,
+            row: 0,
+        }));
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Up,
+            col: 20,
             row: 0,
         }));
 
@@ -5388,14 +5427,14 @@ mod tests {
             rect(0, 0, 40, 10),
             0,
             vec!["hello".into(), String::new(), String::new()],
-            vec![affordance(0, 4, 0)],
+            vec![affordance(0, 4, 10, 20, 0)],
         );
 
-        // Down ON the `⧉` glyph (col 6, row 0), drag left to col 0, release: the drag
+        // Down ON the `⧉` glyph (col 20, row 0), drag left to col 0, release: the drag
         // arm wins, copying the dragged text and NEVER toggling the panel.
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
-            col: 6,
+            col: 20,
             row: 0,
         }));
         app.handle(AppEvent::Mouse(MouseEvent {
@@ -5428,7 +5467,7 @@ mod tests {
             rect(0, 0, 40, 10),
             5,
             vec![String::new(); 10],
-            vec![affordance(1, 4, 3)],
+            vec![affordance(1, 4, 10, 20, 3)],
         );
 
         // Click where the OFF-SCREEN block 0's toggle glyph would be (row 0).

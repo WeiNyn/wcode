@@ -452,9 +452,10 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     // D32 — publish the panel affordance cells. A panel's top rule is its block's
-    // FIRST line, so a visible panel block contributes two 1x1 cells on that row.
-    // The rects are pure functions of (kind, width, range) — recomputed every
-    // frame, never cached (the (rev, width) cache stores `Line`s, not geometry).
+    // FIRST line: a visible panel block contributes the header-row toggle region
+    // (its inner-left through the `▸`/`▾`) plus the 1x1 `⧉` copy cell. The rects
+    // are pure functions of (kind, width, range) — recomputed every frame, never
+    // cached (the (rev, width) cache stores `Line`s, not geometry).
     let panel_w = (area.width as usize)
         .saturating_sub(PANEL_INDENT.chars().count())
         .max(4);
@@ -474,7 +475,10 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             let y = area.y + row as u16;
             Some(AffordanceHit {
                 block: i,
-                toggle: Rect::new(area.x + ind_w + toggle_col, y, 1, 1),
+                // The WHOLE header row is the toggle target: from the panel's
+                // inner-left through the `▸`/`▾` glyph, ending before the gap so
+                // the `⧉` copy cell stays disjoint (`kind_at` checks toggle first).
+                toggle: Rect::new(area.x + ind_w + 1, y, toggle_col, 1),
                 copy: Rect::new(area.x + ind_w + copy_col, y, 1, 1),
             })
         })
@@ -3566,7 +3570,7 @@ mod tests {
         push_bash_panel(&mut app, "ls", "/w", "ok");
         let mut terminal = render(&mut app, 80, 20);
 
-        // The published cells are exactly where the glyphs are drawn.
+        // The published cells line up with the drawn glyphs.
         let (block, toggle, copy) = {
             let hit = app.hit.transcript.as_ref().expect("a transcript hit");
             assert_eq!(hit.affordances.len(), 1, "one panel → one affordance record");
@@ -3577,31 +3581,42 @@ mod tests {
             matches!(&app.transcript()[block], Block::Tool(_)),
             "the affordance names the panel block"
         );
-        {
-            let buf = terminal.backend().buffer();
-            assert_eq!(buf[(toggle.x, toggle.y)].symbol(), "▸", "the toggle cell");
-            assert_eq!(buf[(copy.x, copy.y)].symbol(), "⧉", "the copy cell");
-        }
-        assert_eq!(copy.y, toggle.y, "both glyphs share the top-rule row");
-        assert_eq!(copy.x, toggle.x + 2, "the A4 gap between the glyphs");
 
-        // End to end: a click on the drawn `▸` expands the panel.
+        let buf = terminal.backend().buffer();
+        let header: String = (0..80).map(|x| buf[(x, toggle.y)].symbol()).collect();
+        // The wide toggle ENDS on the `▸`; `copy` is exactly the `⧉` glyph.
+        let glyph_col = toggle.x + toggle.width - 1;
+        assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▸", "the ▸ glyph");
+        assert_eq!(buf[(copy.x, copy.y)].symbol(), "⧉", "the copy cell");
+        assert_eq!(copy.y, toggle.y, "both affordances share the top-rule row");
+        assert!(
+            !toggle.contains((copy.x, copy.y).into()),
+            "the wide toggle and the copy cell are disjoint"
+        );
+        // The header NAME (⚙) is clickable — inside the wide toggle region.
+        let name_col = header.chars().position(|c| c == '⚙').expect("the ⚙ name") as u16;
+        assert!(
+            toggle.contains((name_col, toggle.y).into()),
+            "the header name lies inside the toggle region"
+        );
+
+        // End to end: a click on the header NAME (not the glyph) expands the panel.
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
-            col: toggle.x,
+            col: name_col,
             row: toggle.y,
         }));
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Up,
-            col: toggle.x,
+            col: name_col,
             row: toggle.y,
         }));
         let expanded = matches!(&app.transcript()[block], Block::Tool(t) if t.expanded);
-        assert!(expanded, "clicking the drawn ▸ expands the panel");
+        assert!(expanded, "clicking the header name expands the panel");
 
         // The freshly toggled frame draws `▾` in the same cell.
         terminal = render(&mut app, 80, 20);
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(toggle.x, toggle.y)].symbol(), "▾", "the toggle flips");
+        assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▾", "the toggle flips");
     }
 }
