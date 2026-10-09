@@ -199,6 +199,12 @@ blank pane.
   reply's **first top-level `# h1`** is **consumed** into the head (the heading
   line leaves the body); a reply with no `# h1` renders a bare `§N`. It is
   **chrome** — never a browse selection target, never copied.
+- **Code plate** — a fenced code block renders a **caption line** above it,
+  `plate N — <info>` (the fence's info string verbatim; just `plate N` when
+  there is none), all `dim`. `N` is the fenced block's ordinal, **per message,
+  monotonic**. **No disclosure** — the code always shows (the design's `▸`
+  collapse is deferred). No new glyph (`plate`/`—`/the digits/`/` are ASCII;
+  `─` is declared).
 - **Turn foot (notes)** (D31, revised) — a tool is **not** a mid-flow panel any
   more. At the answer reply's commit the turn's tools fold into ONE
   `Block::Notes`, drawn **frameless** at the turn's foot under a `── notes ──`
@@ -267,8 +273,10 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    `─` rule) above an **open writing line** (the input), with a **foot line**
    below. The head line carries `project ⎇ branch · session a1b2c3d4` left and
    `model · effort` right; the foot line carries the context gauge left and
-   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` right
-   (the `btw…` state while a `/btw` side ask is in flight). There is **no box and
+   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` `<N>/<M>` right
+   (the `btw…` state while a `/btw` side ask is in flight; the **folio**
+   `<N>/<M>` is the surface's turn count, `N == M`, so a first turn reads
+   `1/1`). There is **no box and
    no corners**, and **no session row and no status row**.
 The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored
 green→yellow→red by fill, then `used / limit`. The head/foot titles clip with

@@ -678,7 +678,10 @@ fn content_lines(
     thinking_open: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    // The turn's tool-call ordinal, for the `¹` foot reference.
+    // The `¹` reference ordinal, PER MESSAGE (reset each `content_lines` call).
+    // The foot's note number is per TURN, so the two coincide whenever the
+    // non-final rounds carry no prose (the usual `A(tc) → T → … → A(answer)`
+    // shape, where the text-less rounds emit no reference at all).
     let mut refn = 0usize;
     for (i, block) in content.iter().enumerate() {
         match block {
@@ -1524,6 +1527,14 @@ fn corner_titles(
         if show_scroll && app.scroll() > 0 {
             spans.push(sep());
             spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
+        }
+        // The folio: `<N>/<M>` = the surface's turn count (N == M — the same
+        // series as the `§N` heads); a first turn reads `1/1`. Space-joined (the
+        // design's folio convention), not a second `·`, so the foot line keeps
+        // ≤1 `·` per metadata group.
+        if app.turns() > 0 {
+            spans.push(Span::styled(" ".to_string(), dim()));
+            spans.push(Span::styled(format!("{n}/{n}", n = app.turns()), dim()));
         }
         spans
     };
@@ -3597,6 +3608,21 @@ mod tests {
     }
 
     #[test]
+    fn the_composer_foot_line_shows_the_folio() {
+        let mut app = App::new();
+        // No turn yet → no folio.
+        let text = buffer_text(&render(&mut app, 80, 14));
+        assert!(!text.contains("0/0"), "no folio before a turn:\n{text}");
+        // A first turn reads `1/1`; a second `2/2`.
+        push_assistant(&mut app, "one");
+        let text = buffer_text(&render(&mut app, 80, 14));
+        assert!(text.contains("1/1"), "the folio:\n{text}");
+        push_assistant(&mut app, "two");
+        let text = buffer_text(&render(&mut app, 80, 14));
+        assert!(text.contains("2/2"), "the folio updates:\n{text}");
+    }
+
+    #[test]
     fn the_project_is_muted_and_the_run_state_is_accent() {
         let mut app = App::new();
         app.set_cwd(Some("wcode".into()));
@@ -4057,6 +4083,66 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::Copy(t) if t == "the output")),
             "the copy yields the note's output"
+        );
+    }
+
+    #[test]
+    fn a_multi_note_foot_publishes_a_hit_per_note() {
+        let mut app = App::new();
+        // A two-round turn: two tool calls, then the answer folds both into ONE foot.
+        push_bash_panel(&mut app, "ls", "/w", "first output");
+        push_bash_panel(&mut app, "pwd", "/w", "second output");
+        push_assistant(&mut app, "the answer");
+        let Block::Notes(items) = &app.transcript()[2] else {
+            panic!("a notes block");
+        };
+        assert_eq!(items.len(), 2, "both tools folded into the foot");
+
+        let _ = render(&mut app, 80, 24);
+        let (hits, rows) = {
+            let hit = app.hit.transcript.as_ref().expect("a hit");
+            assert_eq!(hit.affordances.len(), 2, "one hit per note");
+            let hits: Vec<_> = hit.affordances.iter().map(|a| (a.block, a.item)).collect();
+            let rows: Vec<_> = hit.affordances.iter().map(|a| a.toggle.y).collect();
+            (hits, rows)
+        };
+        assert_eq!(
+            hits,
+            [(2, Some(0)), (2, Some(1))],
+            "same block, one hit per note"
+        );
+        assert_ne!(rows[0], rows[1], "the two hits sit on distinct rows");
+
+        // Toggling the SECOND note expands only it.
+        let toggle2 = app.hit.transcript.as_ref().unwrap().affordances[1].toggle;
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            app.handle(AppEvent::Mouse(MouseEvent {
+                kind,
+                col: toggle2.x + 3,
+                row: toggle2.y,
+            }));
+        }
+        let Block::Notes(items) = &app.transcript()[2] else {
+            panic!("a notes block");
+        };
+        assert!(items[1].expanded, "the second note expands");
+        assert!(!items[0].expanded, "the first note stays collapsed");
+
+        // Copying the SECOND note yields its output (re-read the freshly drawn cells).
+        let _ = render(&mut app, 80, 24);
+        let copy2 = app.hit.transcript.as_ref().unwrap().affordances[1].copy;
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            app.handle(AppEvent::Mouse(MouseEvent {
+                kind,
+                col: copy2.x,
+                row: copy2.y,
+            }));
+        }
+        assert!(
+            app.take_actions()
+                .iter()
+                .any(|a| matches!(a, Action::Copy(t) if t == "second output")),
+            "the copy yields the second note's output"
         );
     }
 

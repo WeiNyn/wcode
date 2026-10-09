@@ -3800,6 +3800,12 @@ impl App {
         self.focused().scroll
     }
 
+    /// The focused surface's committed turn count — the `§N` series, and the
+    /// composer foot line's folio (`N/M`; N == M).
+    pub fn turns(&self) -> usize {
+        self.focused().turns
+    }
+
     /// Reconcile scroll state with the transcript the renderer just measured:
     /// keep the view pinned while content grows, then clamp to the top.
     pub fn sync_scroll(&mut self, total: usize, height: usize, width: usize) {

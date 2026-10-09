@@ -83,6 +83,9 @@ enum Inline {
 struct CodeBlock {
     fence: Fenced,
     text: String,
+    /// The fence's info string, verbatim — the plate caption's `<info>` (empty
+    /// for an indented block or a bare fence).
+    info: String,
 }
 
 impl CodeBlock {
@@ -90,6 +93,7 @@ impl CodeBlock {
         Self {
             fence: Fenced::new(info, mode),
             text: String::new(),
+            info: info.to_string(),
         }
     }
 
@@ -99,6 +103,19 @@ impl CodeBlock {
         let body = self.text.strip_suffix('\n').unwrap_or(&self.text);
         body.split('\n').map(|line| fence.line(line)).collect()
     }
+}
+
+/// The code plate's caption line: `plate N — <info>` (or just `plate N` when the
+/// fence carries no info string), all `dim`, under the 3-col gutter. `N` is the
+/// fenced block's ordinal (the `Blocks.plates` counter).
+fn plate_line(n: usize, info: &str) -> Line<'static> {
+    let info = info.trim();
+    let text = if info.is_empty() {
+        format!("{GUTTER}plate {n}")
+    } else {
+        format!("{GUTTER}plate {n} — {info}")
+    };
+    Line::from(Span::styled(text, dim()))
 }
 
 /// A table in progress (D7); `build()` yields the existing `Table`.
@@ -176,6 +193,9 @@ struct Blocks {
     table: Option<TableBuild>,
     /// Completed output.
     out: Vec<Line<'static>>,
+    /// The fenced code blocks emitted so far — the plate number (`plate N`).
+    /// Per `render` call (per message); see the spec's "per session" note.
+    plates: usize,
     /// The wrap width — needed to FLUSH an open leaf on a block-level `Start`
     /// (B1), so the walk holds it rather than threading it through `on_start`.
     width: usize,
@@ -191,6 +211,7 @@ impl Blocks {
             code: None,
             table: None,
             out: Vec::new(),
+            plates: 0,
             width,
         }
     }
@@ -268,6 +289,10 @@ impl Blocks {
             }
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
+                    // A code plate: a `plate N — <info>` caption ABOVE the code
+                    // (the `▸` collapse is deferred — the code always shows).
+                    self.plates += 1;
+                    self.out.push(plate_line(self.plates, &code.info));
                     self.out.extend(code.render());
                 }
             }
@@ -1117,14 +1142,14 @@ mod tests {
     fn unknown_or_absent_language_is_uniform_and_guttered() {
         for md in ["```\nplain text\n```", "```nope\nplain text\n```"] {
             let lines = render_mode(md, 60, ColorMode::Rgb);
-            assert_eq!(lines.len(), 1, "{md:?}");
+            assert_eq!(lines.len(), 2, "the caption + the code: {md:?}");
             assert_eq!(
-                lines[0].spans[0].content.as_ref(),
+                lines[1].spans[0].content.as_ref(),
                 "   │ ",
                 "the gutter proves it is a code block, not reparsed prose: {md:?}"
             );
             assert!(
-                lines[0].spans.iter().skip(1).all(|s| s.style == code_style()),
+                lines[1].spans.iter().skip(1).all(|s| s.style == code_style()),
                 "an unknown/absent language is uniform: {md:?}"
             );
         }
@@ -1134,10 +1159,11 @@ mod tests {
     fn a_non_rgb_mode_still_renders_a_code_block() {
         // B1 regression guard: a non-Rgb mode is still a fence, never prose.
         let lines = render_mode("```rust\nfn main() {}\n```", 60, ColorMode::Named);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
+        assert_eq!(lines.len(), 2, "the plate caption + the code");
+        assert_eq!(text_of(&lines)[0], "   plate 1 — rust");
+        assert_eq!(lines[1].spans[0].content.as_ref(), "   │ ");
         assert!(
-            lines[0].spans.iter().skip(1).all(|s| s.style == code_style()),
+            lines[1].spans.iter().skip(1).all(|s| s.style == code_style()),
             "a non-Rgb fence falls back to the uniform code style"
         );
     }
@@ -1145,9 +1171,9 @@ mod tests {
     #[test]
     fn an_unclosed_fence_at_eof_renders_as_code() {
         let lines = render_mode("```rust\nlet x = 1;", 60, ColorMode::Rgb);
-        assert_eq!(lines.len(), 1, "the unclosed body renders as one code line");
-        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
-        assert!(text_of(&lines)[0].contains("let x = 1;"));
+        assert_eq!(lines.len(), 2, "the caption + one code line");
+        assert_eq!(lines[1].spans[0].content.as_ref(), "   │ ");
+        assert!(text_of(&lines)[1].contains("let x = 1;"));
     }
 
     #[test]
@@ -1202,7 +1228,8 @@ mod tests {
     fn fenced_code_is_marked_and_not_wrapped_inline() {
         let text = text_of(&render("text\n```rust\nlet x = 1; // **not bold**\n```", 60));
         assert_eq!(text[0], "   text");
-        assert_eq!(text[1], "   │ let x = 1; // **not bold**");
+        assert_eq!(text[1], "   plate 1 — rust");
+        assert_eq!(text[2], "   │ let x = 1; // **not bold**");
     }
 
     #[test]
@@ -1211,6 +1238,23 @@ mod tests {
         let styles: Vec<_> = lines[0].spans.iter().map(|s| s.style).collect();
         assert!(styles.iter().any(|s| s.add_modifier.contains(Modifier::BOLD)));
         assert!(styles.iter().any(|s| *s == code_style()));
+    }
+
+    #[test]
+    fn a_fenced_block_renders_a_plate_caption() {
+        // An info string rides the caption verbatim.
+        let with = text_of(&render("```rust\nlet x = 1;\n```", 40));
+        assert_eq!(with[0], "   plate 1 — rust", "{with:?}");
+        assert!(with.iter().any(|l| l.contains("let x = 1;")), "{with:?}");
+
+        // A bare fence → just `plate 1`.
+        let bare = text_of(&render("```\ncode\n```", 40));
+        assert_eq!(bare[0], "   plate 1", "{bare:?}");
+
+        // Two blocks number 1 then 2.
+        let two = text_of(&render("```\na\n```\n\n```\nb\n```", 40));
+        assert_eq!(two[0], "   plate 1", "{two:?}");
+        assert!(two.iter().any(|l| l == "   plate 2"), "{two:?}");
     }
 
     #[test]
