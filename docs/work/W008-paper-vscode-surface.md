@@ -249,6 +249,20 @@ scrollbar. A lesser variant stays inside the column but un-pads to the measure�
 Trade-off: it stops a wide output wrapping tall, at the cost of breaking the ONE-MEASURE
 stance for one element. Not decided here (`design-taste`: the measured column is the stance).
 
+### 2026-10-09 — the team list: Option 4 implemented (glyph row + foot action)
+
+`docs/design/vscode-team-options.md` **Option 4** (the human's choice, the **gap** variant):
+the roster is a wrapping strip of `glyph name` pairs (`chat.ts:renderCaption`), the `.act`
+gone; the live action moves to the transcript's foot (`chat.ts:renderLiveline`) — exactly one
+active member → `glyph name · action`, several → `⋯ {n} working`, none → hidden. Each pair is
+keyed (`tabindex="0"` + Enter/Space → `focus-member`); `title`/`aria-label` = `<name> · <state>`
+(`CaptionRow` gains `state`). `WorkingRow` gains `glyph`/`glyphClass`; a pure `livelineSpec`
+owns the none/one/many branch. CSS: the `.masthead .team` strip (wrap, `gap: --wc-2`,
+`line-height: 1`), the `.sel` underline, no `.act`. Wire/kernel untouched.
+
+Implementation `cddbde6` + the tests/seam `e7939d9`. (Also logged in the W005 record —
+the roster was a W005 component.)
+
 ## 10. References
 
 - `docs/design/vscode-paper-draft.html` — the refinement's visual spec (the WHAT).
