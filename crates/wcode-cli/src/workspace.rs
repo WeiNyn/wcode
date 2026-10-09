@@ -616,8 +616,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("a = 1"),
-                "replacement": "a = 10",
+                "old_string": "a = 1",
+                "new_string": "a = 10",
             }),
         };
         h.transform_tool_input(&mut e).await;
@@ -640,8 +640,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("peer"),
-                "replacement": "x",
+                "old_string": "peer",
+                "new_string": "x",
             }),
         };
         h.transform_tool_input(&mut e2).await;
@@ -741,8 +741,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("a = 1"),
-                "replacement": "a = 10",
+                "old_string": "a = 1",
+                "new_string": "a = 10",
             }),
         };
         h.transform_tool_input(&mut e1).await;
@@ -760,8 +760,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("a = 10"),
-                "replacement": "a = 100",
+                "old_string": "a = 10",
+                "new_string": "a = 100",
             }),
         };
         h.transform_tool_input(&mut e2).await;
@@ -815,8 +815,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("a = 1"),
-                "replacement": "a = 10",
+                "old_string": "a = 1",
+                "new_string": "a = 10",
             }),
         };
         h.transform_tool_input(&mut e1).await;
@@ -833,8 +833,8 @@ mod chain {
             name: "edit".into(),
             arguments: serde_json::json!({
                 "path": "f.txt",
-                "from": anchor::anchor("peer"),
-                "replacement": "x",
+                "old_string": "peer",
+                "new_string": "x",
             }),
         };
         h.transform_tool_input(&mut e2).await;
@@ -869,10 +869,8 @@ mod chain {
         // replacement == original ⇒ applied == 0 ⇒ the no-op arm (is_error:false).
         let eargs = EditArgs {
             path: "f.txt".into(),
-            from: anchor::anchor("a = 1"),
-            to: None,
-            replacement: "a = 1".into(),
-            old_string: None,
+            old_string: "a = 1".into(),
+            new_string: "a = 1".into(),
             replace_all: None,
             expected_digest: None,
         };
@@ -915,10 +913,8 @@ mod chain {
 
         let eargs = EditArgs {
             path: "f.txt".into(),
-            from: anchor::anchor("a = 1"),
-            to: None,
-            replacement: "a = 10".into(),
-            old_string: None,
+            old_string: "a = 1".into(),
+            new_string: "a = 10".into(),
             replace_all: None,
             expected_digest: Some("000000000000".into()),
         };
