@@ -390,7 +390,7 @@ export interface ComposerControls {
   mode: "Plan" | "Act";
   /** The mode toggle's segments, in order; EXACTLY one is pressed. */
   segments: Array<{ mode: "Plan" | "Act"; pressed: boolean }>;
-  /** Show `Stop`? ONLY while a run is in flight — an idle Stop button is chrome. */
+  /** Show `Stop`? Whenever ANY run is in flight — the root’s OR any member’s. */
   stop: boolean;
 }
 
@@ -402,7 +402,7 @@ export function composerControls(state: RenderedState): ComposerControls {
       { mode: "Act", pressed: mode === "Act" },
       { mode: "Plan", pressed: mode === "Plan" },
     ],
-    stop: state.status.running,
+    stop: state.status.running || state.members.some((member) => member.state === "running"),
   };
 }
 

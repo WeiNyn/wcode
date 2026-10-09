@@ -74,7 +74,7 @@ app.innerHTML = [
   '      <div class="inputline">',
   '        <span class="pfx" aria-hidden="true">❯</span>',
   '        <textarea id="input" rows="1" spellcheck="false"',
-  '          placeholder="Message wcode…  (Enter to send, Shift+Enter for a newline)"></textarea>',
+  '          placeholder="Message wcode…" title="Enter to send · Shift+Enter for a newline · Esc to cancel"></textarea>',
   '      </div>',
   '      <div class="foot">',
   '        <button id="cattach" class="linkbtn" type="button" title="Attach the current editor selection">Attach context</button>',

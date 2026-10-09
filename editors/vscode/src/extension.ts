@@ -8,12 +8,14 @@
  * V2: ONE dockable surface — a `WebviewView` (sidebar/panel) + an editor `WebviewPanel`,
  * both fed by the one `SurfaceController`. Every send is addressed to a member's session
  * id, which the server demuxes against its live roster. The team + tasks render INSIDE
- * the surface; the `member` verbs (peek = `Status`, ask = `SideAsk`, stop = `Cancel`) are
- * INERT until a rail-row menu lands — plus `Submit`/`Interrupt` and `SetPlanMode`.
+ * the surface; the `member` verbs (peek = `Status`, ask = `SideAsk`) are INERT until a
+ * menu supplies an id, while `stop` cancels the FOCUSED member — plus `Submit`/`Interrupt`
+ * and `SetPlanMode`.
  */
 import * as fs from "node:fs";
 import * as vscode from "vscode";
 
+import { cancelTargets } from "./cancel.ts";
 import { findCommand } from "./commands.ts";
 import { clearDiffs, openDiff, registerDiffProvider, revertDiff } from "./diffProvider.ts";
 import { setVerdict, type Verdict } from "./review.ts";
@@ -108,11 +110,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("wcode.member.focus", (id?: unknown) => {
       if (typeof id === "string") focusMember(id);
     }),
-    // INERT until a rail-row menu lands (a follow-up): they took a tree element before,
-    // so with no menu there is no id to pass — a palette call is a silent no-op.
+    // INERT until a menu supplies an id (a follow-up): peek/ask took a tree element
+    // before, so a palette call passes no member and is a silent no-op.
     vscode.commands.registerCommand("wcode.member.peek", () => void peekMember(undefined)),
     vscode.commands.registerCommand("wcode.member.ask", () => void askMember(undefined)),
-    vscode.commands.registerCommand("wcode.member.stop", () => stopMember(undefined)),
+    // `stop` is NOT inert: it stops the FOCUSED member (the palette has no menu id).
+    vscode.commands.registerCommand("wcode.member.stop", () => stopMember(viewState.targeted ?? undefined)),
     vscode.commands.registerCommand("wcode.plan.toggle", () => togglePlan()),
   );
 }
@@ -564,12 +567,10 @@ function surfaceHandlers(): SurfaceHandlers {
     },
     onCancel: (target: string | null) => {
       try {
-        // Stop cancels the WHOLE team: every RUNNING agent, not only the target.
-        const running = viewState.members.filter((member) => member.state === "running").map((member) => member.id);
-        const ids = new Set(
-          running.length > 0 ? running : [target ?? viewState.targeted ?? session?.rootSessionId ?? ""],
-        );
-        for (const id of ids) if (id !== "") session?.send({ type: "cancel" }, id);
+        // Focus cancels the focused member; All cancels the WHOLE session (root + runners).
+        for (const id of cancelTargets(target, viewState.members, session?.rootSessionId ?? null)) {
+          session?.send({ type: "cancel" }, id);
+        }
       } catch (err) {
         ensureOutput().appendLine(`cancel failed: ${errMessage(err)}`);
       }

@@ -31,6 +31,7 @@ type-line are webview DOM
 | `src/commands.ts` | the `/`-command registry (pure) — the ONE list the menu and the host share |
 | `src/sessions.ts` | the `/resume` picker's data (session files: groups + legacy) |
 | `src/startup.ts` | the pure "the child died at startup" classifier |
+| `src/cancel.ts` | the pure Cancel-target decision (Focus = the focused member; All = the root + every running member) |
 | `src/review.ts` | the pure change-review model (a hunk + per-call verdicts) |
 | `src/extension.ts` | `activate`/`deactivate`, the commands, the surface wiring, an OutputChannel |
 | `src/webview/chat.ts` | the webview script **source** (typed, dependency-free) |

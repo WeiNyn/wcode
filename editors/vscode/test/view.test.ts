@@ -571,6 +571,27 @@ test("composerControls: an idle composer is Act, with NO `Stop`", () => {
   assert.equal(controls.stop, false, "no Stop when nothing is running");
 });
 
+test("composerControls: `Stop` shows when a NON-root member is running while the root is idle", () => {
+  // The root is idle; a worker runs. `status.running` is PER-TARGET (the root's run), so
+  // the old logic hid Stop — the roster's MemberState is the liveness fact.
+  const state: ViewState = {
+    ...initialState(),
+    members: [
+      { id: "root-1", label: "root-1", state: "idle", isRoot: true },
+      { id: "agent:w1", label: "w1", state: "running", isRoot: false },
+    ],
+    targeted: "root-1",
+    status: { running: false, planMode: false },
+  };
+  assert.equal(
+    composerControls(renderState(state, "root-1")).stop,
+    true,
+    "a running worker must show Stop even with the root idle",
+  );
+  // …and with no member running at all, Stop stays hidden.
+  assert.equal(composerControls(renderState(initialState(), null)).stop, false, "no run ⇒ no Stop");
+});
+
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {
   assert.equal(selectionRef({ path: "src/panel.ts", startLine: 88, endLine: 104 }), "@src/panel.ts#L88-104");
   assert.equal(selectionRef({ path: "a.rs", startLine: 12, endLine: 12 }), "@a.rs#L12-12");
