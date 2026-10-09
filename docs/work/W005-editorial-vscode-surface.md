@@ -334,6 +334,14 @@ view.
 - **Non-blocking notes folded (none deferred):** N1 the dead `data-live` stamp on a plain block is gone; N2 the caption row is keyboard-activatable (Enter/Space → `focus-member`); N3 two stale test names renamed; N4 this record synced.
 - **E7 (the F5 visual proof) is the only open step** — a human action; no browser / VS Code host runs in this session.
 
+### 2026-10-09 — E7 (F5) feedback folded: the composer + Stop
+
+The human ran the F5 review of the editorial surface and reported two defects; both are fixed in `9f5eb3c`:
+
+- **The composer forced two rows.** The placeholder (with its `, Esc to cancel` tail) wrapped and doubled the composer height — `autoGrow` sizes from the VALUE (`chat.ts`), so the placeholder was the only cause. It is now `Message wcode…`, with the hints moved to the textarea's `title` tooltip (`Enter to send · Shift+Enter for a newline · Esc to cancel`); the composer rests at ONE row.
+- **There was no way to cancel agents.** `composerControls.stop` was `status.running`, which `renderState` makes PER-TARGET (`render.ts:82`) — with the root idle and workers running, no Stop appeared. It is now true whenever any member's `MemberState` is `running`. And Cancel is channel-aware: a new pure `cancelTargets` (`src/cancel.ts`) makes **Focus** cancel the focused member alone, while **All** (`target === null`) cancels the whole session — the root plus every running member (`extension.ts` `onCancel`; the wire is unchanged). `wcode.member.stop` is no longer inert (it now stops the focused member).
+- **Tests:** `composerControls.stop` shows for a running non-root member while the root is idle (fails on the old per-target logic); `test/cancel.test.ts` asserts All-mode reaches the root AND each running member (fails if only the root is cancelled). Gates: `npm run typecheck` → 0; `npm test` → 195 pass / 0 fail; `npm run build` → ok.
+
 ## 10. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).
