@@ -16,11 +16,6 @@ pub struct EditArgs {
     pub new_string: String,
     /// Replace every occurrence instead of requiring a unique match.
     pub replace_all: Option<bool>,
-    /// Whole-file digest from your last read of this file (the `# <path>
-    /// digest <hex>` line `read` prints). Auto-filled by the harness; normally
-    /// leave unset. A mismatch refuses the call (E_STALE_DIGEST) — re-read.
-    #[serde(default)]
-    pub expected_digest: Option<String>,
 }
 
 pub struct Edit {
@@ -77,13 +72,6 @@ impl TypedTool for Edit {
             }
         };
 
-        // Whole-file CAS (D1): refuse when the file moved since the digest was
-        // captured, before counting matches. Nothing is written on refuse.
-        if let Some(out) =
-            super::stale_digest_guard(&args.path, &content, args.expected_digest.as_deref())
-        {
-            return out;
-        }
 
         let replace_all = args.replace_all.unwrap_or(false);
         let matches = content.matches(&args.old_string).count();
@@ -116,7 +104,7 @@ impl TypedTool for Edit {
             content.replacen(&args.old_string, &args.new_string, 1)
         };
         // Nothing to do: the replacement is what is already there. Report it and
-        // write nothing, so the file's mtime (and any armed digest) is untouched.
+        // write nothing, so the file's mtime is untouched.
         if updated == content {
             return ToolOutput {
                 output: format!(
@@ -139,7 +127,7 @@ impl TypedTool for Edit {
                         "edited {} ({n} replacement{})",
                         args.path,
                         if n == 1 { "" } else { "s" }
-                    ) + &super::digest_note(&args.path, &updated),
+                    ),
                     is_error: false,
                     diff,
                     path: Some(args.path.clone()),
@@ -169,7 +157,6 @@ mod tests {
             old_string: old.into(),
             new_string: new.into(),
             replace_all,
-            expected_digest: None,
         }
     }
 
@@ -263,40 +250,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
             "keep\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_successful_edit_appends_the_post_edit_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a = 1\nb = 2\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = tool()
-            .execute(args("f.txt", "a = 1", "a = 10", None), &ctx)
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let last = out.output.lines().last().unwrap();
-        assert_eq!(
-            crate::workspace::parse_digest_header(last),
-            Some(crate::tools::anchor::file_digest(b"a = 10\nb = 2\n")),
-            "the last line is the post-edit digest trailer: {}",
-            out.output
-        );
-    }
-
-    #[tokio::test]
-    async fn a_stale_digest_refuses_the_edit() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a = 1\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let mut a = args("f.txt", "a = 1", "a = 2", None);
-        a.expected_digest = Some("000000000000".into());
-        let out = tool().execute(a, &ctx).await;
-        assert!(out.is_error);
-        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "a = 1\n"
         );
     }
 }

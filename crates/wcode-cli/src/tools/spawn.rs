@@ -311,7 +311,6 @@ mod tests {
                 compaction: CompactionPolicy::default(),
                 working_dir: std::env::temp_dir(),
                 members_dir: None,
-                digest_cas: true,
                 sessions_dir: std::env::temp_dir(),
             },
         )

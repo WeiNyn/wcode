@@ -12,9 +12,8 @@
 //! [`VerifyGateHooks`] must read the root's [`TaskList`] to decide. `TaskList`
 //! is a **CLI** type (`crates/wcode-cli/src/tasks.rs`, anchor `uDRme`); the
 //! harness (`wcode-harness`) must not depend on it. So the policy is a CLI
-//! `Hooks` impl, exactly like [`crate::agents::ReportBack`] and
-//! [`crate::workspace::WorkspaceHooks`] — the same "policy in code, next to the
-//! state it needs" seam the harness leaves open.
+//! `Hooks` impl, exactly like [`crate::agents::ReportBack`] — the same "policy in
+//! code, next to the state it needs" seam the harness leaves open.
 //!
 //! ## The seam it rides
 //!

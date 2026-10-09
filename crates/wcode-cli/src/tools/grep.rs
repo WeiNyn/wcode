@@ -5,7 +5,6 @@ use serde::Deserialize;
 use ignore::{DirEntry, Walk, WalkBuilder};
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::anchor;
 
 /// Directories never searched by default (deps/build noise).
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", "build", "dist", ".venv"];
@@ -39,7 +38,7 @@ impl TypedTool for Grep {
         "grep"
     }
     fn description(&self) -> &str {
-        "Regex-search files. Every result line carries its `read`-style anchor so it can be targeted directly with `edit`. Output: `path:lineno  ANCHOR│content`. Match lines are marked ` <--`; context lines are unmarked. Respects .gitignore and skips .git/target/node_modules and binary files by default (pass no_ignore:true to search ignored files too). For AST-structural search use ast_search."
+        "Regex-search files. Output is `path:lineno:content`, so a hit feeds straight into `edit` as an `old_string` and into `read` as an `offset`. Match lines are marked `  <--`; context lines are unmarked. Respects .gitignore and skips .git/target/node_modules and binary files (pass `no_ignore:true` to include ignored files). For structural search use `ast_search`."
     }
 
     /// Read-only: safe to run alongside other calls in the same batch.
@@ -120,7 +119,7 @@ impl TypedTool for Grep {
             let Ok(content) = String::from_utf8(data) else {
                 continue;
             };
-            let lines = anchor::split_lines(&content);
+            let lines = super::diff::split_lines(&content);
             let ctx_n = args.context.unwrap_or(0) as usize;
             let match_idx: Vec<usize> = lines
                 .iter()
@@ -150,17 +149,8 @@ impl TypedTool for Grep {
                     };
                 }
                 let line = &lines[i];
-                let h = anchor::anchor(line);
                 let marker = if match_idx.contains(&i) { "  <--" } else { "" };
-                out.push_str(&format!(
-                    "{}:{}  {}{}{}{}\n",
-                    rel_str,
-                    i + 1,
-                    h,
-                    anchor::ANCHOR_SEP,
-                    line,
-                    marker
-                ));
+                out.push_str(&format!("{}:{}:{}{}\n", rel_str, i + 1, line, marker));
                 shown += 1;
             }
         }
@@ -241,7 +231,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn greps_with_anchors_and_context() {
+    async fn greps_with_line_numbers_and_context() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(

@@ -1,21 +1,21 @@
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::anchor;
+use super::diff::split_lines;
 
-/// Anchored display caps a single line at this many chars, appending `…(+N)`
-/// for the truncated remainder. Raw (`plain:true`) mode is untouched. The
-/// rendered anchor still hashes the FULL line, so a truncated line remains a
-/// valid, unambiguous `edit` target. Tune here; no config surface.
+/// A single line is capped at this many chars, appending `…(+N)` for the
+/// truncated remainder, so one pathological line (minified JS, a base64 blob)
+/// cannot flood the context window. The marker is a warning: a TRUNCATED line is
+/// not the file's real text, so it cannot be used as an `old_string` — `grep`
+/// gives the exact bytes. Tune here; no config surface.
 const MAX_LINE_CHARS: usize = 300;
 /// When `read` is called without a `limit`, the page is capped at this many
 /// lines and a continuation note is appended. An explicit `limit` always wins
 /// (even above the cap). Tune here; no config surface.
 const MAX_READ_LINES: usize = 1000;
 
-/// Anchored display shape for a line that exceeds `MAX_LINE_CHARS`: first
-/// `MAX_LINE_CHARS` chars plus `…(+N)` for the truncated remainder. Plain mode
-/// never calls this (raw text means raw).
+/// Display shape for a line that exceeds [`MAX_LINE_CHARS`]: the first
+/// `MAX_LINE_CHARS` chars plus `…(+N)` for the truncated remainder.
 fn truncate_line(line: &str) -> String {
     let len = line.chars().count();
     if len <= MAX_LINE_CHARS {
@@ -29,22 +29,11 @@ fn truncate_line(line: &str) -> String {
 pub struct ReadArgs {
     /// File path (relative to the working directory unless absolute).
     pub path: String,
-    /// 1-based line number to start from. Mutually exclusive with `from`.
+    /// 1-based line number to start from (default 1).
     pub offset: Option<u64>,
-    /// Maximum number of lines to return.
+    /// Maximum number of lines to return. Without it the page is capped and a
+    /// continuation note is appended.
     pub limit: Option<u64>,
-    /// `true` to suppress anchors and return raw `cat -n` lines; you only need
-    /// anchors when the lines are targets for `edit`. Default `false`.
-    pub plain: Option<bool>,
-    /// Anchor (as shown by `read`, `grep`, or a previous `edit` echo) to read
-    /// from instead of a line number — so a grep hit or a fresh edit region is
-    /// immediately pageable. Reading starts at the first line bearing this
-    /// anchor and continues to end of file (or `limit` lines); `context`
-    /// includes that many lines above it. Mutually exclusive with `offset`.
-    pub from: Option<String>,
-    /// Lines of context to include *above* the `from` anchor. Only valid with
-    /// `from`. Default 0.
-    pub context: Option<u64>,
 }
 
 pub struct Read;
@@ -56,13 +45,14 @@ impl TypedTool for Read {
         "read"
     }
     fn description(&self) -> &str {
-        "Read a text file. Each line renders as ANCHOR│content — the 5-char anchor is its content address and the target for edit. Anchors survive edits elsewhere and hash raw content, so indentation matters; re-read after a formatter reindents. Page with offset/limit, or pass from (an anchor from grep or a prior edit echo) plus context. plain:true prints cat -n style and omits the digest header, so a plain read does not arm the stale-write guard — read anchored before a write."
+        "Read a text file. Each line is rendered as `<line number>\\t<content>`, so page with `offset`/`limit`. A line longer than 300 chars is truncated with `…(+N)` — a truncated line is NOT the real text, so never use it as an `old_string`; use `grep` for the exact bytes. Without `limit` the page is capped."
     }
 
     /// Read-only: safe to run alongside other calls in the same batch.
     fn parallel_safe(&self) -> bool {
         true
     }
+
     async fn execute(&self, args: Self::Args, ctx: &ToolContext) -> ToolOutput {
         let path = super::resolve(&ctx.working_dir, &args.path);
         let content = match std::fs::read_to_string(&path) {
@@ -76,72 +66,14 @@ impl TypedTool for Read {
                 };
             }
         };
-        let lines = anchor::split_lines(&content);
-        let mut ambiguity_note: Option<String> = None;
-        let (start, mut limit) = match &args.from {
-            None => (
-                args.offset.unwrap_or(1).max(1) as usize - 1,
-                args.limit.unwrap_or(u64::MAX) as usize,
-            ),
-            Some(an) => {
-                if !anchor::is_anchor(an) {
-                    return ToolOutput {
-                        output: format!(
-                            "[E_BAD_ANCHOR] `from` must be a bare 5-char anchor as shown by read (e.g. \"aB3x1\"), got \"{an}\". No line numbers, no `{}content, no surrounding text.",
-                            anchor::ANCHOR_SEP
-                        ),
-                        is_error: true,
-                        diff: None,
-                        path: None,
-                    };
-                }
-                if args.offset.is_some() {
-                    return ToolOutput {
-                        output: format!(
-                            "[E_CONFLICT] `from` and `offset` are mutually exclusive: `from` addresses a line by content anchor, `offset` by line number. Use one or the other. (context={:?}, plain={:?})",
-                            args.context, args.plain
-                        ),
-                        is_error: true,
-                        diff: None,
-                        path: None,
-                    };
-                }
-                let anchors = anchor::anchors_for(&lines);
-                let matches = anchor::find_ranges(&lines, &anchors, an, None, None);
-                if matches.is_empty() {
-                    return ToolOutput {
-                        output: format!(
-                            "[E_STALE_ANCHOR] no line in {} carries the anchor `{an}` — the file changed since you last read it. Re-read (read {}) and retry with a fresh anchor.",
-                            args.path, args.path
-                        ),
-                        is_error: true,
-                        diff: None,
-                        path: None,
-                    };
-                }
-                if matches.len() > 1 {
-                    ambiguity_note = Some(format!(
-                        "{an} matches {} lines in {} (identical lines share an anchor): {}.\n",
-                        matches.len(),
-                        args.path,
-                        matches
-                            .iter()
-                            .map(|r| (r.start + 1).to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-                let context = args.context.unwrap_or(0) as usize;
-                (
-                    matches[0].start.saturating_sub(context),
-                    args.limit.unwrap_or(u64::MAX) as usize,
-                )
-            }
-        };
-        // Page guard: without an explicit `limit` (raw and anchored modes alike),
-        // cap the default page to protect the context window. An explicit
-        // `limit` always wins, even above the cap.
+
+        let lines = split_lines(&content);
+        let start = args.offset.unwrap_or(1).max(1) as usize - 1;
         let explicit_limit = args.limit.is_some();
+        let mut limit = args.limit.unwrap_or(u64::MAX) as usize;
+
+        // Page guard: without an explicit `limit`, cap the page to protect the
+        // context window. An explicit `limit` always wins, even above the cap.
         let mut page_note = false;
         if !explicit_limit {
             let available = lines.len().saturating_sub(start);
@@ -151,52 +83,21 @@ impl TypedTool for Read {
             }
         }
 
-        let plain = args.plain.unwrap_or(false);
         let mut out = String::new();
-        if !plain {
-            // A7: the digest header is the FIRST line of ANCHORED output only —
-            // `--plain` stays raw (no header). It is the plumbing channel the
-            // workspace hook reads the whole-file digest from: `after_tool_call`
-            // receives no `working_dir`, so the digest must ride the output text.
-            out.push_str(&crate::workspace::digest_header(
-                &args.path,
-                &anchor::file_digest(content.as_bytes()),
-            ));
+        if lines.is_empty() {
+            out.push_str("(empty file)\n");
         }
-        if let Some(note) = ambiguity_note {
-            out.push_str(&note);
-        }
-        if anchor::is_degenerate_empty(&content) {
-            // Byte-empty and "\n"-only files are one anonymous insertion point;
-            // a "\n"-only file is not a real blank line.
-            if plain {
-                out.push('\n');
-            } else {
-                out.push_str(&format!(
-                    "{}  <empty file — insert at this anchor>\n",
-                    anchor::anchor("")
-                ));
-            }
-        } else {
-            for (i, line) in lines.iter().skip(start).take(limit).enumerate() {
-                let rendered = i + 1; // 1-based count actually shown
-                let n = start + i + 1; // 1-based line number, for plain output
-                if plain {
-                    out.push_str(&format!("{n:>6}\t{line}\n"));
-                } else {
-                    // Anchor hashes the FULL line; only the display is capped,
-                    // so the truncated line stays a valid `edit` target.
-                    out.push_str(&anchor::render(&anchor::anchor(line), &truncate_line(line)));
-                    out.push('\n');
-                }
-                if page_note && rendered == limit {
-                    let remaining = lines.len().saturating_sub(start + rendered);
-                    if remaining > 0 {
-                        out.push_str(&format!(
-                            "… ({remaining} more lines — re-read with offset/limit to continue)\n"
-                        ));
-                        break;
-                    }
+        for (i, line) in lines.iter().skip(start).take(limit).enumerate() {
+            let shown = i + 1; // 1-based count actually shown
+            let n = start + i + 1; // 1-based line number
+            out.push_str(&format!("{n}\t{}\n", truncate_line(line)));
+            if page_note && shown == limit {
+                let remaining = lines.len().saturating_sub(start + shown);
+                if remaining > 0 {
+                    out.push_str(&format!(
+                        "… ({remaining} more lines — re-read with offset/limit to continue)\n"
+                    ));
+                    break;
                 }
             }
         }
@@ -213,427 +114,93 @@ impl TypedTool for Read {
 mod tests {
     use super::*;
 
+    fn args(path: &str, offset: Option<u64>, limit: Option<u64>) -> ReadArgs {
+        ReadArgs {
+            path: path.into(),
+            offset,
+            limit,
+        }
+    }
+
     #[tokio::test]
-    async fn reads_with_anchors_and_paging() {
+    async fn renders_one_numbered_line_per_line() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("f.txt"),
-            (1..=10)
-                .map(|i| format!("line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: Some(2),
-                    limit: Some(2),
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
+        assert!(!out.is_error, "{}", out.output);
+        assert_eq!(out.output, "1\talpha\n2\tbeta\n");
+    }
+
+    #[tokio::test]
+    async fn offset_and_limit_page_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Read.execute(args("f.txt", Some(2), Some(2)), &ctx).await;
+        assert_eq!(out.output, "2\tb\n3\tc\n", "numbers stay absolute");
+    }
+
+    #[tokio::test]
+    async fn a_trailing_newline_is_not_an_extra_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "only\n").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
+        assert_eq!(out.output, "1\tonly\n");
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "").unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
         assert!(!out.is_error);
-        let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 3); // digest header + 2 paged lines
-        assert!(rendered[0].contains("digest"), "{}", rendered[0]);
-        // Every content line is ANCHOR│content with a parseable 5-char anchor.
-        for &line in &rendered[1..] {
-            let (hash, content) = line.split_once(anchor::ANCHOR_SEP).unwrap();
-            assert!(anchor::is_anchor(hash), "bad anchor: {line}");
-            assert!(content.contains("line "));
-        }
+        assert_eq!(out.output, "(empty file)\n");
     }
 
     #[tokio::test]
-    async fn plain_mode_keeps_old_cat_n_shape() {
+    async fn a_very_long_line_is_truncated_with_a_marker() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "l1\nl2\nl3").unwrap();
+        let long = "x".repeat(MAX_LINE_CHARS + 5);
+        std::fs::write(dir.path().join("f.txt"), format!("{long}\n")).unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: Some(true),
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert_eq!(out.output, "     1\tl1\n     2\tl2\n     3\tl3\n");
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
+        assert!(out.output.contains("…(+5)"), "{}", out.output);
+        assert!(!out.output.contains(&long), "the full line must not appear");
     }
 
     #[tokio::test]
-    async fn empty_file_shows_insertion_anchor() {
-        // A byte-empty file and a "\n"-only file are the same degenerate state:
-        // one anonymous insertion point, never a phantom blank line.
+    async fn a_short_line_is_not_truncated() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "short\n").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let mut outputs = Vec::new();
-        for content in ["", "\n"] {
-            let f = dir.path().join("f.txt");
-            std::fs::write(&f, content).unwrap();
-            let out = Read
-                .execute(
-                    ReadArgs {
-                        path: "f.txt".into(),
-                        offset: None,
-                        limit: None,
-                        plain: None,
-                        from: None,
-                        context: None,
-                    },
-                    &ctx,
-                )
-                .await;
-            assert!(!out.is_error);
-            assert!(out.output.contains("empty file"), "for {content:?}");
-            outputs.push(out.output);
-        }
-        // Both degenerate states now carry a digest header, but the digest
-        // differs ("" and "\n" are different bytes), so compare the body
-        // beneath the header — the insertion point itself is unchanged.
-        assert!(
-            outputs[0].contains("digest") && outputs[1].contains("digest"),
-            "both carry a header: {outputs:?}"
-        );
-        let body = |s: &str| s.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap();
-        assert_eq!(
-            body(&outputs[0]),
-            body(&outputs[1]),
-            "empty & newline-only must render identically below the digest header"
-        );
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
+        assert_eq!(out.output, "1\tshort\n");
     }
 
     #[tokio::test]
-    async fn from_anchor_reads_to_end_of_file() {
-        // The continuation seam: an anchor from grep or a previous edit echo
-        // pages to that line without the model needing a line number.
+    async fn an_oversized_page_is_capped_with_a_continuation_note() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne\n").unwrap();
+        let body: String = (1..=MAX_READ_LINES + 10)
+            .map(|i| format!("l{i}\n"))
+            .collect();
+        std::fs::write(dir.path().join("f.txt"), body).unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let hc = anchor::anchor("c");
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: Some(hc),
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 4); // digest header + c, d, e
-        let first = rendered[1].split_once(anchor::ANCHOR_SEP).unwrap();
-        assert_eq!(first.0, anchor::anchor("c"));
-        assert!(rendered[3].contains("e"));
+        let out = Read.execute(args("f.txt", None, None), &ctx).await;
+        assert!(out.output.contains("10 more lines"), "{}", &out.output[out.output.len().saturating_sub(120)..]);
+        // An explicit limit above the cap is honoured.
+        let out = Read.execute(args("f.txt", None, Some((MAX_READ_LINES + 10) as u64)), &ctx).await;
+        assert!(!out.output.contains("more lines"), "explicit limit wins");
     }
 
     #[tokio::test]
-    async fn from_anchor_with_context_shows_lines_above() {
+    async fn a_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne\n").unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let hd = anchor::anchor("d");
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: Some(3),
-                    plain: None,
-                    from: Some(hd),
-                    context: Some(2),
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let rendered: Vec<&str> = out.output.lines().collect();
-        assert_eq!(rendered.len(), 4); // digest header + b, c, d
-        assert!(rendered[1].contains("b"));
-        assert!(rendered[2].contains("c"));
-        assert_eq!(
-            rendered[3].split_once(anchor::ANCHOR_SEP).unwrap().0,
-            anchor::anchor("d")
-        );
-    }
-
-    #[tokio::test]
-    async fn from_anchor_context_clamps_at_first_line() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let hb = anchor::anchor("b");
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: Some(hb),
-                    context: Some(10),
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        assert!(
-            out.output.lines().nth(1).unwrap().contains("a"),
-            "{}",
-            out.output
-        );
-    }
-
-    #[tokio::test]
-    async fn from_anchor_notes_ambiguity_for_duplicates() {
-        // Duplicated lines share an anchor; reading is non-destructive, so we
-        // read from the FIRST occurrence and say so, listing all of them.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "x\n}\ny\n}\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let h = anchor::anchor("}");
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: Some(1),
-                    plain: None,
-                    from: Some(h),
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        assert!(out.output.contains("matches 2 lines"));
-        assert!(
-            out.output.contains("lines in"),
-            "no ambiguity note\n{}",
-            out.output
-        );
-    }
-
-    #[tokio::test]
-    async fn from_anchor_not_found_is_stale_error() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: Some("nope1".to_string()),
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
+        let out = Read.execute(args("nope.txt", None, None), &ctx).await;
         assert!(out.is_error);
-        assert!(out.output.contains("E_STALE_ANCHOR"));
-    }
-
-    #[tokio::test]
-    async fn from_and_offset_conflict_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let hb = anchor::anchor("b");
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: Some(2),
-                    limit: None,
-                    plain: None,
-                    from: Some(hb),
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(out.is_error);
-        assert!(out.output.contains("E_CONFLICT"));
-    }
-
-    #[tokio::test]
-    async fn missing_file_is_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "nope.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(out.is_error);
-    }
-
-    #[test]
-    fn truncate_line_caps_long_lines_and_passes_short() {
-        assert_eq!(truncate_line("short"), "short");
-        assert_eq!(truncate_line(""), "");
-        let long = "x".repeat(MAX_LINE_CHARS + 7);
-        let t = truncate_line(&long);
-        assert!(t.ends_with("…(+7)"), "{t}");
-        assert_eq!(t.chars().count(), MAX_LINE_CHARS + 5); // head + '…' + "(+7)"
-        let exact = "y".repeat(MAX_LINE_CHARS);
-        assert_eq!(
-            truncate_line(&exact),
-            exact,
-            "exact boundary must not truncate"
-        );
-    }
-
-    #[tokio::test]
-    async fn anchored_read_truncates_long_lines_and_keeps_full_line_anchor() {
-        let dir = tempfile::tempdir().unwrap();
-        let long = "fn ".to_string() + &"x".repeat(MAX_LINE_CHARS + 50) + "()";
-        std::fs::write(dir.path().join("f.txt"), format!("short\n{long}\n")).unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let lines: Vec<&str> = out.output.lines().collect();
-        assert_eq!(lines.len(), 3); // digest header + 2 content lines
-        assert!(lines[0].contains("digest"), "{}", lines[0]);
-        assert!(lines[1].ends_with("short"), "{}", lines[1]);
-        // Display is truncated, but the leading anchor hashes the FULL line.
-        let (hash, display) = lines[2].split_once(anchor::ANCHOR_SEP).unwrap();
-        assert_eq!(hash, anchor::anchor(&long));
-        assert!(display.contains("…(+"), "{}", display);
-    }
-
-    #[tokio::test]
-    async fn no_limit_caps_page_and_notes_continuation() {
-        let dir = tempfile::tempdir().unwrap();
-        let n = MAX_READ_LINES + 10;
-        let content = (1..=n)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-
-        // No limit: capped at MAX_READ_LINES with a continuation note.
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let lines: Vec<&str> = out.output.lines().collect();
-        assert_eq!(lines.len(), MAX_READ_LINES + 2); // digest header + page + note
-        assert!(lines[MAX_READ_LINES + 1].contains("10 more lines"));
-
-        // An explicit limit above the cap is honored (no note).
-        let out2 = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: Some((MAX_READ_LINES + 10) as u64),
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out2.is_error, "{}", out2.output);
-        assert_eq!(out2.output.lines().count(), MAX_READ_LINES + 11); // + header
-
-        // Plain mode is capped too.
-        let out3 = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: Some(true),
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out3.is_error, "{}", out3.output);
-        assert_eq!(out3.output.lines().count(), MAX_READ_LINES + 1);
+        assert!(out.output.starts_with("read nope.txt:"), "{}", out.output);
     }
 }
-
-#[cfg(test)]
-mod indentation_regression {
-    use super::*;
-
-    #[tokio::test]
-    async fn anchored_read_keeps_indentation() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "fn main() {\n    let a = 1;\n}\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Read
-            .execute(
-                ReadArgs {
-                    path: "f.txt".into(),
-                    offset: None,
-                    limit: None,
-                    plain: None,
-                    from: None,
-                    context: None,
-                },
-                &ctx,
-            )
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        assert!(
-            out.output.contains("    let a = 1;\n"),
-            "indent was stripped:\n{:?}",
-            out.output
-        );
-    }
-}
-

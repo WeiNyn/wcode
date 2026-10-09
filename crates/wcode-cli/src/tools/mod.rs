@@ -1,4 +1,3 @@
-pub mod anchor;
 pub mod ast;
 pub mod ast_edit;
 pub mod ast_search;
@@ -23,7 +22,7 @@ pub mod write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use wcode_harness::tool::{Tool, ToolOutput, erased};
+use wcode_harness::tool::{Tool, erased};
 
 use crate::config::ToolsConfig;
 
@@ -86,33 +85,6 @@ pub(crate) fn resolve(working_dir: &Path, path: &str) -> PathBuf {
     }
 }
 
-/// Lexically normalize a path for comparison: drop `.` components and resolve
-/// `..` against the preceding component, without touching the filesystem. So
-/// `a`, `./a`, and `sub/../a` compare equal even though [`resolve`] returns
-/// different `PathBuf`s for them.
-pub(crate) fn normalize(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                // `..` at the root is a no-op; otherwise keep it unresolved.
-                Some(Component::RootDir) => {}
-                _ => out.push(".."),
-            },
-            other => out.push(other.as_os_str()),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        out.push(".");
-    }
-    out
-}
-
 /// Whether a walked path passes the include/exclude globs compiled by
 /// [`grep::parse_globs`]: an excluded path is out; an empty include set admits
 /// everything; otherwise any include match admits it. Shared by the `grep` and
@@ -131,49 +103,6 @@ pub(crate) fn include_path(
     includes.iter().any(|m| m.is_match(path))
 }
 
-/// Whole-file compare-and-swap guard shared by the mutating tools (`edit`,
-/// `edits`, `write`): when the caller supplied an `expected_digest`,
-/// refuse (an error `ToolOutput` naming both digests) if the file's current
-/// content no longer matches it. `None` means the digest matched (or none was
-/// given) and the caller proceeds. `content` is the file's current text; `path`
-/// is used only to name the file in the message.
-pub(crate) fn stale_digest_guard(
-    path: &str,
-    content: &str,
-    expected: Option<&str>,
-) -> Option<ToolOutput> {
-    let expected = expected?;
-    let actual = anchor::file_digest(content.as_bytes());
-    if actual == expected {
-        return None;
-    }
-    Some(ToolOutput {
-        output: crate::workspace::stale_digest(path, expected, &actual),
-        is_error: true,
-        ..ToolOutput::default()
-    })
-}
-
-/// The trailer appended to a mutator's SUCCESS output: the post-write whole-file
-/// digest in read's `# <path> digest <hex>` shape, so `after_tool_call` harvests
-/// it with the same parser ([`crate::workspace::parse_digest_header`]). The
-/// leading `\n` makes it the LAST line of `ToolOutput::output`.
-///
-/// Contract:
-/// - Returns `"\n" + digest_header(path, &file_digest(written.as_bytes()))`
-///   (so it both starts and ends with `\n`).
-/// - `written` is the EXACT post-write bytes (`edit`/`edits`: `updated`;
-///   `write`: `args.content`), hashed — never a re-read (W004 §4.4, no TOCTOU
-///   against a concurrent peer).
-/// - The result never contains `anchor::ANCHOR_SEP`, so it is never an anchor
-///   line (mirrors `header_roundtrips_and_is_not_an_anchor_line`).
-/// - Pure, total, no I/O, no panics.
-pub(crate) fn digest_note(path: &str, written: &str) -> String {
-    format!(
-        "\n{}",
-        crate::workspace::digest_header(path, &anchor::file_digest(written.as_bytes()))
-    )
-}
 /// Same-directory temp name for atomic write+rename mutations. PID-suffixed so
 /// two wcode processes editing the same file can't clobber each other's temp
 /// (rename is still atomic — last writer wins, never a truncation), and it
@@ -206,40 +135,11 @@ pub(crate) fn test_ctx(
 mod tests {
     use super::*;
 
-    #[test]
-    fn digest_note_is_a_newline_prefixed_digest_header() {
-        let written = "a = 10\nb = 2\n";
-        let note = digest_note("f.txt", written);
-        assert_eq!(
-            note,
-            format!(
-                "\n{}",
-                crate::workspace::digest_header("f.txt", &anchor::file_digest(written.as_bytes()))
-            )
-        );
-        assert!(note.starts_with('\n'));
-        assert!(note.ends_with('\n'));
-        assert!(!note.contains(anchor::ANCHOR_SEP));
-    }
-
     fn names(cfg: &ToolsConfig) -> Vec<String> {
         default_tools(cfg, &std::env::temp_dir(), background::Background::new())
             .iter()
             .map(|t| t.name().to_string())
             .collect()
-    }
-
-    #[test]
-    fn normalize_collapses_dot_and_dotdot() {
-        let n = |s: &str| normalize(Path::new(s));
-        assert_eq!(n("./f.txt"), PathBuf::from("f.txt"));
-        assert_eq!(n("f.txt"), PathBuf::from("f.txt"));
-        assert_eq!(n("sub/../f.txt"), PathBuf::from("f.txt"));
-        assert_eq!(n("a/b/../c"), PathBuf::from("a/c"));
-        assert_eq!(n("/x/../y"), PathBuf::from("/y"));
-        assert_eq!(n("a/../../b"), PathBuf::from("../b"));
-        assert_eq!(n("/.."), PathBuf::from("/"));
-        assert_eq!(n(""), PathBuf::from("."));
     }
 
     #[test]

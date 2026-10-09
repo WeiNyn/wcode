@@ -5,14 +5,13 @@
 //! that keeps the file's extension, then rename over the original — the same
 //! crash-safe pattern as `edit`/`write`). Structural rewrites bypass line
 //! anchors by design (whole-AST transforms), but the echoed diff carries line
-//! numbers for anchor-based follow-ups.
+//! numbers so a follow-up `edit`/`read` can find the change.
 
 use std::sync::Arc;
 
 use serde::Deserialize;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
-use super::anchor;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct AstEditArgs {
@@ -258,14 +257,14 @@ impl TypedTool for AstEdit {
             };
         }
 
-        let summary = match anchor::changed_range(&original, &updated) {
+        let summary = match super::diff::changed_range(&original, &updated) {
             Some((a, b)) if a == b => format!("line {a} changed"),
             Some((a, b)) => format!("lines {a}–{b} changed"),
             None => "no byte change (rewrite was idempotent)".to_string(),
         };
         ToolOutput {
             output: format!(
-                "ast_edit {}: {summary}. Diff:\n{diff}\n(re-read {} for fresh anchors before further edits.)",
+                "ast_edit {}: {summary}. Diff:\n{diff}\n(re-read {} before further edits.)",
                 args.path, args.path
             ),
             is_error: false,

@@ -26,7 +26,6 @@ mod skills;
 mod tasks;
 mod tools;
 mod verify_gate;
-mod workspace;
 
 use crate::config::{
     Config, ConfigError, DETECT_TIMEOUT, EnvLike, FileConfig, OPENAI_DEFAULT_BASE_URL, Source,
@@ -1016,7 +1015,6 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     args.owner.as_deref(),
                     args.name.as_deref(),
                     None,
-                    cfg.workspace.digest_cas,
                 )
                 .await;
                 std::process::exit(0)
@@ -1229,7 +1227,6 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             compaction: cfg.compaction,
             working_dir: cwd.clone(),
             members_dir: setup.active_group.as_ref().map(|g| g.members_dir.clone()),
-            digest_cas: cfg.workspace.digest_cas,
             sessions_dir: crate::repl::session_dir(),
         };
         // Build the plan BEFORE the orchestrator (so `--resume` reloads it and a
@@ -1487,7 +1484,6 @@ fn build_agent_for(
         session,
         context,
         extra_tools,
-        cfg.workspace.digest_cas,
     )
 }
 
@@ -1898,7 +1894,6 @@ async fn dispatch(
             args.owner.as_deref(),
             args.name.as_deref(),
             orchestrator,
-            cfg.workspace.digest_cas,
         )
         .await;
     }

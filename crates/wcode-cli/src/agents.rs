@@ -100,9 +100,6 @@ pub struct WorkerTemplate {
     /// v1 in-memory contract (no session file); set by the composition root
     /// when a group exists.
     pub members_dir: Option<PathBuf>,
-    /// `[workspace] digest_cas` — each worker builds its OWN `WorkspaceHooks`
-    /// with this (per-session cache; never shared).
-    pub digest_cas: bool,
     /// The sessions store a worker's `session_search` (`scope:"all"`) scans — the
     /// same dir the root uses (`repl::session_dir()`), so a worker searches the
     /// same store the root does.
@@ -426,9 +423,6 @@ impl SessionFactory {
                     me: id.clone(),
                     owner: owner.clone(),
                 }));
-                hooks.push(Arc::new(crate::workspace::WorkspaceHooks::new(
-                    t.digest_cas,
-                )));
                 if spec.read_only {
                     hooks.push(Arc::new(ReadOnlyHooks::new()));
                 }
@@ -756,7 +750,6 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
-            digest_cas: true,
             sessions_dir: std::env::temp_dir(),
         };
         (SessionFactory::new(registry.clone(), template), registry)
@@ -1132,7 +1125,6 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: Some(base.path().join("members")),
-            digest_cas: true,
             sessions_dir: std::env::temp_dir(),
         };
         let factory = SessionFactory::new(registry.clone(), template);
@@ -1248,7 +1240,6 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
-            digest_cas: true,
             sessions_dir: std::env::temp_dir(),
         };
         let o = Orchestrator::new(registry.clone(), template);
@@ -1300,7 +1291,6 @@ mod tests {
             compaction: CompactionPolicy::default(),
             working_dir: std::env::temp_dir(),
             members_dir: None,
-            digest_cas: true,
             sessions_dir: std::env::temp_dir(),
         };
         Orchestrator::new(Registry::new(), template)

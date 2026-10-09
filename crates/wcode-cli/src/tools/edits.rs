@@ -23,11 +23,6 @@ pub struct EditsArgs {
     /// The ops, applied **in order** to the accumulating content. The batch is
     /// atomic: if any op fails, nothing is written.
     pub edits: Vec<EditOp>,
-    /// Whole-file digest from your last read of this file (the `# <path>
-    /// digest <hex>` line `read` prints). Auto-filled by the harness; normally
-    /// leave unset. A mismatch refuses the call (E_STALE_DIGEST) — re-read.
-    #[serde(default)]
-    pub expected_digest: Option<String>,
 }
 
 pub struct Edits {
@@ -87,14 +82,6 @@ impl TypedTool for Edits {
             }
         };
 
-        // Whole-file CAS (D1): the batch touches one file, so a single
-        // top-level digest covers every op. Checked before any op runs; a
-        // mismatch refuses the whole batch, nothing written.
-        if let Some(out) =
-            super::stale_digest_guard(&args.path, &content, args.expected_digest.as_deref())
-        {
-            return out;
-        }
 
         // Apply in order against the accumulating content. Op order therefore
         // matters — an op sees the effect of the ops before it, which is what
@@ -151,7 +138,7 @@ impl TypedTool for Edits {
                         "edited {} ({n} op{})",
                         args.path,
                         if n == 1 { "" } else { "s" }
-                    ) + &super::digest_note(&args.path, &updated),
+                    ),
                     is_error: false,
                     diff,
                     path: Some(args.path.clone()),
@@ -182,7 +169,6 @@ mod tests {
         EditsArgs {
             path: path.into(),
             edits,
-            expected_digest: None,
         }
     }
 
@@ -276,44 +262,5 @@ mod tests {
         let out = tool().execute(args("f.txt", vec![op("a", "a")]), &ctx).await;
         assert!(!out.is_error, "{}", out.output);
         assert!(out.output.starts_with("no-op"), "{}", out.output);
-        assert!(
-            crate::workspace::parse_digest_header(out.output.lines().last().unwrap()).is_none(),
-            "a no-op emits no trailer: {}",
-            out.output
-        );
-    }
-
-    #[tokio::test]
-    async fn a_successful_batch_appends_the_post_batch_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = tool()
-            .execute(args("f.txt", vec![op("a", "x")]), &ctx)
-            .await;
-        assert!(!out.is_error, "{}", out.output);
-        let last = out.output.lines().last().unwrap();
-        assert_eq!(
-            crate::workspace::parse_digest_header(last),
-            Some(crate::tools::anchor::file_digest(b"x\nb\n")),
-            "the last line is the post-batch digest trailer: {}",
-            out.output
-        );
-    }
-
-    #[tokio::test]
-    async fn a_stale_digest_refuses_the_whole_batch() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "a\n").unwrap();
-        let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let mut a = args("f.txt", vec![op("a", "x")]);
-        a.expected_digest = Some("000000000000".into());
-        let out = tool().execute(a, &ctx).await;
-        assert!(out.is_error);
-        assert!(out.output.contains("E_STALE_DIGEST"), "{}", out.output);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
-            "a\n"
-        );
     }
 }

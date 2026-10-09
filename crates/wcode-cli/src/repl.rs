@@ -34,9 +34,9 @@ use crate::tools::default_tools;
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
-/// System prompt derives from the registered tool set. The read/edit anchor
-/// contract is constant; grep/find are named only when those tools are
-/// actually registered (both are off by default — `bash` covers search).
+/// System prompt derives from the registered tool set. The read/edit contract is
+/// constant; grep/find are named only when those tools are actually registered
+/// (both are off by default — `bash` covers search).
 pub fn system_prompt(
     tools: &ToolsConfig,
     instructions: &InstructionSet,
@@ -54,8 +54,8 @@ pub fn system_prompt(
     let base = format!(
         "You are wcode, a minimal coding agent working in the user's current directory. \
          Inspect with {inspect}; modify with edit and write; run anything else through bash. \
-         read emits a 5-char anchor per line and edit targets lines by those anchors \
-         (content-addressed, drift-proof). Be concise."
+         read prints numbered lines; edit replaces an exact `old_string` with `new_string`, \
+         so it is content-addressed and drift-proof. Be concise."
     );
     let mut prompt = match instructions.render() {
         Some(block) => format!("{base}\n\n{block}"),
@@ -340,7 +340,6 @@ pub fn build_agent(
     session: Option<Session>,
     context: Vec<AgentMessage>,
     extra_tools: Vec<Tool>,
-    digest_cas: bool,
 ) -> (Agent, Arc<Background>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let bg = Background::new();
@@ -349,14 +348,7 @@ pub fn build_agent(
     // One handle shared by the `PlanModeHooks` and the agent, so `set_plan_mode`
     // flips both. Created here (per build) — see the doc's toggle flag.
     let plan_mode = PlanModeHandle::new();
-    // A FRESH WorkspaceHooks per agent (per-session digest cache). It must NOT
-    // live in the shared `spec.hooks` set: `/new` and `/resume` rebuild the
-    // agent in-process from that shared set, so a shared instance would either
-    // vanish or leak one session's cache into another (reviewer #1).
     let mut hooks = spec.hooks;
-    hooks.push(std::sync::Arc::new(crate::workspace::WorkspaceHooks::new(
-        digest_cas,
-    )));
     hooks.push(std::sync::Arc::new(PlanModeHooks::new(plan_mode.clone())));
     let agent = Agent::new(AgentConfig {
         system: system_prompt(
@@ -735,7 +727,6 @@ pub async fn run(
     owner: Option<&str>,
     name: Option<&str>,
     orchestrator: Option<crate::agents::Orchestrator>,
-    digest_cas: bool,
 ) {
     #[cfg(unix)]
     let remote = matches!(source, SessionSource::Remote(_));
@@ -886,7 +877,6 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
-                            digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
                         new_bg.bind(handle.clone());
@@ -1042,7 +1032,6 @@ pub async fn run(
                                         .as_ref()
                                         .map(|o| o.tools())
                                         .unwrap_or_default(),
-                                    digest_cas,
                                 );
                                 let handle = SessionActor::spawn(new_agent);
                                 new_bg.bind(handle.clone());
@@ -1091,7 +1080,6 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
-                            digest_cas,
                         );
                         let handle = SessionActor::spawn(new_agent);
                         new_bg.bind(handle.clone());
@@ -1534,9 +1522,9 @@ mod tests {
 
     #[tokio::test]
     async fn build_agent_leaves_the_shared_hook_set_untouched() {
-        // Reviewer #1's correction: WorkspaceHooks is built INSIDE build_agent,
-        // so the shared set that `/new` and `/resume` clone never carries a
-        // per-session digest cache — the policy is rebuilt with every agent.
+        // The per-agent hooks (plan mode) are built INSIDE build_agent, so the
+        // shared set that `/new` and `/resume` clone never carries one — the
+        // policy is rebuilt with every agent.
         let shared = HooksSet::default();
         assert!(shared.is_empty());
         let (agent, _bg) = build_agent(
@@ -1553,15 +1541,14 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
-            true,
         );
         assert!(
             shared.is_empty(),
-            "the shared set must not gain the per-session WorkspaceHooks"
+            "the shared set must not gain the per-agent hooks"
         );
         assert!(
             !agent.hooks().is_empty(),
-            "build_agent must push its fresh WorkspaceHooks"
+            "build_agent must push its fresh per-agent hooks"
         );
     }
     use serde_json::json;

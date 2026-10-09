@@ -70,6 +70,59 @@ pub fn unified(old: &str, new: &str) -> Option<String> {
     Some(out.join("\n"))
 }
 
+/// Split file content into logical lines. A trailing `\n` is a separator, not a
+/// line, so `"a\n"` yields `["a"]`; a byte-empty file yields zero lines. A lone
+/// `"\n"` file yields the single degenerate line `[""]`.
+pub fn split_lines(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return vec![];
+    }
+    let mut v = content
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<String>>();
+    if content.ends_with('\n') {
+        v.pop();
+    }
+    v
+}
+
+/// First/last 1-based line, in the NEW content, that the change touches, or
+/// `None` when the two are byte-identical. Insertions/replacements report the new
+/// lines; a pure deletion reports the surviving line that moved up into the gap
+/// (or the last line, if the deletion was at EOF) — so the span is never one past
+/// EOF. Callers use it to report *where* an edit landed.
+pub fn changed_range(orig: &str, new: &str) -> Option<(usize, usize)> {
+    if orig == new {
+        return None;
+    }
+    let a = split_lines(orig);
+    let b = split_lines(new);
+    let mut first = 0;
+    while first < a.len() && first < b.len() && a[first] == b[first] {
+        first += 1;
+    }
+    let mut ia = a.len();
+    let mut ib = b.len();
+    while ia > first && ib > first && a[ia - 1] == b[ib - 1] {
+        ia -= 1;
+        ib -= 1;
+    }
+    // Region of the NEW content that differs, 0-based [first, ib). When
+    // `ib > first` the changed lines are present (insertion or replacement).
+    if ib > first {
+        return Some((first + 1, ib));
+    }
+    // Pure deletion: the new side has no lines at the gap, so point at the line
+    // that moved up into it — or the line just above — always a real line,
+    // never one past EOF.
+    if b.is_empty() {
+        return Some((1, 1)); // nothing to echo; callers render an empty region
+    }
+    let keep = first.min(b.len() - 1);
+    Some((keep + 1, keep + 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
