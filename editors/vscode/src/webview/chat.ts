@@ -311,10 +311,16 @@ function reviewBlock(tool: RenderedTool, hunk: ReviewHunk, verdict: Verdict): HT
   hunkEl.appendChild(head);
 
   const lines = el("div", "lines");
-  for (const line of hunk.lines) {
+  for (const [i, line] of hunk.lines.entries()) {
     const row = el("div", `ln ${line.kind}`);
     row.appendChild(el("span", "gutter", String(line.number)));
-    row.appendChild(el("span", "txt", line.text));
+    const txt = el("span", "txt");
+    // W009: the host pre-highlights each line (well-formed spans); else the plain text. NOTE:
+    // `el(tag, class, text)` sets `textContent`, so the html MUST go through `innerHTML`.
+    const html = tool.diffLinesHtml?.[i];
+    if (html !== undefined) txt.innerHTML = html;
+    else txt.textContent = line.text;
+    row.appendChild(txt);
     lines.appendChild(row);
   }
   hunkEl.appendChild(lines);

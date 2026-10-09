@@ -13,7 +13,8 @@ import type { ContentBlock, TodoItem } from "./protocol.ts";
 import type { Block, SessionMember, ToolBlock, ViewState, ViewStatus } from "./reducer.ts";
 import { targetLabel, transcriptOf } from "./reducer.ts";
 import { renderMarkdown } from "./markdown.ts";
-import { highlight, languageForTool } from "./highlight.ts";
+import { highlight, highlightLines, languageForTool } from "./highlight.ts";
+import { reviewHunk } from "./review.ts";
 
 /** A tool call, ready to render (collapsed summary + expandable output). */
 export interface RenderedTool {
@@ -37,6 +38,9 @@ export interface RenderedTool {
    * there is no diff (mirrors the `hasDiff` gate).
    */
   diff?: string;
+  /** W009: the diff BODY highlighted, one well-formed HTML fragment per `reviewHunk` line
+   *  (`splitHighlightedLines` re-opens a continuation span). Absent when plain / no hunk. */
+  diffLinesHtml?: string[];
   /** `ToolBlock.target` — the row's `⚙ name  <target>`. Absent on a history row
    *  (or a call with no recognizable arg). */
   target?: string;
@@ -168,6 +172,8 @@ function renderContent(content: ContentBlock[], live: boolean): string {
 
 function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
   if (!tool) return undefined;
+  const hasDiff = typeof tool.diff === "string" && tool.diff !== "";
+  const hunk = hasDiff ? reviewHunk(tool.diff ?? "") : null;
   return {
     callId: tool.callId,
     name: tool.name,
@@ -178,8 +184,10 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
     isError: tool.isError,
     path: tool.path,
     durationMs: tool.durationMs,
-    hasDiff: typeof tool.diff === "string" && tool.diff !== "",
+    hasDiff,
     diff: tool.diff,
+    diffLinesHtml:
+      hunk === null ? undefined : highlightLines(hunk.lines.map((line) => line.text), languageForTool(tool.name, tool.path)),
     target: tool.target,
   };
 }

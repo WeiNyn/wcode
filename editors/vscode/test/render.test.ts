@@ -187,3 +187,24 @@ test("renderTool carries the highlighted OUTPUT (W009): bash by the tool, a read
   }).tool;
   assert.equal(plain?.outputHtml, undefined, "a pathless tool stays plain (textContent fallback)");
 });
+
+test("renderTool highlights the diff BODY per line, re-opening a continuation span (W009 P4)", () => {
+  // A `.ts` block comment spans lines 1-2: Prism opens the comment span on line 1 and closes it
+  // on line 2, so a naive per-line split would leave line 1 unclosed and line 2 a bare close
+  // (its colour lost). The join-then-split RE-OPENS the span on the continuation line.
+  const diff = "@@ -1,3 +1,3 @@\n /* one\n    two */\n const x = 1;\n";
+  const tool = renderBlock({
+    kind: "tool",
+    tool: { callId: "c", name: "edit", output: "", done: true, isError: false, path: "src/a.ts", diff },
+  }).tool;
+  assert.equal(tool?.hasDiff, true);
+  const lines = tool?.diffLinesHtml ?? [];
+  assert.equal(lines.length, 3, "one fragment per hunk line");
+  lines.forEach((html, i) => {
+    const open = (html.match(/<span/g) ?? []).length;
+    const close = (html.match(/<\/span>/g) ?? []).length;
+    assert.equal(open, close, `line ${i + 1} has well-formed (balanced) spans`);
+  });
+  assert.match(lines[0], /token comment/, "the comment opens with colour on line 1");
+  assert.match(lines[1], /token comment/, "the CONTINUATION line keeps the comment colour (re-opened)");
+});

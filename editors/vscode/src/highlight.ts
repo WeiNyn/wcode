@@ -84,6 +84,39 @@ export function highlight(code: string, lang: string): string | null {
   return Prism.highlight(code, grammar, resolved);
 }
 
+const TOKEN_TAG = /<\/?span[^>]*>/g;
+
+/**
+ * Split Prism's HTML into one WELL-FORMED fragment per line: a span left open at a line end is
+ * closed there and RE-OPENED on the next line, so a multi-line construct (a block comment, a
+ * template literal) keeps its colour on every continuation line and each fragment is a valid
+ * HTML insertion. Pure.
+ */
+export function splitHighlightedLines(html: string): string[] {
+  const open: string[] = [];
+  return html.split("\n").map((line) => {
+    const prefix = open.join("");
+    TOKEN_TAG.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = TOKEN_TAG.exec(line)) !== null) {
+      if (match[0].startsWith("</")) open.pop();
+      else open.push(match[0]);
+    }
+    return `${prefix}${line}${open.map(() => "</span>").join("")}`;
+  });
+}
+
+/**
+ * Highlight a BODY of lines as one unit and split it back per line (a diff body): the
+ * join-then-split preserves multi-line context, and `splitHighlightedLines` re-opens the
+ * continuation spans. `undefined` when the language is unknown (the caller shows plain text).
+ */
+export function highlightLines(texts: string[], lang: string | null): string[] | undefined {
+  if (lang === null) return undefined;
+  const html = highlight(texts.join("\n"), lang);
+  return html === null ? undefined : splitHighlightedLines(html);
+}
+
 /** The language for a file PATH, by extension; `null` when unknown. Pure. */
 export function languageForPath(path: string): string | null {
   const dot = path.lastIndexOf(".");
