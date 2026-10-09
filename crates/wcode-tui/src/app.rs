@@ -156,6 +156,12 @@ pub enum Block {
     /// The `todo` tool's live checklist in the transcript (D35). ONE block that
     /// updates in place as the `AgentEvent::Todo` feed advances.
     Todos(Vec<TodoItem>),
+    /// A turn's apparatus, re-homed from the flow to its foot: one row per tool
+    /// the turn called, under a `── notes ──` rule. `items[k]`'s `¹` number is
+    /// `k + 1` (the turn's tool order). One block, one range — browse-selectable,
+    /// copied as the joined tool outputs. The D31 panel is retired for the
+    /// transcript; this is its replacement.
+    Notes(Vec<Tool>),
 }
 
 impl Block {
@@ -168,6 +174,7 @@ impl Block {
         }
     }
 }
+
 
 /// One tool invocation, from `ToolExecutionStart` to `ToolExecutionEnd`.
 #[derive(Clone, Debug, PartialEq)]
@@ -293,6 +300,15 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
     )
 }
 
+/// Whether an assistant message carries any prose — a non-empty `Text` block. A
+/// tool-call-only (or thinking-only) message does not.
+fn content_has_text(content: &[ContentBlock]) -> bool {
+    content.iter().any(|c| match c {
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        _ => false,
+    })
+}
+
 /// Consume a reply's **first top-level `# h1`** as the turn head's title: scan
 /// the content's text blocks in order for the first whose trimmed text opens with
 /// `# ` (an h1 — `##`+ do not count), take the rest of that line as the title, and
@@ -351,6 +367,12 @@ fn copy_text(block: &Block) -> Option<String> {
                 TodoStatus::Completed => format!("☑ {}", t.content),
                 _ => format!("☐ {}", t.content),
             })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        // The turn's foot: the joined tool outputs.
+        Block::Notes(items) => items
+            .iter()
+            .map(|t| t.output.clone())
             .collect::<Vec<_>>()
             .join("\n"),
     };
@@ -1630,14 +1652,13 @@ impl Surface {
     /// assistant message is part of the current turn (its tool is apparatus
     /// *inside* the section), so it gets no head and does not advance the counter.
     fn commit_turn(&mut self, mut content: Vec<ContentBlock>) {
-        let has_text = content.iter().any(|c| match c {
-            ContentBlock::Text { text } => !text.trim().is_empty(),
-            _ => false,
-        });
-        if !has_text {
+        if !content_has_text(&content) {
             self.push_block(Block::assistant(content));
             return;
         }
+        // Take the turn's apparatus out of the flow FIRST (it sits above the head),
+        // then push the head + the reply, then re-home the apparatus at the foot.
+        let notes = self.take_trailing_tools();
         self.turns += 1;
         let title = take_heading(&mut content);
         self.push_block(Block::TurnHead {
@@ -1645,6 +1666,49 @@ impl Surface {
             title,
         });
         self.push_block(Block::assistant(content));
+        if !notes.is_empty() {
+            self.push_block(Block::Notes(notes));
+        }
+    }
+
+    /// Take the WHOLE turn's apparatus out of the flow. Walk the transcript
+    /// BACKWARD from the tail, collecting every `Block::Tool` (reversed to turn
+    /// order) and REMOVING every text-less tool-call `Block::Assistant`; STOP at
+    /// the first block that is neither — the previous section's text reply, a
+    /// `Notice`, `Todos`, …. Pop `transcript`, `block_revs`, and `cache` together
+    /// so the three stay index-aligned.
+    ///
+    /// The turn is `A(tc) → T → A(tc) → T → … → A(answer)` — NOT a contiguous
+    /// `Tool` run (the text-less `Assistant`s sit between the tools), so a
+    /// "stop at the first non-`Tool`" drain would LOSE tools. This walk collects
+    /// the `Tool`s in order and drops the empty assistants.
+    ///
+    /// Returns an EMPTY vec (and mutates nothing) when the tail is not the current
+    /// turn's apparatus — a pure-prose reply adds no `Notes` block. Called ONLY
+    /// from `commit_turn`'s `has_text` branch.
+    fn take_trailing_tools(&mut self) -> Vec<Tool> {
+        let mut start = self.transcript.len();
+        let mut tools: Vec<Tool> = Vec::new();
+        while start > 0 {
+            match &self.transcript[start - 1] {
+                Block::Tool(tool) => {
+                    tools.push(tool.clone());
+                    start -= 1;
+                }
+                Block::Assistant { content, .. } if !content_has_text(content) => {
+                    start -= 1;
+                }
+                _ => break,
+            }
+        }
+        if start == self.transcript.len() {
+            return Vec::new(); // nothing to fold
+        }
+        self.transcript.truncate(start);
+        self.block_revs.truncate(start);
+        self.cache.truncate(start);
+        tools.reverse(); // back to turn (call) order
+        tools
     }
 
     /// Commit a still-streaming message (a tool started, the run ended early).
@@ -1956,6 +2020,9 @@ pub(crate) struct AffordanceHit {
     /// Index into the FOCUSED surface's `transcript` (a committed block, never
     /// the live block).
     pub(crate) block: usize,
+    /// The sub-item a hit addresses (a note index within `Block::Notes`); `None`
+    /// for a whole-block hit (a thinking row).
+    pub(crate) item: Option<usize>,
     /// The panel header ROW's toggle region (1 row tall): from the panel's
     /// inner-left through the `▸`/`▾` glyph, ending before the gap/`▣` so it never
     /// overlaps `copy`. A click anywhere on the header name toggles the block.
@@ -2077,7 +2144,7 @@ pub struct App {
     /// The panel affordance cell under the button at the last `Down`, if any.
     /// Resolved to a toggle/copy on a click `Up`, discarded on a drag. Overwritten
     /// on EVERY `Down` (a miss stores `None`).
-    mouse_affordance: Option<(usize, AffordanceKind)>,
+    mouse_affordance: Option<(usize, Option<usize>, AffordanceKind)>,
     /// The live transcript text selection in global line/char space, normalized
     /// `(min, max)` — `None` when nothing is selected. Cleared on the next `Down`
     /// in the transcript; read by the renderer's highlight pass.
@@ -2222,18 +2289,27 @@ impl App {
             .transcript
             .iter()
             .enumerate()
-            .filter_map(|(i, block)| matches!(block, Block::Tool(_)).then_some(i))
+            .filter_map(|(i, block)| matches!(block, Block::Tool(_) | Block::Notes(_)).then_some(i))
             .collect();
         if indices.is_empty() {
             return;
         }
         // All expanded collapses; anything else expands all.
-        let expand = !indices
-            .iter()
-            .all(|&i| matches!(&self.focused().transcript[i], Block::Tool(tool) if tool.expanded));
+        let all_expanded = indices.iter().all(|&i| match &self.focused().transcript[i] {
+            Block::Tool(tool) => tool.expanded,
+            Block::Notes(items) => items.iter().all(|t| t.expanded),
+            _ => false,
+        });
+        let expand = !all_expanded;
         for i in indices {
-            if let Some(Block::Tool(tool)) = self.focused_mut().transcript.get_mut(i) {
-                tool.expanded = expand;
+            match self.focused_mut().transcript.get_mut(i) {
+                Some(Block::Tool(tool)) => tool.expanded = expand,
+                Some(Block::Notes(items)) => {
+                    for tool in items.iter_mut() {
+                        tool.expanded = expand;
+                    }
+                }
+                _ => {}
             }
             self.focused_mut().bump_rev(i);
         }
@@ -2685,10 +2761,28 @@ impl App {
     /// Toggle block `i`'s detail. A no-op (silent) unless the block is expandable —
     /// a `Block::Tool` panel, or a committed assistant block with thinking (D33).
     /// Bumps block `i`'s rev so the `(rev, width)` cache re-renders its glyph.
-    fn toggle_block(&mut self, i: usize) {
+    fn toggle_block(&mut self, i: usize, item: Option<usize>) {
         let toggled = match self.focused_mut().transcript.get_mut(i) {
             Some(Block::Tool(tool)) => {
                 tool.expanded = !tool.expanded;
+                true
+            }
+            // A turn's foot: a note toggles its own body; a block-level toggle
+            // (browse `Enter` / `Ctrl-T`) expands or collapses every note.
+            Some(Block::Notes(items)) => {
+                match item {
+                    Some(k) => {
+                        if let Some(tool) = items.get_mut(k) {
+                            tool.expanded = !tool.expanded;
+                        }
+                    }
+                    None => {
+                        let expand = !items.iter().all(|t| t.expanded);
+                        for tool in items.iter_mut() {
+                            tool.expanded = expand;
+                        }
+                    }
+                }
                 true
             }
             // A committed assistant block with thinking: expand/collapse it (D33).
@@ -2706,12 +2800,23 @@ impl App {
         }
     }
 
-    /// Copy block `i`'s text via `copy_text`: push `Action::Copy` (OSC-52) plus a
-    /// `copied N chars to the clipboard` notice; a block with nothing to copy becomes
-    /// a `nothing to copy` notice. The index-addressed form of `copy_selected`; the
+    /// Copy block `i`'s text via `copy_text` (or, with a note `item`, that note's
+    /// output): push `Action::Copy` (OSC-52) plus a `copied N chars to the
+    /// clipboard` notice; nothing to copy becomes a `nothing to copy` notice. The
     /// live block is never addressed.
-    fn copy_block(&mut self, i: usize) {
-        let text = self.focused().transcript.get(i).and_then(copy_text);
+    fn copy_block(&mut self, i: usize, item: Option<usize>) {
+        let text = match item {
+            Some(k) => self
+                .focused()
+                .transcript
+                .get(i)
+                .and_then(|b| match b {
+                    Block::Notes(items) => items.get(k).map(|t| t.output.clone()),
+                    _ => None,
+                })
+                .filter(|t| !t.trim().is_empty()),
+            None => self.focused().transcript.get(i).and_then(copy_text),
+        };
         match text {
             Some(text) => {
                 let chars = text.chars().count();
@@ -2722,12 +2827,12 @@ impl App {
         }
     }
 
-    /// `Enter` / `Space` in browse: toggle the selected block's detail. Only a
-    /// tool block has expansion state today — a no-op elsewhere, and silent (no
-    /// notice noise).
+    /// `Enter` / `Space` in browse: toggle the selected block's detail. A tool
+    /// note block expands/collapses every note; a thinking block flips; a no-op
+    /// elsewhere, and silent (no notice noise).
     fn toggle_selected(&mut self) {
         if let Some(idx) = self.focused().selected {
-            self.toggle_block(idx);
+            self.toggle_block(idx, None);
         }
     }
 
@@ -2736,7 +2841,7 @@ impl App {
     /// copy becomes a notice, with no action pushed.
     fn copy_selected(&mut self) {
         match self.focused().selected {
-            Some(idx) => self.copy_block(idx),
+            Some(idx) => self.copy_block(idx, None),
             None => self.notice("nothing to copy"),
         }
     }
@@ -2819,14 +2924,14 @@ impl App {
         }
     }
 
-    /// The affordance `(block, kind)` under screen cell `(row, col)`, or `None`.
-    /// Scans the focused `TranscriptHit.affordances`; the `(row, col)` order matches
-    /// `block_at` / `sidebar_member_at`.
-    fn affordance_at(&self, row: u16, col: u16) -> Option<(usize, AffordanceKind)> {
+    /// The affordance `(block, item, kind)` under screen cell `(row, col)`, or
+    /// `None`. Scans the focused `TranscriptHit.affordances`; the `(row, col)`
+    /// order matches `block_at` / `sidebar_member_at`.
+    fn affordance_at(&self, row: u16, col: u16) -> Option<(usize, Option<usize>, AffordanceKind)> {
         let hit = self.hit.transcript.as_ref()?;
         hit.affordances
             .iter()
-            .find_map(|a| a.kind_at(row, col).map(|kind| (a.block, kind)))
+            .find_map(|a| a.kind_at(row, col).map(|kind| (a.block, a.item, kind)))
     }
 
     /// Button down. Records the cell; a hit on a sidebar member row focuses that
@@ -2883,12 +2988,12 @@ impl App {
                 self.actions.push(Action::Copy(text));
                 self.notice(format!("copied {chars} chars to the clipboard"));
             }
-        } else if let Some((i, kind)) = aff {
+        } else if let Some((i, item, kind)) = aff {
             // A click on a panel glyph toggles / copies THAT block; it never
             // enters browse and never selects a block.
             match kind {
-                AffordanceKind::Toggle => self.toggle_block(i),
-                AffordanceKind::Copy => self.copy_block(i),
+                AffordanceKind::Toggle => self.toggle_block(i, item),
+                AffordanceKind::Copy => self.copy_block(i, item),
             }
         } else if down.is_some()
             && let Some(i) = self.block_at(self.mouse_focus.1, self.mouse_focus.0)
@@ -4750,14 +4855,112 @@ mod tests {
             matches!(app.transcript()[0], Block::Assistant { .. }),
             "no head before the tool call"
         );
-        // The next TEXT reply is still `§1` — the counter never advanced.
+        // The next TEXT reply is still `§1` — the counter never advanced, and the
+        // text-less tool-call message folded into the turn's foot.
         app.handle(AppEvent::Agent(
             root(),
             AgentEvent::MessageEnd {
                 message: assistant("the reply"),
             },
         ));
-        assert_eq!(app.transcript()[1], Block::TurnHead { n: 1, title: None });
+        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+    }
+
+    /// An assistant message carrying one tool call (a text-less round).
+    fn tool_call_msg(id: &str, name: &str) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: Default::default(),
+            }],
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+            model: None,
+        }
+    }
+
+    /// Push one full tool round (a text-less call message, then start → end).
+    fn push_tool_round(app: &mut App, id: &str, name: &str) {
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
+            message: tool_call_msg(id, name),
+        }));
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionStart {
+            call_id: id.into(),
+            name: name.into(),
+        }));
+        app.handle(AppEvent::Agent(root(), AgentEvent::ToolExecutionEnd {
+            call_id: id.into(),
+            name: name.into(),
+            output: format!("{name} out"),
+            is_error: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+        }));
+    }
+
+    #[test]
+    fn a_tool_turn_collects_its_tools_into_one_foot_note() {
+        let mut app = App::new();
+        push_tool_round(&mut app, "c1", "read");
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
+            message: assistant("the answer"),
+        }));
+        // [TurnHead §1, Assistant, Notes([read])] — the empty tool-call message gone.
+        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+        let Block::Notes(items) = &app.transcript()[2] else {
+            panic!("a notes block");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "read");
+        assert!(items[0].done);
+        assert_eq!(app.transcript().len(), 3);
+    }
+
+    #[test]
+    fn a_prose_only_reply_gets_no_notes_block() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
+            message: assistant("just prose"),
+        }));
+        assert_eq!(app.transcript().len(), 2);
+        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+    }
+
+    #[test]
+    fn a_multi_round_turn_collects_every_tool_in_order() {
+        let mut app = App::new();
+        // [A(tc) → T → A(tc) → T → A(answer)] folds to Notes([read, grep]).
+        push_tool_round(&mut app, "c1", "read");
+        push_tool_round(&mut app, "c2", "grep");
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
+            message: assistant("the answer"),
+        }));
+        // BOTH text-less assistants are gone; only the head, reply, and foot remain.
+        assert_eq!(app.transcript().len(), 3);
+        let Block::Notes(items) = &app.transcript()[2] else {
+            panic!("a notes block");
+        };
+        assert_eq!(
+            items.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["read", "grep"],
+            "the tools are in call order"
+        );
+    }
+
+    #[test]
+    fn folding_keeps_transcript_cache_and_revs_index_aligned() {
+        let mut app = App::new();
+        push_tool_round(&mut app, "c1", "read");
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
+            message: assistant("the answer"),
+        }));
+        let s = app.focused();
+        assert_eq!(s.transcript.len(), s.block_revs.len(), "revs aligned");
+        assert_eq!(s.transcript.len(), s.cache.len(), "cache aligned");
     }
 
     #[test]
@@ -5895,6 +6098,7 @@ mod tests {
     fn affordance(block: usize, left: u16, width: u16, copy_x: u16, row: u16) -> AffordanceHit {
         AffordanceHit {
             block,
+            item: None,
             toggle: rect(left, row, width, 1),
             copy: rect(copy_x, row, 1, 1),
         }

@@ -487,46 +487,74 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    // D32 — publish the panel affordance cells. A panel's top rule is its block's
-    // FIRST line: a visible panel block contributes the header-row toggle region
-    // (its inner-left through the `▸`/`▾`) plus the 1x1 `▣` copy cell. The rects
-    // are pure functions of (kind, width, range) — recomputed every frame, never
-    // cached (the (rev, width) cache stores `Line`s, not geometry).
-    let panel_w = measure
-        .saturating_sub(PANEL_INDENT.chars().count())
-        .max(4);
-    let (toggle_col, copy_col) = header_affordance_cols(panel_w);
-    let ind_w = PANEL_INDENT.chars().count() as u16;
+    // D32 — publish the affordance cells. A thinking block's collapsed `▸`/`▣`
+    // row is the block's FIRST line; a `Block::Notes` publishes one hit PER NOTE
+    // (each note's head row is its toggle row). The rects are pure functions of
+    // (kind, width, range) — recomputed every frame, never cached (the
+    // (rev, width) cache stores `Line`s, not geometry).
+    let (_, note_copy) = note_affordance_cols(measure);
     let affordances: Vec<AffordanceHit> = ranges
         .iter()
         .enumerate()
         .filter_map(|(i, range)| {
-            // A panel, or an assistant block whose thinking leads — its collapsed
-            // `▸`/`▣` row is the block's FIRST line (D33).
-            let has_affordance = match &app.transcript()[i] {
-                Block::Tool(_) => true,
-                Block::Assistant { content, .. } => {
-                    matches!(content.first(), Some(ContentBlock::Thinking { .. }))
+            let row0 = range.start.checked_sub(start)?;
+            match &app.transcript()[i] {
+                Block::Notes(items) => {
+                    // Mirror `notes_lines`: the rule (1 row), then each note's head
+                    // (its toggle row) + its expanded body.
+                    let mut hits = Vec::new();
+                    let mut off = 1usize; // past the `── notes ──` rule
+                    for (k, tool) in items.iter().enumerate() {
+                        let r = row0 + off;
+                        if r < window.len() {
+                            let y = area.y + r as u16;
+                            hits.push(AffordanceHit {
+                                block: i,
+                                item: Some(k),
+                                // The whole head row through the `▸`; the `▣` cell
+                                // stays disjoint (`kind_at` checks toggle first).
+                                toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
+                                copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
+                            });
+                        }
+                        off += note_height(tool, measure);
+                    }
+                    Some(hits)
                 }
-                _ => false,
-            };
-            if !has_affordance {
-                return None;
+                Block::Tool(tool) => {
+                    // A standalone tool (a live/running tool, before its answer
+                    // commits) is a one-note list; its head follows the rule.
+                    let _ = tool;
+                    let r = row0 + 1;
+                    if r >= window.len() {
+                        return None;
+                    }
+                    let y = area.y + r as u16;
+                    Some(vec![AffordanceHit {
+                        block: i,
+                        item: Some(0),
+                        toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
+                        copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
+                    }])
+                }
+                Block::Assistant { content, .. }
+                    if matches!(content.first(), Some(ContentBlock::Thinking { .. })) =>
+                {
+                    if row0 >= window.len() {
+                        return None;
+                    }
+                    let y = area.y + row0 as u16;
+                    Some(vec![AffordanceHit {
+                        block: i,
+                        item: None,
+                        toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
+                        copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
+                    }])
+                }
+                _ => None,
             }
-            let row = range.start.checked_sub(start)?;
-            if row >= window.len() {
-                return None;
-            }
-            let y = area.y + row as u16;
-            Some(AffordanceHit {
-                block: i,
-                // The WHOLE header row is the toggle target: from the panel's
-                // inner-left through the `▸`/`▾` glyph, ending before the gap so
-                // the `▣` copy cell stays disjoint (`kind_at` checks toggle first).
-                toggle: Rect::new(col.x + ind_w + 1, y, toggle_col, 1),
-                copy: Rect::new(col.x + ind_w + copy_col, y, 1, 1),
-            })
         })
+        .flatten()
         .collect();
     app.set_transcript_hit(col, start, rows_text, affordances);
     frame.render_widget(Paragraph::new(window), col);
@@ -618,12 +646,14 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
             content,
             thinking_open,
         } => content_lines(content, width, false, *thinking_open),
-        Block::Tool(tool) => tool_panel_lines(tool, width),
+        Block::Tool(tool) => notes_lines(std::slice::from_ref(tool), width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
         Block::Todos(todos) => todos_lines(todos, width),
+        // The turn's foot: the note apparatus, frameless (§11).
+        Block::Notes(items) => notes_lines(items, width),
     }
 }
 
@@ -648,6 +678,8 @@ fn content_lines(
     thinking_open: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // The turn's tool-call ordinal, for the `¹` foot reference.
+    let mut refn = 0usize;
     for (i, block) in content.iter().enumerate() {
         match block {
             ContentBlock::Text { text } => {
@@ -664,7 +696,16 @@ fn content_lines(
                     lines.extend(thinking_block_lines(text, width, thinking_open, i == 0));
                 }
             }
-            ContentBlock::ToolCall { .. } => {}
+            ContentBlock::ToolCall { .. } => {
+                // A printed superscript reference to the turn's foot (the note
+                // list). SUPPRESSED when the block has emitted no prose yet: a
+                // text-less tool-call round has no sentence to mark, and a
+                // replayed/orphan tool is still numbered in the foot, unmarked.
+                refn += 1;
+                if let Some(last) = lines.last_mut() {
+                    last.spans.push(Span::styled(footnote_mark(refn), link()));
+                }
+            }
         }
     }
     if live {
@@ -674,6 +715,106 @@ fn content_lines(
         }
     }
     lines
+}
+
+/// The superscript footnote mark for the n-th note of a turn: `¹²³…` for 1..=9,
+/// the ASCII-clean `[n]` for n >= 10.
+fn footnote_mark(n: usize) -> String {
+    const MARKS: [char; 9] = ['¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    match n.checked_sub(1).and_then(|i| MARKS.get(i)) {
+        Some(c) => c.to_string(),
+        None => format!("[{n}]"),
+    }
+}
+
+/// The turn's footnote list: ONE `── notes ──` rule row, then one group per note
+/// — the head `{n} » {name}  {target}` (its `▸`/`▣` affordances right-aligned),
+/// and, when expanded or errored, the params + full output + the
+/// `  ✓ {name} · {note} · {ms}` summary. **Frameless** (§11). Note `k`'s FIRST
+/// line is its toggle row (D32).
+fn notes_lines(items: &[Tool], width: usize) -> Vec<Line<'static>> {
+    let content_w = panel_content_width(width);
+    let mut out = vec![notes_rule(width)];
+    for (k, tool) in items.iter().enumerate() {
+        out.push(note_head_row(k + 1, tool, width));
+        let expanded = tool.expanded || tool.is_error;
+        if !tool.done {
+            // Running: the head + the growing tail (no `✓` yet).
+            out.extend(panel_param_lines(&tool.params, content_w));
+            out.extend(tool_panel_body(tool, content_w, expanded));
+            continue;
+        }
+        if expanded {
+            out.extend(panel_param_lines(&tool.params, content_w));
+            out.extend(tool_panel_body(tool, content_w, true));
+        } else {
+            // Collapsed: the summary row only — the body (params + output) is
+            // behind the disclosure.
+            let (note, _) = summary_line(&tool.output);
+            out.push(tool_summary_row(tool, &note));
+        }
+    }
+    out
+}
+
+/// One note's head row: `   {n} » {name}  {target}`, the `▸`/`▣` affordances
+/// right-aligned (this row is the note's D32 toggle/copy row). `{n}` is `dim`;
+/// the `» {name}` run is `tool_name()`.
+fn note_head_row(n: usize, tool: &Tool, width: usize) -> Line<'static> {
+    let params = panel_param_lines(&tool.params, panel_content_width(width));
+    let name_text = match tool.target.as_ref().or(tool.path.as_ref()) {
+        Some(target) if params.is_empty() => format!("» {}  {target}", tool.name),
+        _ => format!("» {}", tool.name),
+    };
+    let glyph = if tool.expanded || tool.is_error { "▾" } else { "▸" };
+    let head = format!("   {n} {name_text}");
+    let aff = format!("{glyph} ▣");
+    let pad = width
+        .saturating_sub(head.chars().count() + aff.chars().count())
+        .max(1);
+    Line::from(vec![
+        Span::styled(format!("   {n} "), dim()),
+        Span::styled(name_text, tool_name()),
+        Span::styled(" ".repeat(pad), dim()),
+        Span::styled(aff, dim()),
+    ])
+}
+
+/// The note head's affordance cells (0-based from the row's left edge): the
+/// `▸`/`▾` toggle glyph at `width - 3` and the `▣` copy at `width - 1` (the
+/// `▸ ▣` run flush right).
+fn note_affordance_cols(width: usize) -> (usize, usize) {
+    (width.saturating_sub(3), width.saturating_sub(1))
+}
+
+/// The rendered height of one note group in [`notes_lines`]: its head row plus
+/// the running tail, the expanded body, or the collapsed summary. Mirrors
+/// `notes_lines` exactly.
+fn note_height(tool: &Tool, width: usize) -> usize {
+    let content_w = panel_content_width(width);
+    let expanded = tool.expanded || tool.is_error;
+    if !tool.done {
+        return 1
+            + panel_param_lines(&tool.params, content_w).len()
+            + tool_panel_body(tool, content_w, expanded).len();
+    }
+    if expanded {
+        1 + panel_param_lines(&tool.params, content_w).len()
+            + tool_panel_body(tool, content_w, true).len()
+    } else {
+        2 // head + summary
+    }
+}
+
+/// The `── notes ──` rule: `   ── notes ` + `─`.repeat(fill) to `width`, all `dim`
+/// (the `todos_lines` head idiom). `─` is already in the §2 table.
+fn notes_rule(width: usize) -> Line<'static> {
+    let head = "   ── notes ";
+    let fill = width.saturating_sub(head.chars().count());
+    Line::from(vec![
+        Span::styled(head.to_string(), dim()),
+        Span::styled("─".repeat(fill), dim()),
+    ])
 }
 
 /// A committed thinking block (D33): the collapsed `··· thinking · N chars
@@ -693,8 +834,8 @@ fn thinking_block_lines(
 }
 
 /// The thinking block's header row: `··· thinking · N chars` (dim) with the
-/// `▸`/`▾`/`▣` affordance run right-aligned at the SAME columns a tool panel
-/// uses (`header_affordance_cols`), so one publish geometry serves both.
+/// `▸`/`▾`/`▣` affordance run right-aligned at the SAME columns a note head uses
+/// (`note_affordance_cols`), so one publish geometry serves both.
 /// Without a published region the glyphs are SUPPRESSED — a drawn affordance
 /// must always route a click (the D32 invariant).
 fn thinking_header_line(
@@ -710,13 +851,11 @@ fn thinking_header_line(
             Span::styled(head, dim()),
         ]);
     }
-    let panel_w = width.saturating_sub(PANEL_INDENT.chars().count()).max(4);
-    let (toggle_col, _) = header_affordance_cols(panel_w);
+    let (toggle_col, _) = note_affordance_cols(width);
     let used = THINK_FIRST.chars().count() + head.chars().count();
-    // The `▸` sits at the SAME screen column as a tool panel's (`header_affordance_cols`
-    // is panel-local; THINK_FIRST already carries the 3-column indent).
-    let target = PANEL_INDENT.chars().count() + toggle_col as usize;
-    let fill = target.saturating_sub(used);
+    // The `▸` sits at the SAME screen column as a note's (`note_affordance_cols`
+    // is row-local and absolute; THINK_FIRST already carries the indent).
+    let fill = toggle_col.saturating_sub(used);
     let glyph = if open { "▾" } else { "▸" };
     Line::from(vec![
         Span::styled(THINK_FIRST.to_string(), dim()),
@@ -726,74 +865,6 @@ fn thinking_header_line(
         Span::styled(" ".to_string(), dim()),
         Span::styled("▣".to_string(), dim()),
     ])
-}
-
-/// Render a tool as a panel (D31). Three branches, mirroring the old
-/// `tool_lines`:
-///   1. LIVE (`!tool.done`): header + the live tail; no `✓` row yet.
-///   2. DIFF (`tool.diff`): the diff body inside the panel.
-///   3. DONE: header + the body + the `✓`/`✗` summary row.
-///
-/// A tool ERROR forces expanded (a failure is never hidden). The command WRAPS
-/// under its value column and is never clipped; params stay visible expanded.
-fn tool_panel_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
-    let content_w = panel_content_width(width);
-    let params = panel_param_lines(&tool.params, content_w);
-    // The params block supersedes the old header target; when the call carried
-    // no recognizable params, the target/path still rides the header (never
-    // clipped to one line — the rule is sized to it).
-    let name_text = match tool.target.as_ref().or(tool.path.as_ref()) {
-        Some(target) if params.is_empty() => format!("» {}  {target}", tool.name),
-        _ => format!("» {}", tool.name),
-    };
-    let name = Span::styled(name_text, tool_name());
-    let expanded = tool.expanded || tool.is_error;
-    let affordances = header_affordances(expanded);
-    let body = tool_panel_body(tool, content_w, expanded);
-    panel_frame(name, &affordances, params, body, width)
-}
-
-/// The top-right affordance run — toggle glyph, separating space, copy glyph — as
-/// separate spans so a caller can address each glyph's cell. D32 (slice 4).
-struct HeaderAffordances {
-    toggle: Span<'static>,
-    gap: Span<'static>,
-    copy: Span<'static>,
-}
-
-impl HeaderAffordances {
-    /// The run's column count (`"▸ ▣"` == 3). It drives the A4 right-alignment, so
-    /// the rendered top rule stays byte-identical to the pre-D32 single span.
-    const WIDTH: usize = 3;
-
-    /// The run's column count (== the old `"▸ ▣".chars().count()`).
-    fn width(&self) -> usize {
-        Self::WIDTH
-    }
-
-    /// `[toggle, gap, copy]`, in draw order.
-    fn spans(&self) -> Vec<Span<'static>> {
-        vec![self.toggle.clone(), self.gap.clone(), self.copy.clone()]
-    }
-}
-
-/// The two affordance CELLS, 0-based from the panel's own left edge (excluding
-/// `PANEL_INDENT`): `toggle_col = panel_w - 2 - WIDTH`, `copy_col = toggle_col + 2`.
-fn header_affordance_cols(panel_w: usize) -> (u16, u16) {
-    let toggle_col = panel_w.saturating_sub(2 + HeaderAffordances::WIDTH);
-    (toggle_col as u16, (toggle_col + 2) as u16)
-}
-
-/// The panel's top-right affordance run: the toggle glyph (`▸` collapsed, `▾`
-/// expanded), a separating space, and the copy glyph `▣` — each as its own span so
-/// the D32 hit cells can be derived from `panel_w`.
-fn header_affordances(expanded: bool) -> HeaderAffordances {
-    let toggle = if expanded { "▾" } else { "▸" };
-    HeaderAffordances {
-        toggle: Span::styled(toggle.to_string(), dim()),
-        gap: Span::styled(" ".to_string(), dim()),
-        copy: Span::styled("▣".to_string(), dim()),
-    }
 }
 
 /// The content region inside a panel of `width` columns: the panel minus the
@@ -916,7 +987,8 @@ fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
         ("✓", success())
     };
     let mut spans = vec![
-        Span::styled(format!("{PANEL_GUTTER}{mark} "), style),
+        // The `✓` aligns under the note head's `»` (5 cols).
+        Span::styled(format!("     {mark} "), style),
         Span::styled(tool.name.clone(), tool_name()),
     ];
     if !note.is_empty() {
@@ -926,90 +998,6 @@ fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
         spans.push(Span::styled(format!(" · {}", format_ms(ms)), dim()));
     }
     Line::from(spans)
-}
-
-/// Wrap `params` + `body` in the rounded frame. The top rule carries `» name`
-/// (left) and the affordances (right-aligned, A4); the mid `├──┤` rule appears
-/// IFF both `params` and `body` are non-empty (A1). Every row is padded to
-/// `width`.
-fn panel_frame(
-    name: Span<'static>,
-    affordances: &HeaderAffordances,
-    params: Vec<Line<'static>>,
-    body: Vec<Line<'static>>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let indent = PANEL_INDENT;
-    let panel_w = width.saturating_sub(indent.chars().count()).max(4);
-    let has_params = !params.is_empty();
-    let has_body = !body.is_empty();
-
-    let mut out = Vec::with_capacity(params.len() + body.len() + 3);
-    let mut top = vec![Span::styled(indent.to_string(), border())];
-    top.extend(panel_top_spans(&name, affordances, panel_w));
-    out.push(Line::from(top));
-    for line in &params {
-        out.push(panel_content_row(indent, line, panel_w));
-    }
-    if has_params && has_body {
-        out.push(panel_rule(indent, '├', '┤', panel_w));
-    }
-    for line in &body {
-        out.push(panel_content_row(indent, line, panel_w));
-    }
-    out.push(panel_rule(indent, '╰', '╯', panel_w));
-    out
-}
-
-/// The top rule's spans (without the block indent): `╭─ {name} ─────
-/// {affordances} ─╮`. A4 — the affordance run starts at column
-/// `panel_w - 2 - affordances.width()`, so slice 4 reads its hit cells from there
-/// while the rendered glyphs stay byte-identical to the pre-D32 span.
-fn panel_top_spans(
-    name: &Span<'static>,
-    affordances: &HeaderAffordances,
-    panel_w: usize,
-) -> Vec<Span<'static>> {
-    let name_w = name.content.chars().count();
-    let aff_w = affordances.width();
-    // `╭─ ` + name + ` ` + fill + ` ` + affordances + `─╮`
-    let fixed = 3 + name_w + 1 + 1 + aff_w + 2;
-    let fill = panel_w.saturating_sub(fixed);
-    let mut spans = vec![
-        Span::styled("╭─ ".to_string(), border()),
-        name.clone(),
-        Span::styled(" ".to_string(), border()),
-        Span::styled("─".repeat(fill), border()),
-        Span::styled(" ".to_string(), border()),
-    ];
-    spans.extend(affordances.spans());
-    spans.push(Span::styled("─╮".to_string(), border()));
-    spans
-}
-
-/// One framed content row: `│` + `line` + padding + `│`, exactly `panel_w` wide
-/// (plus the block indent).
-fn panel_content_row(indent: &str, line: &Line<'static>, panel_w: usize) -> Line<'static> {
-    let inner = panel_w.saturating_sub(2);
-    let line_w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad = inner.saturating_sub(line_w);
-    let mut spans = vec![
-        Span::styled(indent.to_string(), border()),
-        Span::styled("│".to_string(), border()),
-    ];
-    spans.extend(line.spans.iter().cloned());
-    spans.push(Span::styled(" ".repeat(pad), border()));
-    spans.push(Span::styled("│".to_string(), border()));
-    Line::from(spans)
-}
-
-/// A framed horizontal rule (`├──┤` or `╰──╯`), exactly `panel_w` wide.
-fn panel_rule(indent: &str, open: char, close: char, panel_w: usize) -> Line<'static> {
-    let inner = panel_w.saturating_sub(2);
-    Line::from(vec![
-        Span::styled(indent.to_string(), border()),
-        Span::styled(format!("{open}{}{close}", "─".repeat(inner)), border()),
-    ])
 }
 
 /// A committed todos block (D35): a `── todos  d/t ──` header, then one `☑`/`☐`
@@ -1699,6 +1687,11 @@ fn heading() -> Style {
     theme::theme().heading
 }
 
+/// A markdown link — the turn's `¹` footnote reference shares it.
+fn link() -> Style {
+    theme::theme().link
+}
+
 /// The overlay / popup border and its title.
 fn border() -> Style {
     theme::theme().border
@@ -2269,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_diff_renders_with_a_plus_minus_summary() {
+    fn a_tool_diff_renders_when_expanded() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
             root(),
@@ -2290,7 +2283,8 @@ mod tests {
                 duration_ms: None,
             },
         ));
-        let text = buffer_text(&render(&mut app, 60, 12));
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the note
+        let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("-old"), "removal missing: {text}");
         assert!(text.contains("+new"), "addition missing: {text}");
         assert!(text.contains("+1 −1"), "summary missing: {text}");
@@ -2530,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn a_done_tool_collapses_to_a_preview_with_a_more_hint() {
+    fn a_done_note_collapses_to_its_head_and_summary() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
@@ -2538,15 +2532,13 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
         let text = buffer_text(&render(&mut app, 70, 20));
-        assert!(
-            text.contains("… +15 more lines"),
-            "collapsed hint missing:\n{text}"
-        );
-        assert!(text.contains("line-2"), "the head preview is missing:\n{text}");
-        assert!(
-            !text.contains("line-20"),
-            "the tail must be elided when collapsed:\n{text}"
-        );
+        // A collapsed note is its head row + the `✓` summary; the body is behind
+        // the disclosure (no preview, no `… +N more` hint).
+        assert!(text.contains("── notes"), "the rule:\n{text}");
+        assert!(text.contains("1 » bash"), "the head:\n{text}");
+        assert!(text.contains("✓ bash · line-1"), "the summary:\n{text}");
+        assert!(!text.contains("line-2"), "the body is collapsed:\n{text}");
+        assert!(!text.contains("more lines"), "no preview hint:\n{text}");
     }
 
     #[test]
@@ -2596,24 +2588,19 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "edit", "edited", false, Some(&diff));
 
+        // Collapsed: the head + the summary; no diff lines.
         let collapsed = buffer_text(&render(&mut app, 70, 24));
-        assert!(
-            collapsed.contains("… +22 more lines"),
-            "diff cap hint missing:\n{collapsed}"
-        );
+        assert!(collapsed.contains("1 » edit"), "{collapsed}");
+        assert!(collapsed.contains("✓ edit"), "the summary row:\n{collapsed}");
         assert!(
             !collapsed.contains("+add-30"),
-            "the diff tail must be elided:\n{collapsed}"
+            "the diff is collapsed:\n{collapsed}"
         );
 
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 40));
         assert!(expanded.contains("+add-30"), "the full diff should show:\n{expanded}");
-        assert!(
-            !expanded.contains("more lines"),
-            "the hint should be gone when expanded:\n{expanded}"
-        );
     }
 
     #[test]
@@ -2624,10 +2611,6 @@ mod tests {
         let line = format!("{}TAIL-REACHABLE", "x".repeat(285));
         push_tool(&mut app, "bash", &line, false, None);
         let collapsed = buffer_text(&render(&mut app, 70, 20));
-        assert!(
-            collapsed.contains("the full line is elided"),
-            "the truncation must be hinted:\n{collapsed}"
-        );
         assert!(
             !collapsed.contains("TAIL-REACHABLE"),
             "the tail must be hidden while collapsed:\n{collapsed}"
@@ -2655,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_line_tool_output_previews_four_lines_then_expands_to_all() {
+    fn a_multi_line_tool_output_expands_to_all() {
         let mut app = App::new();
         let output = (1..=10)
             .map(|i| format!("row {i}"))
@@ -2663,47 +2646,27 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
 
-        // Summary "row 1" + a four-line preview ("row 2".."row 5") + the hint.
+        // Collapsed: the summary ("row 1") only — the body is behind the disclosure.
         let collapsed = buffer_text(&render(&mut app, 70, 20));
-        assert!(collapsed.contains("row 5"), "preview short:\n{collapsed}");
-        assert!(
-            !collapsed.contains("row 6"),
-            "the fifth body line must be elided:\n{collapsed}"
-        );
-        assert!(collapsed.contains("… +5 more lines"), "{collapsed}");
+        assert!(collapsed.contains("row 1"), "the summary:\n{collapsed}");
+        assert!(!collapsed.contains("row 2"), "the body is collapsed:\n{collapsed}");
 
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 20));
         assert!(expanded.contains("row 10"), "not all lines shown:\n{expanded}");
-        assert!(
-            !expanded.contains("more lines"),
-            "the hint should be gone:\n{expanded}"
-        );
     }
 
     #[test]
     fn the_more_hint_pluralizes_one_hidden_line() {
-        // 6 output lines = summary + 5 body lines → 4 previewed, 1 hidden.
-        let mut app = App::new();
-        let six = (1..=6)
-            .map(|i| format!("row {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        push_tool(&mut app, "bash", &six, false, None);
-        let text = buffer_text(&render(&mut app, 70, 20));
-        assert!(text.contains("… +1 more line"), "{text}");
-        assert!(!text.contains("+1 more lines"), "not pluralized:\n{text}");
-
-        // 7 output lines = summary + 6 body lines → 2 hidden (plural).
-        let mut app = App::new();
-        let seven = (1..=7)
-            .map(|i| format!("row {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        push_tool(&mut app, "bash", &seven, false, None);
-        let text = buffer_text(&render(&mut app, 70, 20));
-        assert!(text.contains("… +2 more lines"), "{text}");
+        // The hint is a unit of the (expanded) body: 1 is singular, 2+ plural.
+        let one = more_hint(1, false).expect("a hint");
+        assert_eq!(one.spans[0].content.as_ref(), "  … +1 more line");
+        let two = more_hint(2, false).expect("a hint");
+        assert_eq!(two.spans[0].content.as_ref(), "  … +2 more lines");
+        // `wide` adds the single-line-elision hint; 0 with no `wide` → none.
+        assert!(more_hint(0, false).is_none());
+        assert!(more_hint(0, true).is_some());
     }
 
     #[test]
@@ -2749,7 +2712,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_toggles_only_the_selected_tool() {
+    fn enter_toggles_only_the_selected_note() {
         let mut app = App::new();
         let first = (1..=20)
             .map(|i| format!("FIRST-{i}"))
@@ -2762,18 +2725,14 @@ mod tests {
         push_tool(&mut app, "bash", &first, false, None);
         push_tool(&mut app, "bash", &last, false, None);
 
-        // Browse selects the last block; Enter toggles just it.
+        // Browse selects the last block; Enter expands just it.
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         app.handle(AppEvent::Key(Key::Enter));
-        let text = buffer_text(&render(&mut app, 70, 45));
+        let text = buffer_text(&render(&mut app, 70, 50));
         // The selected block is fully expanded…
-        assert!(text.contains("LAST-20"), "the selected block should expand:\n{text}");
-        // …while the first stays collapsed (its preview stops at line 5).
-        assert!(text.contains("FIRST-5"), "{text}");
-        assert!(
-            !text.contains("FIRST-6"),
-            "only the selected block should toggle:\n{text}"
-        );
+        assert!(text.contains("LAST-20"), "the selected note should expand:\n{text}");
+        // …while the first stays collapsed (its body is behind the disclosure).
+        assert!(!text.contains("FIRST-2"), "only the selected note toggles:\n{text}");
     }
 
     #[test]
@@ -2829,7 +2788,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Enter));
 
         // A short terminal: the wrapped body overflows the transcript band.
-        let _ = buffer_text(&render(&mut app, 40, 6));
+        let _ = buffer_text(&render(&mut app, 40, 8));
         for _ in 0..50 {
             app.handle(AppEvent::Key(Key::PageUp));
         }
@@ -2839,7 +2798,7 @@ mod tests {
         );
         // Scrolled to the top, the start of the wrapped body is reachable — it
         // would not be if the body were counted as a single line.
-        let text = buffer_text(&render(&mut app, 40, 6));
+        let text = buffer_text(&render(&mut app, 40, 8));
         assert!(
             text.contains("START"),
             "the top of the wrapped body must be reachable:\n{text}"
@@ -2868,13 +2827,12 @@ mod tests {
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
         push_tool(&mut app, "bash", &output, false, None);
-        // Collapsed, the tail is elided (a hint is drawn).
-        assert!(buffer_text(&render(&mut app, 70, 40)).contains("more lines"));
+        // Collapsed, neither body shows.
+        assert!(!buffer_text(&render(&mut app, 70, 60)).contains("line-2"));
 
         app.handle(AppEvent::Key(Key::Ctrl('t')));
-        let text = buffer_text(&render(&mut app, 70, 40));
-        assert!(!text.contains("more lines"), "all tools show their whole output:\n{text}");
-        assert!(text.contains("line-20"), "the last line should show:\n{text}");
+        let text = buffer_text(&render(&mut app, 70, 60));
+        assert!(text.contains("line-20"), "all notes show their whole output:\n{text}");
     }
 
     // --- transcript browse mode ---------------------------------------------
@@ -3362,7 +3320,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_browse_expands_the_selected_tool_in_the_frame() {
+    fn enter_in_browse_expands_the_selected_note_in_the_frame() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
@@ -3373,15 +3331,14 @@ mod tests {
 
         let collapsed = buffer_text(&render(&mut app, 70, 30));
         assert!(!collapsed.contains("line-20"), "collapsed hides the tail:\n{collapsed}");
-        // The bar covers the whole panel block: top rule + 4 preview lines +
-        // the hint + the ✓ status row + the bottom rule.
-        assert_eq!(barred(&collapsed).len(), 8, "{collapsed}");
+        // The bar covers the collapsed note: the rule + the head + the summary.
+        assert_eq!(barred(&collapsed).len(), 3, "{collapsed}");
 
         app.handle(AppEvent::Key(Key::Enter));
         let expanded = buffer_text(&render(&mut app, 70, 30));
         assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
-        // Top rule + all 20 output lines + the ✓ status row + the bottom rule.
-        assert_eq!(barred(&expanded).len(), 23, "{expanded}");
+        // The bar still covers the note's rows (rule + head + body, scrolled).
+        assert!(barred(&expanded).len() >= 20, "{expanded}");
     }
 
     #[test]
@@ -3413,11 +3370,11 @@ mod tests {
         ));
 
         let text = buffer_text(&render(&mut app, 80, 12));
-        let first = text.lines().next().unwrap_or_default();
-        assert!(
-            first.contains("read"),
-            "the tool line is the first row, with no leading blank:\n{text}"
-        );
+        let lines: Vec<&str> = text.lines().collect();
+        // The empty assistant block renders nothing, so the note's rule is row 0 —
+        // no stray leading blank.
+        assert!(lines[0].contains("── notes"), "the note rule leads:\n{text}");
+        assert!(lines[1].contains("» read"), "the note head follows:\n{text}");
     }
 
     #[test]
@@ -3866,6 +3823,7 @@ mod tests {
                 name: "bash".into(),
             },
         ));
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the note
         let text = buffer_text(&render(&mut app, 80, 14));
         assert!(text.contains("bash"), "tool name missing:\n{text}");
         assert!(
@@ -3936,7 +3894,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bash_panel_shows_the_full_command_unclipped() {
+    fn a_note_shows_the_full_command_unclipped() {
         let mut app = App::new();
         let cmd = "cargo test -p wcode-cli --all-targets -- --nocapture --color=always";
         assert!(
@@ -3944,7 +3902,8 @@ mod tests {
             "the fixture must exceed the old 60-char clip"
         );
         push_bash_panel(&mut app, cmd, "/Users/wei/Workspace/wcode", "ok");
-        // At 80 cols the band is below the centering threshold, so the panel gets
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand: the params carry the command
+        // At 80 cols the band is below the centering threshold, so the note gets
         // the full width and the command rides one line (no 60-char clip).
         let text = buffer_text(&render(&mut app, 80, 20));
         assert!(
@@ -3954,9 +3913,10 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_panel_shows_its_params() {
+    fn a_note_shows_its_params_when_expanded() {
         let mut app = App::new();
         push_bash_panel(&mut app, "cargo test", "/Users/wei/Workspace/wcode", "ok");
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the note
         let text = buffer_text(&render(&mut app, 100, 20));
         let cmd_row = text
             .lines()
@@ -3977,7 +3937,7 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_rows_share_the_gutter() {
+    fn the_note_rows_share_the_gutter() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "ok");
         let text = buffer_text(&render(&mut app, 80, 20));
@@ -3986,44 +3946,122 @@ mod tests {
                 .find(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("no {needle} row:\n{text}"))
         };
-        // The `»` header, the params key, and the `✓` summary all start at the
-        // design's column 6 (3 indent + the frame `│` + the 2-col gutter). Char, not
-        // byte, positions — the box-drawing glyphs are multibyte.
+        // The `»` head and the `✓` summary share column 5 (3 margin + `N `).
         let col = |row: &str, needle: char| row.chars().position(|c| c == needle);
-        assert_eq!(col(row("» bash"), '»'), Some(6), "the header");
-        assert_eq!(col(row("cmd"), 'c'), Some(6), "the params key");
-        assert_eq!(col(row("✓ bash"), '✓'), Some(6), "the summary");
+        assert_eq!(col(row("» bash"), '»'), Some(5), "the head");
+        assert_eq!(col(row("✓ bash"), '✓'), Some(5), "the summary");
     }
 
     #[test]
-    fn the_params_body_rule_appears_only_when_both_are_present() {
-        // params + body → the mid `├──┤` rule shows.
+    fn a_note_is_frameless() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "line one\nline two");
-        let both = buffer_text(&render(&mut app, 80, 20));
-        assert!(both.contains('├'), "the rule shows with params + body:\n{both}");
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand: params + body show
+        let text = buffer_text(&render(&mut app, 80, 20));
+        for bad in ['╭', '╮', '╰', '╯', '│', '├', '┤'] {
+            assert!(!text.contains(bad), "a frame glyph {bad} survives:\n{text}");
+        }
+        assert!(text.contains("── notes"), "the rule:\n{text}");
+    }
 
-        // params, no body → no rule (a live tool that produced nothing yet).
+    #[test]
+    fn footnote_mark_maps_1_to_9_then_falls_back_to_ascii() {
+        assert_eq!(footnote_mark(1), "¹");
+        assert_eq!(footnote_mark(3), "³");
+        assert_eq!(footnote_mark(9), "⁹");
+        assert_eq!(footnote_mark(10), "[10]");
+        assert_eq!(footnote_mark(12), "[12]");
+    }
+
+    #[test]
+    fn a_rendered_turn_shows_the_notes_apparatus() {
         let mut app = App::new();
-        push_bash_live(&mut app, "ls", "/w");
-        let params_only = buffer_text(&render(&mut app, 80, 20));
+        push_bash_panel(&mut app, "ls", "/w", "ok");
+        push_assistant(&mut app, "# the head\n\nSome prose.");
+        let text = buffer_text(&render(&mut app, 80, 16));
+        assert!(text.contains("── notes"), "the rule:\n{text}");
+        assert!(text.contains("1 » bash"), "the numbered note:\n{text}");
+        assert!(text.contains("✓ bash"), "the summary:\n{text}");
+        for bad in ['╭', '╮', '╰', '╯', '│'] {
+            assert!(!text.contains(bad), "frameless — no {bad}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_superscript_is_present_with_prose_and_absent_when_textless() {
+        // A reply with prose + a tool call emits a `¹` at the call position.
+        let with = content_lines(
+            &[
+                ContentBlock::Text {
+                    text: "Some prose here".into(),
+                },
+                ContentBlock::ToolCall {
+                    id: "c".into(),
+                    name: "read".into(),
+                    arguments: Default::default(),
+                },
+            ],
+            40,
+            false,
+            false,
+        );
+        let text: String = with
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains('¹'), "the reference is present: {text:?}");
+
+        // A text-less tool-call round emits no reference (and no line at all).
+        let without = content_lines(
+            &[ContentBlock::ToolCall {
+                id: "c".into(),
+                name: "read".into(),
+                arguments: Default::default(),
+            }],
+            40,
+            false,
+            false,
+        );
+        assert!(without.is_empty(), "a text-less round renders nothing: {without:?}");
+    }
+
+    #[test]
+    fn a_note_toggle_and_copy_target_the_note() {
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "the output");
+        let _ = render(&mut app, 80, 20); // publish the hit map
+        let (block, toggle) = {
+            let hit = app.hit.transcript.as_ref().expect("a hit");
+            let a = &hit.affordances[0];
+            assert_eq!(a.item, Some(0), "the hit names note 0");
+            (a.block, a.toggle)
+        };
+        // A click on the toggle region expands the note.
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            app.handle(AppEvent::Mouse(MouseEvent {
+                kind,
+                col: toggle.x + 3,
+                row: toggle.y,
+            }));
+        }
         assert!(
-            !params_only.contains('├'),
-            "no rule with params and no body:\n{params_only}"
+            matches!(&app.transcript()[block], Block::Tool(t) if t.expanded),
+            "the click expands the note"
         );
 
-        // body, no params → no rule (the call carried no recognizable args).
-        let mut app = App::new();
-        push_tool(&mut app, "bash", "line one\nline two", false, None);
-        let body_only = buffer_text(&render(&mut app, 80, 20));
+        // Browse `y` on the note block copies its output.
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the note block
+        app.handle(AppEvent::Key(Key::Char('y')));
         assert!(
-            !body_only.contains('├'),
-            "no rule with body and no params:\n{body_only}"
+            app.take_actions()
+                .iter()
+                .any(|a| matches!(a, Action::Copy(t) if t == "the output")),
+            "the copy yields the note's output"
         );
     }
 
     #[test]
-    fn panel_affordances_are_right_aligned_at_the_documented_column() {
+    fn note_affordances_are_right_aligned() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "ok");
         let width = 80usize;
@@ -4031,67 +4069,62 @@ mod tests {
         let header = text
             .lines()
             .find(|l| l.contains("» bash"))
-            .expect("the panel header row");
+            .expect("the note head row");
         let col = header
             .chars()
             .position(|c| c == '▸')
             .expect("the collapse affordance");
         assert_eq!(
             col,
-            width - 2 - "▸ ▣".chars().count(),
-            "the affordances are right-aligned at width - 2 - len:\n{header}"
+            width - 3,
+            "the `▸` is flush right at width - 3:\n{header}"
         );
     }
 
     #[test]
-    fn a_rendered_panel_publishes_cells_on_the_drawn_glyphs() {
+    fn a_rendered_note_publishes_cells_on_the_drawn_glyphs() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "ok");
         let mut terminal = render(&mut app, 80, 20);
 
         // The published cells line up with the drawn glyphs.
-        let (block, toggle, copy) = {
+        let (block, item, toggle, copy) = {
             let hit = app.hit.transcript.as_ref().expect("a transcript hit");
-            assert_eq!(hit.affordances.len(), 1, "one panel → one affordance record");
+            assert_eq!(hit.affordances.len(), 1, "one note → one affordance record");
             let a = &hit.affordances[0];
-            (a.block, a.toggle, a.copy)
+            (a.block, a.item, a.toggle, a.copy)
         };
+        assert_eq!(item, Some(0), "the hit names note 0");
         assert!(
             matches!(&app.transcript()[block], Block::Tool(_)),
-            "the affordance names the panel block"
+            "the affordance names the note block"
         );
 
         let buf = terminal.backend().buffer();
-        let header: String = (0..80).map(|x| buf[(x, toggle.y)].symbol()).collect();
         // The wide toggle ENDS on the `▸`; `copy` is exactly the `▣` glyph.
         let glyph_col = toggle.x + toggle.width - 1;
         assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▸", "the ▸ glyph");
         assert_eq!(buf[(copy.x, copy.y)].symbol(), "▣", "the copy cell");
-        assert_eq!(copy.y, toggle.y, "both affordances share the top-rule row");
+        assert_eq!(copy.y, toggle.y, "both affordances share the head row");
         assert!(
             !toggle.contains((copy.x, copy.y).into()),
             "the wide toggle and the copy cell are disjoint"
         );
-        // The header NAME (») is clickable — inside the wide toggle region.
-        let name_col = header.chars().position(|c| c == '»').expect("the » name") as u16;
-        assert!(
-            toggle.contains((name_col, toggle.y).into()),
-            "the header name lies inside the toggle region"
-        );
 
-        // End to end: a click on the header NAME (not the glyph) expands the panel.
+        // End to end: a click on the note's head (the toggle region) expands it.
+        let click_col = toggle.x + 3;
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
-            col: name_col,
+            col: click_col,
             row: toggle.y,
         }));
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Up,
-            col: name_col,
+            col: click_col,
             row: toggle.y,
         }));
         let expanded = matches!(&app.transcript()[block], Block::Tool(t) if t.expanded);
-        assert!(expanded, "clicking the header name expands the panel");
+        assert!(expanded, "clicking the note head expands it");
 
         // The freshly toggled frame draws `▾` in the same cell.
         terminal = render(&mut app, 80, 20);
@@ -4148,7 +4181,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_band_publishes_the_panel_cells_on_the_centered_column() {
+    fn a_wide_band_publishes_the_note_cells_on_the_centered_column() {
         // The affordance rects must follow the measure column (`col.x`), not the
         // band's left edge — else clicks land off by `pad`.
         let mut app = App::new();

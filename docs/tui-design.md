@@ -57,6 +57,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | user prompt | `❯` | accent, bold |
 | assistant prose | — | default fg |
 | section counter | `§` | heading |
+| footnote reference | `¹²³` (`[n]` for n ≥ 10) | link |
 | thinking (in flight) | `···` | dim, italic |
 | thinking (collapsed row) | `··· thinking · N chars` | dim |
 | tool start | `» name  args` | dim |
@@ -70,7 +71,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | status separators | `·` | dim |
 | inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
 | table | `─` | header bold; three `─` rules (top / header / bottom); columns separated by a whitespace gutter; cells wrap |
-| tool panel / overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
+| overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
 | collapsed affordance | `▸` | dim |
 | expanded affordance | `▾` | dim |
 | copy affordance | `▣` | dim |
@@ -198,13 +199,16 @@ blank pane.
   reply's **first top-level `# h1`** is **consumed** into the head (the heading
   line leaves the body); a reply with no `# h1` renders a bare `§N`. It is
   **chrome** — never a browse selection target, never copied.
-- **Tool** (D31) — a framed **panel**: a `» name` header with a `▸`/`▾` toggle
-  and a `▣` copy affordance, then keyed **params** rows (`cmd`, `cwd`, `path`, …)
-  above the body. The **`bash` command is shown in full** — it wraps under its
-  value column and is **never clipped** (the old 60-char clip is gone). A
-  `✓`/`✗` summary row (`✓ read · 128 lines · 12ms`, from
-  `ToolExecutionEnd::duration_ms`) closes the panel. A tool error is forced
-  expanded. `Ctrl-T` toggles every tool at once.
+- **Turn foot (notes)** (D31, revised) — a tool is **not** a mid-flow panel any
+  more. At the answer reply's commit the turn's tools fold into ONE
+  `Block::Notes`, drawn **frameless** at the turn's foot under a `── notes ──`
+  rule: one row per note, `{n} » {name}  {target}` with a `▸`/`▣` toggle, and —
+  expanded or errored — the params + the full body + the
+  `✓ {name} · {note} · {ms}` summary. The prose keeps a `¹` reference where the
+  call was (suppressed on a text-less tool-call round). The **`bash` command is
+  shown in full** (it wraps, never clips). A tool error is forced expanded.
+  `Ctrl-T` toggles every note; browse `Enter`/`Space`/`y` act per note. The
+  framed D31 **panel is retired**.
 - **Thinking** (D33) — **in flight** it streams expanded inline (the `···` gutter
   plus the `thinking` italic body); on **commit** it collapses to a one-line
   `··· thinking · N chars` row with the same `▸`/`▾`/`▣` affordances, expandable.
