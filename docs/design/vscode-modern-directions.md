@@ -71,6 +71,12 @@ and the toolbar that drives it, are prototype chrome, not the surface.
   it is CSS over the existing DOM plus dropping a few elements. The risk is
   taste: a colleague who reads the surface as a *dashboard* may find it too
   quiet, and the team loses its persistent home (it is a caption).
+- **Refinement (2026-10-09):** [`vscode-reading-refinement.md`](vscode-reading-refinement.md)
+  and its prototype [`vscode-reading-draft.html`](vscode-reading-draft.html) — A pushed
+  toward a *printed page*: one measure governs the running head, the text and the writing
+  line; the prose takes a local serif reading face (the furniture stays mono); the
+  paragraph rhythm is indent-led. **A is the shipped spec; this refinement is a draft for
+  a human to judge**, not authorized (W005 is the shipped direction).
 
 ---
 
