@@ -591,6 +591,26 @@ test("composerControls: `Stop` shows when a NON-root member is running while the
   assert.equal(composerControls(renderState(initialState(), null)).stop, false, "no run ⇒ no Stop");
 });
 
+test("composerControls: ONE primary control — Send when idle, Stop while running", () => {
+  assert.equal(composerControls(renderState(initialState(), null)).sendLabel, "Send", "idle -> Send");
+  const running: ViewState = {
+    ...initialState(),
+    members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true }],
+    targeted: "root-1",
+    status: { running: true, planMode: false },
+  };
+  assert.equal(composerControls(renderState(running, "root-1")).sendLabel, "Stop", "running -> Stop");
+});
+
+test("the composer has ONE primary Send/Stop control (no separate Stop button)", () => {
+  const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
+  const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));
+  assert.equal((skeleton.match(/id="send"/g) ?? []).length, 1, "exactly one #send control");
+  assert.ok(!/id="cancel"/.test(skeleton), "no separate #cancel button");
+  assert.ok(!/requireEl\("cancel"\)/.test(src), "no cancel element handle");
+  assert.match(src, /sendBtn\.textContent = controls\.sendLabel/, "the label comes from the pure builder");
+});
+
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {
   assert.equal(selectionRef({ path: "src/panel.ts", startLine: 88, endLine: 104 }), "@src/panel.ts#L88-104");
   assert.equal(selectionRef({ path: "a.rs", startLine: 12, endLine: 12 }), "@a.rs#L12-12");

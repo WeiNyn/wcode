@@ -454,17 +454,22 @@ export interface ComposerControls {
   segments: Array<{ mode: "Plan" | "Act"; pressed: boolean }>;
   /** Show `Stop`? Whenever ANY run is in flight — the root’s OR any member’s. */
   stop: boolean;
+  /** The ONE primary control's label: `Send` while idle, `Stop` while a run is in flight — the
+   *  Send button BECOMES the interrupt, so it sits exactly where Send was (W005 follow-up). */
+  sendLabel: "Send" | "Stop";
 }
 
 export function composerControls(state: RenderedState): ComposerControls {
   const mode = state.status.planMode ? "Plan" : "Act";
+  const stop = state.status.running || state.members.some((member) => member.state === "running");
   return {
     mode,
     segments: [
       { mode: "Act", pressed: mode === "Act" },
       { mode: "Plan", pressed: mode === "Plan" },
     ],
-    stop: state.status.running || state.members.some((member) => member.state === "running"),
+    stop,
+    sendLabel: stop ? "Stop" : "Send",
   };
 }
 

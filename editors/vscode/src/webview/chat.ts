@@ -87,7 +87,6 @@ app.innerHTML = [
   '        <button id="mAct" class="linkbtn" type="button" aria-pressed="true">Act</button>',
   '        <button id="mPlan" class="linkbtn" type="button" aria-pressed="false">Plan</button>',
   '        <button id="send" class="linkbtn send" type="button">Send</button>',
-  '        <button id="cancel" class="linkbtn send" type="button" title="Cancel the in-flight run (Esc)" hidden>Stop</button>',
   '      </div>',
   '    </div>',
   '  </footer>',
@@ -102,7 +101,6 @@ const transcriptEl = requireEl("transcript");
 const livelineEl = requireEl("liveline");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
-const cancelBtn = requireEl("cancel");
 const mActEl = requireEl("mAct");
 const mPlanEl = requireEl("mPlan");
 const cattachEl = requireEl("cattach");
@@ -124,6 +122,8 @@ let lastContext: SelectionContext | null = null;
 let lastRef: string | null = null;
 /** The composer's current mode (the mode toggle's pressed segment), for the click guard. */
 let composerMode: "Plan" | "Act" = "Act";
+/** Is a run in flight, so the ONE primary control is `Stop`? Set by `renderComposer`. */
+let composerStop = false;
 
 /** The masthead's cells+caption signature; a matching snapshot skips the rebuild. */
 let mastheadKey: string | null = null;
@@ -567,8 +567,12 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
   for (const segment of controls.segments) {
     (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
   }
-  // `Stop` is conditional chrome: visible ONLY while a run is in flight (Esc still cancels).
-  cancelBtn.hidden = !controls.stop;
+  // ONE primary control (W005 follow-up): `Send` BECOMES `Stop` while a run is in flight, so
+  // the interrupt sits exactly where Send was — unmissable, never a second competing control.
+  composerStop = controls.stop;
+  sendBtn.textContent = controls.sendLabel;
+  sendBtn.title = controls.stop ? "Stop the in-flight run (Esc)" : "Send the message";
+  sendBtn.setAttribute("aria-label", controls.stop ? "Stop the in-flight run" : "Send the message");
 }
 
 function ctxChip(context: SelectionContext): HTMLElement {
@@ -748,7 +752,10 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
     post({ kind: "cancel" });
   }
 });
-sendBtn.addEventListener("click", submit);
+sendBtn.addEventListener("click", () => {
+  if (composerStop) post({ kind: "cancel" });
+  else submit();
+});
 // The mode toggle: post and let the HOST flip plan-mode; the next snapshot reflects it
 // (no optimistic flip). The wire only carries `toggle-plan`, so a click on the segment
 // that is ALREADY active is a no-op — otherwise it would flip the mode the wrong way.
@@ -758,9 +765,6 @@ mPlanEl.addEventListener("click", () => selectMode("Plan"));
 cattachEl.addEventListener("click", () => {
   attached = true;
   rerender();
-});
-cancelBtn.addEventListener("click", () => {
-  post({ kind: "cancel" });
 });
 
 /* ------------------------------------------------------------------ host io */
