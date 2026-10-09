@@ -834,8 +834,10 @@ textarea {
   border: 0;
   background: none;
   color: var(--vscode-editor-foreground);
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-ui);
+  /* the sentence you WRITE looks like the sentence you will READ (A1) — the composer's
+     buttons (.linkbtn) stay mono. */
+  font-family: var(--ed-read);
+  font-size: var(--wc-fs-body);
   line-height: 1.5;
   padding: 0;
   outline: none;
