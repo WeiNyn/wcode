@@ -256,6 +256,18 @@ See the **W005 record** — [`docs/work/W005-editorial-vscode-surface.md`](W005-
 pairs (the per-member `.act` gone) and the live action moves to the transcript's foot.
 Implementation `cddbde6`; the pure `livelineSpec` seam + tests `e7939d9`.
 
+### 2026-10-09 — the tool apparatus follows event order (per-message footnotes)
+
+The human reported a multi-round run reading out of order — "all thinking and message at
+top, all tools at the bottom" — while running AND at turn end. Root cause: `renderTurn`
+pooled the WHOLE turn's tool blocks into ONE `.footnotes` at the turn's foot. Fixed by a new
+pure `turnSegments` (`src/webview/view.ts`) that splits a turn at each message boundary;
+`renderTurn` now sets one `.footnotes` group PER message, so each message's detail follows
+it, in event order, identically while running and settled (the `.fnmark` numbering stays
+block-ordered across segments). Implemented by the orchestrator (the developer stalled) —
+commit `2b96fcc`; second-layer APPROVED (226/226). The commit subject's `W010` citation is a
+misnomer: this is a W008 defect fix, not a new work item.
+
 ## 10. References
 
 - `docs/design/vscode-paper-draft.html` — the refinement's visual spec (the WHAT).
