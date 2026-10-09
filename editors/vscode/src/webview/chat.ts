@@ -14,7 +14,7 @@
  * `acquireVsCodeApi()`.
  */
 import { completionText, filterCommands, parseSlash, type SlashCommand } from "../commands.ts";
-import { memberViews } from "../reducer.ts";
+import { memberGlyph, memberViews } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
@@ -27,10 +27,7 @@ import {
   emptySpec,
   foldOpen,
   livelineLabel,
-  MEMBER_SWATCHES,
-  memberSwatch,
   panelHeader,
-  outputHead,
   bodyKind,
   toolStatus,
   teamCaption,
@@ -39,7 +36,6 @@ import {
   turns,
   workingGroup,
   type FoldOverrides,
-  type MemberSwatch,
   type Turn,
   type TurnMember,
 } from "./view.ts";
@@ -288,43 +284,17 @@ function renderToolFold(block: RenderedBlock): HTMLElement {
   details.appendChild(summary);
 
   const inner = el("div", "inner");
-  // EXACTLY ONE L2a body per fold (V12): the `.review` card for a diff-bearing tool, else
-  // the output card — the fold itself stays L1.
+  // EXACTLY ONE body per fold: the `.review` card for a diff-bearing tool, else the bare
+  // fill-only output recess. The change review STAYS a card (non-scope, §2).
   const hunk = bodyKind(tool) === "review" ? reviewHunk(tool.diff ?? "") : null;
   inner.appendChild(hunk !== null ? reviewBlock(tool, hunk, verdictOf(lastVerdicts, tool.callId)) : rawOutput(tool));
   details.appendChild(inner);
   return details;
 }
 
-/** The plain output CARD (V12, L2a): a `.chead` naming the producer + its kind, a `Copy`,
- *  over a BARE `<pre>` body — exactly ONE card, never nested. */
+/** The bare output recess (fill-only; NO card head, NO `Copy`). Impure (DOM). */
 function rawOutput(tool: RenderedTool): HTMLElement {
-  const card = el("div", "tool-output");
-  card.setAttribute("role", "group");
-  card.setAttribute("aria-label", outputHead(tool.name));
-
-  const head = el("div", "chead");
-  const mark = el("span", "mark", "⚙");
-  mark.setAttribute("aria-hidden", "true");
-  head.appendChild(mark);
-  head.appendChild(el("span", null, `${tool.name} · output`));
-  head.appendChild(el("span", "spacer"));
-  head.appendChild(copyButton(tool.outputText));
-  card.appendChild(head);
-
-  card.appendChild(el("pre", null, tool.outputText));
-  return card;
-}
-
-/** The output card's `Copy`: writes the output text to the clipboard (client-local). */
-function copyButton(text: string): HTMLElement {
-  const button = el("button", "mini", "Copy");
-  button.setAttribute("type", "button");
-  button.setAttribute("aria-label", "Copy the tool output");
-  button.addEventListener("click", () => {
-    void navigator.clipboard.writeText(text).catch(() => undefined);
-  });
-  return button;
+  return el("pre", "quote", tool.outputText);
 }
 
 /** The in-panel change review for ONE diff-bearing tool (draft Change review). */
@@ -425,24 +395,15 @@ function toolMeta(tool: RenderedTool): HTMLElement | null {
 }
 
 function renderTurn(turn: Turn): HTMLElement {
-  // The swatch rides the WRAPPER, so the rail (a sibling of the content) takes it too.
-  const sw = turn.swatch === undefined ? "" : ` sw-${turn.swatch}`;
-  // V14: `.turn.new` marks the turn that OPENS a speaker (the role-aware rhythm).
-  const wrap = el("div", `turn ${turn.role}${sw}${turn.isNew ? " new" : ""}`);
-  const rail = el("div", "rail");
-  rail.setAttribute("aria-hidden", "true");
-  wrap.appendChild(rail);
-
-  const content = el("div", null);
-  const who = el("div", turn.who.className);
-  who.appendChild(el("span", "av", turn.who.avatar));
-  who.appendChild(el("span", "name", turn.who.name)); // no `.stamp` — no time on the wire
-  content.appendChild(who);
+  // `.turn.new` marks the turn that OPENS a speaker (the role-aware rhythm).
+  const wrap = el("div", `turn ${turn.role}${turn.isNew ? " new" : ""}`);
+  const byline = el("div", turn.who.className);
+  if (turn.who.glyph !== "") byline.appendChild(el("span", "glyph", turn.who.glyph));
+  byline.appendChild(el("span", "name", turn.who.name)); // no `.stamp` — no time on the wire
+  wrap.appendChild(byline);
   for (const block of turn.blocks) {
-    content.appendChild(block.kind === "tool" ? renderToolFold(block) : blockShell(block));
+    wrap.appendChild(block.kind === "tool" ? renderToolFold(block) : blockShell(block));
   }
-
-  wrap.appendChild(content);
   return wrap;
 }
 
@@ -481,7 +442,7 @@ function render(snapshot: ToWebview): void {
   } else {
     const col = el("div", "col");
     const member = snapshot.mode === "all" ? memberOf(state) : undefined;
-    for (const turn of turns(state.blocks, member, targetSwatch(state))) col.appendChild(renderTurn(turn));
+    for (const turn of turns(state.blocks, member)) col.appendChild(renderTurn(turn));
     transcriptEl.appendChild(col);
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -491,27 +452,18 @@ function render(snapshot: ToWebview): void {
 function memberOf(state: RenderedState): (origin: string | undefined) => TurnMember | undefined {
   return (origin) => {
     if (origin === undefined) return undefined;
-    const index = state.members.findIndex((m) => m.id === origin);
-    if (index < 0) {
-      // Not in the roster (a peer that has since left): name it by its id, uncoloured.
+    const member = state.members.find((m) => m.id === origin);
+    if (member === undefined) {
+      // Not in the roster (a peer that has since left): name it by its id, idle glyph.
       const name = origin.startsWith("agent:") ? origin.slice("agent:".length) : origin;
-      return { name, isRoot: false, swatch: MEMBER_SWATCHES[0] };
+      return { name, isRoot: false, glyph: memberGlyph("idle").glyph };
     }
-    const member = state.members[index];
     return {
       name: member.isRoot ? "orchestrator" : member.label,
       isRoot: member.isRoot,
-      swatch: memberSwatch(index, member.isRoot),
+      glyph: memberGlyph(member.state).glyph,
     };
   };
-}
-
-/** The TARGET's swatch: Focus mode shows ONE member, so every turn takes its colour. */
-function targetSwatch(state: RenderedState): MemberSwatch | undefined {
-  const id = state.target?.id;
-  if (id === undefined) return undefined;
-  const index = state.members.findIndex((m) => m.id === id);
-  return index < 0 ? undefined : memberSwatch(index, state.members[index].isRoot);
 }
 
 /* ---------------------------------------------------------------- composer */

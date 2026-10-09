@@ -12,7 +12,6 @@ import {
   bodyKind,
   toolState,
   toolStatus,
-  outputHead,
   composerControls,
   composeSubmit,
   diffStat,
@@ -241,12 +240,13 @@ test("turns: a user block opens a you turn; the rest fold into one wcode turn", 
   ]);
   assert.equal(grouped.length, 2);
   assert.equal(grouped[0].role, "you");
-  assert.equal(grouped[0].who.className, "who you");
-  assert.equal(grouped[0].who.avatar, "Y");
+  assert.equal(grouped[0].who.className, "byline you");
+  assert.equal(grouped[0].who.glyph, "", "the user's byline carries no glyph");
+  assert.equal(grouped[0].who.name, "You");
   assert.deepEqual(grouped[0].blocks.map((b) => b.kind), ["user"]);
   assert.equal(grouped[1].role, "wcode");
-  assert.equal(grouped[1].who.className, "who wcode");
-  assert.equal(grouped[1].who.avatar, "❯");
+  assert.equal(grouped[1].who.className, "byline");
+  assert.equal(grouped[1].who.glyph, "❯", "the root's byline is the ❯");
   assert.deepEqual(grouped[1].blocks.map((b) => b.kind), ["assistant", "tool"]);
 });
 
@@ -259,7 +259,7 @@ test("turns: a leading non-user block opens a wcode turn", () => {
 test("turns: a turn containing an error block is role 'err'", () => {
   const grouped = turns([{ kind: "error", html: "boom", live: false }]);
   assert.equal(grouped[0].role, "err");
-  assert.equal(grouped[0].who.className, "who wcode", "an err turn still reads as wcode");
+  assert.equal(grouped[0].who.className, "byline", "an err turn still reads as wcode");
 });
 
 /* ---------------------------------------------------------------- diffStat */
@@ -376,45 +376,28 @@ test("toolStatus: the exceptions carry a glyph + word; complete is quiet", () =>
   assert.equal(toolStatus({ done: true, isError: true }).glyph, memberGlyph("failed").glyph);
 });
 
-    test("the three tool-status colours are GREEN / BLUE / RED in the sheet (V13r)", () => {
-      // No pure helper carries the colour: the palette is the theme's own tokens in CSS,
-      // so this is the behavioural check that the three states read by HUE alone.
-      const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-      assert.match(
-        css,
-        /details\.fold\.tool \{[^}]*border-left-color: var\(--vscode-charts-green\)/,
-        "complete: the base rule is GREEN",
-      );
-      assert.match(
-        css,
-        /details\.fold\.tool \.tname \{[^}]*color: var\(--vscode-charts-green\)/,
-        "complete: the ⚙ mark is GREEN",
-      );
-      assert.match(
-        css,
-        /details\.fold\.tool\[data-live="1"\] \{[^}]*border-left-color: var\(--wc-accent\)/,
-        "running: the rule is accent (BLUE)",
-      );
-      assert.match(
-        css,
-        /details\.fold\.tool\[data-live="1"\] \.tname \{[^}]*color: var\(--wc-accent\)/,
-        "running: the ⚙ mark is accent",
-      );
-      assert.match(
-        css,
-        /details\.fold\.tool\.error \{[^}]*border-left-color: var\(--vscode-errorForeground\)/,
-        "error: the rule is RED",
-      );
-      assert.match(
-        css,
-        /details\.fold\.tool\.error \.tname \{[^}]*color: var\(--vscode-errorForeground\)/,
-        "error: the ⚙ mark is RED",
-      );
-    });
+test("the three tool-status colours live on the ⚙ mark (complete neutral, running accent, error red)", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.tname \{[^}]*color: var\(--vscode-foreground\)/, "complete: the ⚙ mark is NEUTRAL");
+  assert.match(
+    css,
+    /details\.fold\.tool\[data-live="1"\] \.tname \{[^}]*color: var\(--wc-accent\)/,
+    "running: the ⚙ mark is accent (BLUE)",
+  );
+  assert.match(
+    css,
+    /details\.fold\.tool\.error \.tname \{[^}]*color: var\(--vscode-errorForeground\)/,
+    "error: the ⚙ mark is RED",
+  );
+});
 
-test("outputHead: the output card's head is `⚙ {tool} · output`", () => {
-  assert.equal(outputHead("bash"), "⚙ bash · output");
-  assert.equal(outputHead("edit"), "⚙ edit · output");
+test("the code block has no border: `pre.quote`/`.code` are fill-only recesses", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /pre\.quote \{[^}]*background: var\(--vscode-textCodeBlock-background\)/, "the quote is a fill");
+  const codeRule = css.slice(css.indexOf(".code {"), css.indexOf("}", css.indexOf(".code {")));
+  assert.ok(!/border:/.test(codeRule), "`.code` has no border");
+  const quoteRule = css.slice(css.indexOf("pre.quote {"), css.indexOf("}", css.indexOf("pre.quote {")));
+  assert.ok(!/border:/.test(quoteRule), "`pre.quote` has no border");
 });
 
 test("bodyKind: a diff-bearing tool gets the `.review` card, else the output card", () => {
@@ -696,14 +679,14 @@ test("panelHeader: no member-count cell remains on the bar (it lives in the rail
   assert.ok(!texts.some((t) => /\d+ members/.test(t)), "the bar carries no `N members` cell");
 });
 
-test("turns: WITHOUT a resolver (Focus), labels stay you/wcode", () => {
+test("turns: WITHOUT a resolver (Focus), labels stay You/wcode", () => {
   const t = turns([
     { kind: "user", html: "hi", live: false },
     { kind: "assistant", html: "", live: false },
   ]);
-  assert.equal(t[0].who.name, "you");
+  assert.equal(t[0].who.name, "You");
   assert.equal(t[1].who.name, "wcode");
-  assert.equal(t[1].who.avatar, "❯");
+  assert.equal(t[1].who.glyph, "❯");
 });
 
 test("turns: WITH a resolver (All), a non-user turn is labeled by its origin member", () => {
@@ -711,19 +694,18 @@ test("turns: WITH a resolver (All), a non-user turn is labeled by its origin mem
     { kind: "assistant", html: "", live: false, origin: "agent:w1" },
     { kind: "tool", html: "", live: false, origin: "agent:w1" },
   ];
-  const t = turns(blocks, (origin) => (origin === "agent:w1" ? { name: "explorer", isRoot: false, swatch: "green" } : undefined));
+  const t = turns(blocks, (origin) => (origin === "agent:w1" ? { name: "explorer", isRoot: false, glyph: "⠋" } : undefined));
   assert.equal(t.length, 1, "one contiguous member run");
   assert.equal(t[0].who.name, "explorer");
-  assert.equal(t[0].who.avatar, "E");
-  assert.equal(t[0].who.className, "who wcode sw-green", "the turn carries the member swatch");
-  assert.equal(t[0].swatch, "green");
+  assert.equal(t[0].who.glyph, "⠋", "the byline carries the member's STATE glyph");
+  assert.equal(t[0].who.className, "byline", "no swatch class");
 
-  // A1/R1: a ROOT origin keeps the `❯` avatar (the resolver carries `isRoot`).
+  // A ROOT origin keeps the `❯` glyph (the resolver carries `isRoot`).
   const rootTurn = turns(
     [{ kind: "assistant", html: "", live: false, origin: "root-1" }],
-    (o) => (o === "root-1" ? { name: "orchestrator", isRoot: true, swatch: "blue" } : undefined),
+    (o) => (o === "root-1" ? { name: "orchestrator", isRoot: true, glyph: "⠋" } : undefined),
   );
-  assert.equal(rootTurn[0].who.avatar, "❯");
+  assert.equal(rootTurn[0].who.glyph, "❯");
   assert.equal(rootTurn[0].who.name, "orchestrator");
 });
 
@@ -732,9 +714,9 @@ test("turns: an ORIGIN change starts a NEW turn (mixed-origin adjacency)", () =>
     { kind: "assistant", html: "", live: false, origin: "agent:w1" },
     { kind: "assistant", html: "", live: false, origin: "agent:w2" }, // NO user text between
   ];
-  const members: Record<string, { name: string; isRoot: boolean; swatch: "green" | "orange" }> = {
-    "agent:w1": { name: "explorer", isRoot: false, swatch: "green" },
-    "agent:w2": { name: "developer", isRoot: false, swatch: "orange" },
+  const members: Record<string, { name: string; isRoot: boolean; glyph: string }> = {
+    "agent:w1": { name: "explorer", isRoot: false, glyph: "⠋" },
+    "agent:w2": { name: "developer", isRoot: false, glyph: "⠋" },
   };
   const t = turns(blocks, (origin) => (origin === undefined ? undefined : members[origin]));
   assert.equal(t.length, 2, "TWO turns, one per origin — NOT one collapsed turn");
@@ -778,24 +760,22 @@ test("turns: a peer block opens its OWN turn, labeled by its sender", () => {
   ];
   const resolve = (id: string | undefined) =>
     id === "root-1"
-      ? { name: "orchestrator", isRoot: true, swatch: "blue" as const }
+      ? { name: "orchestrator", isRoot: true, glyph: "⠋" }
       : id === "agent:explorer"
-        ? { name: "explorer", isRoot: false, swatch: "green" as const }
+        ? { name: "explorer", isRoot: false, glyph: "✓" }
         : undefined;
   const t = turns(blocks, resolve);
   assert.equal(t.length, 3, "the peer message is its own turn");
   assert.equal(t[1].who.name, "explorer", "labeled by the SENDER, never 'you'");
-  assert.equal(t[1].who.avatar, "E");
-  assert.equal(t[1].who.className, "who wcode sw-green");
-  assert.equal(t[1].swatch, "green");
+  assert.equal(t[1].who.glyph, "✓");
+  assert.equal(t[1].who.className, "byline");
   assert.equal(t[1].blocks[0].kind, "peer");
 });
 
-test("turns: the Focus fallback swatch tints a single member's turns", () => {
-  const t = turns([{ kind: "assistant", html: "", live: false }], undefined, "orange");
-  assert.equal(t[0].who.className, "who wcode sw-orange");
-  assert.equal(t[0].swatch, "orange");
-  assert.equal(t[0].who.name, "wcode", "Focus still labels the assistant turn 'wcode'");
+test("turns: WITHOUT a resolver (Focus), the assistant turn stays the plain `wcode` byline", () => {
+  const t = turns([{ kind: "assistant", html: "", live: false }]);
+  assert.equal(t[0].who.className, "byline");
+  assert.equal(t[0].who.glyph, "❯");
   assert.equal(t[0].who.name, "wcode", "Focus still labels the assistant turn 'wcode'");
 });
 
@@ -827,38 +807,19 @@ test("turns: two peer blocks from the SAME sender are one speaker (the second co
   assert.equal(t[0].isNew, true, "the FIRST turn always opens a speaker");
 });
 
-test("the V14 composition is in the sheet: spine, head, alignment, rhythm, the wash", () => {
+test("the composition is in the sheet: a reading column, a byline, the paragraph beat (no spine)", () => {
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-  // 2. the spine: a 3px filled, rounded bar in the turn's own colour.
-  assert.match(css, /\.turn \{[^}]*grid-template-columns: 3px 1fr/, "the 3px spine column");
-  assert.match(css, /\.rail \{[^}]*border: 0;[^}]*background: var\(--sw/, "the rail is a filled bar");
-  assert.match(css, /\.rail \{[^}]*border-radius: 2px/, "the spine is rounded");
-  // 1. the turn head: a hairline to the right edge, suppressed on `you`.
-  assert.match(css, /\.turn \.who::after \{[^}]*height: 1px/, "the turn head's hairline");
-  assert.match(css, /\.turn\.you \.who::after \{\s*display: none;/, "no hairline on `you`");
-  // 3. conversation alignment: `you` indents + takes a neutral fill that clips the spine.
-  assert.match(css, /\.turn\.you \{[^}]*margin-left: var\(--wc-5\)/, "`you` indents");
-  assert.match(
-    css,
-    /\.turn\.you \{[^}]*background: var\(--vscode-textBlockQuote-background\)/,
-    "`you` takes a NEUTRAL fill (not the accent)",
-  );
-  assert.match(css, /\.turn\.you \{[^}]*overflow: hidden/, "the fill clips the spine");
-  // 4. the role-aware rhythm: a continuation is tight, a speaker change is a beat.
-  assert.match(css, /\.stream \{[^}]*gap: var\(--wc-2\)/, "a continuation stays tight");
-  assert.match(css, /\.turn\.new \{[^}]*margin-top: var\(--wc-4\)/, "a speaker change gets the beat");
-  // 5. the one live thing: a faint accent wash ("active now").
-  assert.match(
-    css,
-    /details\.fold\.tool\[data-live="1"\] \{[^}]*background: color-mix\(in srgb, var\(--wc-accent\) 6%/,
-    "the running fold's faint accent wash",
-  );
+  // the reading column is capped + centered.
+  assert.match(css, /\.col \{[^}]*max-width: var\(--ed-measure\)/, "the column is capped");
+  assert.match(css, /\.col \{[^}]*margin: 0 auto/, "the column is centered");
+  // the byline: small-caps mono, no avatar box.
+  assert.match(css, /\.byline \{[^}]*text-transform: uppercase/, "the byline is small-caps");
+  // a speaker change is a paragraph break (--wc-5), not a row.
+  assert.match(css, /\.turn\.new \{[^}]*margin-top: var\(--wc-5\)/, "a speaker change gets the beat");
+  // NO spine, NO `who` hairline, NO `you` fill.
+  assert.ok(!/\.rail\s*\{/.test(css), "no spine");
+  assert.ok(!/\.turn \.who/.test(css), "no turn-head hairline");
+  assert.ok(!/\.turn\.you\s*\{/.test(css), "no `you` fill");
 });
 
-test("a turn never shrinks: the transcript scrolls, so a `you` message can't be clipped", () => {
-  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-  // `.turn` must pin `flex: 0 0 auto`. `.turn.you` sets `overflow: hidden`, which zeroes its
-  // flex auto-minimum; in the scrolling `.transcript` column a too-tall transcript would then
-  // dump every bit of flex-shrink onto the user messages and clip them out of view.
-  assert.match(css, /\.turn \{[^}]*flex: 0 0 auto/, "a turn keeps its content height");
-});
+

@@ -159,6 +159,8 @@ body {
 
 /* ----------------------------------------------------- transcript + turns */
 
+/* The transcript is a reading column, centered, capped at --ed-measure. There is no
+   rail, no spine, no fill: your turn and mine are told apart by a byline and the air. */
 .stream {
   flex: 1 1 auto;
   overflow: auto;
@@ -166,7 +168,6 @@ body {
   padding: var(--wc-4) var(--wc-4) var(--wc-5);
   display: flex;
   flex-direction: column;
-  gap: var(--wc-2); /* the tight baseline: a CONTINUATION (a speaker change adds below) */
 }
 
 .col {
@@ -175,115 +176,44 @@ body {
   margin: 0 auto;
 }
 
-/* V14 COMPOSITION: a turn head, a 3px rounded spine, conversation alignment and a
-   role-aware rhythm. Depth comes from composition. NO new level, NO card. */
 .turn {
-  display: grid;
-  grid-template-columns: 3px 1fr;
-  gap: var(--wc-3);
-  /* A turn keeps its content height: the transcript SCROLLS, it must never squeeze. Without
-     this, a `you` turn's `overflow: hidden` forces its auto minimum to 0, so an over-tall
-     transcript dumps ALL its flex-shrink onto the user messages and clips them out of view
-     (worst in All mode, where the merged transcript is tallest). */
-  flex: 0 0 auto;
+  margin: 0 0 var(--wc-3);
 }
 
-/* A SPEAKER CHANGE is a bigger beat; a continuation keeps the transcript's tight --wc-2. */
+/* A speaker change is a paragraph break, not a row: a bigger beat. */
 .turn.new {
-  margin-top: var(--wc-4);
+  margin-top: var(--wc-5);
 }
 
-/* The SPINE: a 3px rounded SHAPE (was a 2px border-left), so a turn reads as a unit. */
-.rail {
-  border: 0;
-  background: var(--sw, var(--vscode-panel-border));
-  border-radius: 2px;
-}
-
-.turn.you .rail {
-  background: var(--vscode-descriptionForeground);
-}
-
-.turn.wcode .rail {
-  background: var(--sw, var(--wc-accent));
-}
-
-.turn.err .rail {
-  background: var(--vscode-errorForeground);
-}
-
-/* Conversation alignment: your own words INDENT and take a QUIET fill (neutral, NOT the
-   accent). The fill sits on the TURN itself — no wrapper class, no DOM change — and there
-   is no left padding, so the 3px spine sits flush at the fill's own edge; `overflow: hidden`
-   clips both to the fill's radius. */
-.turn.you {
-  margin-left: var(--wc-5);
-  background: var(--vscode-textBlockQuote-background);
-  border-radius: var(--wc-radius);
-  padding: var(--wc-2) var(--wc-3) var(--wc-2) 0;
-  overflow: hidden;
-}
-
-.who {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--wc-2);
-  font-size: var(--wc-fs-meta);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--vscode-descriptionForeground);
-  margin: 0 0 var(--wc-1);
-}
-
-/* V14: the turn HEAD — the name at `--wc-fs-ui` plus a HAIRLINE running to the right
-   edge (an L1 line, so the head costs no chrome). Scoped to `.turn` so the roster row's
-   `.who` — the same class — keeps its own compact treatment. */
-.turn .who {
+/* The byline: small-caps mono, dim. The user's own words are set apart by the type, not
+   by an indent, a spine or a fill. */
+.byline {
   display: flex;
-  font-size: var(--wc-fs-ui);
-  letter-spacing: 0;
-  margin: 0 0 var(--wc-2);
-}
-
-.turn .who::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--vscode-panel-border);
-}
-
-.turn.you .who::after {
-  display: none;
-}
-
-.turn.you .who {
-  margin-bottom: var(--wc-1);
-}
-
-.who .av {
-  width: 17px;
-  height: 17px;
-  border-radius: 5px;
-  display: grid;
-  place-items: center;
-  font-size: var(--wc-fs-meta);
+  align-items: baseline;
+  gap: var(--wc-1);
+  margin: 0 0 var(--wc-1);
   font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+}
+
+.byline .glyph {
+  font-size: var(--wc-fs-meta);
+}
+
+.byline .name {
+  color: inherit;
   font-weight: 700;
-  background: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
 }
 
-.who.wcode .av {
-  background: color-mix(in srgb, var(--sw, var(--wc-accent)) 20%, transparent);
-  color: var(--sw, var(--wc-accent));
-}
-
-.who .name {
+.byline.you {
   color: var(--vscode-foreground);
-  font-weight: 700;
 }
 
 .body {
+  line-height: 1.7;
   overflow-wrap: anywhere;
 }
 
@@ -321,8 +251,7 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
-/* L2b RECESSED: a peer's message is someone ELSE's words — a fill + the radius,
-   no border (the `.who` line above names and colours the sender). */
+/* L2b RECESSED: a peer's message is someone ELSE's words — a fill + the radius, no border. */
 .body.peer {
   background: var(--vscode-textBlockQuote-background);
   border-radius: var(--wc-radius);
@@ -344,47 +273,16 @@ body {
 
 /* ------------------------------------------------ folds: thinking + tool */
 
-/* L1 LINE: structure only. A 2px inset rule, NO box and NO fill. The fold is a
-   feature and stays; its chrome was the problem. */
+/* The tool is a SENTENCE, not a fold: a dim line, expanding to a bare fill. No box, no
+   rule — the action is told from the aside by weight + colour, not by chrome. */
 details.fold {
   border: 0;
-  border-left: 2px solid var(--vscode-panel-border);
   margin: var(--wc-1) 0;
 }
 
-/* V13: a tool row carries EXACTLY one of three states, and the colour is spent on the
-   two EXCEPTIONS — a running tool is "active now" (accent), a failed one is loud (error
-   red), and a COMPLETE tool is NEUTRAL (most tools complete, so a stripe would be flat).
-   The colour is the L1 rule (the row's own edge) plus the ⚙ mark. No fill, no box: the
-   fold stays L1. (`data-live="1"` is the running stamp `renderToolFold` already sets.) */
-details.fold.tool[data-live="1"] {
-  border-left-color: var(--wc-accent);
-  /* V14: the ONE live thing carries a faint wash — depth that MOVES ("active now"). */
-  background: color-mix(in srgb, var(--wc-accent) 6%, transparent);
-  border-radius: 0 var(--wc-radius) var(--wc-radius) 0;
-}
-
-details.fold.tool[data-live="1"] .tname {
-  color: var(--wc-accent);
-}
-
-details.fold.tool.error .tname {
-  color: var(--vscode-errorForeground);
-}
-
-/* The tool fold's rule carries the STATUS (V13/V13r, plan §1.5e): GREEN when complete,
-   accent (blue) while running, errorForeground (red) on failure — the three states read
-   by HUE alone. The base rule IS complete; the two exceptions override it. */
-details.fold.tool {
-  border-left-color: var(--vscode-charts-green);
-}
-details.fold.tool.error {
-  border-left-color: var(--vscode-errorForeground);
-}
-
-/* A thinking fold reads as structure, not a card: a dim rule instead of a fill. */
+/* The thinking aside keeps its dim L1 rule (structure), demoted to read quiet. */
 details.fold.thinking {
-  border-left-color: color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--vscode-descriptionForeground) 45%, transparent);
 }
 
 details.fold > summary {
@@ -395,6 +293,13 @@ details.fold > summary {
   align-items: baseline;
   gap: var(--wc-2);
   font-size: var(--wc-fs-ui);
+}
+
+details.fold.tool > summary {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+  padding: 1px 0;
 }
 
 details.fold > summary::-webkit-details-marker {
@@ -410,6 +315,7 @@ details.fold > summary .chev {
   color: var(--vscode-descriptionForeground);
   font-size: var(--wc-fs-meta);
   width: 9px;
+  opacity: 0.7;
 }
 
 details.fold[open] > summary .chev::before {
@@ -420,25 +326,23 @@ details.fold:not([open]) > summary .chev::before {
   content: "▸";
 }
 
-/* The TOOL mark is the ACTION mark: the ⚙ glyph + the name at weight 700, carrying the
-   row's STATUS hue (V13r: GREEN complete, accent running, red failed). A thinking block is
-   the ASIDE, so it is DEMOTED instead: dim, weight 400, an italic summary. That contrast
-   is what tells an action from an aside (V12). */
+/* The `⚙ {tool}` mark: NEUTRAL when complete, accent while running, red on failure — the
+   row's status is told by HUE alone (the fold carries no rule). */
 .tname {
   color: var(--vscode-foreground);
   font-family: var(--vscode-editor-font-family);
   font-weight: 600;
 }
 
-/* The tool line reads at FULL strength (scoped, so the thinking label is unaffected). */
-details.fold.tool .tname {
-  /* The ⚙ mark takes the row's STATUS hue too: green complete, accent running, red
-     failed (the two exception rules below/above override this base). */
-  color: var(--vscode-charts-green);
-  font-weight: 700;
+details.fold.tool[data-live="1"] .tname {
+  color: var(--wc-accent);
 }
 
-/* The thinking line reads QUIET: a demoted label + an italic summary (its dim rule stays). */
+details.fold.tool.error .tname {
+  color: var(--vscode-errorForeground);
+}
+
+/* The thinking line reads QUIET: a demoted label + an italic summary. */
 details.fold.thinking .tname {
   color: var(--vscode-descriptionForeground);
   font-weight: 400;
@@ -472,8 +376,6 @@ details.fold.thinking .tsum {
   color: var(--vscode-charts-red);
 }
 
-/* The status meta (V13): the run is accent, the failure error-red. A COMPLETE tool takes
-   neither — its meta is the dim `+N −M · 38ms` stat above. */
 .tmeta .run {
   color: var(--wc-accent);
 }
@@ -482,62 +384,37 @@ details.fold.thinking .tsum {
   color: var(--vscode-errorForeground);
 }
 
-.fold .inner {
-  padding: 0 var(--wc-2) var(--wc-2) 22px;
+details.fold .inner {
+  padding: var(--wc-1) var(--wc-2) var(--wc-2);
 }
 
-/* L2a BORDERED (V12): the tool output GAINS A HEAD, so it gains a border. Its body is a
-   bare `<pre>` (exactly one card, never nested); the old L2b `.out` recess is gone — L2b
-   is now `.body.peer` only. */
-.fold .tool-output {
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: var(--wc-radius);
-  overflow: hidden;
+details.fold .inner pre {
   margin: 0;
-}
-
-/* The ⚙ mark in the output card's head is the ACTION mark: neutral foreground. */
-.fold .tool-output .chead .mark {
-  color: var(--vscode-foreground);
-}
-
-/* The card body: the output `<pre>` (keeps the pre-wrap + the max-height + scroll). */
-.fold .tool-output pre {
-  margin: 0;
-  padding: var(--wc-2);
-  max-height: 220px;
-  overflow: auto;
-  background: var(--vscode-textCodeBlock-background);
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-code);
-  white-space: pre-wrap;
 }
 
 /* ------------------------------------------------- code block with header */
 
-/* L2a BORDERED: a 1px hairline + the radius. */
+/* A fill-only recess (L2b): the code block keeps its language label but loses the card
+   border — a quiet surface is worth more than the boundary. */
 .code {
-  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-textCodeBlock-background);
   border-radius: var(--wc-radius);
   overflow: hidden;
   margin: var(--wc-2) 0;
 }
 
-.code .chead,
-.fold .tool-output .chead {
+.code .chead {
   display: flex;
   align-items: center;
   gap: var(--wc-2);
   padding: var(--wc-1) var(--wc-2);
   background: var(--vscode-textBlockQuote-background);
-  border-bottom: 1px solid var(--vscode-panel-border);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
-.code .chead .spacer,
-.fold .tool-output .chead .spacer {
+.code .chead .spacer {
   flex: 1;
 }
 
@@ -545,9 +422,20 @@ details.fold.thinking .tsum {
   margin: 0;
   padding: var(--wc-2);
   overflow-x: auto;
-  background: var(--vscode-textCodeBlock-background);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-code);
+}
+
+/* The fill-only recess a tool's output expands into. */
+pre.quote {
+  margin: var(--wc-2) 0;
+  padding: var(--wc-2) var(--wc-3);
+  background: var(--vscode-textCodeBlock-background);
+  border-radius: var(--wc-radius);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-code);
+  white-space: pre-wrap;
+  overflow-x: auto;
 }
 
 /* --------------------------------------------- empty / error state card */
@@ -1094,9 +982,6 @@ textarea::placeholder {
   --st: var(--vscode-errorForeground);
 }
 
-/* A member avatar: the swatch is IDENTITY (the fill), the `--st` state colour is the
-   ring, the initial is the glyph. Shared by the collapsed strip (`.sc`) and the working
-   pill (`.pill .mav`); the EXPANDED rail row uses the `--sw` edge + glyph instead. */
 /* ------------------------------------------------ docked at a sidebar width */
 @media (max-width: 560px) {
   .masthead {

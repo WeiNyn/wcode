@@ -181,11 +181,6 @@ export function classNames(block: RenderedBlock, expanded = false): string {
   }
 }
 
-/** The tool output card's head text — `⚙ {tool} · output` (V12, §1.5e). Pure. */
-export function outputHead(tool: string): string {
-  return `⚙ ${tool} · output`;
-}
-
 /** Which L2a card a tool fold's body is: the `.review` (a diff-bearing tool) or the output
  *  card. EXACTLY ONE body per fold; the fold itself stays L1. Pure. */
 export function bodyKind(tool: { hasDiff: boolean }): "review" | "output" {
@@ -230,12 +225,10 @@ export function toolStatus(tool: { done: boolean; isError: boolean }): ToolStatu
 export interface Turn {
   /** → `.turn.{role}`; `err` = a turn containing an error block (draft `.turn.err`). */
   role: "you" | "wcode" | "err";
-  /** → the `.who` line (draft `.who.you` / `.who.wcode`). */
-  who: { className: string; avatar: string; name: string };
-  /** The member's swatch, carried onto the turn so the rail takes its colour. */
-  swatch?: MemberSwatch;
-  /** True when this turn OPENS a speaker (V14's `--wc-4` beat); false when it continues
-   *  the speaker above it (a tight `--wc-2`). → the `.turn.new` class. */
+  /** → the `.byline` line (draft `.byline` / `.byline.you`). */
+  who: { className: string; glyph: string; name: string };
+  /** True when this turn OPENS a speaker (a `--wc-5` beat); false when it continues
+   *  the speaker above it (a tight `--wc-3`). → the `.turn.new` class. */
   isNew: boolean;
   /** The blocks of this turn, in order. */
   blocks: RenderedBlock[];
@@ -251,12 +244,11 @@ export interface Turn {
  * A turn containing an `error` block is role "err". `memberOf` (All mode) resolves an origin
  * to the member that labels the turn; absent ⇒ the current `who("wcode")`.
  *
- * V14: each turn also carries `isNew` — it OPENS a speaker (a `--wc-4` beat) vs CONTINUES
- * the speaker above it (a tight `--wc-2`), the transcript's role-aware rhythm. */
+ * Each turn also carries `isNew` — it OPENS a speaker (a `--wc-5` beat) vs CONTINUES
+ * the speaker above it (a tight `--wc-3`), the transcript's role-aware rhythm. */
 export function turns(
   blocks: RenderedBlock[],
   memberOf?: (origin: string | undefined) => TurnMember | undefined,
-  fallbackSwatch?: MemberSwatch,
 ): Turn[] {
   const grouped: Turn[] = [];
   let lastSpeaker: string | null = null;
@@ -276,8 +268,7 @@ export function turns(
       const member = memberOf?.(opensPeer ? block.from : block.origin);
       grouped.push({
         role: opensYou ? "you" : "wcode",
-        who: who(opensYou, member, fallbackSwatch),
-        swatch: opensYou ? undefined : member?.swatch ?? fallbackSwatch,
+        who: who(opensYou, member),
         isNew: speaker !== lastSpeaker,
         blocks: [block],
       });
@@ -298,18 +289,17 @@ export function turns(
 export interface TurnMember {
   name: string;
   isRoot: boolean;
-  swatch: MemberSwatch;
+  /** → the `.byline` leading glyph (`⠋ ✓ ✗ ○`), from `memberGlyph(state)`. */
+  glyph: string;
 }
 
-/** The `.who` line: you / the root's ❯ / a member's initial, tinted with its swatch. Pure. */
-function who(isYou: boolean, member: TurnMember | undefined, fallback?: MemberSwatch): Turn["who"] {
-  if (isYou) return { className: "who you", avatar: "Y", name: "you" };
-  const swatch = member?.swatch ?? fallback;
-  const sw = swatch === undefined ? "" : ` sw-${swatch}`;
+/** The `.byline` line: `You` / the root's `❯` / a member's state glyph. Pure. */
+function who(isYou: boolean, member: TurnMember | undefined): Turn["who"] {
+  if (isYou) return { className: "byline you", glyph: "", name: "You" };
   if (member === undefined || member.isRoot) {
-    return { className: `who wcode${sw}`, avatar: "❯", name: member?.name ?? "wcode" };
+    return { className: "byline", glyph: "❯", name: member?.name ?? "wcode" };
   }
-  return { className: `who wcode${sw}`, avatar: member.name.charAt(0).toUpperCase(), name: member.name };
+  return { className: "byline", glyph: member.glyph, name: member.name };
 }
 
 /** One empty/error state card (draft States `.statecard`). */
