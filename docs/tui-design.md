@@ -11,14 +11,15 @@ TUI reads as the same product, given a full screen.
 
 ## 1. Principles
 
-1. **The base is the transcript over the input box.** Transcript (flex) → input
-   box; the box's **four corners carry all chrome** (project/branch + session
-   top-left, model/effort top-right, the context gauge bottom-left,
-   `⏻ plan`/`▤ browse`/state/`↑ N` bottom-right). There is **no session row and
-   no separate status row** — the session id is folded into the box top-left. A
-   **0–3-row team strip rides above the box** only while a member is running; it
-   is a rider, not a band. A palette, side panel, or diff is an *overlay* or an
-   addition — never a reflow of the base.
+1. **The base is the transcript over the composer.** Transcript (flex) → the
+   composer (a head line over a full-width `─` rule, the input, a foot line);
+   the **head and foot lines carry all chrome** (project/branch + session
+   left/right on the head, the context gauge left and
+   `⏻ plan`/`▤ browse`/state/`↑ N` right on the foot). There is **no session row
+   and no separate status row** — the session id is folded into the head line. A
+   **0–3-row team strip rides above the composer** only while a member is
+   running; it is a rider, not a band. A palette, side panel, or diff is an
+   *overlay* or an addition — never a reflow of the base.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
    glance; wrapped continuation lines align under it. A **tool panel** adds its
@@ -66,7 +67,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | status separators | `·` | dim |
 | inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
 | table | `│ ─ ┼` | header bold; columns aligned, cells wrap |
-| tool panel frame | `╭ ╮ ╰ ╯ ─ │` | border |
+| tool panel / overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
 | collapsed affordance | `▸` | dim |
 | expanded affordance | `▾` | dim |
 | copy affordance | `⧉` | dim |
@@ -80,9 +81,9 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 
 ## 3. Layout drafts
 
-> **Historical.** Drafts A–E below predate the input-box redesign (D1b/D4b) and
+> **Historical.** Drafts A–E below predate the composer redesign (D1b/D4b) and
 > the D29–D36 work: they show a flat status line and a `────` rule, whereas the
-> shipped screen carries the chrome in the **input box's four corners** and has
+> shipped screen carries the chrome in the **composer's head and foot lines** and has
 > no status row or session row. Read **§4** for the shipped layout; the drafts
 > are kept for the reasoning, not as current targets.
 
@@ -219,7 +220,7 @@ thinking row keeps the plain `···` marker column.
 
 **Browse mode** — `Ctrl-G` moves a `▌` selection over the committed transcript.
 The bar occupies the gutter's first column (the 1-col margin), *replacing* the
-blank there so no glyph shifts; a `▤ browse` token rides the input box's bottom-right corner just
+blank there so no glyph shifts; a `▤ browse` token rides the composer's foot line just
 before `state`. Movement is `j`/`k`, `g`/`G`, `PgUp`/`PgDn`; `Esc`/`q`/`Ctrl-G`
 leave — and in browse `Esc` leaves the mode, it does **not** cancel or quit.
 **Browse owns the text and navigation keys**; `F1` / `?` (help) and `Ctrl-C`
@@ -245,15 +246,18 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
    a band: it collapses to nothing when no teammate runs;
-3. the **input box** — a rounded border whose **four corners carry all chrome**:
-   `project ⎇ branch · session a1b2c3d4` top-left, `model · effort` top-right,
-   the context gauge bottom-left, and `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running
-   3.1s`/`⠹ btw…` · `[↑ N]` bottom-right (the `btw…` state while a `/btw` side ask
-   is in flight). There is **no session row and no status row**.
+3. the **composer** — a **running-head block** (a head line over a full-width
+   `─` rule) above an **open writing line** (the input), with a **foot line**
+   below. The head line carries `project ⎇ branch · session a1b2c3d4` left and
+   `model · effort` right; the foot line carries the context gauge left and
+   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` right
+   (the `btw…` state while a `/btw` side ask is in flight). There is **no box and
+   no corners**, and **no session row and no status row**.
 The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored
-green→yellow→red by fill, then `used / limit`. Corner titles clip with `…` then
-drop least-important-first (top: the session id, then branch; bottom: the
-gauge). The session id is shortened to 8 chars.
+green→yellow→red by fill, then `used / limit`. The head/foot titles clip with
+`…` then drop least-important-first (head: the session id, then branch; foot:
+the `[↑ N]` scroll, then the gauge, then `⏻ plan`/`▤ browse`). The session id is
+shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
 ≥ 80 cols; below that the layout is untouched), **off by default** so the base
@@ -270,14 +274,14 @@ sections:
 An empty section keeps its header with a dim `—`; rows clip to the panel and
 never wrap. The modal overlay floats over the whole terminal so it covers the
 panel. *(No `Todos` section — todos are a transcript block, D35 — and no
-`Context` section — the gauge lives in the input box's bottom-left corner.)*
+`Context` section — the gauge lives on the composer's foot line.)*
 
 **Keys** — `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Del` forward-delete · `Up`/`Down` history ·
 `Ctrl-A`/`Ctrl-E` move to the start/end of the input · `Ctrl-W` delete the previous word,
 `Ctrl-U`/`Ctrl-K` delete to the start/end of the current line (readline word editing on the
 atom buffer; a paste chip is one unit, never split) ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
-transcript, `↑ N` in the input box's bottom-right corner while scrolled ·
+transcript, `↑ N` on the composer's foot line while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52) · `Ctrl-T` expands/collapses every tool's output (a collapsed tool
 shows a 4-line preview, a failed tool always shows its error) ·
@@ -319,7 +323,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 - **Thinking** — **resolved (D33)**: in flight it streams **expanded** inline; on commit it collapses to a one-line `··· thinking · N chars` row, expandable. Tool *output* is a panel (D31), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
 - **Timestamps** on turns: lean no.
-- **Header/title bar**: decided **no** — the **input box's corners** carry session/project/branch and model/effort, and `Ctrl-B` docks the sidebar for the rest.
+- **Header/title bar**: decided **no** — the **composer's head and foot lines** carry session/project/branch and model/effort, and `Ctrl-B` docks the sidebar for the rest.
 - **Block separation**: blank between *roles* (kept); a tool is a panel and a thinking block is an affordance row, so "between every block" is moot.
 - **Gutter vs flat**: gutter (drafted) — it is the main thing the TUI buys over
   the line loop. Revisit only if it costs width on 80-col terminals.

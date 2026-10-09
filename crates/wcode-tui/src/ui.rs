@@ -1,8 +1,9 @@
 //! Immediate-mode rendering: compose the whole frame from [`App`] each draw.
 //!
-//! Bands (top → bottom): session · transcript · [working-team region] · input
-//! box. The team region grows to at most three rows (running teammates only);
-//! the rounded input box carries the chrome in its four corners.
+//! Bands (top → bottom): session · transcript · [working-team region] · composer
+//! band. The team region grows to at most three rows (running teammates only);
+//! the composer is a **running-head block** (a head line + a `─` rule) over an
+//! open writing line and a foot line — no box, no corners.
 //! See `docs/tui-design.md` for the visual spec.
 
 use std::ops::Range;
@@ -41,8 +42,8 @@ const TOOL_DIFF_PREVIEW_LINES: usize = 8;
 
 /// The working-team region appears only when the terminal is at least this wide.
 const TEAM_MIN_WIDTH: u16 = 50;
-/// … and at least this tall, so the transcript, the team region, and the input
-/// box all leave the transcript something to show.
+/// … and at least this tall, so the transcript, the team region, and the
+/// composer band all leave the transcript something to show.
 const TEAM_MIN_HEIGHT: u16 = 8;
 /// The docked left sidebar's fixed width in columns. Its content is clipped
 /// to fit; the bands to its right are NOT reflowed to compensate.
@@ -56,8 +57,8 @@ const SIDEBAR_MIN_WIDTH: u16 = 80;
 ///
 /// Bands (top → bottom), in the bands column to the right of the optional
 /// sidebar: the transcript (flex), the working-team region (0..=3 rows — a
-/// rider, only while a member runs), and the rounded input box. The box's
-/// corners carry the chrome the old status band used to. The team region
+/// rider, only while a member runs), and the composer band. The composer's head
+/// and foot lines carry the chrome the old status band used to. The team region
 /// collapses to nothing when no
 /// teammate is running.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -97,7 +98,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let (_, _, _, total_rows) = input_rows(&view.display, view.cursor_col, width);
     let input_height = total_rows.clamp(1, max_rows) as u16;
 
-    // The working-team region sits ABOVE the input box: one row per RUNNING
+    // The working-team region sits ABOVE the composer band: one row per RUNNING
     // teammate (the accessor orders oldest→newest and caps at three). It
     // collapses to nothing when none are running or the terminal cannot seat it
     // without starving the transcript.
@@ -113,18 +114,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         working_count as u16
     };
 
-    // At least one transcript row is reserved; the input box (two borders + the
-    // composer) then has priority over the team region, so a short terminal
-    // degrades gracefully instead of overflowing. There is no session band — the
-    // id folds into the box's top-left corner (D1b).
+    // At least one transcript row is reserved; the composer band (the head line,
+    // the rule, the input, and the foot line) then has priority over the team
+    // region, so a short terminal degrades gracefully instead of overflowing.
+    // There is no session band — the id folds into the composer's head line
+    // (D1b).
     let spare = area.height.saturating_sub(1);
-    let box_h = (input_height + 2).min(spare).max(1);
+    let box_h = (input_height + 3).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
     let areas = Layout::vertical([
         Constraint::Min(1),         // transcript (flexes)
         Constraint::Length(team_h), // working-team region (a rider, 0..=3)
-        Constraint::Length(box_h),  // input box
+        Constraint::Length(box_h),  // composer band (head · rule · input · foot)
     ])
     .split(area);
     let body = areas[0];
@@ -137,8 +139,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_working_team(frame, team, &working);
     }
     draw_input_box(frame, editor, app, &view);
-    // The completion/search popups float just above the input box's TOP border,
-    // over the transcript interior — never over the composer.
+    // The completion/search popups anchor on the composer band's TOP row — the
+    // head line — so their bottom edge rests on the head line and they float
+    // over the transcript interior, never over the composer. (The row below is
+    // the rule; resting on the rule would cover the head line.)
     let above = Rect {
         y: editor.y,
         height: 1,
@@ -156,8 +160,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// `Clear`ed over the transcript only while the prompt is open, so an
 /// input-mode frame stays byte-identical.
 ///
-/// The popup anchors on a 1-row `above` rect at the input box's TOP border, so
-/// it floats over the transcript interior and never covers the composer.
+/// The popup anchors on a 1-row `above` rect at the composer band's top row
+/// (the head line), so it floats over the transcript interior and never covers
+/// the composer.
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let Some(query) = app.search_query() else {
         return;
@@ -1319,40 +1324,119 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
     });
 }
 
-/// Draw the input box: a ROUNDED bordered `Block` wrapping the composer, whose
-/// four corners carry the chrome the old status band used to (project/branch,
-/// model/effort, the context gauge, and the mode/state). The composer renders in
-/// the block's inner rect, so its wrap width is `area.width - 2`.
+/// Draw the composer: a **running-head block** (a head line over a full-width
+/// `─` rule) above an **open writing line** (the input) and a **foot line**.
+/// There is no rounded box and no corners — the chrome the box's four corners
+/// used to carry now rides four plain rows (head: project/branch/session left,
+/// model/effort right; foot: the gauge left, plan/browse/state/scroll right).
+///
+/// The input is drawn at the band's **full width**, so the composer wraps at
+/// `area.width - 3` (the `❯ ` gutter), not the box's narrower inner width.
+///
+/// On a band too short to seat all four rows the **rule drops first** (it is
+/// pure decoration), then the foot line — so a 1-row input always keeps its
+/// writing line when the band has room for the head + the input.
 fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
     let (tl, tr, bl, br) = corner_titles(app, area);
-    let block = WidgetBlock::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border())
-        .title_top(tl.left_aligned())
-        .title_top(tr.right_aligned())
-        .title_bottom(bl.left_aligned())
-        .title_bottom(br.right_aligned());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    draw_input(frame, inner, view);
+    let w = area.width;
+    let h = area.height;
+    let mut row = area.y;
+    // Head line — always drawn. A running head is plain: the two titles are
+    // separated by spaces, not a rule.
+    if h >= 1 {
+        frame.render_widget(
+            Paragraph::new(padded_row(&tl, &tr, " ", Style::default(), w)),
+            Rect {
+                x: area.x,
+                y: row,
+                width: w,
+                height: 1,
+            },
+        );
+        row += 1;
+    }
+    // The full-width rule — only when the band seats head · rule · input · foot.
+    if h >= 4 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("─".repeat(w as usize), dim()))),
+            Rect {
+                x: area.x,
+                y: row,
+                width: w,
+                height: 1,
+            },
+        );
+        row += 1;
+    }
+    // Foot line — pinned to the last row when it leaves the input a row.
+    let foot = (h >= 3).then(|| area.y + h - 1);
+    // The writing line fills the gap between the head/rule and the foot line.
+    let input_end = foot.unwrap_or(area.y + h);
+    if input_end > row {
+        draw_input(
+            frame,
+            Rect {
+                x: area.x,
+                y: row,
+                width: w,
+                height: input_end - row,
+            },
+            view,
+        );
+    }
+    if let Some(y) = foot {
+        frame.render_widget(
+            Paragraph::new(padded_row(&bl, &br, "─", dim(), w)),
+            Rect {
+                x: area.x,
+                y,
+                width: w,
+                height: 1,
+            },
+        );
+    }
 }
 
-/// Assemble the input box's four corner titles, width-budgeted to `area` so the
-/// two titles on a row never overdraw the border.
+/// One full-width composer row: `left` at column 0 and `right` right-aligned to
+/// the last column, the gap between filled with `fill` in `style`. A head line
+/// fills with spaces (a running head has no rule); a foot line fills with `─`
+/// (the gauge-to-state leader). [`corner_titles`] has already budgeted the pair
+/// to `width - 1`, so the gap is ≥ 1; a wider pair is clipped by the `Paragraph`.
+fn padded_row(
+    left: &Line<'static>,
+    right: &Line<'static>,
+    fill: &str,
+    style: Style,
+    width: u16,
+) -> Line<'static> {
+    let width = width as usize;
+    let lw: usize = left.spans.iter().map(|s| s.content.chars().count()).sum();
+    let rw: usize = right.spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut spans = left.spans.clone();
+    let gap = width.saturating_sub(lw + rw);
+    if gap > 0 {
+        spans.push(Span::styled(fill.repeat(gap), style));
+    }
+    spans.extend(right.spans.iter().cloned());
+    Line::from(spans)
+}
+
+/// Assemble the composer's head/foot titles, width-budgeted to `area` so the two
+/// titles on a row never overdraw each other.
 ///
-/// Each row's two titles share the row: `area.width` minus the two border
-/// columns and a 1-col gap so they never touch. Fields are dropped
-/// least-important-first (top: ` · ⎇ branch` then ` · effort`; bottom: `↑ N`
-/// scroll, then the gauge, then `⏻ plan`/`▤ browse`), and a still-too-long title
-/// is truncated with a trailing `…`. The surviving minimum is the project
-/// (top-left) and the mode/state (bottom-right).
+/// Each row's two titles share the row: `area.width` minus a 1-col gap so they
+/// never touch (there are no border columns — the composer is frameless). Fields
+/// are dropped least-important-first (top: ` · ⎇ branch` then ` · effort`;
+/// bottom: `↑ N` scroll, then the gauge, then `⏻ plan`/`▤ browse`), and a
+/// still-too-long title is truncated with a trailing `…`. The surviving minimum
+/// is the project (head-left) and the mode/state (foot-right).
 fn corner_titles(
     app: &App,
     area: Rect,
 ) -> (Line<'static>, Line<'static>, Line<'static>, Line<'static>) {
-    // Title columns available per row (the two border columns + a 1-col gap).
-    let avail = (area.width as usize).saturating_sub(3);
+    // Title columns available per row (a 1-col gap between the two titles; the
+    // composer is frameless, so there are no border columns to reserve).
+    let avail = (area.width as usize).saturating_sub(1);
 
     // --- top row: `{project} · ⎇ {branch}`   ·   `{model} · {effort}` --------
     let project = app.cwd().unwrap_or("wcode").to_string();
@@ -1783,7 +1867,7 @@ fn clipped_row(segs: Vec<(String, Style)>, width: usize) -> Line<'static> {
     }
     Line::from(spans)
 }
-/// The working-team region ABOVE the input box: one row per RUNNING teammate,
+/// The working-team region ABOVE the composer band: one row per RUNNING teammate,
 /// `glyph label  action`. `rows` is already filtered to running members, ordered
 /// oldest→newest (the LATEST event is the BOTTOM row), and capped to three by
 /// [`App::working_team_rows`]. The root is excluded there; idle/done/failed
@@ -3428,7 +3512,7 @@ mod tests {
     }
 
     #[test]
-    fn the_input_box_carries_the_corner_titles() {
+    fn the_composer_carries_the_head_and_foot_lines() {
         let mut app = App::new();
         app.set_cwd(Some("myrepo".into()));
         app.set_git(Some("main*".into()));
@@ -3440,16 +3524,41 @@ mod tests {
             plan: false,
         });
         let text = buffer_text(&render(&mut app, 80, 14));
-        // The input box is rounded and carries the chrome in its four corners.
+        // The composer is a rule-set head + open writing line — NO box, NO corners.
         assert!(
-            text.contains('╭') && text.contains('╮'),
-            "no rounded box:\n{text}"
+            !text.contains('╭') && !text.contains('╮') && !text.contains('╰') && !text.contains('╯'),
+            "the composer must be frameless:\n{text}"
         );
-        assert!(text.contains("myrepo"), "project (cwd) top-left:\n{text}");
-        assert!(text.contains("⎇ main*"), "branch missing:\n{text}");
-        assert!(text.contains("zephyr-9"), "model top-right:\n{text}");
-        assert!(text.contains("high"), "effort missing:\n{text}");
-        assert!(text.contains("⏸ idle"), "state bottom-right:\n{text}");
+        assert!(!text.contains('│'), "no side border columns:\n{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        // The rule is the full band width and sits directly under the head line.
+        let rule = lines
+            .iter()
+            .position(|l| *l == "─".repeat(80))
+            .expect("a full-width rule");
+        let head = lines[rule - 1];
+        assert!(head.contains("myrepo"), "project on the head line:\n{text}");
+        assert!(head.contains("⎇ main*"), "branch missing:\n{text}");
+        assert!(head.contains("zephyr-9"), "model on the head line:\n{text}");
+        assert!(head.contains("high"), "effort missing:\n{text}");
+        assert!(
+            head.starts_with("myrepo"),
+            "the project leads the head line:\n{text}"
+        );
+        assert!(
+            head.ends_with("zephyr-9 · high"),
+            "the model/effort trail the head line:\n{text}"
+        );
+        // The writing line rides below the rule, the foot line below that.
+        assert!(lines[rule + 1].contains('❯'), "the writing line:\n{text}");
+        assert!(
+            !head.contains('─'),
+            "the head line is plain (a running head, no leader):\n{text}"
+        );
+        assert!(
+            lines[rule + 2].contains('─') && lines[rule + 2].ends_with("⏸ idle"),
+            "the foot line carries the leader + state:\n{text}"
+        );
     }
 
     #[test]
@@ -3485,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn an_in_flight_btw_shows_in_the_corner() {
+    fn an_in_flight_btw_shows_in_the_foot_line() {
         let mut app = App::new();
         // Submit `/btw` — the side ask stays in flight until the reply arrives.
         typed(&mut app, "/btw why?");
@@ -3493,7 +3602,7 @@ mod tests {
         let _ = app.take_actions();
 
         let text = buffer_text(&render(&mut app, 80, 14));
-        assert!(text.contains("btw…"), "the corner shows the pending btw:\n{text}");
+        assert!(text.contains("btw…"), "the foot line shows the pending btw:\n{text}");
         assert!(
             !text.contains("⏸ idle"),
             "the idle state is replaced while asking:\n{text}"
@@ -3501,7 +3610,7 @@ mod tests {
     }
 
     #[test]
-    fn the_session_id_rides_the_input_box_corner() {
+    fn the_session_id_rides_the_composer_head_line() {
         let mut app = App::new();
         app.set_status(crate::app::Status {
             session: Some("abcdef0123456789".into()),
@@ -3510,8 +3619,8 @@ mod tests {
         // Real content, so the D5 empty-state hint is not what shows at row 0.
         push_assistant(&mut app, "hello there");
         let text = buffer_text(&render(&mut app, 80, 12));
-        // D1b: there is no `session` band — the id folds into the box top-left and
-        // the transcript still starts at row 0.
+        // D1b: there is no `session` band — the id folds into the composer's head
+        // line and the transcript still starts at row 0.
         let first = text.lines().next().unwrap_or_default();
         assert!(
             first.contains("hello there"),
@@ -3519,7 +3628,7 @@ mod tests {
         );
         assert!(
             text.contains("session abcdef01"),
-            "the session id is not in the box corner:\n{text}"
+            "the session id is not on the composer head line:\n{text}"
         );
     }
 
@@ -3578,9 +3687,9 @@ mod tests {
     }
 
     #[test]
-    fn the_model_appears_exactly_once_in_the_box() {
+    fn the_model_appears_exactly_once_in_the_composer() {
         // Regression carried over from the old status line: the model must be
-        // named once, on the box's top-right.
+        // named once, on the composer head line's right.
         let mut app = App::new();
         app.set_status(crate::app::Status {
             model: "zephyr-9".into(),
@@ -3627,11 +3736,26 @@ mod tests {
     }
 
     #[test]
-    fn a_short_terminal_draws_the_input_box_without_panicking() {
+    fn a_short_terminal_draws_the_composer_without_panicking() {
         let mut app = App::new();
+        // Every band height must draw without panicking (the rule/foot degrade).
         for height in [2u16, 3, 4, 5, 6, 8] {
-            let _ = render(&mut app, 80, height); // must not panic
+            let text = buffer_text(&render(&mut app, 80, height));
+            assert!(
+                !text.contains('╭') && !text.contains('╰'),
+                "the composer is frameless at height {height}:\n{text}"
+            );
         }
+        // At five rows the band seats all four: head · rule · input · foot.
+        let text = buffer_text(&render(&mut app, 80, 5));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[1].contains("wcode"), "the head line:\n{text}");
+        assert!(
+            lines[2] == "─".repeat(80),
+            "the rule rides the second band row:\n{text}"
+        );
+        assert!(lines[3].contains('❯'), "the input survives:\n{text}");
+        assert!(lines[4].contains("⏸ idle"), "the foot line survives:\n{text}");
     }
 
     #[test]
