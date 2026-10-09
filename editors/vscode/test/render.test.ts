@@ -169,3 +169,21 @@ test("renderMerged falls back to a stable order for blocks with no seq", () => {
   };
   assert.deepEqual(renderMerged(state).map((b) => b.origin), ["root-1", "agent:w1"]);
 });
+
+test("renderTool carries the highlighted OUTPUT (W009): bash by the tool, a read by its path", () => {
+  const bash = renderBlock({
+    kind: "tool",
+    tool: { callId: "c1", name: "bash", output: "echo hi", done: true, isError: false },
+  }).tool;
+  assert.match(bash?.outputHtml ?? "", /class="token /, "bash output is highlighted as bash");
+  const read = renderBlock({
+    kind: "tool",
+    tool: { callId: "c2", name: "read", output: "fn main() {}", done: true, isError: false, path: "src/a.rs" },
+  }).tool;
+  assert.match(read?.outputHtml ?? "", /keyword[^>]*>fn</, "a `.rs` read is highlighted as rust");
+  const plain = renderBlock({
+    kind: "tool",
+    tool: { callId: "c3", name: "grep", output: "some lines", done: true, isError: false },
+  }).tool;
+  assert.equal(plain?.outputHtml, undefined, "a pathless tool stays plain (textContent fallback)");
+});

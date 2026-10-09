@@ -13,6 +13,7 @@ import type { ContentBlock, TodoItem } from "./protocol.ts";
 import type { Block, SessionMember, ToolBlock, ViewState, ViewStatus } from "./reducer.ts";
 import { targetLabel, transcriptOf } from "./reducer.ts";
 import { renderMarkdown } from "./markdown.ts";
+import { highlight, languageForTool } from "./highlight.ts";
 
 /** A tool call, ready to render (collapsed summary + expandable output). */
 export interface RenderedTool {
@@ -21,6 +22,9 @@ export interface RenderedTool {
   /** The one-line summary shown while collapsed. */
   summary: string;
   outputText: string;
+  /** W009: the tool OUTPUT, highlighted host-side (Prism HTML; Prism escapes it). Absent
+   *  when the language is unknown / the output is empty, so the webview shows plain text. */
+  outputHtml?: string;
   done: boolean;
   isError: boolean;
   path?: string;
@@ -169,6 +173,7 @@ function renderTool(tool: ToolBlock | undefined): RenderedTool | undefined {
     name: tool.name,
     summary: toolSummary(tool),
     outputText: tool.output,
+    outputHtml: highlight(tool.output, languageForTool(tool.name, tool.path) ?? "") ?? undefined,
     done: tool.done,
     isError: tool.isError,
     path: tool.path,

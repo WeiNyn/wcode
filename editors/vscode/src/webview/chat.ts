@@ -276,7 +276,11 @@ function blockShell(block: RenderedBlock): HTMLElement {
 
 /** The bare output recess (fill-only; NO card head, NO `Copy`). Impure (DOM). */
 function rawOutput(tool: RenderedTool): HTMLElement {
-  return el("pre", "quote", tool.outputText);
+  const pre = el("pre", "quote");
+  // W009: the host pre-highlights; Prism escapes its own output, so it is safe as HTML.
+  if (tool.outputHtml !== undefined) pre.innerHTML = tool.outputHtml;
+  else pre.textContent = tool.outputText;
+  return pre;
 }
 
 /** The in-panel change review for ONE diff-bearing tool (draft Change review). */
