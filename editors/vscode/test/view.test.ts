@@ -617,13 +617,13 @@ test("composerActions: a NON-root member running while the root is idle still en
   assert.deepEqual(composerActions(renderState(state, "root-1")), { stop: true }, "a running worker enables Stop");
 });
 
-test("the composer foot always shows Send + Stop; Stop is disabled until a run is in flight", () => {
+test("the composer foot swaps Send/Stop in ONE slot (inverse `hidden`)", () => {
   const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
   const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));
   assert.match(skeleton, /id="send"[^\n]*\n[^\n]*id="cancel"/, "#send then #cancel, adjacent");
-  assert.doesNotMatch(skeleton, /id="cancel"[^\n]*hidden/, "the Stop is NOT hidden in the skeleton");
-  assert.match(src, /cancelBtn\.disabled = !actions\.stop/, "Stop is DISABLED while idle, enabled while running");
-  assert.doesNotMatch(src, /cancelBtn\.hidden/, "the Stop is never hidden — it is always present");
+  assert.doesNotMatch(skeleton, /id="cancel"[^\n]*hidden/, "the skeleton does NOT pre-hide the Stop (the toggle governs it)");
+  assert.match(src, /sendBtn\.hidden = actions\.stop/, "Send hides while a run is in flight");
+  assert.match(src, /cancelBtn\.hidden = !actions\.stop/, "Stop shows only then");
 });
 
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {

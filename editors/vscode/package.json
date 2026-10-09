@@ -2,7 +2,7 @@
   "name": "wcode-vscode",
   "displayName": "wcode",
   "description": "wcode team surface: chat panel, native diffs, and a live member sidebar",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "private": true,
   "publisher": "wcode",
   "license": "MIT",

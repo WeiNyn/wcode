@@ -574,10 +574,12 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
   for (const segment of controls.segments) {
     (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
   }
-  // The Stop control is ALWAYS present so it is findable (a mid-run-only button is easy to
-  // miss); it is DISABLED while idle and enabled + accented while a run is in flight.
+  // ONE primary action in ONE slot (the human's ask): `Send` at idle, `Stop` while a run is
+  // in flight — inverse `hidden`, same slot, the interrupt accented. The Stop is never
+  // `disabled`, so a visible Stop always acts (click → `cancel`).
   const actions = composerActions(state);
-  cancelBtn.disabled = !actions.stop;
+  sendBtn.hidden = actions.stop;
+  cancelBtn.hidden = !actions.stop;
 }
 
 function ctxChip(context: SelectionContext): HTMLElement {

@@ -779,11 +779,6 @@ details.fn-out .inner pre {
   color: var(--vscode-foreground);
 }
 
-.linkbtn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
 .linkbtn:focus-visible {
   outline: 2px solid var(--vscode-focusBorder);
   outline-offset: 2px;
@@ -799,9 +794,9 @@ details.fn-out .inner pre {
   color: var(--vscode-foreground);
 }
 
-/* The Stop is always present (findable); it reads PRIMARY only while a run is in flight
-   — the accent, "active now". */
-.composer .foot .send.stop:not(:disabled) {
+/* `#send` and `#cancel` share the slot (inverse `hidden`); the interrupt reads PRIMARY
+   while a run is in flight — the accent, "active now" — so the swap is unmistakable. */
+.composer .foot .send.stop {
   color: var(--wc-accent);
 }
 
