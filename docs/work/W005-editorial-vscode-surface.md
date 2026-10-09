@@ -342,6 +342,25 @@ The human ran the F5 review of the editorial surface and reported two defects; b
 - **There was no way to cancel agents.** `composerControls.stop` was `status.running`, which `renderState` makes PER-TARGET (`render.ts:82`) — with the root idle and workers running, no Stop appeared. It is now true whenever any member's `MemberState` is `running`. And Cancel is channel-aware: a new pure `cancelTargets` (`src/cancel.ts`) makes **Focus** cancel the focused member alone, while **All** (`target === null`) cancels the whole session — the root plus every running member (`extension.ts` `onCancel`; the wire is unchanged). `wcode.member.stop` is no longer inert (it now stops the focused member).
 - **Tests:** `composerControls.stop` shows for a running non-root member while the root is idle (fails on the old per-target logic); `test/cancel.test.ts` asserts All-mode reaches the root AND each running member (fails if only the root is cancelled). Gates: `npm run typecheck` → 0; `npm test` → 195 pass / 0 fail; `npm run build` → ok.
 
+### 2026-10-09 — the team list: Option 4 (glyph row + foot action) implemented
+
+The human chose **Option 4** of `docs/design/vscode-team-options.md` (a glyph row + the
+foot action). Implemented in `cddbde6`:
+
+- **The roster** is now a wrapping strip of `glyph name` **pairs** (root first, each a keyed
+  retarget control — `tabindex="0"` + Enter/Space → `focus-member`), the target pair
+  **underlined**. The pairs are separated by the flex **`gap`**, not the middle-dot, to keep
+  the locked "≤1 `·` per metadata line" rule.
+- **The action moves to the transcript's foot.** The per-member `.act` leaves the roster; the
+  liveline carries *what the active member is doing*: exactly one active member →
+  `glyph name · action`; several → `⋯ {n} working`; none → hidden.
+- **Pure halves:** `teamCaption`'s `CaptionRow` swaps `action` for `state` (the pair's
+  `title`/`aria-label`); `workingGroup`'s `WorkingRow` gains `glyph`/`glyphClass` for the foot
+  line. `view.ts`/`chat.ts`/`chat.css`; tests updated; wire/kernel untouched.
+
+(Note: `docs/design/vscode-team-options.md` still reads "Not authorized" — stale once this
+lands.)
+
 ## 10. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).
