@@ -385,22 +385,10 @@ details.fold:not([open]) > summary .chev::before {
   font-weight: 600;
 }
 
-/* The thinking line reads QUIET: a demoted label + an italic summary. */
+/* The thinking line reads QUIET: a demoted label. */
 details.fold.thinking .tname {
   color: var(--vscode-descriptionForeground);
   font-weight: 400;
-}
-
-details.fold.thinking .tsum {
-  font-style: italic;
-}
-
-.tsum {
-  color: var(--vscode-descriptionForeground);
-  font-family: var(--vscode-editor-font-family);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .tmeta {

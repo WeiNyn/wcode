@@ -9,9 +9,9 @@
  * (the sibling `tool_call` was committed by the `message_end` arm before the
  * `tool_execution_start` arm runs).
  *
- * The `.tsum` rule itself (target wins, else the summary, and NEVER an empty
- * `<span class="tsum">`) is exercised below at the RENDER seam the webview reads —
- * `RenderedTool.target` / `.summary`. The webview DOM (`chat.ts` `renderToolFold`)
+ * The note's target rule (target wins, else the summary, and NEVER an empty `.to`
+ * span) is exercised below at the RENDER seam the webview reads —
+ * `RenderedTool.target` / `.summary`. The webview DOM (`chat.ts` `fnNote`)
  * is not headless-testable (it calls `acquireVsCodeApi()` and touches `document`),
  * so it is NOT faked here: only the values it consumes are asserted.
  */
@@ -50,7 +50,7 @@ test("FIX A: the reducer stamps a tool block's target from the preceding tool_ca
   );
 });
 
-test("FIX A: renderTool carries the target for the row's `.tsum`", () => {
+test("FIX A: renderTool carries the target for the note head's `.to`", () => {
   const tool = renderState(drive("tool_target.handwritten.ndjson"), "root").blocks.find(
     (b) => b.kind === "tool",
   )?.tool;
@@ -60,7 +60,7 @@ test("FIX A: renderTool carries the target for the row's `.tsum`", () => {
 
 test("FIX A: toolSummary returns '' while running with no content (one running indicator)", () => {
   assert.equal(toolSummary({ callId: "c", name: "n", output: "", done: false, isError: false }), "");
-  // ...and the ONE indicator is the `.tmeta .run` status (V13, `⠋ running…`), not `.tsum`.
+  // ...and the ONE indicator is the `.tmeta .run` status (V13, `⠋ running…`), not a target span.
 });
 
 test("FIX A: renderBlock drops a tool_call content block (no bare `⚙ name` div)", () => {
@@ -79,7 +79,7 @@ test("FIX B: the thinking fold label/class is `thinking`, not `thought`", () => 
   assert.doesNotMatch(block.html, /thought/);
 });
 
-test("FIX A: a history tool_result has no target, so `.tsum` falls back to the summary", () => {
+test("FIX A: a history tool_result has no target, so the target falls back to the summary", () => {
   const state = seedFromHistory(
     initialState(),
     [{ role: "tool_result", tool_call_id: "t1", name: "edit", output: "wrote src/panel.ts", is_error: false }],
@@ -92,16 +92,16 @@ test("FIX A: a history tool_result has no target, so `.tsum` falls back to the s
   assert.equal(
     tool?.target ?? tool?.summary,
     "wrote src/panel.ts",
-    "the webview's `.tsum = target ?? summary` shows the summary for a target-less row",
+    "the webview's `note.target = tool.target ?? tool.summary` shows the summary for a target-less row",
   );
 
-  // And no empty span: a running call with no target and no output makes `.tsum`
-  // resolve to "", which the webview's `if (tsum !== "")` guard omits.
+  // And no empty span: a running call with no target and no output makes the target
+  // resolve to "", which the webview's `if (note.target !== "")` guard omits.
   const running = renderState(
     reduce(initialState(), { type: "tool_execution_start", call_id: "c", name: "edit" }, "root"),
     "root",
   ).blocks.find((b) => b.kind === "tool")?.tool;
   assert.equal(running?.target, undefined, "no sibling tool_call -> no target");
   assert.equal(running?.summary, "");
-  assert.equal(running?.target ?? running?.summary, "", "an empty `.tsum` is never emitted as a span");
+  assert.equal(running?.target ?? running?.summary, "", "an empty `.to` is never emitted as a span");
 });
