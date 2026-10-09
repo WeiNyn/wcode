@@ -15,11 +15,12 @@ test("html:false escapes raw HTML instead of passing it through", () => {
   assert.match(html, /&lt;img/);
 });
 
-test("fenced code renders as a titled `.code` card (no highlighting in P1)", () => {
+test("fenced code renders as a titled `.code` card with Prism token spans", () => {
   const html = renderMarkdown("```js\nconst x = 1;\n```");
   assert.match(html, /<div class="code"><div class="chead"><span>js<\/span><\/div><pre class="pre">/);
-  assert.match(html, /const x = 1;\n<\/pre><\/div>/);
-  assert.ok(!html.includes("hljs"), "no highlighting in P1");
+  assert.match(html, /class="token /, "the code body carries Prism token spans");
+  assert.match(html, /keyword[^>]*>const</, "the `const` keyword is a token");
+  assert.match(html, /<\/pre><\/div>/, "the plate closes");
 });
 
 test("a fence with no language gets a blank header, and the code is escaped", () => {

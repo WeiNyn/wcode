@@ -108,15 +108,15 @@ test("a thinking block renders as the draft's folded `thinking` row", () => {
   assert.match(block.html, /class="fold thinking"/, "the renamed fold class is present");
 });
 
-test("a fenced code block renders as a titled `.code` card", () => {
+test("a fenced code block renders as a titled `.code` card with Prism tokens", () => {
   const block = renderBlock({
     kind: "assistant",
     content: [{ type: "text", text: "```ts\nconst x = 1;\n```" }],
   });
   assert.match(block.html, /<div class="code">/);
   assert.match(block.html, /<div class="chead"><span>ts<\/span><\/div>/);
-  assert.match(block.html, /<pre class="pre">const x = 1;\n<\/pre>/);
-  assert.ok(!block.html.includes("hljs"), "no highlighting in P1");
+  assert.match(block.html, /class="token /, "the code body carries Prism token spans");
+  assert.match(block.html, /keyword[^>]*>const</, "the `const` keyword is a token");
 });
 
 test("a live assistant block's thinking fold is open; a settled one is not", () => {
