@@ -72,7 +72,39 @@ The one behaviour A drops — the pill's click-to-reveal — was client-local (`
   (flagged in [W005](../work/W005-editorial-vscode-surface.md) §4.6).
 - Zero remote assets, `--vscode-*` for colour only, one accent, no `—` in any rendered string.
 
-## 4. References
+## 4. Refined by paper (W008)
+
+The shipped A surface was refined by the **paper** direction
+(`docs/design/vscode-paper-draft.html`; stance `docs/design/vscode-paper-direction.md`),
+recorded in [W008](../work/W008-paper-vscode-surface.md) and authorised by the
+[refined by paper (W008)](../decisions/D006-editorial-supersedes-v3-decisions.md) addendum.
+It is a *reading* refinement of A, not a new direction.
+
+**Adopted (A1–A7).** **A1** keep the local serif for prose (the furniture stays mono);
+**A2** tool output moves to **turn-foot footnotes** (a printed mark at the tool block's
+boundary; the output behind a disclosure *inside* the note, no in-flow fold); **A3** the
+**step count** is the folio (the page number); **A4** the running head is **static**;
+**A5** keep the small-caps chapter open, add an **indent-led** paragraph rhythm; **A6** the
+measure is **64ch**; **A7** **no** margin column (footnotes only, no sidenotes).
+
+**Added vs A.** `FolioCell` + a pure `folio(blocks)` + a pure `turnNotes(blocks)`
+(`src/webview/view.ts`); the `.masthead .inner` measure wrapper + a `#folio` placeholder
+(`chat.ts`); the footnote builders (`fnmark`/`renderFootnotes`/`fnNote`, `chat.ts`);
+`--ed-read`/`--ed-indent` and `.folio` / `.footnotes` / `.fnmark` / `.fn-head` /
+`details.fn-out` plus the indent + chapter-open rules (`media/chat.css`).
+
+**Changed vs A.** the composer's rule moves onto `.composer .inner` (both the head's and
+the writing line's rules run to the column, not the viewport); `.masthead .inner` padding is
+`--wc-4`; `.body` is the serif at `line-height: 1.75` with the indent rhythm; `.code .chead`
+is a small-caps caption; `.liveline` is capped to the measure; `renderTurn` no longer paints
+an in-flow tool fold.
+
+**Removed vs A.** the in-flow `details.fold.tool` row (and its `renderToolFold` builder);
+the inter-paragraph margin in `.body` (the first-line indent replaces it).
+
+Nothing under `docs/` moves (D004 item 58); the wire/kernel is untouched (`src/webview.ts`).
+
+## 5. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).
 - `docs/design/vscode-modern-directions.md:86wCa` — §A, the stance and the dials.

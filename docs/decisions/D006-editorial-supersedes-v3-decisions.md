@@ -54,3 +54,24 @@ goes with the rule.
   spine without a new decision that supersedes this one.
 - Implementation follows in `docs/plans/vscode-ui-editorial-plan.md` §1 (E1–E7);
   nothing under `docs/` moves (D004 item 58).
+
+## Refined by paper (W008)
+
+W008 **refines** editorial — it does not supersede it. The **paper** direction
+(`docs/design/vscode-paper-draft.html`; [W008](../work/W008-paper-vscode-surface.md)) keeps
+A's stance and adopts A1–A7 (a local serif face for prose; turn-foot footnotes; a step-count
+folio; a static running head; the small-caps chapter open + an indent-led rhythm; a 64ch
+measure; no margin column).
+
+Two consequences touch the locked decisions:
+
+- the tool detail **leaves the flow**: the in-flow `details.fold.tool` row (decision 5's
+  L1 fold, V12/V13's rule-and-mark carrier) is retired in favour of a **turn-foot footnote**
+  whose output disclosure reuses the shipped fold-override map (`foldOpen`/`toggleFold`,
+  keyed by `callId`) — so the stream re-render hazard is unchanged, and the tool-status
+  colour is now carried by the footnote head;
+- the `--ed-*` knobs are re-spent (`--ed-measure` 66→**64ch**, a new `--ed-read` family and
+  `--ed-indent`): **no new `--wc-*`** and **no size change** (the prose keeps `--wc-fs-body`).
+
+The wire/kernel is untouched; nothing under `docs/` moves (D004 item 58).
+
