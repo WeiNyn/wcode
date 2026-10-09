@@ -224,6 +224,31 @@ a `.footnotes::before` separator (44%); the `<ol>` is full width, so the notes f
 view test asserts the RULE is short AND the list is not (it fails if the list regresses to
 44%). `26bc741`.
 
+### 2026-10-09 — flagged, NOT taken: a wide-figure output bleed
+
+The footnote notes now take the full 64ch measure (`26bc741`), but a wide `bash`/`read`
+output is still monospace `white-space: pre-wrap`, so it wraps a lot inside the column. A
+paper-true alternative — let the output **bleed past the measure to the panel width, like a
+wide figure in a book** — was raised and **flagged, not implemented**; it awaits the human.
+
+CSS shape (the standard full-bleed technique; the `.footnotes` sits inside the measure-capped
+`.col`, so it must escape it):
+
+    /* OPTION (not taken): a wide tool output bleeds past the measure, like a wide figure. */
+    details.fn-out .inner,
+    details.fn-out .inner pre.quote {
+      width: 100vw;
+      margin-inline: calc(50% - 50vw);   /* escape the 64ch .col, span the panel */
+    }
+
+Caveat for whoever implements it: `100vw` counts the scrollbar, so `.stream` would want
+`overflow-x: hidden` (or the width derived from the scroller) or the bleed adds a horizontal
+scrollbar. A lesser variant stays inside the column but un-pads to the measure’s own edge:
+`width: calc(100% + 2 * var(--wc-4)); margin-left: calc(-1 * var(--wc-4))`.
+
+Trade-off: it stops a wide output wrapping tall, at the cost of breaking the ONE-MEASURE
+stance for one element. Not decided here (`design-taste`: the measured column is the stance).
+
 ## 10. References
 
 - `docs/design/vscode-paper-draft.html` — the refinement's visual spec (the WHAT).
