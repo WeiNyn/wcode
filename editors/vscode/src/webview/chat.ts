@@ -29,16 +29,17 @@ import {
   isActivationKey,
   livelineLabel,
   panelHeader,
-  bodyKind,
   toolStatus,
   teamCaption,
   selectionRef,
   toggleFold,
+  turnNotes,
   turns,
   workingGroup,
   type FoldOverrides,
   type Turn,
   type TurnMember,
+  type TurnNote,
 } from "./view.ts";
 
 /** The webview global; not in `@types/vscode` (it is injected by the host). */
@@ -269,43 +270,6 @@ function blockShell(block: RenderedBlock): HTMLElement {
   return node;
 }
 
-function renderToolFold(block: RenderedBlock): HTMLElement {
-  const tool = block.tool;
-  if (tool === undefined) return el("details", "fold tool");
-  const open = foldOpen(foldOverrides, tool.callId, tool.done); // override wins; else open while running
-  const details = el("details", classNames(block, open));
-  if (open) details.setAttribute("open", "");
-  if (!tool.done) details.dataset.live = "1"; // a RUNNING fold is the newest live step
-
-  const summary = el("summary", null);
-  summary.appendChild(el("span", "chev"));
-  summary.appendChild(el("span", "tname", `⚙ ${tool.name}`));
-  // `.tsum` is the TARGET (the draft's `⚙ edit` + `src/panel.ts`), falling back to
-  // the output summary (`tool.summary`) for a row with no target — a history row, or
-  // a call with no recognizable arg. Omit the span when both are empty (exact TUI
-  // parity — never an empty `<span class="tsum">`).
-  const tsum = tool.target ?? tool.summary;
-  if (tsum !== "") summary.appendChild(el("span", "tsum", tsum));
-  const meta = toolMeta(tool);
-  if (meta !== null) summary.appendChild(meta);
-  // We drive the fold from the override map (so it survives a stream re-render):
-  // suppress the native toggle, flip the override for this phase, repaint.
-  summary.addEventListener("click", (event) => {
-    event.preventDefault();
-    foldOverrides = toggleFold(foldOverrides, tool.callId, tool.done);
-    rerender();
-  });
-  details.appendChild(summary);
-
-  const inner = el("div", "inner");
-  // EXACTLY ONE body per fold: the `.review` card for a diff-bearing tool, else the bare
-  // fill-only output recess. The change review STAYS a card (non-scope, §2).
-  const hunk = bodyKind(tool) === "review" ? reviewHunk(tool.diff ?? "") : null;
-  inner.appendChild(hunk !== null ? reviewBlock(tool, hunk, verdictOf(lastVerdicts, tool.callId)) : rawOutput(tool));
-  details.appendChild(inner);
-  return details;
-}
-
 /** The bare output recess (fill-only; NO card head, NO `Copy`). Impure (DOM). */
 function rawOutput(tool: RenderedTool): HTMLElement {
   return el("pre", "quote", tool.outputText);
@@ -415,10 +379,79 @@ function renderTurn(turn: Turn): HTMLElement {
   if (turn.who.glyph !== "") byline.appendChild(el("span", "glyph", turn.who.glyph));
   byline.appendChild(el("span", "name", turn.who.name)); // no `.stamp` — no time on the wire
   wrap.appendChild(byline);
+  // The tool blocks LEAVE the flow (A2): each prints a reference at its own boundary and is
+  // collected; the apparatus is then set ONCE, at the turn's foot, after ALL blocks.
+  const notes = turnNotes(turn.blocks);
+  let i = 0;
   for (const block of turn.blocks) {
-    wrap.appendChild(block.kind === "tool" ? renderToolFold(block) : blockShell(block));
+    if (block.kind === "tool" && i < notes.length) {
+      wrap.appendChild(fnmark(notes[i]));
+      i += 1;
+    } else {
+      wrap.appendChild(blockShell(block));
+    }
   }
+  if (notes.length > 0) wrap.appendChild(renderFootnotes(notes));
   return wrap;
+}
+
+/** The printed reference (`.fnmark`) for ONE note — a real button, so Enter/Space are free. */
+function fnmark(note: TurnNote): HTMLElement {
+  const button = el("button", "fnmark", String(note.n));
+  button.setAttribute("type", "button");
+  button.id = `fnm-${note.n}`;
+  button.setAttribute("aria-controls", `fn-${note.n}`);
+  button.setAttribute("aria-expanded", foldOpen(foldOverrides, note.callId, note.done) ? "true" : "false");
+  button.title = `Note ${note.n}, ${note.name}`;
+  button.addEventListener("click", () => {
+    foldOverrides = toggleFold(foldOverrides, note.callId, note.done);
+    rerender();
+  });
+  return button;
+}
+
+/** The turn's footnote apparatus (`.footnotes` `<ol>`), one `<li>` per note. */
+function renderFootnotes(notes: TurnNote[]): HTMLElement {
+  const list = el("ol", "footnotes");
+  list.setAttribute("aria-label", "Notes");
+  for (const note of notes) list.appendChild(fnNote(note));
+  return list;
+}
+
+/** ONE footnote `<li>`: the head (reusing `toolMeta`) + the note's `details.fn-out`. */
+function fnNote(note: TurnNote): HTMLElement {
+  const item = el("li", null);
+  item.id = `fn-${note.n}`;
+  const head = el("div", "fn-head");
+  const n = el("span", "n", String(note.n));
+  n.setAttribute("aria-hidden", "true");
+  head.appendChild(n);
+  head.appendChild(el("span", "mark", `⚙ ${note.name}`));
+  if (note.target !== "") head.appendChild(el("span", "to", note.target));
+  const meta = toolMeta(note.tool);
+  if (meta !== null) head.appendChild(meta);
+  item.appendChild(head);
+
+  // The note's `open` is driven by the SHARED override map, so it survives `render`'s
+  // `textContent = ""` rebuild (a native `details` open would be lost on every tick).
+  const details = el("details", "fn-out");
+  details.id = `fn-${note.n}-out`;
+  if (foldOpen(foldOverrides, note.callId, note.done)) details.setAttribute("open", "");
+  const summary = el("summary", null);
+  summary.appendChild(el("span", "chev"));
+  summary.appendChild(document.createTextNode(" output"));
+  summary.addEventListener("click", (event) => {
+    event.preventDefault(); // suppress the native toggle; the override drives it
+    foldOverrides = toggleFold(foldOverrides, note.callId, note.done);
+    rerender();
+  });
+  details.appendChild(summary);
+  const inner = el("div", "inner");
+  const hunk = note.hasDiff ? reviewHunk(note.tool.diff ?? "") : null;
+  inner.appendChild(hunk !== null ? reviewBlock(note.tool, hunk, verdictOf(lastVerdicts, note.callId)) : rawOutput(note.tool));
+  details.appendChild(inner);
+  item.appendChild(details);
+  return item;
 }
 
 /* ------------------------------------------------------- the one live line */

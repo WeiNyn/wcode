@@ -20,6 +20,7 @@ import {
   foldOpen,
   formatTokens,
   folio,
+  turnNotes,
   livelineLabel,
   panelHeader,
   isActivationKey,
@@ -692,6 +693,61 @@ test("folio: panelHeader's folio cell counts the TOOL blocks (3 tools -> steps =
 test("folio: a transcript with no tool block reads 0", () => {
   assert.equal(folio([{ kind: "assistant", html: "", live: false }]), 0);
   assert.equal(folio([]), 0);
+});
+
+test("turnNotes: one descriptor per tool block, numbered in BLOCK order", () => {
+  const blocks: RenderedBlock[] = [
+    { kind: "assistant", html: "", live: false },
+    aTool(),
+    { kind: "assistant", html: "", live: false },
+    aTool(),
+  ];
+  const notes = turnNotes(blocks);
+  assert.equal(notes.length, 2, "one note per tool block");
+  assert.deepEqual(notes.map((x) => x.n), [1, 2], "numbered in block order");
+  assert.deepEqual(notes.map((x) => x.callId), ["t1", "t1"]);
+});
+
+test("turnNotes: the descriptor carries name/target/outputText/done/isError/hasDiff + its row", () => {
+  const tool: RenderedBlock = {
+    kind: "tool",
+    html: "",
+    live: false,
+    tool: {
+      callId: "c9",
+      name: "edit",
+      summary: "s",
+      outputText: "out",
+      done: true,
+      isError: false,
+      hasDiff: true,
+      diff: "@@ -1,1 +1,1 @@\n-a\n+b",
+      target: "src/a.rs",
+    },
+  };
+  const [note] = turnNotes([tool]);
+  assert.equal(note.name, "edit");
+  assert.equal(note.target, "src/a.rs", "the tool's own target wins");
+  assert.equal(note.outputText, "out");
+  assert.equal(note.done, true);
+  assert.equal(note.isError, false);
+  assert.equal(note.hasDiff, true);
+  assert.equal(note.tool.callId, "c9", "the note keeps its source row");
+});
+
+test("turnNotes: the target falls back to the summary; a turn with no tool yields none", () => {
+  const [note] = turnNotes([aTool()]); // aTool()'s summary is "s", no target
+  assert.equal(note.target, "s", "the summary is the fallback target");
+  assert.deepEqual(turnNotes([{ kind: "assistant", html: "", live: false }]), [], "no tool \u21d2 no notes");
+});
+
+test("the footnote matter is declared: .fnmark / .footnotes / .fn-head / details.fn-out", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.fnmark \{/, ".fnmark");
+  assert.match(css, /\.footnotes \{/, ".footnotes");
+  assert.match(css, /\.fn-head \{/, ".fn-head");
+  assert.match(css, /details\.fn-out \{/, "details.fn-out");
+  assert.match(css, /\.footnotes \{[^}]*width: 44%/, "the SHORT rule (44%)");
 });
 
 /* -------------------------------------------------------- working group */

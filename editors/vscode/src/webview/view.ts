@@ -7,7 +7,7 @@
  */
 import type { MemberState } from "../protocol.ts";
 import { memberGlyph, type RosterItem, type SessionMember } from "../reducer.ts";
-import type { RenderedBlock, RenderedState } from "../render.ts";
+import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import type { SessionState } from "../session.ts";
 import type { PanelSessionInfo, SelectionContext, ViewMode } from "../webview.ts";
 
@@ -299,49 +299,54 @@ export function turns(
   return grouped;
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W008 · footnote matter (A2), pure. The tool blocks LEAVE the flow; this descriptor is
-// what `chat.ts:renderTurn` paints as a `.fnmark` + a `.footnotes` entry. See
-// docs/work/W008-paper-vscode-surface.md §4.2 and docs/design/vscode-paper-draft.html
-// (`.fnmark`, `.footnotes`, `.fn-head`, `details.fn-out`).
-//
-// /** One tool call, printed as a footnote. */
-// export interface TurnNote {
-//   /** The printed reference number (1-based, BLOCK order). */
-//   n: number;
-//   /** The tool's callId — the note's DOM id + the fold override key. */
-//   callId: string;
-//   /** → the note head's `.mark` (`⚙ {name}`). */
-//   name: string;
-//   /** → the note head's `.to` (`tool.target ?? tool.summary`); "" omits the span. */
-//   target: string;
-//   /** → the note body's bare recess (`rawOutput`'s text). */
-//   outputText: string;
-//   done: boolean;
-//   isError: boolean;
-//   /** A diff-bearing tool: the note body is the `.review` card (non-scope, unchanged). */
-//   hasDiff: boolean;
-//   /** The source row — so the DOM builder reuses `toolMeta`/`rawOutput`/`reviewBlock`. */
-//   tool: RenderedTool;
-// }
-//
-// /**
-//  * The turn's footnote descriptors, in BLOCK order, one per `tool` block. Pure.
-//  *
-//  * Does NOT promise: it does not paint, and it does not decide the note's `open` — that
-//  * is the fold override (`foldOpen` view.ts:513 / `toggleFold` view.ts:522, keyed by
-//  * `callId`), so the open state survives `render`'s `textContent = ""` rebuild.
-//  * Non-`tool` blocks are NOT returned — the caller keeps them in the flow.
-//  */
-// export function turnNotes(blocks: RenderedBlock[]): TurnNote[] { todo!() }
-//
-// // The import at view.ts:10 (`import type { RenderedBlock, RenderedState } from
-// // "../render.ts";`) gains `RenderedTool` (the `tool` field's type).
-// // FLAG (§9, "not a fact"): the `.fnmark` cannot be injected INSIDE a prose node —
-// // the prose is one pre-rendered HTML string (`render.ts:143` renderContent, set by
-// // `blockShell` chat.ts:256 `node.innerHTML = block.html`). So the mark is emitted as a
-// // SIBLING at the tool block's POSITION in the turn's block order, NOT mid-sentence.
-// ==== /SKETCH ====
+/** One tool call, printed as a footnote (A2). */
+export interface TurnNote {
+  /** The printed reference number (1-based, BLOCK order). */
+  n: number;
+  /** The tool's callId — the note's DOM id + the fold-override key. */
+  callId: string;
+  /** → the note head's `.mark` (`⚙ {name}`). */
+  name: string;
+  /** → the note head's `.to` (`tool.target ?? tool.summary`); "" omits the span. */
+  target: string;
+  /** → the note body's bare recess (`rawOutput`'s text). */
+  outputText: string;
+  done: boolean;
+  isError: boolean;
+  /** A diff-bearing tool: the note body is the `.review` card (non-scope, unchanged). */
+  hasDiff: boolean;
+  /** The source row — so the DOM builder reuses `toolMeta`/`rawOutput`/`reviewBlock`. */
+  tool: RenderedTool;
+}
+
+/**
+ * The turn's footnote descriptors, in BLOCK order, one per `tool` block. Pure.
+ *
+ * Does NOT promise: it does not paint, and it does not decide the note's `open` — that is
+ * the fold override (`foldOpen`/`toggleFold`, keyed by `callId`), so the open state survives
+ * `render`'s `textContent = ""` rebuild. Non-`tool` blocks are NOT returned — the caller
+ * keeps them in the flow.
+ */
+export function turnNotes(blocks: RenderedBlock[]): TurnNote[] {
+  const notes: TurnNote[] = [];
+  for (const block of blocks) {
+    const tool = block.tool;
+    if (block.kind !== "tool" || tool === undefined) continue;
+    notes.push({
+      n: notes.length + 1,
+      callId: tool.callId,
+      name: tool.name,
+      target: tool.target ?? tool.summary,
+      outputText: tool.outputText,
+      done: tool.done,
+      isError: tool.isError,
+      hasDiff: tool.hasDiff,
+      tool,
+    });
+  }
+  return notes;
+}
+
 /** The member a turn is labeled by — the All-mode resolver's answer, or Focus's fallback. */
 export interface TurnMember {
   name: string;

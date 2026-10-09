@@ -564,6 +564,108 @@ pre.quote {
   overflow-x: auto;
 }
 
+/* ------------------------------------------------------- the footnote matter */
+
+/* A tool call leaves a printed REFERENCE (a superscript numeral); its detail is set as a
+   footnote at the turn's foot, under a SHORT rule. The reference is a LINK, never the
+   accent — it is not "active now". */
+.fnmark {
+  font: inherit;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.68em;
+  vertical-align: super;
+  line-height: 0;
+  padding: 0 0.15em;
+  margin-left: 1px;
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.fnmark:hover {
+  text-decoration: underline;
+}
+
+.fnmark:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.footnotes {
+  margin: var(--wc-4) 0 0;
+  padding: var(--wc-2) 0 0;
+  border-top: 1px solid var(--vscode-editorWidget-border);
+  /* the rule is SHORT: the classic footnote separator, not a full-width divider */
+  width: 44%;
+  list-style: none;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+}
+
+.footnotes > li {
+  display: block;
+  margin: 0 0 var(--wc-2);
+}
+
+.fn-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wc-1);
+}
+
+.fn-head .n {
+  color: var(--vscode-descriptionForeground);
+}
+
+.fn-head .mark {
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.fn-head .to {
+  overflow-wrap: anywhere;
+}
+
+/* the note's own disclosure (a native `details`: the keyboard cost is already paid) */
+details.fn-out {
+  margin: var(--wc-1) 0 0 var(--wc-3);
+}
+
+details.fn-out > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+}
+
+details.fn-out > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.fn-out > summary:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+details.fn-out > summary .chev::before {
+  content: "\25b8";
+}
+
+details.fn-out[open] > summary .chev::before {
+  content: "\25be";
+}
+
+details.fn-out .inner {
+  padding: var(--wc-1) 0 0;
+}
+
+details.fn-out .inner pre {
+  margin: 0;
+}
+
 /* --------------------------------------------- empty / error state card */
 
 /* L2a BORDERED: the state card is a foreign object, so it earns a border. */
