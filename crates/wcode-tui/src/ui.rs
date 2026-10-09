@@ -52,6 +52,14 @@ const SIDEBAR_WIDTH: u16 = 30;
 /// below it there is not enough room for a 30-col panel AND a usable bands
 /// column, so `draw` leaves the layout completely untouched.
 const SIDEBAR_MIN_WIDTH: u16 = 80;
+/// The transcript's **measure**: the content column is at most this many columns
+/// wide, centered in its band (the "printed page"). It governs the transcript
+/// only — the composer band stays edge-to-edge.
+const MEASURE_MAX: usize = 68;
+/// The band width at (or above) which the measure centers, leaving a real margin
+/// on each side. Below it the content uses the full band width (so an 80-col
+/// terminal keeps its `❯` at the gutter).
+const MEASURE_MIN_BAND: usize = 84;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 ///
@@ -392,15 +400,30 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
 }
 
 /// Draw the transcript into its band: the committed blocks (cached per width)
-/// plus the in-flight message. `area` is the plain transcript band — the wrap
-/// width is `area.width` and the viewport height is `area.height`, feeding
-/// `sync_scroll`; the selection bar paints column 0 in a second pass.
+/// plus the in-flight message. `area` is the plain transcript band; the content
+/// renders in a centered **measure** (at most [`MEASURE_MAX`] cols, when the band
+/// is at least [`MEASURE_MIN_BAND`] wide), so the wrap width is the measure and
+/// the viewport height is `area.height`, feeding `sync_scroll`; the selection bar
+/// paints the measure's column 0 in a second pass.
 ///
 /// `Surface::cache` keys on width, so a reflow (e.g. toggling the sidebar,
 /// which changes the bands width by `SIDEBAR_WIDTH`) invalidates every cached
 /// block.
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
-    let width = area.width as usize;
+    // The measure: a centered content column when the band leaves a real margin,
+    // else the full band width. The composer band is NOT centered.
+    let band = area.width as usize;
+    let measure = if band >= MEASURE_MIN_BAND { MEASURE_MAX } else { band };
+    let pad = (band - measure) / 2;
+    let width = measure;
+    // The centered measure column: the content renders here, and hit-testing
+    // targets this rect (not the full band).
+    let col = Rect {
+        x: area.x + pad as u16,
+        y: area.y,
+        width: measure as u16,
+        height: area.height,
+    };
     let mut lines: Vec<Line> = Vec::new();
     // Record each committed block's line range so the selection bar can be drawn
     // in a second pass. A range starts *after* the separator, so it never spans
@@ -423,7 +446,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     app.set_block_ranges(ranges.clone());
     // Follow the tail unless the user has scrolled up; the renderer measures
     // the transcript and reconciles the scroll window.
-    app.sync_scroll(total, height, area.width as usize);
+    app.sync_scroll(total, height, measure);
     // While browsing, re-anchor the view across transcript growth so a run that
     // appends blocks never yanks the view to the tail; a deliberate wheel scroll
     // is left alone (this fires only when the content changed).
@@ -469,7 +492,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // (its inner-left through the `▸`/`▾`) plus the 1x1 `▣` copy cell. The rects
     // are pure functions of (kind, width, range) — recomputed every frame, never
     // cached (the (rev, width) cache stores `Line`s, not geometry).
-    let panel_w = (area.width as usize)
+    let panel_w = measure
         .saturating_sub(PANEL_INDENT.chars().count())
         .max(4);
     let (toggle_col, copy_col) = header_affordance_cols(panel_w);
@@ -500,13 +523,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 // The WHOLE header row is the toggle target: from the panel's
                 // inner-left through the `▸`/`▾` glyph, ending before the gap so
                 // the `▣` copy cell stays disjoint (`kind_at` checks toggle first).
-                toggle: Rect::new(area.x + ind_w + 1, y, toggle_col, 1),
-                copy: Rect::new(area.x + ind_w + copy_col, y, 1, 1),
+                toggle: Rect::new(col.x + ind_w + 1, y, toggle_col, 1),
+                copy: Rect::new(col.x + ind_w + copy_col, y, 1, 1),
             })
         })
         .collect();
-    app.set_transcript_hit(area, start, rows_text, affordances);
-    frame.render_widget(Paragraph::new(window), area);
+    app.set_transcript_hit(col, start, rows_text, affordances);
+    frame.render_widget(Paragraph::new(window), col);
 }
 
 /// Restyle the char range `[lo, hi)` of `line` with `style` (the caller passes
@@ -3865,7 +3888,9 @@ mod tests {
             "the fixture must exceed the old 60-char clip"
         );
         push_bash_panel(&mut app, cmd, "/Users/wei/Workspace/wcode", "ok");
-        let text = buffer_text(&render(&mut app, 100, 20));
+        // At 80 cols the band is below the centering threshold, so the panel gets
+        // the full width and the command rides one line (no 60-char clip).
+        let text = buffer_text(&render(&mut app, 80, 20));
         assert!(
             text.contains(cmd),
             "the whole command must render unclipped:\n{text}"
@@ -4016,6 +4041,81 @@ mod tests {
         terminal = render(&mut app, 80, 20);
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▾", "the toggle flips");
+    }
+
+    #[test]
+    fn the_transcript_centers_its_measure_on_a_wide_band() {
+        // 120 cols: the measure (68) is centered — a 26-col margin each side.
+        let mut app = App::new();
+        let text = buffer_text(&render(&mut app, 120, 40));
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        assert_eq!((hit.rect.x, hit.rect.width), (26, 68), "a centered measure");
+        // The content is indented by the pad: the `❯` gutter moves from col 3
+        // to col 29; the margin to its left is blank.
+        let first = text.lines().next().unwrap_or_default();
+        assert_eq!(
+            first.chars().nth(29),
+            Some('❯'),
+            "the content is indented by the pad:\n{text}"
+        );
+        assert_eq!(first.chars().nth(3), Some(' '), "the margin is blank:\n{text}");
+
+        // 80 cols: below the threshold — the content rides the gutter.
+        let mut app = App::new();
+        let text = buffer_text(&render(&mut app, 80, 24));
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        assert_eq!(
+            (hit.rect.x, hit.rect.width),
+            (0, 80),
+            "full width below the threshold"
+        );
+        let first = text.lines().next().unwrap_or_default();
+        assert_eq!(
+            first.chars().nth(3),
+            Some('❯'),
+            "the content is at the gutter:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_measure_threshold_flips_at_84() {
+        // 83 cols → the full band width; 84 → the 68-col measure centers (pad 8).
+        let mut app = App::new();
+        let _ = render(&mut app, 83, 24);
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        assert_eq!((hit.rect.x, hit.rect.width), (0, 83), "83 → full width");
+
+        let mut app = App::new();
+        let _ = render(&mut app, 84, 24);
+        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+        assert_eq!((hit.rect.x, hit.rect.width), (8, 68), "84 → centered");
+    }
+
+    #[test]
+    fn a_wide_band_publishes_the_panel_cells_on_the_centered_column() {
+        // The affordance rects must follow the measure column (`col.x`), not the
+        // band's left edge — else clicks land off by `pad`.
+        let mut app = App::new();
+        push_bash_panel(&mut app, "ls", "/w", "ok");
+        let terminal = render(&mut app, 120, 20);
+        let (toggle, copy) = {
+            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
+            assert_eq!(hit.rect.x, 26, "the measure is centered");
+            let a = &hit.affordances[0];
+            (a.toggle, a.copy)
+        };
+        let buf = terminal.backend().buffer();
+        let glyph_col = toggle.x + toggle.width - 1;
+        assert_eq!(
+            buf[(glyph_col, toggle.y)].symbol(),
+            "▸",
+            "the ▸ glyph lands on the published cell"
+        );
+        assert_eq!(
+            buf[(copy.x, copy.y)].symbol(),
+            "▣",
+            "the ▣ cell lands on the published cell"
+        );
     }
 
     // ---- slice 5 (D33): thinking collapses on commit, expands on toggle ----

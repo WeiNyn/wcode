@@ -13,7 +13,9 @@ TUI reads as the same product, given a full screen.
 
 1. **The base is the transcript over the composer.** Transcript (flex) → the
    composer (a head line over a full-width `─` rule, the input, a foot line);
-   the **head and foot lines carry all chrome** (project/branch + session
+   the transcript renders in a **measure** (a ≤68-col content column, centered
+   once the band reaches 84 cols), while the composer stays full-width. The
+   **head and foot lines carry all chrome** (project/branch + session
    left/right on the head, the context gauge left and
    `⏻ plan`/`▤ browse`/state/`↑ N` right on the foot). There is **no session row
    and no separate status row** — the session id is folded into the head line. A
@@ -241,8 +243,13 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 **Layout** — top to bottom (the sidebar, `Ctrl-B`, is an optional left column):
 1. the **transcript** (flex, plain, scrollable; committed assistant messages
    render as markdown — headings, bullets, fenced code, aligned tables, inline
-   `code`/`**bold**`). A **tool** is a panel (params + body); a **thinking**
-   block is a collapsed row until expanded;
+   `code`/`**bold**`). It renders in a **measure** — a content column at most
+   **68 cols** wide, **centered** in its band once the band reaches **84 cols**
+   (a real margin each side); below 84 the content uses the full band width (so
+   an 80-col terminal keeps its `❯` at the gutter). The **composer band is never
+   centered** — it is the one piece of furniture that stays edge-to-edge. A
+   **tool** is a panel (params + body); a **thinking** block is a collapsed row
+   until expanded;
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
    a band: it collapses to nothing when no teammate runs;
