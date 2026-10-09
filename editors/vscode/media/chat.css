@@ -11,6 +11,76 @@
      - ACCENT   --wc-accent means "active now" and nothing else.
    Density is a token switch, not a second design. */
 
+/* ==== SKETCH (review-only, not real code) ====
+   W008 · paper (P1/P2/P3/P4 CSS). The moves, grounded in the spec
+   docs/design/vscode-paper-draft.html and docs/work/W008-paper-vscode-surface.md §4.3.
+   Pure CSS; `node scripts/check-css.mjs` must stay `ok (chat.css)`.
+   NOTE: line refs are the SHIPPED sheet BEFORE this block — it shifts the lines below
+   it; the quoted snippet pins each (D007). (Braces in this block stay BALANCED: the
+   check counts raw `{`/`}`, comments included.)
+
+   :root (media/chat.css:14 `:root`) — the three derived knobs; A6 changes the measure
+   (media/chat.css:31 `  --ed-measure: 66ch;`):
+     --ed-measure: 64ch;                        // A6 (was 66ch)
+     --ed-indent: 1.5em;                        // A5, the first-line indent
+     --ed-read: "Iowan Old Style","Charter","Palatino Linotype","Book Antiqua",
+                Georgia,"Times New Roman",serif; // A1, a LOCAL stack, ZERO requests
+
+   .masthead (media/chat.css:73 `.masthead`) — split: the outer keeps the padding +
+   background; a NEW `.masthead .inner` carries the measure AND the rule (the page's top
+   edge runs to the column — spec `docs/design/vscode-paper-draft.html` `.runninghead .inner`):
+     .masthead { flex: 0 0 auto; padding: var(--wc-3) 0 0; background: var(--vscode-editor-background); }
+     .masthead .inner { max-width: var(--ed-measure); margin: 0 auto;
+       padding: 0 var(--wc-5) var(--wc-2); border-bottom: 1px solid var(--vscode-panel-border); }
+
+   NEW `.folio` (spec `.folio`) — the step count at the row's outer edge, tabular mono:
+     .folio { margin-left: var(--wc-2); padding-left: var(--wc-2);
+       font-family: var(--vscode-editor-font-family); font-size: var(--wc-fs-meta);
+       font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); }
+
+   .body (media/chat.css:220 `.body`) — the reading face + the book rhythm (A1/A5):
+     .body { font-family: var(--ed-read); line-height: 1.75; overflow-wrap: anywhere;
+             text-wrap: pretty; orphans: 2; widows: 2; }
+     .body > p { margin: 0; }                  // REPLACES media/chat.css:225 `.body p { margin: 0 0 var(--wc-2); }`
+     .body > p + p { text-indent: var(--ed-indent); }
+     .body > :not(p) + p { text-indent: 0; margin-top: var(--wc-3); }
+     .body > p + :not(p) { margin-top: var(--wc-3); }
+     .body > p:first-child { text-indent: 0; }
+     .turn.new .body > p:first-child::first-line { font-variant: small-caps; }   // A5 chapter open
+     // DELETE media/chat.css:229 `.body p:last-child { margin-bottom: 0; }` — the indent
+     // rhythm replaces the inter-paragraph margin.
+
+   .code .chead (media/chat.css:411 `.code .chead`) — a small-caps caption (a plate):
+     .code .chead { font-family: var(--vscode-editor-font-family); font-size: var(--wc-fs-meta);
+       letter-spacing: .06em; text-transform: uppercase; color: var(--vscode-descriptionForeground);
+       margin: 0 0 var(--wc-1); }
+     // DROP the current flex/align/gap/padding/background (a caption line, not a bar).
+     // `.code` keeps its fill-only recess; `.code .chead .spacer` becomes moot.
+
+   .liveline (media/chat.css:589 `.liveline`) — cap to the measure (spec `.liveline`):
+     .liveline { … max-width: var(--ed-measure); margin: 0 auto; width: 100%;
+                 padding: 0 var(--wc-4); }   // was `padding: var(--wc-1) var(--wc-5)`
+
+   NEW footnote matter (spec `.fnmark` / `.footnotes` / `.fn-head` / `details.fn-out`) —
+   `.fnmark` (a superscript BUTTON coloured `--vscode-textLink-foreground`, NEVER the
+   accent — it is not "active now"), `.footnotes` (an `<ol>`, `list-style: none`, the SHORT
+   rule `width: 44%; border-top: 1px solid var(--vscode-editorWidget-border)`), `.fn-head`
+   (+ `.n`/`.mark`/`.to`/`.meta`, and the `.add/.del/.run/.fail` colours under `.fn-head
+   .meta`), and `details.fn-out` (+ `summary`, `.chev`, `.inner`).
+
+   .byline (media/chat.css:195 `.byline`) — `letter-spacing: .06em` → `.08em` (spec
+   `.byline`). The head hairline is already absent (W005). `.turn` (media/chat.css:184
+   `.turn { margin: 0 0 var(--wc-3); }`) → `margin: 0`; `.turn.new` (media/chat.css:189)
+   keeps the beat.
+
+   @media (prefers-reduced-motion: reduce) (media/chat.css:738) — the gate ALREADY names
+   `.body.live::after`, `.spin`, `.liveline .dots`; the notes add NO animation. No change.
+
+   RETIRED (P5 sweep): the in-flow tool-fold rules that lose their element — `details.fold.tool
+   > summary` (media/chat.css:303). `.tname`/`.tsum`/`.tmeta` STAY (the note head reuses
+   `toolMeta`); `pre.quote` (media/chat.css:435) STAYS (the note body); `details.fold .inner`
+   STAYS.
+   ==== /SKETCH ==== */
 :root {
   /* --- the wcode system: LENGTHS and TYPE SIZES only, never a colour --- */
   --wc-1: 4px; /* hairline insets, control padding */
@@ -27,8 +97,9 @@
   --wc-radius: 6px; /* the ONE card radius (small adornments round themselves) */
   --wc-accent: var(--vscode-charts-blue); /* the one wcode accent: "active now" */
 
-  /* editorial's one local knob: the reading-column width (derived, not a new token). */
-  --ed-measure: 66ch;
+  /* the local knobs, DERIVED from shipped steps, NOT new tokens */
+  --ed-measure: 64ch; /* the text block's width (A6) */
+  --ed-indent: 1.5em; /* the first-line indent that replaces inter-paragraph space (A5) */
 }
 
 /* Density is a token switch, not a second design — which IS the proof the scale
@@ -69,12 +140,19 @@ body {
 /* ---------------------------------------------------------------- masthead */
 
 /* One quiet line, and a rule. No box, no bar: everything the widget-header
-   shouted, this whispers. The team is a dim caption below, not a sidebar. */
+   shouted, this whispers. The page's TOP EDGE runs to the column, not the
+   viewport, so the head, the text and the writing line share one sheet. */
 .masthead {
   flex: 0 0 auto;
-  padding: var(--wc-3) var(--wc-5) var(--wc-2);
-  border-bottom: 1px solid var(--vscode-panel-border);
+  padding: var(--wc-3) 0 0;
   background: var(--vscode-editor-background);
+}
+
+.masthead .inner {
+  max-width: var(--ed-measure);
+  margin: 0 auto;
+  padding: 0 var(--wc-4) var(--wc-2);
+  border-bottom: 1px solid var(--vscode-panel-border);
 }
 
 .masthead .row1 {
@@ -170,7 +248,7 @@ body {
   flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
-  padding: var(--wc-4) var(--wc-4) var(--wc-5);
+  padding: var(--wc-5) 0;
   display: flex;
   flex-direction: column;
 }
@@ -179,15 +257,20 @@ body {
   width: 100%;
   max-width: var(--ed-measure);
   margin: 0 auto;
+  padding: 0 var(--wc-4);
 }
 
 .turn {
-  margin: 0 0 var(--wc-3);
+  margin: 0;
 }
 
-/* A speaker change is a paragraph break, not a row: a bigger beat. */
+/* A speaker change is a paragraph break: the air, not a rule. */
 .turn.new {
   margin-top: var(--wc-5);
+}
+
+.turn:first-child {
+  margin-top: 0;
 }
 
 /* The byline: small-caps mono, dim. The user's own words are set apart by the type, not
@@ -196,10 +279,10 @@ body {
   display: flex;
   align-items: baseline;
   gap: var(--wc-1);
-  margin: 0 0 var(--wc-1);
+  margin: 0 0 var(--wc-2);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--vscode-descriptionForeground);
 }
@@ -222,12 +305,37 @@ body {
   overflow-wrap: anywhere;
 }
 
-.body p {
-  margin: 0 0 var(--wc-2);
+/* the indent-led rhythm (A5): paragraphs are set solid, a first-line indent separates
+   them; a non-`p` sibling resets it. The first paragraph of a speaker turn is flush. */
+.body > p {
+  margin: 0;
 }
 
-.body p:last-child {
-  margin-bottom: 0;
+.body > p + p {
+  text-indent: var(--ed-indent);
+}
+
+.body > :not(p) + p {
+  text-indent: 0;
+  margin-top: var(--wc-3);
+}
+
+.body > p + :not(p) {
+  margin-top: var(--wc-3);
+}
+
+.body > p:first-child {
+  text-indent: 0;
+}
+
+/* a continuation WITHIN one speaker (a second `.body` sibling) keeps the indent run. */
+.body + .body > p:first-child {
+  text-indent: var(--ed-indent);
+}
+
+/* a chapter open: the first line of a speaker's turn is set in small caps. */
+.turn.new .body > p:first-child::first-line {
+  font-variant: small-caps;
 }
 
 .body code {
@@ -509,16 +617,17 @@ pre.quote {
 
 /* ---------------------------------------------------------------- composer */
 
-/* A field on a page, not a panel: a hairline under a single line of type. */
+/* A field on a page: the rule is the page's BOTTOM edge, so it runs to the column. */
 .composer {
   flex: 0 0 auto;
-  border-top: 1px solid var(--vscode-panel-border);
-  padding: var(--wc-3) var(--wc-5);
+  padding: 0 0 var(--wc-3);
 }
 
 .composer .inner {
   max-width: var(--ed-measure);
   margin: 0 auto;
+  padding: var(--wc-3) var(--wc-4) 0;
+  border-top: 1px solid var(--vscode-panel-border);
   display: flex;
   flex-direction: column;
   gap: var(--wc-2);
@@ -591,7 +700,10 @@ pre.quote {
   display: flex;
   gap: var(--wc-2);
   align-items: baseline;
-  padding: var(--wc-1) var(--wc-5);
+  max-width: var(--ed-measure);
+  margin: 0 auto;
+  width: 100%;
+  padding: 0 var(--wc-4);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
@@ -971,14 +1083,26 @@ textarea::placeholder {
 /* ------------------------------------------------ docked at a sidebar width */
 @media (max-width: 560px) {
   .masthead {
-    padding: var(--wc-2) var(--wc-3);
+    padding: var(--wc-2) 0 0;
+  }
+
+  .masthead .inner {
+    padding: 0 var(--wc-3) var(--wc-2);
+  }
+
+  .col {
+    padding: 0 var(--wc-3);
+  }
+
+  .liveline {
+    padding: 0 var(--wc-3);
   }
 
   .composer {
-    padding: var(--wc-2) var(--wc-3);
+    padding: 0 0 var(--wc-2);
   }
 
-  .stream {
-    padding: var(--wc-3);
+  .composer .inner {
+    padding: var(--wc-2) var(--wc-3) 0;
   }
 }

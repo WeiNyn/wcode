@@ -631,6 +631,28 @@ test("the team caption is keyboard-activatable: a tabindex row whose keydown pos
   assert.match(src, /addEventListener\("keydown"[\s\S]{0,240}?focus-member/, "a keydown posts focus-member");
 });
 
+/* ------------------------------------------------------ the paper sheet */
+
+test("the measure: --ed-measure is 64ch and shared by .col, .masthead .inner, .composer .inner", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /--ed-measure: 64ch/, "the measure is 64ch (A6)");
+  assert.match(css, /\.col \{[^}]*max-width: var\(--ed-measure\)/, ".col shares the measure");
+  assert.match(css, /\.masthead \.inner \{[^}]*max-width: var\(--ed-measure\)/, ".masthead .inner shares it");
+  assert.match(css, /\.composer \.inner \{[^}]*max-width: var\(--ed-measure\)/, ".composer .inner shares it");
+});
+
+test("the indent rhythm: .body > p + p indents; the first paragraph is flush; a continuation runs on", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.body > p \+ p \{[^}]*text-indent: var\(--ed-indent\)/, "paragraphs are indent-led");
+  assert.match(css, /\.body > p:first-child \{[^}]*text-indent: 0/, "the first paragraph is flush");
+  assert.match(
+    css,
+    /\.body \+ \.body > p:first-child \{[^}]*text-indent: var\(--ed-indent\)/,
+    "a continuation within one speaker keeps the run",
+  );
+  assert.match(css, /\.turn\.new \.body > p:first-child::first-line \{[^}]*font-variant: small-caps/, "the chapter open");
+});
+
 /* -------------------------------------------------------- working group */
 
 test("workingGroup: other members that are running or carry a liveAction (the pill's source)", () => {
