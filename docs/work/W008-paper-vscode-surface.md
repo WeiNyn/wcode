@@ -216,6 +216,14 @@ Look for: **one** measure governing the head, the text and the writing line, wit
   2. **The dead `.tsum` is swept** — its only producer (`renderToolFold`) is gone, so the `.tsum` and `details.fold.thinking .tsum` rules go and the two `toolTarget` test names stop naming it. No `.tsum` reference remains under `src/`, `media/` or `test/`. `5808bfa`.
 - **P6 (the F5 visual proof) is the only open step** — a human action; no browser / VS Code host runs here.
 
+### 2026-10-09 — F5 fix: the footnote notes take the full measure
+
+At F5 the footnote apparatus read too tall: the 44% width was on the whole `.footnotes`
+**list**, so a note's output recess wrapped inside 44% and grew tall. The short rule is now
+a `.footnotes::before` separator (44%); the `<ol>` is full width, so the notes fit. The
+view test asserts the RULE is short AND the list is not (it fails if the list regresses to
+44%). `26bc741`.
+
 ## 10. References
 
 - `docs/design/vscode-paper-draft.html` — the refinement's visual spec (the WHAT).
