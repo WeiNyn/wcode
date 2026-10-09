@@ -104,7 +104,33 @@ the inter-paragraph margin in `.body` (the first-line indent replaces it).
 
 Nothing under `docs/` moves (D004 item 58); the wire/kernel is untouched (`src/webview.ts`).
 
-## 5. References
+## 5. W009 — syntax highlighting
+
+The three code-bearing surfaces of the VS Code webview render code as flat escaped text (the
+assistant's fenced blocks, the tool output recess, the tool input/diff body). W009 adds **token
+syntax highlighting**, recorded by [D008](../decisions/D008-host-side-syntax-highlighting.md)
+and the [W009 brief](../work/W009-syntax-highlighting.md).
+
+- **Placement: host-side.** The highlighter is Prism, bundled into the **host** bundle
+  (`out/extension.js`, which already carries `markdown-it`); `src/highlight.ts` is pure. The
+  **webview stays dependency-free** (`src/render.ts:9`, `src/webview.ts:10`, `esbuild.mjs:5`)
+  and `media/chat.js` does not grow — the webview only inserts pre-rendered HTML.
+- **Dependency:** `prismjs` (+ `@types/prismjs` for the build) with a **curated** grammar set
+  (bash, json, javascript, typescript, rust, python, toml, yaml, markdown, css, markup) —
+  matched to wcode's tools and the TUI's bundled syntaxes. **No `Prism.highlightAuto`.**
+- **Colour budget:** the token palette maps Prism's classes to `--vscode-symbolIcon-*`, each
+  with a `--vscode-editor-foreground` fallback; **no new `--wc-*`**, and `--wc-accent` stays
+  the one accent. A missing `--vscode-symbolIcon-*` family degrades to a single colour (the
+  fallback) — F5 must confirm the tokens paint (P6).
+- **Scope:** highlight *inside* the existing plate/recess/card; the layout, the diff
+  backgrounds and the change-review card are unchanged. The kernel/NDJSON wire is untouched
+  (the host→webview `RenderedState` gains two optional fields).
+
+Sequences after W008 (the footnote apparatus) — this change sits inside the footnote markup.
+Steps: P1 the module + dependency, P2 the fence rule, P3 tool output, P4 tool input, P5 the
+palette, P6 the sweep + F5.
+
+## 6. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).
 - `docs/design/vscode-modern-directions.md:86wCa` — §A, the stance and the dials.
