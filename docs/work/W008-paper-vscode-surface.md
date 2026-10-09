@@ -205,7 +205,18 @@ Look for: **one** measure governing the head, the text and the writing line, wit
 
 ---
 
-## 9. References
+## 9. Log
+
+### 2026-10-09 — the paper refinement landed (E0–P5); layer-2 APPROVED
+
+- **Implemented** in six commits: E0 `90211dd` (the record); P1 `348600f` (one measure + the indent rhythm); P2 `47621b1` (the reading face + the code caption); P3 `ca68d99` (the folio); P4 `e8b7dc6` (footnote matter); P5 `5f6343c` (the sweep).
+- **Gates:** `npm run typecheck` → 0; `npm test` → **206 pass / 0 fail** (run serially — the full parallel glob flakes on `test/live.test.ts`); `npm run build` → ok; **zero `SKETCH` markers**; the wire/kernel untouched.
+- **Layer-2 review APPROVED** (no blockers). Two notes folded:
+  1. **The writing line takes the reading face** — `textarea { font-family: var(--ed-read); font-size: var(--wc-fs-body); }`, so the sentence you write looks like the sentence you will read (the `.linkbtn` controls stay mono). `10d6468`.
+  2. **The dead `.tsum` is swept** — its only producer (`renderToolFold`) is gone, so the `.tsum` and `details.fold.thinking .tsum` rules go and the two `toolTarget` test names stop naming it. No `.tsum` reference remains under `src/`, `media/` or `test/`. `5808bfa`.
+- **P6 (the F5 visual proof) is the only open step** — a human action; no browser / VS Code host runs here.
+
+## 10. References
 
 - `docs/design/vscode-paper-draft.html` — the refinement's visual spec (the WHAT).
 - `docs/design/vscode-paper-direction.md` — the stance, dials, moves-with-anchors, the Implementation seam, the type-scale note, the refusals.
