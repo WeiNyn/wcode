@@ -62,6 +62,7 @@ app.innerHTML = [
   '      <span id="ident" class="ident"></span>',
   '      <span class="spacer"></span>',
   '      <span id="status" class="status"></span>',
+  '      <span id="folio" class="folio"></span>',
   '    </div>',
   '    <div id="team" class="team" role="list" aria-label="Team"></div>',
   '  </div>',
@@ -92,6 +93,7 @@ app.innerHTML = [
 ].join("\n");
 const identEl = requireEl("ident");
 const statusEl = requireEl("status");
+const folioEl = requireEl("folio");
 const teamEl = requireEl("team");
 
 const transcriptEl = requireEl("transcript");
@@ -165,6 +167,7 @@ function renderMasthead(state: RenderedState, session: PanelSessionInfo, mode: V
   const { cells } = panelHeader(state, session, mode);
   identEl.textContent = "";
   statusEl.textContent = "";
+  folioEl.textContent = "";
   for (const cell of cells) {
     if (cell.kind === "ident") {
       const glyph = el("span", cell.glyphClass, cell.glyph);
@@ -178,6 +181,8 @@ function renderMasthead(state: RenderedState, session: PanelSessionInfo, mode: V
       if (cell.text !== "") statusEl.appendChild(el("span", "mono", cell.text));
     } else if (cell.kind === "mode") {
       statusEl.appendChild(modeToggle(cell.mode));
+    } else if (cell.kind === "folio") {
+      folioEl.textContent = String(cell.steps);
     }
     // a spacer cell needs no DOM: the skeleton's `.spacer` holds the row's gap
   }

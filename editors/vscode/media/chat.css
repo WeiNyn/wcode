@@ -206,6 +206,16 @@ body {
   gap: var(--wc-2);
 }
 
+/* The folio (A3): the STEP count at the row's outer edge — the page number. */
+.folio {
+  margin-left: var(--wc-2);
+  padding-left: var(--wc-2);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+}
+
 /* The dim team caption (draft `.team`): one `.m` per member. */
 .masthead .team {
   margin-top: var(--wc-1);

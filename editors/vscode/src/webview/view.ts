@@ -26,7 +26,7 @@ export function stateLabel(state: SessionState): string {
 }
 
 /** One cell of the ONE-row panel header (draft `.bar > *`). */
-export type HeaderCell = IdentCell | SpacerCell | MeterCell | ModeCell;
+export type HeaderCell = IdentCell | SpacerCell | MeterCell | ModeCell | FolioCell;
 
 /** The identity cell (draft `.ident`): the state glyph + the member NAME (a byline, not a chip). */
 export interface IdentCell {
@@ -60,6 +60,13 @@ export interface MeterCell {
   word: string;
   /** The plain numerator-only text (`ctx 42k`), or "" when the count is unknown. */
   text: string;
+}
+
+/** The folio (A3): the STEP count at the row's outer edge — the page number. */
+export interface FolioCell {
+  kind: "folio";
+  /** The number of `tool` blocks in `RenderedState.blocks` — the reading position. */
+  steps: number;
 }
 
 /** The ONE glanceable row of the header (draft `header.bar`). */
@@ -113,13 +120,19 @@ function identityGlyph(
   };
 }
 
+/** The folio's number: how many `tool` blocks the transcript holds. Pure. */
+export function folio(blocks: RenderedBlock[]): number {
+  return blocks.filter((block) => block.kind === "tool").length;
+}
+
 /**
  * The masthead as ONE row of cells (draft `.masthead .row1`). Pure.
  *
  * In order: (1) the IDENTITY — the target's (Focus) or the root's (All) state glyph +
  * its display NAME; (2) a spacer; (3) the `.status` — the state WORD (only
- * starting/stopped/crashed) and the plain `ctx N`; (4) the mode text toggle (`ModeCell`).
- * No chip, no All/Focus `.seg`, no gauge, no `▾` disclosure (all dropped, W005).
+ * starting/stopped/crashed) and the plain `ctx N`; (4) the mode text toggle (`ModeCell`);
+ * (5) the folio (`FolioCell`) — the step count at the row's outer edge (A3). No chip, no
+ * All/Focus `.seg`, no gauge, no `▾` disclosure (all dropped, W005).
  */
 export function panelHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): PanelHeader {
   const member = identityMember(state, mode);
@@ -139,6 +152,7 @@ export function panelHeader(state: RenderedState, session: PanelSessionInfo, mod
       { kind: "spacer" },
       { kind: "meter", word: session.state === "ready" ? "" : stateLabel(session.state), text },
       { kind: "mode", mode },
+      { kind: "folio", steps: folio(state.blocks) },
     ],
   };
 }
@@ -285,6 +299,49 @@ export function turns(
   return grouped;
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W008 · footnote matter (A2), pure. The tool blocks LEAVE the flow; this descriptor is
+// what `chat.ts:renderTurn` paints as a `.fnmark` + a `.footnotes` entry. See
+// docs/work/W008-paper-vscode-surface.md §4.2 and docs/design/vscode-paper-draft.html
+// (`.fnmark`, `.footnotes`, `.fn-head`, `details.fn-out`).
+//
+// /** One tool call, printed as a footnote. */
+// export interface TurnNote {
+//   /** The printed reference number (1-based, BLOCK order). */
+//   n: number;
+//   /** The tool's callId — the note's DOM id + the fold override key. */
+//   callId: string;
+//   /** → the note head's `.mark` (`⚙ {name}`). */
+//   name: string;
+//   /** → the note head's `.to` (`tool.target ?? tool.summary`); "" omits the span. */
+//   target: string;
+//   /** → the note body's bare recess (`rawOutput`'s text). */
+//   outputText: string;
+//   done: boolean;
+//   isError: boolean;
+//   /** A diff-bearing tool: the note body is the `.review` card (non-scope, unchanged). */
+//   hasDiff: boolean;
+//   /** The source row — so the DOM builder reuses `toolMeta`/`rawOutput`/`reviewBlock`. */
+//   tool: RenderedTool;
+// }
+//
+// /**
+//  * The turn's footnote descriptors, in BLOCK order, one per `tool` block. Pure.
+//  *
+//  * Does NOT promise: it does not paint, and it does not decide the note's `open` — that
+//  * is the fold override (`foldOpen` view.ts:513 / `toggleFold` view.ts:522, keyed by
+//  * `callId`), so the open state survives `render`'s `textContent = ""` rebuild.
+//  * Non-`tool` blocks are NOT returned — the caller keeps them in the flow.
+//  */
+// export function turnNotes(blocks: RenderedBlock[]): TurnNote[] { todo!() }
+//
+// // The import at view.ts:10 (`import type { RenderedBlock, RenderedState } from
+// // "../render.ts";`) gains `RenderedTool` (the `tool` field's type).
+// // FLAG (§9, "not a fact"): the `.fnmark` cannot be injected INSIDE a prose node —
+// // the prose is one pre-rendered HTML string (`render.ts:143` renderContent, set by
+// // `blockShell` chat.ts:256 `node.innerHTML = block.html`). So the mark is emitted as a
+// // SIBLING at the tool block's POSITION in the turn's block order, NOT mid-sentence.
+// ==== /SKETCH ====
 /** The member a turn is labeled by — the All-mode resolver's answer, or Focus's fallback. */
 export interface TurnMember {
   name: string;

@@ -19,6 +19,7 @@ import {
   emptySpec,
   foldOpen,
   formatTokens,
+  folio,
   livelineLabel,
   panelHeader,
   isActivationKey,
@@ -85,13 +86,13 @@ test("panelHeader: ONE row — identity, spacer, ctx meter, the mode toggle (no 
   const state = headerState("idle", { status: { running: false, planMode: false, contextUsed: 42_000 } });
   assert.deepEqual(
     panelHeader(state, session(), "focus").cells.map((c) => c.kind),
-    ["ident", "spacer", "meter", "mode"],
+    ["ident", "spacer", "meter", "mode", "folio"],
   );
   // No `contextUsed` ⇒ the meter cell is still there, its text empty (the word lives on it).
   const bare = panelHeader(headerState("idle"), session(), "focus").cells;
   assert.deepEqual(
     bare.map((c) => c.kind),
-    ["ident", "spacer", "meter", "mode"],
+    ["ident", "spacer", "meter", "mode", "folio"],
   );
   assert.equal(meterOf(headerState("idle"), session()).text, "", "no count ⇒ no `ctx N` text");
 });
@@ -671,6 +672,26 @@ test("the code caption: .code .chead is a small-caps caption line", () => {
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
   assert.match(css, /\.code \.chead \{[^}]*text-transform: uppercase/, "the caption is set small");
   assert.match(css, /\.code \.chead \{[^}]*letter-spacing/, "with tracking");
+});
+
+test("folio: panelHeader's folio cell counts the TOOL blocks (3 tools -> steps === 3)", () => {
+  const rendered: RenderedState = {
+    blocks: [aTool(), { kind: "assistant", html: "", live: false }, aTool(), aTool()],
+    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true }],
+    todos: [],
+    status: { running: false, planMode: false },
+    target: null,
+  };
+  assert.equal(folio(rendered.blocks), 3, "the folio counts TOOL blocks only");
+  const cells = panelHeader(rendered, session(), "focus").cells;
+  const cell = cells.find((c) => c.kind === "folio");
+  assert.equal(cell?.kind === "folio" ? cell.steps : -1, 3, "the folio cell carries the count");
+  assert.equal(cells[cells.length - 1]?.kind, "folio", "the folio is pushed LAST");
+});
+
+test("folio: a transcript with no tool block reads 0", () => {
+  assert.equal(folio([{ kind: "assistant", html: "", live: false }]), 0);
+  assert.equal(folio([]), 0);
 });
 
 /* -------------------------------------------------------- working group */
