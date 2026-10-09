@@ -379,18 +379,14 @@ test("toolStatus: the exceptions carry a glyph + word; complete is quiet", () =>
   assert.equal(toolStatus({ done: true, isError: true }).glyph, memberGlyph("failed").glyph);
 });
 
-test("the three tool-status colours live on the ⚙ mark (complete neutral, running accent, error red)", () => {
+test("the footnote head carries the tool status (complete neutral; running accent; error red)", () => {
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-  assert.match(css, /\.tname \{[^}]*color: var\(--vscode-foreground\)/, "complete: the ⚙ mark is NEUTRAL");
+  assert.match(css, /\.fn-head \.mark \{[^}]*color: var\(--vscode-foreground\)/, "complete: the ⚙ mark is NEUTRAL");
+  assert.match(css, /\.tmeta \.run \{[^}]*color: var\(--wc-accent\)/, "running: the meta is accent (BLUE)");
   assert.match(
     css,
-    /details\.fold\.tool\[data-live="1"\] \.tname \{[^}]*color: var\(--wc-accent\)/,
-    "running: the ⚙ mark is accent (BLUE)",
-  );
-  assert.match(
-    css,
-    /details\.fold\.tool\.error \.tname \{[^}]*color: var\(--vscode-errorForeground\)/,
-    "error: the ⚙ mark is RED",
+    /\.tmeta \.fail \{[^}]*color: var\(--vscode-errorForeground\)/,
+    "error: the meta is RED",
   );
 });
 
