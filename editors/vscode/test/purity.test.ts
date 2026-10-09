@@ -24,6 +24,7 @@ for (const file of [
   "diff.ts",
   "review.ts",
   "startup.ts",
+  "highlight.ts",
   "webview/view.ts",
 ]) {
   test(`${file} imports no host and no I/O`, () => {

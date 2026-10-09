@@ -116,11 +116,13 @@
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.1.0",
+    "prismjs": "^1.29.0"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.10.0",
+    "@types/prismjs": "^1.26.6",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
