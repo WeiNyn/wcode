@@ -174,7 +174,8 @@ impl SessionHandle {
     /// [`AgentEvent::Ack`], or [`AgentEvent::Error`]). It also works for
     /// `Submit`, replying when the run completes. Interrupts
     /// (`Interrupt`/`Wake`/`Cancel`) want no reply — use `send`; an `ask` on one
-    /// is deferred like any command while a run is in flight.
+    /// still lands mid-run (the actor answers it `Ack`), so a server-side `cancel`
+    /// is never deferred.
     ///
     /// Fails only if the session has shut down.
     pub async fn ask(&self, request: Request) -> Result<AgentEvent, SessionClosed> {
@@ -496,10 +497,23 @@ async fn run(
                     continue;
                 }
                 match message {
+                    // The interrupt verbs (Cancel / Notify-Interrupt / Wake) want NO reply —
+                    // but the server delivers EVERY request via `ask` (`server.rs`), so handle
+                    // them for BOTH `Tell` and `Ask`, or an `Ask{Cancel}` falls through to
+                    // `deferred` and is queued until the run ENDS: the interrupt never lands.
+                    // An `Ask` gets its `Ack`; a `Tell` needs none.
                     Message::Tell {
                         request: Request::Cancel,
                         ..
                     } => cancel.cancel(),
+                    Message::Ask {
+                        request: Request::Cancel,
+                        reply,
+                        ..
+                    } => {
+                        cancel.cancel();
+                        let _ = reply.send(AgentEvent::Ack);
+                    }
                     Message::Tell {
                         request: Request::Notify { content } | Request::Interrupt { content },
                         from,
@@ -511,6 +525,19 @@ async fn run(
                             content,
                         });
                     }
+                    Message::Ask {
+                        request: Request::Notify { content } | Request::Interrupt { content },
+                        from,
+                        reply,
+                    } => {
+                        let from = from.unwrap_or_else(SessionId::user);
+                        let _ = steer.send(AgentMessage::user_text(tag(&from, &content)));
+                        let _ = events.send(AgentEvent::MessageReceived {
+                            from,
+                            content,
+                        });
+                        let _ = reply.send(AgentEvent::Ack);
+                    }
                     Message::Tell {
                         request: Request::Wake { content },
                         from,
@@ -521,6 +548,19 @@ async fn run(
                             from,
                             content,
                         });
+                    }
+                    Message::Ask {
+                        request: Request::Wake { content },
+                        from,
+                        reply,
+                    } => {
+                        let from = from.unwrap_or_else(SessionId::user);
+                        let _ = follow_up.send(AgentMessage::user_text(tag(&from, &content)));
+                        let _ = events.send(AgentEvent::MessageReceived {
+                            from,
+                            content,
+                        });
+                        let _ = reply.send(AgentEvent::Ack);
                     }
                     // Read-only queries are answered mid-run from the context
                     // snapshot `run_loop` republishes each turn — a `/btw` or
@@ -784,6 +824,39 @@ mod tests {
                 .expect("open");
             if matches!(event, AgentEvent::MessageUpdate { .. }) {
                 handle.send(Request::Cancel).unwrap();
+                break;
+            }
+        }
+        // Without a live cancel this would time out on the pending stream.
+        wait_for_end(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn ask_cancel_aborts_an_in_flight_run() {
+        // The server delivers EVERY request via `ask`; an `Ask{Cancel}` must abort the run
+        // mid-flight, NOT be deferred to its end (the bug this fixes). One delta, then a
+        // hang: only a live cancel ends the run.
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            let head = futures::stream::iter(vec![LlmStreamEvent::TextDelta("part".into())]);
+            Box::pin(head.chain(futures::stream::pending())) as LlmStream
+        });
+        let handle = SessionActor::spawn(Agent::new(agent_config(stream_fn, vec![])));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event")
+                .expect("open");
+            if matches!(event, AgentEvent::MessageUpdate { .. }) {
+                // ASK for the cancel: deferred, this hangs and the 2 s timeout fires (the
+                // pre-fix failure); handled, it replies `Ack` at once.
+                let reply = tokio::time::timeout(Duration::from_secs(2), handle.ask(Request::Cancel))
+                    .await
+                    .expect("the cancel ask is answered mid-run, not deferred")
+                    .unwrap();
+                assert!(matches!(reply, AgentEvent::Ack), "{reply:?}");
                 break;
             }
         }
