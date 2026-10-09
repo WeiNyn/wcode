@@ -743,7 +743,8 @@ test("the footnote matter is declared: .fnmark / .footnotes / .fn-head / details
   assert.match(css, /\.footnotes \{/, ".footnotes");
   assert.match(css, /\.fn-head \{/, ".fn-head");
   assert.match(css, /details\.fn-out \{/, "details.fn-out");
-  assert.match(css, /\.footnotes \{[^}]*width: 44%/, "the SHORT rule (44%)");
+  assert.match(css, /\.footnotes::before \{[^}]*width: 44%/, "the RULE is short (44%)");
+  assert.ok(!/\.footnotes \{[^}]*width: 44%/.test(css), "the NOTES are full width — the output fits");
 });
 
 /* -------------------------------------------------------- working group */

@@ -492,14 +492,20 @@ pre.quote {
 
 .footnotes {
   margin: var(--wc-4) 0 0;
-  padding: var(--wc-2) 0 0;
-  border-top: 1px solid var(--vscode-editorWidget-border);
-  /* the rule is SHORT: the classic footnote separator, not a full-width divider */
-  width: 44%;
   list-style: none;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
+}
+
+/* The RULE is SHORT (44%) — the classic footnote separator, not a full-width divider — but
+   the NOTES are not: a note's output recess must use the full measure or it grows tall. */
+.footnotes::before {
+  content: "";
+  display: block;
+  width: 44%;
+  margin: 0 0 var(--wc-2);
+  border-top: 1px solid var(--vscode-editorWidget-border);
 }
 
 .footnotes > li {
