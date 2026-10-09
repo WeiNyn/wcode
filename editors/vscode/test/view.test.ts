@@ -762,6 +762,8 @@ test("workingGroup: other members that are running or carry a liveAction (the pi
   assert.equal(group.rows[0].name, "w1");
   assert.equal(group.rows[0].running, true);
   assert.equal(group.rows[0].action, "edit src/f.rs");
+  assert.equal(group.rows[0].glyph, memberGlyph("running").glyph, "the foot line's glyph");
+  assert.equal(group.rows[0].glyphClass, memberGlyph("running").className);
   assert.equal(group.rows[1].running, false);
   assert.equal(group.rows[1].action, "grep onOpenDiff");
 });
@@ -813,8 +815,8 @@ test("teamCaption: one row per member; the glyph is memberGlyph(state) for EVERY
   assert.equal(caption[0].className, "m", "no swatch edge; not the target");
   assert.equal(caption[1].className, "m sel", "the target carries `sel` (the retarget affordance)");
   assert.equal(caption[0].name, "orchestrator");
-  assert.equal(caption[1].action, "grep onOpenDiff", "the liveAction wins");
-  assert.equal(caption[3].action, "idle", "the action falls back to the state word");
+  assert.equal(caption[1].state, "done", "the row carries its MemberState");
+  assert.equal(caption[3].state, "idle", "…for the title/aria word");
 });
 
 test("panelHeader: no member-count cell remains on the masthead (the team is a caption now)", () => {

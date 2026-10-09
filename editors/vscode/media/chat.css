@@ -146,12 +146,14 @@ body {
   color: var(--vscode-descriptionForeground);
 }
 
-/* The dim team caption (draft `.team`): one `.m` per member. */
+/* The team roster (Option 4): a WRAPPING strip of `glyph name` PAIRS, root first, each a
+   keyed retarget control. The action is NOT here — it is at the transcript's foot. */
 .masthead .team {
   margin-top: var(--wc-1);
   display: flex;
   flex-wrap: wrap;
-  gap: var(--wc-3);
+  gap: var(--wc-2);
+  line-height: 1;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
@@ -178,8 +180,10 @@ body {
   font-weight: 600;
 }
 
-.masthead .team .act {
-  opacity: 0.7;
+/* the target pair is UNDERLINED (no new colour) */
+.masthead .team .m.sel .glyph,
+.masthead .team .m.sel .nm {
+  text-decoration: underline;
 }
 
 /* ----------------------------------------------------- transcript + turns */
@@ -730,6 +734,23 @@ details.fn-out .inner pre {
 
 .liveline[hidden] {
   display: none;
+}
+
+.liveline .row {
+  display: flex;
+  gap: var(--wc-2);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.liveline .who {
+  color: var(--vscode-foreground);
+}
+
+.liveline .what {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .liveline .dots {

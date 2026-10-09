@@ -498,9 +498,13 @@ export interface WorkingRow {
   id: string;
   /** Display name; the ROOT reads as "orchestrator" (mirrors `reducer.displayLabel`). */
   name: string;
-  /** True when the row's member is `state === "running"` (→ `.g-run`). */
+  /** True when the row's member is `state === "running"` (→ `.g-run` ` spin`). */
   running: boolean;
-  /** The dim right-hand text (the member's `liveAction`). */
+  /** → the foot detail line's leading glyph (`⠋` / `✓` / `✗` / `○`). */
+  glyph: string;
+  /** → its class (`g-run` / `g-done` / `g-err` / `g-idle`). */
+  glyphClass: string;
+  /** The member's `liveAction` (the foot detail line's `.what`); "" when it has none. */
   action: string;
   /** The member's identity swatch (roster order) — kept on the row; no avatar consumes it now. */
   swatch: MemberSwatch;
@@ -542,10 +546,13 @@ export function workingGroup(members: SessionMember[], targetId: string | null):
     if (member.id === targetId) return;
     if (member.state !== "running" && member.liveAction === undefined) return;
     const name = member.isRoot ? "orchestrator" : member.label;
+    const glyph = memberGlyph(member.state);
     rows.push({
       id: member.id,
       name,
       running: member.state === "running",
+      glyph: glyph.glyph,
+      glyphClass: glyph.className,
       action: member.liveAction ?? "",
       swatch: memberSwatch(index, member.isRoot),
       initial: memberInitial(name, member.isRoot),
@@ -619,8 +626,9 @@ export interface CaptionRow {
   /** → the state glyph (`⠋ ✓ ✗ ○`), from `memberGlyph(row.state)`. */
   glyph: string;
   name: string;
-  /** → the dim `.act` text (`row.liveAction ?? row.state`). */
-  action: string;
+  /** → the pair's `title`/`aria-label` state word (`running` / `idle` / `done` / `failed`).
+   *  The ACTION is NOT on the row — it lives at the transcript's foot (the liveline). */
+  state: MemberState;
 }
 
 /**
@@ -641,7 +649,7 @@ export function teamCaption(rows: RosterItem[], targetId: string | null): Captio
       glyphClass: glyph.className,
       glyph: glyph.glyph,
       name: row.label,
-      action: row.liveAction ?? row.state,
+      state: row.state,
     };
   });
 }

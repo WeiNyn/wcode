@@ -221,11 +221,14 @@ function renderCaption(state: RenderedState): void {
   for (const row of rows) {
     const node = el("span", row.className);
     node.setAttribute("role", "listitem");
-    // The caption row is the retarget affordance, so it carries a KEY, not just a click.
+    // The pair is the retarget affordance, so it carries a KEY, not just a click.
     node.tabIndex = 0;
-    node.appendChild(el("span", `glyph ${row.glyphClass}`, row.glyph));
-    node.appendChild(document.createTextNode(`${row.name} `));
-    node.appendChild(el("span", "act", row.action));
+    node.title = `${row.name} · ${row.state}`;
+    node.setAttribute("aria-label", `${row.name}, ${row.state}`);
+    const glyph = el("span", `glyph ${row.glyphClass}`, row.glyph);
+    glyph.setAttribute("aria-hidden", "true");
+    node.appendChild(glyph);
+    node.appendChild(el("span", "nm", row.name));
     node.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
     node.addEventListener("keydown", (event) => {
       if (!isActivationKey(event.key)) return;
@@ -466,13 +469,34 @@ function renderLiveline(state: RenderedState): void {
   }
   livelineEl.hidden = false;
   livelineEl.textContent = "";
+  // exactly ONE active member: the glyph + its name + what it is doing.
+  if (group.count === 1) {
+    const row = group.rows[0];
+    const line = el("span", "row live-one");
+    const glyph = el("span", `glyph ${row.glyphClass}${row.running ? " spin" : ""}`, row.glyph);
+    glyph.setAttribute("aria-hidden", "true");
+    line.appendChild(glyph);
+    line.appendChild(el("span", "who", row.name));
+    if (row.action !== "") {
+      const dot = el("span", null, "·");
+      dot.setAttribute("aria-hidden", "true");
+      line.appendChild(dot);
+      line.appendChild(el("span", "what", row.action));
+    }
+    livelineEl.appendChild(line);
+    livelineEl.setAttribute("aria-label", row.action === "" ? row.name : `${row.name} · ${row.action}`);
+    return;
+  }
+  // several: the aggregate count.
+  const line = el("span", "row live-count");
   const dots = el("span", "dots", "⋯");
   dots.setAttribute("aria-hidden", "true");
-  livelineEl.appendChild(dots);
+  line.appendChild(dots);
   const label = el("span", "lbl");
   label.appendChild(el("b", null, String(group.count)));
   label.appendChild(document.createTextNode(" working"));
-  livelineEl.appendChild(label);
+  line.appendChild(label);
+  livelineEl.appendChild(line);
   livelineEl.setAttribute("aria-label", livelineLabel(group.count));
 }
 
