@@ -1,8 +1,9 @@
-# VS Code paper surface — the team list: three options
+# VS Code paper surface — the team list: four options (option 4 chosen)
 
 - **Status:** proposal, for a human to react to. **Not authorized** — nothing
   under `editors/vscode/` is touched and no spec is amended.
-- **Prototype:** [`vscode-team-options.html`](vscode-team-options.html) — self-contained; the toolbar switches the three placements.
+- **Prototype:** [`vscode-team-options.html`](vscode-team-options.html) — self-contained; the toolbar switches the four placements (`imprint` / `cast` / `margin` / **`glyph`**).
+- **Chosen:** the human picked the compact **glyph row + foot action** (Option 4). This note records it.
 - **Shipped surface:** the paper page (W008) — `editors/vscode/media/chat.css`,
   `src/webview/chat.ts`, `src/webview/view.ts`.
 - **History:** v3 gave the team a permanent rail; W005/D006 removed it and the
@@ -126,13 +127,103 @@ already the turn headings.
 - CSS: `.stream`/`.col` (`chat.css:wKAYF`) gain a margin; a narrow fallback in
   the shipped `@media` block (`chat.css:1106`).
 
-## Comparison
+## Option 4 · Glyph row + foot action — CHOSEN
+
+**Stance (one line):** the roster is a **strip of state glyphs** — one glyph per
+member, root first — and the member's *action* leaves the roster for the
+transcript's foot, where the live line already sits.
+
+**What it looks like.** Two moves.
+
+**Move 1 — the roster is a glyph row** (compact, one line, minimal height
+regardless of team size):
+
+```
+  ⣿ orchestrator            ctx 42k   All Focus        12
+  ⣿ ⣿ ○ ✓                           ← the roster: one state glyph per member, root first
+  ─────────────────────────────────────────
+```
+
+Hover a glyph and its `title` names the member and its action
+(`explorer · grep onOpenDiff`); the targeted member's glyph is underlined.
+
+**Move 2 — the action lives at the transcript's foot.** The liveline carries
+*what the active member is doing*, and falls back:
+
+```
+  ⣿ explorer · grep onOpenDiff      ← exactly one running member
+  ⋯ 2 working                       ← several running
+  (hidden)                            ← nothing running
+```
+
+**The exact markup.**
+
+```html
+<!-- the glyph row (in the masthead, under row1) -->
+<div class="team" role="list" aria-label="Team">
+  <span class="m sel" role="listitem" tabindex="0"
+        title="orchestrator · editing chat.css"
+        aria-label="orchestrator, running: editing chat.css">
+    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+  </span>
+  <span class="m" role="listitem" tabindex="0"
+        title="explorer · grep onOpenDiff"
+        aria-label="explorer, running: grep onOpenDiff">
+    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+  </span>
+  <!-- ○ idle · ✓ done · ✗ failed, root first -->
+</div>
+
+<!-- the foot action (the liveline, role="status") -->
+<div class="liveline" role="status">
+  <span class="row live-count"><span class="dots" aria-hidden="true">⋯</span><span><b>2</b> working</span></span>
+  <span class="row live-one">
+    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+    <span class="who">explorer</span>
+    <span aria-hidden="true">·</span>
+    <span class="what">grep onOpenDiff</span>
+  </span>
+</div>
+```
+
+**The CSS shape.** `.team` is a flex row with `gap:var(--wc-2)` and `line-height:1`
+(one line, no name column); `.m` keeps its hover/focus/`.sel`; `.sel` underlines
+the glyph (no new colour). The liveline swaps its one child on the mode: the count
+row (`{n} working`) or the detail row (`glyph name · action`) — one `·`, and
+`role="status"` announces the text (the glyph and the `·` are `aria-hidden`).
+
+**What it costs.**
+- **Space:** one tiny line, **flat regardless of team size** — the smallest of
+  the four. **Discoverability:** lowest — a glyph row shows *state*, not names;
+  the name + action need a hover (or the foot line). **Retarget:** the glyphs
+  (the key stays: `tabindex="0"` + Enter/Space).
+- It is still a **status widget** (not page *content*), so it trades some of the
+  paper stance for compactness — the accepted cost of the human's call.
+
+**Touch-points.**
+- **Glyph row:** `chat.ts:renderCaption` (`:KWHuo`) — drop the name text node and
+  the `.act` span, add `title` + `aria-label`. The row shape needs the member's
+  **state** as well as name/action for the `aria-label`: `view.ts:teamCaption`
+  (`:uWZi8`) + `CaptionRow` (`:LXxM3`) gain a state field (`memberGlyph`'s name is
+  already computed, `reducer.ts`). CSS: `.masthead .team` (`chat.css:pLaZr`) and
+  `.m` (`:50gNH`) compress; `.act` (`:2A7UY`) leaves the roster.
+- **Foot action:** `chat.ts:renderLiveline` (`:xAdWz`) — add the one/many branch (a
+  single running member → the detail row; else `{n} working`; zero → hidden).
+  Source: `view.ts:workingGroup` (`:KeUWa`, rows `:MTdZD`) and `livelineLabel`
+  (`:psxWY`); the skeleton `#liveline` (`chat.ts:rY4Ro`). CSS: `.liveline`
+  (`chat.css:ZLzzY`).
+
+**Note.** This supersedes the earlier **cast** recommendation for the *chosen*
+path: the human wants compact + a foot action, not a cast block. The cast remains
+a viable variant if the plan/backlog ever wants the roster as front matter.
+
 
 | | where | carries | space | discoverability | retarget home | width |
 |---|---|---|---|---|---|---|
 | 1 · imprint | head line | glyph + name (+action) | a line, always | highest (first glance) | the rows | safe |
 | 2 · cast | text front matter | glyph + name + role | a top block, then gone | highest on open, none mid-read | the rows | safe |
 | 3 · margin | outer margin | the live action | none in the column | per-turn only | the note | editor only |
+| 4 · glyph (chosen) | head strip | state glyph only | one tiny line | lowest (hover for name + action) | the glyphs | safe |
 
 ## Which fits the paper stance best, and why
 
@@ -154,9 +245,11 @@ their own today.
 
 1. **Now:** ship the **Option 1 improvements** (active-first, drop the redundant
    `.act`) — pure, no DOM change, quieter head.
-2. **Target:** **Option 2, the cast** as the roster's home, keeping the liveline
-   as the live case. This is the one proposal that both removes the strip and
-   respects the single measure.
+2. **Chosen (the human's call): Option 4, the glyph row + the foot action.** The
+   roster becomes a compact strip of state glyphs (root first, keyed retarget,
+   name + action on hover) and the liveline carries the active member's action
+   (`⣿ name · action`), falling back to `{n} working` and to hidden. Steps 1 and
+   3 stay optional.
 3. **Optional:** **Option 3** at editor width only, for a reader who wants the
    state beside the text.
 
@@ -173,6 +266,23 @@ their own today.
 - **Q5.** Is a roster still wanted at all, or are the headings + liveline enough
   (the pure Option-2 answer)?
 
+**Option 4 (chosen) specifics.**
+
+- **Q6.** The glyph row is **width-safe for one line** only while the team is
+  small; with many members it wraps. Cap it (e.g. the first N glyphs + a `+N`), or
+  let it wrap?
+- **Q7.** The foot-action predicate: the shipped `workingGroup` **excludes the
+  target** (`view.ts:KeUWa`) and counts a member with a `liveAction` even when not
+  running. Should the one/many branch consider *all* running members (the target
+  included), or keep the peer-only rule?
+- **Q8.** Is the name in the detail line the display label (`explorer`) or the id
+  (`w1`)? The brief's example uses `w1`.
+- **Q9.** Hover `title` is mouse-only; the `aria-label` carries name + state +
+  action for SR. Should the glyph row also open a focus-visible name (one line),
+  or is the hover-only name an accepted cost of "compact"?
+- **Q10.** Does the targeted member's mark (the glyph underline) read at 80 cols
+  beside `.sel`'s old name-bold treatment?
+
 ## Facts NOT verified
 
 - **No browser and no VS Code host were run.** The prototype was parse-checked
@@ -185,11 +295,15 @@ their own today.
   for the webview's own viewport); the real webview's `@media` governs there.
 - **Not confirmed:** that the cast should be session-scoped; that `.act` should
   leave the roster; that the retarget key can move without a keymap change.
+- **The glyph mode is illustrative:** the foot action is a static example, not
+  wired to a run; the four glyphs and their titles are hand-set. The one/many
+  branch, the state field on `CaptionRow`, and the wrap/cap question are not
+  resolved.
 - **Not touched:** `editors/vscode/**` and every spec doc — this is a proposal.
 
 ## References
 
-- [`vscode-team-options.html`](vscode-team-options.html) — the three placements, switchable.
+- [`vscode-team-options.html`](vscode-team-options.html) — the four placements, switchable (`glyph` is the chosen one).
 - [`vscode-paper-direction.md`](vscode-paper-direction.md) — the paper stance, dials and refusals.
 - `editors/vscode/media/chat.css` (`.masthead .team:pLaZr`, `.m:pLaZr`/`:50gNH`, `.act:2A7UY`, `.folio:E4MMN`, `.stream:wKAYF`).
 - `editors/vscode/src/webview/chat.ts` (skeleton `:Bnfe4`, `#team:6Rpsp`, `renderMasthead:T33oI`, `renderCaption:KWHuo`, `mastheadSignature:L284G`).

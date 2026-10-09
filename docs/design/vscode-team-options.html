@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>wcode · paper surface · the team list: three options</title>
+<title>wcode · paper surface · the team list: four options</title>
 <style>
 /* ============================================================================
    wcode · paper surface · THE TEAM LIST — three options (prototype)
@@ -158,13 +158,35 @@ body{
 /* ------------ option 3 · MARGIN (marginalia, beside the turn it belongs to) */
 .mnote{ display:none; }
 
+/* ------------ option 4 · GLYPH ROW (chosen): one state glyph per member, root first.
+   Compact (one line, minimal height regardless of team size); the member's name +
+   action ride the `title`; the retarget key stays (focusable + Enter/Space). */
+.glyphrow{
+  margin-top:var(--wc-1); display:flex; flex-wrap:wrap; gap:var(--wc-2);
+  align-items:baseline; line-height:1;
+}
+.glyphrow .m{ display:inline-flex; padding:0 1px; }
+.glyphrow .m .glyph{ font-size:var(--wc-fs-ui); }
+.glyphrow .m.sel .glyph{ text-decoration:underline; text-underline-offset:2px; }
+/* move 2: the foot action — one running member gets the detail line, else the count */
+.liveline .row.live-one{ display:none; }
+.liveline .who{ color:var(--vscode-foreground); }
+
 /* the switch */
 html[data-team="cast"] .imprint,
-html[data-team="margin"] .imprint{ display:none; }
+html[data-team="margin"] .imprint,
+html[data-team="glyph"] .imprint{ display:none; }
+html[data-team="imprint"] .glyphrow,
+html[data-team="cast"] .glyphrow,
+html[data-team="margin"] .glyphrow{ display:none; }
 html[data-team="imprint"] .cast,
-html[data-team="margin"] .cast{ display:none; }
+html[data-team="margin"] .cast,
+html[data-team="glyph"] .cast{ display:none; }
 html[data-team="imprint"] .mnote,
-html[data-team="cast"] .mnote{ display:none; }
+html[data-team="cast"] .mnote,
+html[data-team="glyph"] .mnote{ display:none; }
+html[data-team="glyph"] .liveline .live-one{ display:flex; }
+html[data-team="glyph"] .liveline .live-count{ display:none; }
 
 /* --------------------------------------------------------------- the text */
 .stream{ flex:1 1 auto; overflow:auto; min-height:0; padding:var(--wc-5) 0; }
@@ -237,25 +259,28 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
 <body>
 
 <div class="draft">
-  <h1>wcode · paper surface · the team list: three options</h1>
+  <h1>wcode · paper surface · the team list: four options</h1>
   <p class="sub">
     The roster is the last widget on the page: a dim line of members under the
     running head. It is also the retarget affordance: each row is focusable and
-    opens on Enter/Space. These three options move it, or the state it carries,
-    into the page's own idiom. Switch with the toolbar; the page is identical.
+    opens on Enter/Space. These four options move it, or the state it carries,
+    into the page's own idiom. The <b>glyph row</b> is the chosen one: a compact
+    strip of state glyphs, with the member's action moved to the foot of the
+    transcript. Switch with the toolbar; the page is identical.
   </p>
   <p class="read">Reading this as: a web screen (the VS Code webview), for a developer reading a multi-agent session inside VS Code, in VS Code's own theme-variable language, with the dominant constraint that nothing may be a container that is not content, so the roster must read as page matter, not a status strip.</p>
   <div class="toolbar">
     <button class="tbtn" id="tImprint" aria-pressed="true">imprint</button>
     <button class="tbtn" id="tCast" aria-pressed="false">cast</button>
     <button class="tbtn" id="tMargin" aria-pressed="false">margin</button>
+    <button class="tbtn" id="tGlyph" aria-pressed="false">glyph row</button>
     <span class="spacer" style="flex:1"></span>
     <button class="tbtn" id="tWidth" aria-pressed="false">Dock: editor</button>
   </div>
 </div>
 
 <div class="app" id="app" data-width="editor"
-     role="group" aria-label="wcode: the team list in three placements">
+     role="group" aria-label="wcode: the team list in four placements">
 
   <header class="masthead" role="banner">
     <div class="inner">
@@ -276,6 +301,15 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
         <span class="m" role="listitem" tabindex="0"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer <span class="act">grep onOpenDiff</span></span>
         <span class="m" role="listitem" tabindex="0"><span class="glyph g-idle" aria-hidden="true">○</span>developer <span class="act">waiting</span></span>
         <span class="m" role="listitem" tabindex="0"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span></span>
+      </div>
+
+      <!-- option 4 · GLYPH ROW (chosen): one state glyph per member, ROOT FIRST. The name +
+           action ride the title; the row keeps tabindex + Enter/Space (the retarget key). -->
+      <div class="glyphrow" id="glyphrow" role="list" aria-label="Team">
+        <span class="m sel" role="listitem" tabindex="0" title="orchestrator · editing chat.css" aria-label="orchestrator, running: editing chat.css"><span class="glyph g-run spin" aria-hidden="true">⠋</span></span>
+        <span class="m" role="listitem" tabindex="0" title="explorer · grep onOpenDiff" aria-label="explorer, running: grep onOpenDiff"><span class="glyph g-run spin" aria-hidden="true">⠋</span></span>
+        <span class="m" role="listitem" tabindex="0" title="developer · waiting" aria-label="developer, idle: waiting"><span class="glyph g-idle" aria-hidden="true">○</span></span>
+        <span class="m" role="listitem" tabindex="0" title="reviewer · turn done" aria-label="reviewer, done: turn done"><span class="glyph g-done" aria-hidden="true">✓</span></span>
       </div>
     </div>
   </header>
@@ -316,10 +350,15 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
   </section>
 
   <div class="liveline" role="status">
-    <span class="row">
+    <span class="row live-count">
       <span class="dots" aria-hidden="true">⋯</span>
       <span><b>2</b> working</span>
-      <span>explorer grep onOpenDiff</span>
+    </span>
+    <span class="row live-one">
+      <span class="glyph g-run spin" aria-hidden="true">⠋</span>
+      <span class="who">explorer</span>
+      <span aria-hidden="true">·</span>
+      <span class="what">grep onOpenDiff</span>
     </span>
   </div>
 
@@ -352,13 +391,15 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
   var tImprint = document.getElementById("tImprint");
   var tCast = document.getElementById("tCast");
   var tMargin = document.getElementById("tMargin");
+  var tGlyph = document.getElementById("tGlyph");
   function setTeam(mode, on) {
     root.dataset.team = mode;
-    press([tImprint, tCast, tMargin], on);
+    press([tImprint, tCast, tMargin, tGlyph], on);
   }
   tImprint.addEventListener("click", function () { setTeam("imprint", tImprint); });
   tCast.addEventListener("click", function () { setTeam("cast", tCast); });
   tMargin.addEventListener("click", function () { setTeam("margin", tMargin); });
+  tGlyph.addEventListener("click", function () { setTeam("glyph", tGlyph); });
 
   var tWidth = document.getElementById("tWidth");
   tWidth.addEventListener("click", function () {
