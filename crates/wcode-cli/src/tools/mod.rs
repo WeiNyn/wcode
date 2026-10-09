@@ -308,6 +308,38 @@ mod tests {
         );
     }
 
+    /// Regression (W006 review): the schema scrubber must strip schema
+    /// *keywords*, never property *names*. `webfetch` really does take a
+    /// `format` argument, so the wire schema must still declare it — filtering
+    /// by key name alone silently deleted it from every request.
+    #[test]
+    fn slimming_keeps_a_property_named_like_a_keyword() {
+        let tools = default_tools(
+            &ToolsConfig::default(),
+            &std::env::temp_dir(),
+            background::Background::new(),
+        );
+        let webfetch = tools
+            .iter()
+            .find(|t| t.name() == "webfetch")
+            .expect("webfetch is a core tool");
+        let parameters = webfetch.definition().parameters;
+        let props = &parameters["properties"];
+        assert!(
+            props.get("format").is_some(),
+            "`webfetch` takes a `format` argument; the schema must declare it: {parameters}"
+        );
+        // The sibling property named like a keyword is intact...
+        assert!(props.get("url").is_some(), "{parameters}");
+        assert!(props.get("timeout").is_some(), "{parameters}");
+        // ...while the `format` KEYWORD on `timeout` is still stripped.
+        let text = parameters.to_string();
+        assert!(
+            !text.contains("\"format\":\"uint64\""),
+            "the uint64 format keyword leaked: {text}"
+        );
+    }
+
     #[test]
     fn every_mutating_tool_is_in_the_plan_mode_denylist() {
         // Keep `MUTATING_TOOLS` (plan mode's denylist) in sync with the tools
