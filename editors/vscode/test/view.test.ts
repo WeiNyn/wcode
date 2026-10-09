@@ -593,18 +593,18 @@ test("composerControls: `Stop` shows when a NON-root member is running while the
   assert.equal(composerControls(renderState(initialState(), null)).stop, false, "no run ⇒ no Stop");
 });
 
-test("composerActions: exactly ONE primary action — Send idle / Stop running (inverse)", () => {
-  assert.deepEqual(composerActions(renderState(initialState(), null)), { send: true, stop: false }, "idle -> Send");
+test("composerActions: the Stop is enabled only while a run is in flight", () => {
+  assert.deepEqual(composerActions(renderState(initialState(), null)), { stop: false }, "idle -> no run");
   const running: ViewState = {
     ...initialState(),
     members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true }],
     targeted: "root-1",
     status: { running: true, planMode: false },
   };
-  assert.deepEqual(composerActions(renderState(running, "root-1")), { send: false, stop: true }, "running -> Stop");
+  assert.deepEqual(composerActions(renderState(running, "root-1")), { stop: true }, "running -> Stop enabled");
 });
 
-test("composerActions: a NON-root member running while the root is idle still shows Stop", () => {
+test("composerActions: a NON-root member running while the root is idle still enables Stop", () => {
   const state: ViewState = {
     ...initialState(),
     members: [
@@ -614,15 +614,15 @@ test("composerActions: a NON-root member running while the root is idle still sh
     targeted: "root-1",
     status: { running: false, planMode: false },
   };
-  assert.deepEqual(composerActions(renderState(state, "root-1")), { send: false, stop: true }, "a running worker shows Stop");
+  assert.deepEqual(composerActions(renderState(state, "root-1")), { stop: true }, "a running worker enables Stop");
 });
 
-test("the composer foot has the Send + Stop buttons adjacent, with inverse `hidden`", () => {
+test("the composer foot always shows Send + Stop; Stop is disabled until a run is in flight", () => {
   const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
   const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));
   assert.match(skeleton, /id="send"[^\n]*\n[^\n]*id="cancel"/, "#send then #cancel, adjacent");
-  assert.match(src, /sendBtn\.hidden = actions\.stop/, "#send hides while a run is in flight");
-  assert.match(src, /cancelBtn\.hidden = !actions\.stop/, "#cancel shows only then");
+  assert.match(src, /cancelBtn\.disabled = !actions\.stop/, "Stop is DISABLED while idle, enabled while running");
+  assert.doesNotMatch(src, /cancelBtn\.hidden/, "the Stop is never hidden — it is always present");
 });
 
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {

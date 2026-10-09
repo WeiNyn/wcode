@@ -104,7 +104,7 @@ const transcriptEl = requireEl("transcript");
 const livelineEl = requireEl("liveline");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
-const cancelBtn = requireEl("cancel");
+const cancelBtn = requireEl("cancel") as HTMLButtonElement;
 const mActEl = requireEl("mAct");
 const mPlanEl = requireEl("mPlan");
 const cattachEl = requireEl("cattach");
@@ -574,13 +574,10 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
   for (const segment of controls.segments) {
     (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
   }
-  // ONE primary action in ONE slot (W005 follow-up): `Send` at idle, `Stop` while a run is in
-  // flight — the SAME slot (inverse `hidden`), and the interrupt reads in the accent so it is
-  // unmistakable. Both carry `.composer .foot .send { margin-left: auto }`, so whichever is
-  // shown stays right-aligned — the swap never shifts the layout.
+  // The Stop control is ALWAYS present so it is findable (a mid-run-only button is easy to
+  // miss); it is DISABLED while idle and enabled + accented while a run is in flight.
   const actions = composerActions(state);
-  sendBtn.hidden = actions.stop;
-  cancelBtn.hidden = !actions.stop;
+  cancelBtn.disabled = !actions.stop;
 }
 
 function ctxChip(context: SelectionContext): HTMLElement {

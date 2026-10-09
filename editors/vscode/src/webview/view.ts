@@ -481,11 +481,10 @@ export interface ComposerControls {
   stop: boolean;
 }
 
-/** Which of the composer's TWO primary controls is SHOWN — exactly one (W005 follow-up). The
- *  pair shares ONE slot: idle shows `Send`, a run in flight shows `Stop`. Pure. */
-export function composerActions(state: RenderedState): { send: boolean; stop: boolean } {
-  const stop = composerControls(state).stop;
-  return { send: !stop, stop };
+/** Whether a run is in flight — the Stop control is ENABLED only then. The Stop is always
+ *  present (findable), dimmed while idle and accented while a run is in flight. Pure. */
+export function composerActions(state: RenderedState): { stop: boolean } {
+  return { stop: composerControls(state).stop };
 }
 
 export function composerControls(state: RenderedState): ComposerControls {
