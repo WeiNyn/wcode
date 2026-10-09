@@ -26,6 +26,7 @@ import {
   emptyKind,
   emptySpec,
   foldOpen,
+  isActivationKey,
   livelineLabel,
   panelHeader,
   bodyKind,
@@ -212,10 +213,17 @@ function renderCaption(state: RenderedState): void {
   for (const row of rows) {
     const node = el("span", row.className);
     node.setAttribute("role", "listitem");
+    // The caption row is the retarget affordance, so it carries a KEY, not just a click.
+    node.tabIndex = 0;
     node.appendChild(el("span", `glyph ${row.glyphClass}`, row.glyph));
     node.appendChild(document.createTextNode(`${row.name} `));
     node.appendChild(el("span", "act", row.action));
     node.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
+    node.addEventListener("keydown", (event) => {
+      if (!isActivationKey(event.key)) return;
+      event.preventDefault();
+      post({ kind: "focus-member", id: row.id });
+    });
     teamEl.appendChild(node);
   }
 }
@@ -250,7 +258,6 @@ function blockShell(block: RenderedBlock): HTMLElement {
   // "body notice" / …), so there is no outer wrap + nested `.body`. No `.role`
   // line either — the `.byline` line is per-TURN now.
   const node = el("div", classNames(block));
-  if (block.live) node.dataset.live = "1"; // the newest live step (the running fold / live block)
   node.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
   return node;
 }

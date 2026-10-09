@@ -565,6 +565,11 @@ export interface CaptionRow {
  * The team caption rows, ready to paint (draft `.team`). Pure. Identity is the NAME; the
  * glyph's colour is STATE. There is NO `--sw` edge (the swatches are dropped) and NO `meta`.
  */
+/** The caption row's activation keys: Enter or Space (it is a `tabindex="0"` element). Pure. */
+export function isActivationKey(key: string): boolean {
+  return key === "Enter" || key === " " || key === "Spacebar";
+}
+
 export function teamCaption(rows: RosterItem[], targetId: string | null): CaptionRow[] {
   return rows.map((row) => {
     const glyph = memberGlyph(row.state);

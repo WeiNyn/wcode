@@ -21,6 +21,7 @@ import {
   formatTokens,
   livelineLabel,
   panelHeader,
+  isActivationKey,
   teamCaption,
   selectionRef,
   stateLabel,
@@ -534,7 +535,7 @@ test("parseToWebview rejects junk and malformed snapshots", () => {
 });
 /* --------------------------------------------------------------- composer */
 
-test("composerControls: mode + the `.seg` segments + the `Stop` gate (NO model)", () => {
+test("composerControls: mode + the two toggle segments + the `Stop` gate (NO model)", () => {
   const running: ViewState = {
     ...initialState(),
     members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true, model: "sonnet" }],
@@ -591,6 +592,22 @@ test("reduced-motion freezes the liveline dots: the gate names `.liveline .dots`
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
   const gate = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
   assert.match(gate, /\.liveline \.dots\s*\{/, "the liveline dots are reduced-motion gated");
+});
+
+test("isActivationKey: Enter and Space activate the caption row; other keys do not", () => {
+  assert.equal(isActivationKey("Enter"), true);
+  assert.equal(isActivationKey(" "), true, "Space");
+  assert.equal(isActivationKey("Spacebar"), true, "the legacy Space name");
+  assert.equal(isActivationKey("a"), false);
+  assert.equal(isActivationKey("Tab"), false, "Tab must still move focus, not retarget");
+});
+
+test("the team caption is keyboard-activatable: a tabindex row whose keydown posts focus-member", () => {
+  // There is no DOM harness, so this guards the WIRING: remove the tabindex or the
+  // keydown path and the caption row goes mouse-only again — the test fails.
+  const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
+  assert.match(src, /node\.tabIndex = 0/, "the caption row is focusable");
+  assert.match(src, /addEventListener\("keydown"[\s\S]{0,240}?focus-member/, "a keydown posts focus-member");
 });
 
 /* -------------------------------------------------------- working group */
@@ -663,7 +680,7 @@ test("teamCaption: one row per member; the glyph is memberGlyph(state) for EVERY
   assert.equal(caption[3].action, "idle", "the action falls back to the state word");
 });
 
-test("panelHeader: no member-count cell remains on the bar (it lives in the rail now)", () => {
+test("panelHeader: no member-count cell remains on the masthead (the team is a caption now)", () => {
   const state = renderState(
     {
       ...initialState(),

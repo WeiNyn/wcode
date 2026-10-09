@@ -148,6 +148,11 @@ body {
   color: var(--vscode-foreground);
 }
 
+.masthead .team .m:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
 .masthead .team .m.sel {
   color: var(--vscode-foreground);
   font-weight: 600;
