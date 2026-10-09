@@ -1,6 +1,6 @@
 # D007 — remove hash-based line addressing from the tools
 
-- **Status:** accepted (direction); implementation staged by the W007 brief
+- **Status:** **implemented** — P1 `2867604`, P2 `c4ec64a`, P3+P4 `7c740fe`, P5 `c83bd22`; see [work/W007-remove-hash-based-addressing.md](../work/W007-remove-hash-based-addressing.md) §9. Second-layer review pending
 - **Date:** 2026-10-09
 - **Supersedes / relates to:** `README.md` §"Design: content-addressed editing"
   (`README.md:UQZBx`) and the anchor rules in `AGENTS.md` §Gotchas (`AGENTS.md`). It

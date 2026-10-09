@@ -1,6 +1,8 @@
 # W007 — remove hash-based line addressing — brief
 
-- **Status:** brief — **awaiting human sign-off**; no code written
+- **Status:** **done** — P0–P6 delivered in `2867604` (P1), `c4ec64a` (P2),
+  `7c740fe` (P3+P4), `c83bd22` (P5); P6 is this record. **Second-layer review
+  pending** (the human reviews the whole thing — see §9)
 - **Work item:** W007
 - **Decision:** [`D007`](../decisions/D007-remove-hash-based-addressing.md) (accepted — direction)
 - **Supersedes:** `README.md` §"Design: content-addressed editing"; `AGENTS.md` §Gotchas (the anchor rules)
@@ -140,7 +142,56 @@ the quality question, and it is weak — see §9.
 - `README.md` §Design is **rewritten, not deleted**: content-addressing by text is still
   content-addressing, and the no-drift argument is still true.
 
-## 9. Facts NOT verified
+## 9. Delivery — what actually landed
+
+| Step | Commit | What |
+|---|---|---|
+| P1 | `2867604` | `edit` → `{path, old_string, new_string, replace_all?}` |
+| P2 | `c4ec64a` | `edits` → a batch of literal-text ops, `path` hoisted to the top level; **`replace` deleted** (it was already text matching) |
+| P3+P4 | `7c740fe` | `read`/`grep` print plain lines; `anchor.rs`, `workspace.rs`/`WorkspaceHooks`, `stale_digest_guard`/`digest_note`, `expected_digest`, and the `[workspace] digest_cas` config surface all deleted |
+| P5 | `c83bd22` | the citation convention → `file:line` + a quoted snippet |
+| P6 | this | the record |
+
+**P3 and P4 were merged**, against the brief's staging: dropping the digest
+header from `read` is what makes the CAS guard inert, so the guard cannot
+outlive it. Two green commits would have meant one of them carrying a
+deliberately-dead guard.
+
+### Measured, live
+
+- **Tool definitions: 19 → 18 tools**, 23,227 → **21,988 chars** (−310 tok) — the
+  anchor/digest prose and `replace` are gone.
+- **`read` output: ~50 % off the prefix.** The old prefix was **9 bytes/line**
+  (5 chars + a 3-byte `│` + a space); `{n}\t` is ~5. Measured on four real files
+  (read.rs, tool.rs, README.md, main.rs): **40,923 B → 20,159 B**, ~5,200 tokens
+  saved per read of that set. Unlike the prompt tax, this **persists in the
+  transcript**.
+- The system prompt no longer describes anchors (checked with
+  `--dump-system-prompt`).
+- `cargo test --workspace` 1098 passed, 4 ignored; `cargo clippy --workspace
+  --all-targets` clean, **no warnings**.
+
+### Friction the brief predicted, and what it cost
+
+- **`anchor.rs` was two modules in one coat.** `changed_range` is a line-diff
+  helper, not addressing — it moved to `tools/diff.rs` alongside `split_lines`.
+  Flagged in §4; it was the only real surprise.
+- **`WorkspaceHooks` existed only for the digest policy**, so it deleted whole,
+  taking its call sites in `agents.rs`/`repl.rs` and the `[workspace]` config
+  table with it. That was wider than the brief implied.
+- **The `no-op` arm had to be re-added to `edit`** — replacing text with itself
+  must not touch the file. Caught by a surviving `workspace.rs` test before the
+  file was deleted.
+
+### Historical citations are frozen
+
+The ~33 files under `docs/` that cite `file:anchor` in dated records were
+**deliberately not rewritten**. They are records of what was true when written;
+rewriting them would falsify history. Their anchors are now unresolvable — a
+reader can no longer recover the line from the hash, because nothing computes it
+any more. Treat them as frozen prose, not as citations.
+
+## 10. Facts NOT verified
 
 - **Tool-calling quality.** D007's deciding question, and **it cannot be measured in this
   repo** — there is no eval harness. The A/B in §7 gives *a* signal, not a proof. Anything
