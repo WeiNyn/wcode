@@ -466,7 +466,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     // D32 — publish the panel affordance cells. A panel's top rule is its block's
     // FIRST line: a visible panel block contributes the header-row toggle region
-    // (its inner-left through the `▸`/`▾`) plus the 1x1 `⧉` copy cell. The rects
+    // (its inner-left through the `▸`/`▾`) plus the 1x1 `▣` copy cell. The rects
     // are pure functions of (kind, width, range) — recomputed every frame, never
     // cached (the (rev, width) cache stores `Line`s, not geometry).
     let panel_w = (area.width as usize)
@@ -479,7 +479,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .enumerate()
         .filter_map(|(i, range)| {
             // A panel, or an assistant block whose thinking leads — its collapsed
-            // `▸`/`⧉` row is the block's FIRST line (D33).
+            // `▸`/`▣` row is the block's FIRST line (D33).
             let has_affordance = match &app.transcript()[i] {
                 Block::Tool(_) => true,
                 Block::Assistant { content, .. } => {
@@ -499,7 +499,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 block: i,
                 // The WHOLE header row is the toggle target: from the panel's
                 // inner-left through the `▸`/`▾` glyph, ending before the gap so
-                // the `⧉` copy cell stays disjoint (`kind_at` checks toggle first).
+                // the `▣` copy cell stays disjoint (`kind_at` checks toggle first).
                 toggle: Rect::new(area.x + ind_w + 1, y, toggle_col, 1),
                 copy: Rect::new(area.x + ind_w + copy_col, y, 1, 1),
             })
@@ -628,7 +628,7 @@ fn content_lines(
                 } else {
                     // The affordance belongs to the block's FIRST line only (the
                     // publish requires `content.first()` to be `Thinking`), so
-                    // only the leading thinking row draws `▸`/`▾`/`⧉`.
+                    // only the leading thinking row draws `▸`/`▾`/`▣`.
                     lines.extend(thinking_block_lines(text, width, thinking_open, i == 0));
                 }
             }
@@ -645,7 +645,7 @@ fn content_lines(
 }
 
 /// A committed thinking block (D33): the collapsed `··· thinking · N chars
-/// ▸ ⧉` row, plus the `thinking`-styled body when expanded. No panel frame —
+/// ▸ ▣` row, plus the `thinking`-styled body when expanded. No panel frame —
 /// thinking is lighter than a tool, so a bare affordance row keeps it cheap.
 fn thinking_block_lines(
     text: &str,
@@ -661,7 +661,7 @@ fn thinking_block_lines(
 }
 
 /// The thinking block's header row: `··· thinking · N chars` (dim) with the
-/// `▸`/`▾`/`⧉` affordance run right-aligned at the SAME columns a tool panel
+/// `▸`/`▾`/`▣` affordance run right-aligned at the SAME columns a tool panel
 /// uses (`header_affordance_cols`), so one publish geometry serves both.
 /// Without a published region the glyphs are SUPPRESSED — a drawn affordance
 /// must always route a click (the D32 invariant).
@@ -692,7 +692,7 @@ fn thinking_header_line(
         Span::styled(" ".repeat(fill), dim()),
         Span::styled(glyph.to_string(), dim()),
         Span::styled(" ".to_string(), dim()),
-        Span::styled("⧉".to_string(), dim()),
+        Span::styled("▣".to_string(), dim()),
     ])
 }
 
@@ -711,8 +711,8 @@ fn tool_panel_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     // no recognizable params, the target/path still rides the header (never
     // clipped to one line — the rule is sized to it).
     let name_text = match tool.target.as_ref().or(tool.path.as_ref()) {
-        Some(target) if params.is_empty() => format!("⚙ {}  {target}", tool.name),
-        _ => format!("⚙ {}", tool.name),
+        Some(target) if params.is_empty() => format!("» {}  {target}", tool.name),
+        _ => format!("» {}", tool.name),
     };
     let name = Span::styled(name_text, tool_name());
     let expanded = tool.expanded || tool.is_error;
@@ -730,11 +730,11 @@ struct HeaderAffordances {
 }
 
 impl HeaderAffordances {
-    /// The run's column count (`"▸ ⧉"` == 3). It drives the A4 right-alignment, so
+    /// The run's column count (`"▸ ▣"` == 3). It drives the A4 right-alignment, so
     /// the rendered top rule stays byte-identical to the pre-D32 single span.
     const WIDTH: usize = 3;
 
-    /// The run's column count (== the old `"▸ ⧉".chars().count()`).
+    /// The run's column count (== the old `"▸ ▣".chars().count()`).
     fn width(&self) -> usize {
         Self::WIDTH
     }
@@ -753,14 +753,14 @@ fn header_affordance_cols(panel_w: usize) -> (u16, u16) {
 }
 
 /// The panel's top-right affordance run: the toggle glyph (`▸` collapsed, `▾`
-/// expanded), a separating space, and the copy glyph `⧉` — each as its own span so
+/// expanded), a separating space, and the copy glyph `▣` — each as its own span so
 /// the D32 hit cells can be derived from `panel_w`.
 fn header_affordances(expanded: bool) -> HeaderAffordances {
     let toggle = if expanded { "▾" } else { "▸" };
     HeaderAffordances {
         toggle: Span::styled(toggle.to_string(), dim()),
         gap: Span::styled(" ".to_string(), dim()),
-        copy: Span::styled("⧉".to_string(), dim()),
+        copy: Span::styled("▣".to_string(), dim()),
     }
 }
 
@@ -896,7 +896,7 @@ fn tool_summary_row(tool: &Tool, note: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Wrap `params` + `body` in the rounded frame. The top rule carries `⚙ name`
+/// Wrap `params` + `body` in the rounded frame. The top rule carries `» name`
 /// (left) and the affordances (right-aligned, A4); the mid `├──┤` rule appears
 /// IFF both `params` and `body` are non-empty (A1). Every row is padded to
 /// `width`.
@@ -1672,7 +1672,7 @@ fn thinking() -> Style {
     theme::theme().thinking
 }
 
-/// A tool's name in its `⚙` / `✓` header.
+/// A tool's name in its `»` / `✓` header.
 fn tool_name() -> Style {
     theme::theme().tool_name
 }
@@ -2288,7 +2288,7 @@ mod tests {
 
         let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("1 file changed"), "summary missing: {text}");
-        // The `⚙` line names the changed file.
+        // The `»` line names the changed file.
         assert!(text.contains("src/a.rs"), "tool path missing: {text}");
 
         for c in "/changes".chars() {
@@ -3796,12 +3796,12 @@ mod tests {
     }
     #[test]
     fn a_completed_tool_shows_a_start_line_and_an_end_line() {
-        // Regression: the done block rendered only the ✓ line, losing the ⚙
+        // Regression: the done block rendered only the ✓ line, losing the »
         // start line. It must be two separated lines.
         let mut app = App::new();
         push_tool(&mut app, "bash", "hello", false, None);
         let text = buffer_text(&render(&mut app, 80, 12));
-        assert!(text.contains("⚙ bash"), "the ⚙ start line is missing:\n{text}");
+        assert!(text.contains("» bash"), "the » start line is missing:\n{text}");
         assert!(text.contains("✓ bash"), "the ✓ end line is missing:\n{text}");
     }
 
@@ -3905,11 +3905,11 @@ mod tests {
                 .find(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("no {needle} row:\n{text}"))
         };
-        // The `⚙` header, the params key, and the `✓` summary all start at the
+        // The `»` header, the params key, and the `✓` summary all start at the
         // design's column 6 (3 indent + the frame `│` + the 2-col gutter). Char, not
         // byte, positions — the box-drawing glyphs are multibyte.
         let col = |row: &str, needle: char| row.chars().position(|c| c == needle);
-        assert_eq!(col(row("⚙ bash"), '⚙'), Some(6), "the header");
+        assert_eq!(col(row("» bash"), '»'), Some(6), "the header");
         assert_eq!(col(row("cmd"), 'c'), Some(6), "the params key");
         assert_eq!(col(row("✓ bash"), '✓'), Some(6), "the summary");
     }
@@ -3949,7 +3949,7 @@ mod tests {
         let text = buffer_text(&render(&mut app, width as u16, 20));
         let header = text
             .lines()
-            .find(|l| l.contains("⚙ bash"))
+            .find(|l| l.contains("» bash"))
             .expect("the panel header row");
         let col = header
             .chars()
@@ -3957,7 +3957,7 @@ mod tests {
             .expect("the collapse affordance");
         assert_eq!(
             col,
-            width - 2 - "▸ ⧉".chars().count(),
+            width - 2 - "▸ ▣".chars().count(),
             "the affordances are right-aligned at width - 2 - len:\n{header}"
         );
     }
@@ -3982,17 +3982,17 @@ mod tests {
 
         let buf = terminal.backend().buffer();
         let header: String = (0..80).map(|x| buf[(x, toggle.y)].symbol()).collect();
-        // The wide toggle ENDS on the `▸`; `copy` is exactly the `⧉` glyph.
+        // The wide toggle ENDS on the `▸`; `copy` is exactly the `▣` glyph.
         let glyph_col = toggle.x + toggle.width - 1;
         assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▸", "the ▸ glyph");
-        assert_eq!(buf[(copy.x, copy.y)].symbol(), "⧉", "the copy cell");
+        assert_eq!(buf[(copy.x, copy.y)].symbol(), "▣", "the copy cell");
         assert_eq!(copy.y, toggle.y, "both affordances share the top-rule row");
         assert!(
             !toggle.contains((copy.x, copy.y).into()),
             "the wide toggle and the copy cell are disjoint"
         );
-        // The header NAME (⚙) is clickable — inside the wide toggle region.
-        let name_col = header.chars().position(|c| c == '⚙').expect("the ⚙ name") as u16;
+        // The header NAME (») is clickable — inside the wide toggle region.
+        let name_col = header.chars().position(|c| c == '»').expect("the » name") as u16;
         assert!(
             toggle.contains((name_col, toggle.y).into()),
             "the header name lies inside the toggle region"
@@ -4074,7 +4074,7 @@ mod tests {
         // Two thinking contents in ONE committed block. Only the first is the
         // block's first line, so only it has a published hit region (the publish
         // requires `content.first()` to be `Thinking`); the second must not draw a
-        // dead `▸ ⧉`.
+        // dead `▸ ▣`.
         app.handle(AppEvent::Agent(
             root(),
             wcode_harness::event::AgentEvent::MessageEnd {
@@ -4097,7 +4097,7 @@ mod tests {
         let rows: Vec<&str> = text.lines().filter(|l| l.contains("thinking ·")).collect();
         assert_eq!(rows.len(), 2, "two thinking rows:\n{text}");
         assert_eq!(text.matches('▸').count(), 1, "exactly one toggle glyph:\n{text}");
-        assert_eq!(text.matches('⧉').count(), 1, "exactly one copy glyph:\n{text}");
+        assert_eq!(text.matches('▣').count(), 1, "exactly one copy glyph:\n{text}");
         assert!(rows[0].contains('▸'), "the first row draws it:\n{text}");
         assert!(!rows[1].contains('▸'), "the second row does not:\n{text}");
     }

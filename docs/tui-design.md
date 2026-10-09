@@ -41,7 +41,7 @@ TUI reads as the same product, given a full screen.
    **`NO_COLOR`** still yields `Theme::plain` — no `fg`, and there `dim` falls
    back to the `DIM` modifier, the only lever without colour (best-effort; D29).
 4. **Blocks are separated by a blank line between roles** (tools cluster tight
-   under their `⚙`). Noise is dim; only the model's prose and *your* prompt are
+   under their `»`). Noise is dim; only the model's prose and *your* prompt are
    full-strength. A **tool** is a framed **panel** (params rows + body) and
    **thinking** is a collapsed `··· thinking · N chars` affordance row — richer
    than a blank-line-only block (§4), not a reflow of the base.
@@ -56,7 +56,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | assistant prose | — | default fg |
 | thinking (in flight) | `···` | dim, italic |
 | thinking (collapsed row) | `··· thinking · N chars` | dim |
-| tool start | `⚙ name  args` | dim |
+| tool start | `» name  args` | dim |
 | tool done | `✓ name · note` | dim |
 | tool error | `✗ name · note` | red |
 | compaction / retry | `⋯` | dim |
@@ -70,7 +70,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | tool panel / overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
 | collapsed affordance | `▸` | dim |
 | expanded affordance | `▾` | dim |
-| copy affordance | `⧉` | dim |
+| copy affordance | `▣` | dim |
 | changes tree | `├ └ │ ─` | dim; leaf stats right-aligned |
 | todos | `☑ ☐` | dim |
 | team state | `● ○ ✓ ✗` | running / idle / done / failed |
@@ -190,8 +190,8 @@ divider marks the replayed prefix. With **no** history the transcript opens on a
 dim seeded hint (`❯ type a message · /help for commands · F1 for keys`), not a
 blank pane.
 
-- **Tool** (D31) — a framed **panel**: a `⚙ name` header with a `▸`/`▾` toggle
-  and a `⧉` copy affordance, then keyed **params** rows (`cmd`, `cwd`, `path`, …)
+- **Tool** (D31) — a framed **panel**: a `» name` header with a `▸`/`▾` toggle
+  and a `▣` copy affordance, then keyed **params** rows (`cmd`, `cwd`, `path`, …)
   above the body. The **`bash` command is shown in full** — it wraps under its
   value column and is **never clipped** (the old 60-char clip is gone). A
   `✓`/`✗` summary row (`✓ read · 128 lines · 12ms`, from
@@ -199,7 +199,7 @@ blank pane.
   expanded. `Ctrl-T` toggles every tool at once.
 - **Thinking** (D33) — **in flight** it streams expanded inline (the `···` gutter
   plus the `thinking` italic body); on **commit** it collapses to a one-line
-  `··· thinking · N chars` row with the same `▸`/`▾`/`⧉` affordances, expandable.
+  `··· thinking · N chars` row with the same `▸`/`▾`/`▣` affordances, expandable.
 - **Todos** (D35) — the `todo` tool's checklist is ONE block that updates in
   place (`── todos  d/t ──` header, `☑`/`☐` rows), in the transcript — removed
   from the sidebar.
@@ -208,7 +208,7 @@ blank pane.
   right-aligned) in the sidebar and the `/changes` modal.
 - **Affordances** (D32) — every **expandable** block (a tool panel, or an
   assistant block whose first content is thinking) carries a `▸`/`▾` disclosure
-  and a `⧉` copy cell on its first row, right-aligned at the panel's columns;
+  and a `▣` copy cell on its first row, right-aligned at the panel's columns;
   click toggles/copies, and browse `Enter`/`Space` and `y` are the keyboard
   parity.
 

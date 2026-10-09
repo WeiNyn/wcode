@@ -47,7 +47,7 @@ pub(crate) struct Theme {
     pub heading_sub: Style,
     /// Markdown links.
     pub link: Style,
-    /// A tool's name in its `⚙` / `✓` header.
+    /// A tool's name in its `»` / `✓` header.
     pub tool_name: Style,
     /// A thinking block.
     pub thinking: Style,

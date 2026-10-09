@@ -131,7 +131,7 @@ pub enum Block {
         /// The message's content blocks (text, thinking, tool calls).
         content: Vec<ContentBlock>,
         /// Whether the message's thinking is expanded (D33). `false` — the commit
-        /// default — draws the collapsed `··· thinking · N chars ▸ ⧉` row; the `▸`
+        /// default — draws the collapsed `··· thinking · N chars ▸ ▣` row; the `▸`
         /// affordance (or browse `Enter`) flips it.
         thinking_open: bool,
     },
@@ -165,7 +165,7 @@ pub struct Tool {
     pub name: String,
     /// The tool's INPUT target, from the call's arguments (the first of
     /// [`ACTION_KEYS`]): the `command` for `bash`, the `path` for `read`/`edit`,
-    /// the `pattern` for `grep`. Rendered on the `⚙`/`✓` line. `None` when the
+    /// the `pattern` for `grep`. Rendered on the `»`/`✓` line. `None` when the
     /// call carried no recognizable argument (or was reseeded from history).
     pub target: Option<String>,
     pub output: String,
@@ -179,7 +179,7 @@ pub struct Tool {
     /// A UI-only unified diff, when the tool changed a file (`ToolOutput::diff`).
     pub diff: Option<String>,
     /// The file this tool changed (UI-only), from `ToolExecutionEnd`: labels the
-    /// `⚙` line and feeds the run's changeset.
+    /// `»` line and feeds the run's changeset.
     pub path: Option<String>,
     /// Wall-clock ms the tool's `execute` took (from `ToolExecutionEnd`).
     /// UI-only: never copied (`copy_text`), never persisted. `None` while the
@@ -1855,7 +1855,7 @@ pub(crate) struct TranscriptHit {
 }
 
 /// One panel affordance cell's role (D32): `Toggle` is the `▸`/`▾` glyph, `Copy`
-/// is `⧉`. Both are one column wide and sit on the same row, so the KIND — not the
+/// is `▣`. Both are one column wide and sit on the same row, so the KIND — not the
 /// row — disambiguates them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AffordanceKind {
@@ -1873,17 +1873,17 @@ pub(crate) struct AffordanceHit {
     /// the live block).
     pub(crate) block: usize,
     /// The panel header ROW's toggle region (1 row tall): from the panel's
-    /// inner-left through the `▸`/`▾` glyph, ending before the gap/`⧉` so it never
+    /// inner-left through the `▸`/`▾` glyph, ending before the gap/`▣` so it never
     /// overlaps `copy`. A click anywhere on the header name toggles the block.
     pub(crate) toggle: Rect,
-    /// The `⧉` glyph cell on the same row (1 col wide).
+    /// The `▣` glyph cell on the same row (1 col wide).
     pub(crate) copy: Rect,
 }
 
 impl AffordanceHit {
     /// Which affordance, if any, contains screen cell `(row, col)` — the
     /// app-wide `(row, col)` argument order (`block_at`, `sidebar_member_at`).
-    /// `toggle` is checked first and never covers the `⧉` cell (`toggle` ends
+    /// `toggle` is checked first and never covers the `▣` cell (`toggle` ends
     /// before the gap), so a copy click still resolves to `Copy`.
     pub(crate) fn kind_at(&self, row: u16, col: u16) -> Option<AffordanceKind> {
         let point = (col, row).into();
@@ -5656,7 +5656,7 @@ mod tests {
 
     /// A published panel affordance for `block` on the panel's top-rule `row`: a
     /// wide `toggle` spanning `[left, left + width)` (the header name + fill + the
-    /// `▸`/`▾` glyph) and the 1x1 `⧉` `copy` cell at `copy_x` (one past the gap).
+    /// `▸`/`▾` glyph) and the 1x1 `▣` `copy` cell at `copy_x` (one past the gap).
     /// Mirrors the `ui` publish: `toggle` is wide and disjoint from `copy`.
     fn affordance(block: usize, left: u16, width: u16, copy_x: u16, row: u16) -> AffordanceHit {
         AffordanceHit {
@@ -5709,7 +5709,7 @@ mod tests {
         let mut app = App::new();
         app.focused_mut().push_block(panel_block("bash"));
         app.set_block_ranges(std::iter::once(0..3).collect());
-        // A wide header toggle `[4, 14)` with the `⧉` copy cell out at col 20.
+        // A wide header toggle `[4, 14)` with the `▣` copy cell out at col 20.
         app.set_transcript_hit(
             rect(0, 0, 40, 10),
             0,
@@ -5717,7 +5717,7 @@ mod tests {
             vec![affordance(0, 4, 10, 20, 0)],
         );
 
-        // Click the header NAME area (col 6) — not the `▸` glyph, not `⧉`.
+        // Click the header NAME area (col 6) — not the `▸` glyph, not `▣`.
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
             col: 6,
@@ -5749,7 +5749,7 @@ mod tests {
             vec![affordance(0, 4, 10, 20, 0)],
         );
 
-        // Click the `⧉` glyph (col 20, one past the toggle region).
+        // Click the `▣` glyph (col 20, one past the toggle region).
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
             col: 20,
@@ -5778,7 +5778,7 @@ mod tests {
             vec![affordance(0, 4, 10, 20, 0)],
         );
 
-        // Down ON the `⧉` glyph (col 20, row 0), drag left to col 0, release: the drag
+        // Down ON the `▣` glyph (col 20, row 0), drag left to col 0, release: the drag
         // arm wins, copying the dragged text and NEVER toggling the panel.
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
