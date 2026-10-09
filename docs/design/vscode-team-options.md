@@ -1,7 +1,10 @@
 # VS Code paper surface — the team list: four options (option 4 chosen)
 
-- **Status:** proposal, for a human to react to. **Not authorized** — nothing
-  under `editors/vscode/` is touched and no spec is amended.
+- **Status:** **implemented** — the human chose Option 4 (the **gap** variant) and it landed
+  in the paper surface: the roster + the foot action in `cddbde6`, the pure `livelineSpec` seam
+  + the tests in `e7939d9`. Recorded in
+  [`docs/work/W008-paper-vscode-surface.md`](../work/W008-paper-vscode-surface.md) §9 (and the
+  W005 record). `editors/vscode/` is now touched; W005 remains the spec this refines.
 - **Prototype:** [`vscode-team-options.html`](vscode-team-options.html) — self-contained; the toolbar switches the four placements (`imprint` / `cast` / `margin` / **`glyph`**).
 - **Chosen:** the human picked the compact **glyph row + foot action** (Option 4). This note records it.
 - **Shipped surface:** the paper page (W008) — `editors/vscode/media/chat.css`,
@@ -282,15 +285,14 @@ their own today.
 
 - **Q6 — settled:** the row **wraps** for a big team; it does not cap or grow a
   column. (A cap, e.g. the first N + `+N`, remains an option if the wrap is noisy.)
-- **Q7.** The foot-action predicate: the shipped `workingGroup` **excludes the
-  target** (`view.ts:KeUWa`) and counts a member with a `liveAction` even when not
-  running. Should the one/many branch consider *all* running members (the target
-  included), or keep the peer-only rule?
-- **Q8.** Is the name in the detail line the display label (`explorer`) or the id
-  (`w1`)? The brief's example uses `w1`.
-- **Q9.** Does the target's mark read from the wraps above — is the **pair
-  underline** right, or should the **name be weighted** instead (the brief allows
-  either)?
+- **Q7 — settled:** keep the shipped **peer-only** `workingGroup` predicate. It excludes the
+  target **by design** — the foot reports the OTHER members' activity; the target's own run is
+  the turn you are reading. **Consequence:** when the TARGET alone is active the foot is hidden
+  (count 0). Revisit only if the foot should echo the target too.
+- **Q8 — settled:** the detail line names the **display label** (`explorer`), not the id —
+  consistent with the roster's pairs.
+- **Q9 — settled:** the target pair is **underlined** (`.m.sel .glyph`, `.m.sel .nm`); the row
+  keeps its existing colour + weight (the underline is ADDED, nothing removed).
 - **Dropped:** the old hover-only-name question is moot — the name is now visible
   inline.
 

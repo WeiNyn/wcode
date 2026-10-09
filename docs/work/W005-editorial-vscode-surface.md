@@ -358,8 +358,7 @@ foot action). Implemented in `cddbde6`:
   `title`/`aria-label`); `workingGroup`'s `WorkingRow` gains `glyph`/`glyphClass` for the foot
   line. `view.ts`/`chat.ts`/`chat.css`; tests updated; wire/kernel untouched.
 
-(Note: `docs/design/vscode-team-options.md` still reads "Not authorized" — stale once this
-lands.)
+(The design doc's status was "Not authorized" at the time; it now records the implementation.)
 
 ## 10. References
 
