@@ -356,7 +356,8 @@ foot action). Implemented in `cddbde6`:
   `glyph name · action`; several → `⋯ {n} working`; none → hidden.
 - **Pure halves:** `teamCaption`'s `CaptionRow` swaps `action` for `state` (the pair's
   `title`/`aria-label`); `workingGroup`'s `WorkingRow` gains `glyph`/`glyphClass` for the foot
-  line. `view.ts`/`chat.ts`/`chat.css`; tests updated; wire/kernel untouched.
+  line. `view.ts`/`chat.ts`/`chat.css`; tests updated; wire/kernel untouched. The pair's `title` is
+`<name> · <state>` and its `aria-label` is `<name>, <state>`.
 
 (The design doc's status was "Not authorized" at the time; it now records the implementation.)
 

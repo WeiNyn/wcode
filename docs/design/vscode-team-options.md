@@ -155,7 +155,7 @@ The `.act` field is **gone from the roster** — the action is at the foot.
 *what the active member is doing*, and falls back:
 
 ```
-  ⠋ explorer · grep onOpenDiff      ← exactly one running member
+  ⠋ explorer · grep onOpenDiff      ← exactly one OTHER member active
   ⋯ 2 working                       ← several running
   (hidden)                          ← nothing running
 ```
@@ -220,7 +220,7 @@ Option 4 would then differ from it only by *where the action lives*).
   `.masthead .team` (`chat.css:pLaZr`) and `.m` (`:50gNH`) compress; `.act`
   (`:2A7UY`) is dropped.
 - **Foot action:** `chat.ts:renderLiveline` (`:xAdWz`) — the one/many branch (a
-  single running member → the detail row; else `{n} working`; zero → hidden).
+  single OTHER member active → the detail row; else `{n} working`; zero → hidden).
   Source: `view.ts:workingGroup` (`:KeUWa`, rows `:MTdZD`) and `livelineLabel`
   (`:psxWY`); the skeleton `#liveline` (`chat.ts:rY4Ro`). CSS: `.liveline`
   (`chat.css:ZLzzY`).
@@ -286,9 +286,12 @@ their own today.
 - **Q6 — settled:** the row **wraps** for a big team; it does not cap or grow a
   column. (A cap, e.g. the first N + `+N`, remains an option if the wrap is noisy.)
 - **Q7 — settled:** keep the shipped **peer-only** `workingGroup` predicate. It excludes the
-  target **by design** — the foot reports the OTHER members' activity; the target's own run is
-  the turn you are reading. **Consequence:** when the TARGET alone is active the foot is hidden
-  (count 0). Revisit only if the foot should echo the target too.
+  target **by design** and reports the OTHER members: the target's own run is the turn you are
+  reading, so the foot is the aggregate of everyone else. A member carrying a `liveAction`
+  while NOT `running` shows its **state** glyph (e.g. `○`), not `⠋` — the glyph tracks
+  `memberGlyph` (the member's state), never "has an action". **Consequence:** when the TARGET
+  alone is active the foot is hidden (count 0) — **deliberate**. Revisit only if the foot
+  should echo the target too.
 - **Q8 — settled:** the detail line names the **display label** (`explorer`), not the id —
   consistent with the roster's pairs.
 - **Q9 — settled:** the target pair is **underlined** (`.m.sel .glyph`, `.m.sel .nm`); the row
