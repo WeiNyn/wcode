@@ -10,7 +10,7 @@ Review in two gates. No rubber-stamping — "looks fine" is not a verdict. Run t
 
 **FIRST LAYER — the sketch** (a NEW file or an in-place `// SKETCH` block):
 
-- Verify the interface matches the locked design, citing `file:anchor`.
+- Verify the interface matches the locked design, citing `file:line` + a quoted snippet.
 - Settle every open question the design left, as concrete amendments.
 - Approve or block **before** any implementation is written.
 
@@ -24,7 +24,7 @@ Review in two gates. No rubber-stamping — "looks fine" is not a verdict. Run t
 - Re-run `cargo build`, `cargo test --workspace`, and
   `cargo clippy --workspace --all-targets`.
 
-Verdict: **APPROVE**, or a numbered blocking list with `file:anchor` evidence.
+Verdict: **APPROVE**, or a numbered blocking list with `file:line` + snippet evidence.
 
 Read-only is enforced: `edit`/`write` and mutating `bash`/`bg` are refused. The
 gate commands are read-only and pass — but run them plainly: a `>`/`2>&1`

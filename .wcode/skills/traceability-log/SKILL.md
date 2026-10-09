@@ -40,7 +40,7 @@ bug fix. Those live in the commit message.
 - **Supersedes / relates to:** <doc names or `—`>
 
 ## Context
-<why a decision was needed; cite file:anchor for the code facts>
+<why a decision was needed; cite file:line + a snippet for the code facts>
 
 ## Decision
 <the decision, in the imperative>
@@ -53,7 +53,7 @@ Rules:
 
 - Numbers are permanent and never reused. A reversed decision is **superseded**,
   not deleted.
-- **Cite `file:anchor` for every fact about the code.** An assertion with no
+- **Cite `file:line` + a quoted snippet for every fact about the code.** An assertion with no
   anchor is an opinion.
 - 30–50 lines. A decision record is a decision, not an essay.
 - The Decision section is imperative; the Context is evidence; the Consequences
@@ -82,7 +82,7 @@ points at it.
 ## 1. The ask
 ## 2. Scope / Non-scope        (two explicit lists)
 ## 3. Estimates                (value / complexity / risk, one row per workstream + a why)
-## 4. Interface & structure    (what is added/changed, with file:anchor integration points)
+## 4. Interface & structure    (what is added/changed, with file:line integration points)
 ## 5. Plan                     (numbered steps, each with its deliverable and its gate)
 ## 6. Quality gates            (exact commands and exact expected output)
 ## 7. Testing
@@ -116,7 +116,7 @@ record.
 ## §6 — Checklist
 
 - [ ] A **DNNN** exists for each locked decision a WNNN relies on.
-- [ ] Each `file:anchor` in a decision record names a real fact.
+- [ ] Each `file:line` in a decision record names a real fact (the snippet still matches).
 - [ ] The WNNN `Decisions:` line links each applicable DNNN.
 - [ ] The WNNN has all nine sections, with §2 two explicit lists.
 - [ ] The tracker (`docs/next-steps.md`) has exactly one row pointing at the

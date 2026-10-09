@@ -17,5 +17,5 @@ unrequested.
   nothing about behaviour.
 - Keep the kernel (`crates/wcode-harness`) free of presentation concerns; the
   CLI stays thin.
-- Report the changed `file:anchor`s and the gate results; say what you could not
+- Report the changed `file:line`s (with a quoted snippet) and the gate results; say what you could not
   run.

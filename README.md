@@ -1,7 +1,7 @@
 # wcode
 
 A minimal, pi-like coding agent for the terminal. It streams an LLM conversation
-and gives it content-addressed tools — read (anchors per line), grep/find, bash,
+and gives it content-addressed tools — read (numbered lines), grep/find, bash,
 edit/edits/replace, write, and ast-grep search/rewrite — and stays out of the way.
 Built on a small kernel
 ([`wcode-harness`](crates/wcode-harness)) that speaks to any OpenAI-compatible
@@ -396,16 +396,15 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | tool | behavior |
 |---|---|
 | `webfetch` | GET a URL over http(s); HTML reduced to readable text. `format` = `text`/`markdown`/`html` (default `markdown`); `timeout` seconds (default 30, max 120). Body capped at 5 MiB, output at 40k chars. Read-only, always registered |
-| `read` | file contents as `ANCHOR│line` — the 5-char anchor is the line's content address and the `edit` target (no line numbers; `plain:true` restores `cat -n`). Anchors survive inserts/deletes above; they hash the line's raw content, so indentation is semantically meaningful (a nested `}` is a different anchor from a top-level one) — but a formatter that reindents moves an indented line's anchor (re-read after formatting). `offset`/`limit` page |
-| `grep` | regex search; results carry anchors so a hit feeds straight into `edit` (`path:line  ANCHOR│line  <--`). **Respects `.gitignore`** (plus `.git`/`target`/`node_modules` as a built-in floor) and skips binaries; `no_ignore:true` searches ignored files too. Glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
+| `read` | file contents as `<line number>	<content>`. The number is for **locating**, never an address. A line longer than 300 chars is truncated with `…(+N)` — such a line is not usable as an `old_string` (use `grep`). `offset`/`limit` page; without `limit` the page is capped |
+| `grep` | regex search; results are `path:lineno:content`, so a hit feeds straight into `edit` as an `old_string` and into `read` as an `offset` (match lines marked `  <--`). **Respects `.gitignore`** (plus `.git`/`target`/`node_modules` as a built-in floor) and skips binaries; `no_ignore:true` searches ignored files too. Glob include filters, context, case-insensitive. **Registered only when `[tools] grep = true` (off by default — `bash` can search)** |
 | `find` | glob-based file/dir listing, one path per line. **Respects `.gitignore`**; `no_ignore:true` lists ignored entries too. **Registered only when `[tools] find = true` (off by default — `bash` can list files)** |
 | `bash` | `sh -c` in the working dir; stdout, labeled `[stderr]`, exit code; 30s default timeout, Ctrl-C kills. An always-on catastrophic-risk gate (`BashRiskHooks`) refuses device writes, `mkfs`/`wipefs`/`shred` on a device, recursive `rm`/`chmod`/`chown` of `/`/`~`/`$HOME` (incl. the `/*` fold), and the fork bomb — returned as a `blocked:` tool error, no config knob |
 | `bg` | manage tasks started with `bash { background: true }`. `list` (all tasks), `status <id>`, `output <id> [tail_lines]` (tail + the spill file path), `wait <id> [timeout_secs]` (block until it finishes; default 60s, max 300s), `kill <id>`. A finished task **pushes** `[message from bg]` back to the session — a turn if idle, next-turn context if running. Always registered |
 | `ast_search` | AST-structural search via `ast-grep` (`$UPPERCASE` wildcards); **registered only when an `ast-grep`/`sg` binary is on PATH** |
 | `ast_edit` | AST-structural rewrite of **one file** via `ast-grep` (`pattern`/`rewrite` with `$UPPERCASE` wildcards); `commit:false` dry-runs (diff only), default commits atomically and echoes the diff. **Registered only when an `ast-grep`/`sg` binary is on PATH** |
-| `edit` | replace the line range covered by `from`/`to` anchors with `replacement`. Content-addressed: edits above never shift the target; stale/ambiguous anchors are rejected with candidates, nothing written. Echoes the fresh-anchor region so edits chain without re-reads. `replacement` is verbatim — preserve leading indentation; re-read after any external change first |
-| `edits` | apply a batch of anchor-range edits (`{edits: [{path,from,to?,replacement,…}]}`) to **one file** in a single call. Every op resolves against the same snapshot and the batch is atomic — any stale/ambiguous/overlapping op aborts with nothing written |
-| `replace` | exact string replace without a read for quick unique substitutions; fails on 0 or (without `replace_all`) multiple matches |
+| `edit` | replace an exact `old_string` with `new_string`. Matching is **byte-exact** (whitespace counts) and must be unique unless `replace_all` — a miss is `E_NO_MATCH`, an ambiguous match `E_AMBIGUOUS_MATCH`, nothing written either way. Because the match *is* the check there is no separate staleness guard. `new_string` is verbatim; empty deletes. Whole-file rewrite = `write` |
+| `edits` | apply a batch of the same literal-text ops (`{path, edits: [{old_string, new_string, replace_all?}]}`) to **one file** in a single call. Ops run **in order** against the accumulating content; the batch is atomic — if any op fails, nothing is written |
 | `write` | create/overwrite; parents created automatically. Content is written byte-for-byte — indentation preserved, never reformatted |
 | `todo` | maintain a session-local todo list — call with `todos` to replace the whole list (each item `content` + `status` pending/in_progress/completed), or with no args to read it back. Always registered, every session (workers included) |
 | `session_search` | search prior session transcripts: `scope:all` (default) scans every session in the store, grouped by session, excluding the current one unless `include_current`; `scope:current` reads this session (including turns a compaction replaced with a summary) and also takes `turns{start,end}` and `stats`. Terms are ANDed, case-insensitive; thinking/tool text is skipped unless `include_tools`. Read-only, always registered |
@@ -414,7 +413,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | `peers` | list the peers you can message, as `name -> address [state]` |
 | `task` | plan and track the team's tasks: `op` is `create` (optional `deps`/`gate`), `assign`, `depends`, `complete`, `reject`, `reset`, or `list`. Root-only |
 
-`edit`/`replace`/`write` share a mutation lock and write via a temp file +
+`edit`/`edits`/`write` share a mutation lock and write via a temp file +
 rename, so concurrent file mutation can't interleave or truncate.
 
 When the model issues several tool calls in one message, the independent ones run
@@ -423,28 +422,32 @@ mutating tools and `bash` are barriers, so no read can race a write inside a
 batch. Results are still appended in call order. `--sequential` (or
 `[tools] parallel = false`) restores strictly one-at-a-time execution.
 
-## Design: content-addressed editing
+## Design: editing by literal text
 
 Line numbers are positional — insert one line and every number below silently
-means something else, the classic way agents corrupt files. wcode `read`/`edit`
-address lines by a 5-char **content anchor** instead (`XXa1b│fn main() {`),
-following the hashline ideas in `pi-better-edit`:
+means something else, the classic way agents corrupt files. So the editing tools
+do not address lines by position at all: `edit` replaces an exact `old_string`
+with `new_string`, and `edits` batches those ops. This is still
+**content-addressed** — the address is the literal text rather than a hash of it
+— so the drift-proof property is unchanged (D007).
 
-- `anchor(line)` is a pure hash of the line's **raw content** (a trailing `\r`
-  is dropped for CRLF/LF portability). Inserting or deleting lines elsewhere
-  *never* changes an intact line's anchor; whitespace is part of the address, so
-  `{`, `  {` and `\t{` are distinct (a nested brace is directly addressable),
-  and `foo bar` ≠ `foobar`. Cost: a formatter that reindents moves indented
-  lines' anchors — re-read before editing after a format.
-- `edit` sends `from`/`to` anchors + the new text — old code is never re-typed
-  (token savings) and the target can't drift.
-- Identical lines intentionally share an anchor; `edit` **rejects** ambiguous
-  targets with the candidate line numbers (or `old_string` to pin one) instead
-  of guessing. Stale anchors (line changed since `read`) get the same
-  reject-with-a-hint treatment.
-- Fully stateless: no anchor store, no session memory, so external edits
-  (bash, formatters, other tools) are always picked up — `read`/`edit`
-  recompute anchors from current file contents every call.
+- `read` prints `<line number>\t<content>`. The number is for *locating* — it
+  feeds `offset` and a `file:line` citation — never an address.
+- `edit` never re-types the target: it sends the old text and the new text, and
+  the match is **byte-exact**, so whitespace counts and indentation is
+  meaningful. A miss is `E_NO_MATCH`; a non-unique match is `E_AMBIGUOUS_MATCH`
+  (add surrounding lines, or set `replace_all`). Nothing is written either way.
+- **The match *is* the staleness check.** If the text changed since the read, it
+  simply no longer matches — which is why there is no separate whole-file digest
+  guard (the hash-anchor scheme needed one to cover the range *between* two
+  anchors; text matching covers the whole span by construction).
+- `edits` applies its ops **in order** against the accumulating content, so a
+  later op can match what an earlier one wrote. The batch is atomic: any failing
+  op refuses the whole call and nothing is written.
+- Fully stateless: no anchor store, no session memory, so external edits (bash,
+  formatters, other tools) are always picked up.
+- `edit`/`edits`/`write` share a mutation lock and write via a temp file +
+  rename, so concurrent mutation cannot interleave or truncate.
 
 Structural search is a separate axis: `ast_search`/`ast_edit` shell out to an
 `ast-grep` binary (the legacy `sg` alias is the fallback; the same auto-detect

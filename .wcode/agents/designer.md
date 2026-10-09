@@ -19,4 +19,4 @@ Run the `design-taste` skill and follow it; it enforces the locked spec.
 - Keep the two surfaces' rule sets separate — a TUI reading of a dial is not the
   web reading.
 - Every interactive thing needs a key and a keymap entry.
-- Report the changed `file:anchor`s and how you checked the result.
+- Report the changed `file:line`s (with a quoted snippet) and how you checked the result.

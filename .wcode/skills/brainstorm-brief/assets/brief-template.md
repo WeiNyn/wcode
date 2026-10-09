@@ -37,9 +37,9 @@
 
 **Changed.**
 
-- `<path>::<function>` (`file:anchor`) — <what changes and why>
+- `<path>::<function>` (`file:line` + a quoted snippet) — <what changes and why>
 
-**Integration points** (verify before coding; anchors drift only if the line
+**Integration points** (verify before coding; a line number moves if the line
 itself changes).
 
 - `<path>:<anchor>` — <the fact this brief relies on>

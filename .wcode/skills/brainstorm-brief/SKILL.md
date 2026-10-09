@@ -19,7 +19,7 @@ record, not the discovery.
 The brief rests on facts. Before writing anything:
 
 1. **Read the code** the request touches. Name the functions and cite
-   `file:anchor` for every integration point.
+   `file:line` + a quoted snippet for every integration point.
 2. **Read the docs** the request relates to — `README.md`, `AGENTS.md`,
    `docs/next-steps.md`, the matching `docs/*-plan.md`.
 3. **Say what you did not check.** A brief that asserts an unverified fact is
@@ -38,7 +38,7 @@ Write the brief with these sections, in this order. Use
 | 1 | **The ask** | what was requested, in one paragraph |
 | 2 | **Scope / Non-scope** | two explicit lists — what is in, what is deliberately out |
 | 3 | **Estimates** | value / complexity / risk per workstream, each with a one-line why |
-| 4 | **Interface & structure** | what is added or changed, with `file:anchor` integration points |
+| 4 | **Interface & structure** | what is added or changed, with `file:line` integration points |
 | 5 | **Plan** | numbered steps, each with its deliverable and its gate |
 | 6 | **Quality gates** | the exact commands and the exact expected output |
 | 7 | **Testing** | 7.1 automated; 7.2 how a human verifies it |
@@ -74,7 +74,7 @@ code/logic"; risk answers "what can break if this goes wrong".
 State what changes, and **ground every integration point in the real code**:
 
 - New files by path; changed files by function name.
-- For each touch point, cite `file:anchor` — the anchor is a hash of the line,
+- For each touch point, cite `file:line` and quote the line — the number locates,
   so it survives edits above it and fails loudly if the code moved.
 - Separate "added" from "changed" so a reviewer can see the shape of the diff.
 

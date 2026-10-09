@@ -13,7 +13,7 @@
 
 ## Blocking issues
 
-<None, or a numbered list. Each cites file:anchor.>
+<None, or a numbered list. Each cites file:line + a quoted snippet.>
 
 1. **<issue>** — `<path>:<anchor>`
    - What is wrong: <the fact, not a feeling>
@@ -21,7 +21,7 @@
 
 ## Non-blocking notes
 
-<Findings that do not gate the change. Each with file:anchor where it is a
+<Findings that do not gate the change. Each with file:line + a snippet where it is a
 claim about the code.>
 
 - `<path>:<anchor>` — <note>

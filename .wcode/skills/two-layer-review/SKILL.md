@@ -28,11 +28,11 @@ IN-PLACE `// ==== SKETCH … ====` comment block.
 Check, in order:
 
 1. **Fidelity to the design.** Does the sketched interface implement the locked
-   design doc? Cite `file:anchor` for each claim about the real code.
+   design doc? Cite `file:line` + a quoted snippet for each claim about the real code.
 2. **Open questions.** Every open question the design left must be **settled**
    here, in the verdict — not deferred to implementation. A settled question is
    recorded as an amendment.
-3. **Integration points.** Each cited `file:anchor` must still name the fact it
+3. **Integration points.** Each cited `file:line` + snippet must still name the fact it
    claims; a stale or wrong anchor is a blocking issue.
 4. **Friction.** Where the design fights the code, does the sketch resolve it
    honestly, or paper over it?
@@ -71,13 +71,13 @@ Emit exactly one of:
 - **APPROVE** — no blocking issues. Non-blocking notes are listed separately and
   do not gate the change.
 - **BLOCKING** — a numbered list of issues, each with:
-  - the `file:anchor` evidence,
+  - the `file:line` + snippet evidence,
   - what is wrong,
   - the concrete change that would clear it.
 
 Rules:
 
-- A blocking issue cites `file:anchor`. An issue with no anchor is an opinion.
+- A blocking issue cites `file:line` + a snippet. An issue with neither is an opinion.
 - Do not mix notes and blockers in one list; label them.
 - Do not approve a diff with a `SKETCH` marker, a hollow test, or a moved open
   question.
@@ -88,9 +88,9 @@ Rules:
 
 - [ ] The sketch is a NEW file or an IN-PLACE `SKETCH` block, and no real code
       line was modified.
-- [ ] Fidelity to the locked design checked, with `file:anchor` evidence.
+- [ ] Fidelity to the locked design checked, with `file:line` + snippet evidence.
 - [ ] Every open question settled and written as an amendment.
-- [ ] Integration anchors still name the facts they claim.
+- [ ] Integration citations still name the facts they claim.
 - [ ] Test stubs name behaviours.
 
 **Layer 2:**

@@ -1,6 +1,6 @@
 ---
 name: interface-sketch
-description: "Use before implementing a non-trivial change — sketch the interface first, either as a NEW full module or as an IN-PLACE review-only comment block, ground every integration point in file:anchor evidence, and hand the filled sketch to a developer. Not for a tiny change whose interface is one obvious edit, and not for the implementation itself."
+description: "Use before implementing a non-trivial change — sketch the interface first, either as a NEW full module or as an IN-PLACE review-only comment block, ground every integration point in file:line + snippet evidence, and hand the filled sketch to a developer. Not for a tiny change whose interface is one obvious edit, and not for the implementation itself."
 ---
 
 # Interface sketch
@@ -72,7 +72,7 @@ as comments it is inert, which is what makes it safe to review.
 3. **Test skeletons.** One `#[cfg(test)]` block with `fn <behaviour_name>()`
    stubs and `todo!()` bodies. A stub's *name* is the assertion you intend
    ("blocks an un-gated work node"); it is not thrown away by the developer.
-4. **Integration points**, each cited `file:anchor` — the real current code it
+4. **Integration points**, each cited `file:line` + a quoted snippet — the real current code it
    plugs into. Anchor, never line number: the anchor hashes the line, so it
    survives edits above it.
 5. **Friction.** Where the design fights the existing code, write it down and
@@ -101,7 +101,7 @@ Run every box before handing off.
 - [ ] Every `fn` has a signature **and** a contract.
 - [ ] Every open type/field is marked (`todo!()` / `<TBD>`), not guessed.
 - [ ] A `#[cfg(test)]` skeleton exists, with behaviour-named stubs.
-- [ ] Every integration point cites `file:anchor`.
+- [ ] Every integration point cites `file:line` + a quoted snippet.
 - [ ] A "friction" paragraph names where the design fights the code.
 - [ ] The developer can fill it without redesigning.
 
@@ -109,13 +109,13 @@ Run every box before handing off.
 
 - The locked design doc the sketch implements (cite it in the sketch header).
 - The `two-layer-review` skill — the first-layer gate this sketch feeds.
-- The `wcode-conventions` skill — the edit/`write` tooling and the anchor rule.
+- The `wcode-conventions` skill — the edit/`write` tooling and the citation rule.
 
 ## Grounding
 
-- Content-addressed anchors: `README.md` §"Design: content-addressed editing";
-  `read` anchors are 5-char hashes of the line's raw content, so indentation is
-  part of an address and a reformatter moves anchors — re-read after formatting.
+- Citing code: `file:line` + a short quoted snippet (D007). The number locates,
+  the snippet pins it; an earlier edit or a reformatter can move the line, so
+  never rely on the number alone. See `README.md` §"Design: editing by literal text".
 - The repo's own sketch convention is stated in `.wcode/team.toml` (the
   orchestrator guidelines comment) and in the sketcher role.
 

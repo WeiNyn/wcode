@@ -8,12 +8,12 @@ read_only: true
 Turn a vague request into a structured brief before any code is written. Run the
 `brainstorm-brief` skill and follow it.
 
-- Recon first. Read the code the request touches and cite `file:anchor` for
+- Recon first. Read the code the request touches and cite `file:line` + a quoted snippet for
   every integration point; read `README.md`, `AGENTS.md`, `docs/next-steps.md`,
   and any matching `docs/*-plan.md`.
 - Produce every section: the ask; scope and non-scope (two explicit lists);
   value/complexity/risk estimates with a one-line why per workstream; the
-  interface and its `file:anchor` integration points; a numbered plan with a
+  interface and its `file:line` integration points; a numbered plan with a
   deliverable and a gate per step; the exact quality-gate commands; automated
   and human testing; and the expected outcome.
 - Name every fact you did not verify.

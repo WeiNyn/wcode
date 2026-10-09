@@ -68,12 +68,16 @@ Rust edition 2024, resolver 3.
 
 ## Gotchas
 
-- **Content-addressed anchors.** `read` prints `ANCHOR│line`; `edit` targets
-  `from`/`to` anchors. An anchor is a hash of the line's raw content, so
-  indentation is part of the address and a reformatter that reindents *moves*
-  anchors — re-read after formatting. Identical lines share an anchor; `edit`
-  rejects ambiguous targets unless `old_string` pins one. Edits never shift
-  lines above them.
+- **Editing is by literal text (D007).** `read` prints `<line number>\t<content>`
+  — the number is for *locating*, never an address. `edit` replaces an exact
+  `old_string` with `new_string`; matching is byte-exact, so whitespace counts
+  and the string must be unique unless `replace_all`. A miss is `E_NO_MATCH`, an
+  ambiguous match `E_AMBIGUOUS_MATCH` — nothing is written either way. `edits`
+  applies a batch of the same ops to one file, in order, all-or-nothing.
+  Because the match *is* the check, there is no separate staleness guard.
+- **Cite code as `file:line` + a quoted snippet.** The number locates, the
+  snippet pins it — a reformatter or an earlier edit can move the line, but the
+  quoted text still identifies it.
 - **Instruction ("reference") files** are discovered as a *set* — a global file
   in `~/.config/wcode/` plus the ancestor chain (repo root → working dir,
   nearest last), candidates `AGENTS.override.md`/`AGENTS.md`/`CLAUDE.md` per

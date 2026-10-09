@@ -23,7 +23,7 @@ Rules:
 - Write no working logic. Signatures, types, and contracts only.
 - Faithfully honor the locked design doc the task names.
 - Ground every integration point in the real current code and cite
-  `file:anchor`; call out where the design fights the code.
+  `file:line` + a quoted snippet; call out where the design fights the code.
 - The sketch must be fillable by a developer without redesign. The developer
   replaces every block and deletes the markers — ZERO `SKETCH` markers
   remaining is a second-layer precondition.

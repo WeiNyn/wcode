@@ -53,24 +53,26 @@ Where a policy must read CLI state (e.g. the task list), it lives in the CLI as
 a `Hooks` impl — the `VerifyGateHooks` pattern
 (`crates/wcode-cli/src/verify_gate.rs:N10Kg`). The kernel must not depend on it.
 
-## §5 — Content-addressed anchors
+## §5 — Editing is by literal text
 
-`read` prints `ANCHOR│line`; `edit` targets `from`/`to` anchors.
+`read` prints `<line number>\t<content>`; `edit` replaces an exact `old_string`
+with `new_string`. (D007 — the hash-anchor scheme is gone.)
 
-- An anchor is a hash of the line's **raw content** — **indentation is part of
-  the address**. `{`, `  {`, and `\t{` are distinct anchors.
-- Editing elsewhere **never** shifts an anchor above the edit; an intact line
-  keeps its anchor.
-- **A reformatter that reindents MOVES anchors.** Re-read after any format.
-- Identical lines share an anchor; `edit` **rejects ambiguous targets** unless
-  `old_string` pins one. Stale anchors are rejected with candidates — nothing is
-  written on a stale/ambiguous edit.
-- The editing tools are stateless; anchors are recomputed from current file
-  contents on every call, so external edits are always picked up.
-- `edit`/`edits`/`replace`/`write` share a mutation lock and write via a temp
-  file + rename; concurrent mutation cannot interleave or truncate.
+- Matching is **byte-exact**: whitespace counts, and a common string (a bare
+  `}`) needs surrounding context or `replace_all`.
+- `old_string` must occur **exactly once** unless `replace_all` — a miss is
+  `E_NO_MATCH`, an ambiguous match `E_AMBIGUOUS_MATCH`. Nothing is written on
+  either.
+- Because the match *is* the check, there is **no separate staleness guard**:
+  text that changed simply no longer matches.
+- `edits` applies a batch of the same ops to ONE file, **in order** against the
+  accumulating content, all-or-nothing.
+- `edit`/`edits`/`write` share a mutation lock and write via a temp file +
+  rename; concurrent mutation cannot interleave or truncate.
+- `read` truncates a >300-char line with `…(+N)` — such a line is **not** usable
+  as an `old_string`; use `grep` for the exact bytes.
 
-See `README.md` §"Design: content-addressed editing".
+See `README.md` §"Design: editing by literal text".
 
 ## §6 — Tools: read-only vs barrier
 
