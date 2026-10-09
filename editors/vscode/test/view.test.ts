@@ -617,6 +617,16 @@ test("composerActions: a NON-root member running while the root is idle still en
   assert.deepEqual(composerActions(renderState(state, "root-1")), { stop: true }, "a running worker enables Stop");
 });
 
+test("renderState: a run in flight reads `running` even when the ROOT member's roster state is idle", () => {
+  const state: ViewState = {
+    ...initialState(),
+    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true }],
+    status: { running: true, planMode: false },
+  };
+  assert.equal(renderState(state, "root-1").status.running, true, "the root's liveness is the run flag, not the roster state");
+  assert.equal(composerControls(renderState(state, "root-1")).stop, true, "so the composer shows Stop");
+});
+
 test("the composer foot swaps Send/Stop in ONE slot (inverse `hidden`)", () => {
   const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
   const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));

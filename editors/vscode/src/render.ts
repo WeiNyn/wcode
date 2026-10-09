@@ -102,7 +102,11 @@ function rootTodos(state: ViewState): TodoItem[] {
 function targetRunning(state: ViewState, target: string | null): boolean {
   if (target === null) return state.status.running;
   const member = state.members.find((m) => m.id === target);
-  return member ? member.state === "running" : state.status.running;
+  // The ROOT's liveness IS the run flag — the reducer sets `status.running` on
+  // `agent_start`/`agent_end`, while a member's roster `state` is server-reported (a local
+  // run never marks the root "running"). An unknown target falls back to the flag too.
+  if (member === undefined || member.isRoot) return state.status.running;
+  return member.state === "running";
 }
 /** Render one block. Pure. */
 export function renderBlock(block: Block): RenderedBlock {
