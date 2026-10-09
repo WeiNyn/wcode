@@ -633,6 +633,9 @@ enum Align {
     Center,
 }
 
+/// Render a markdown table as a **booktabs plate**: three solid `─` rules (above
+/// the header, under it, and below the last row), the columns separated by a
+/// whitespace gutter, the header bold — no vertical `│` and no crossing `┼`.
 fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
     let cols = table
         .header
@@ -648,9 +651,10 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         }
     }
 
-    // Shrink the widest column until the row (with ` │ ` joins and the gutter)
-    // fits, never below 3 cells; longer cells then wrap within the column.
-    let overhead = disp(GUTTER) + 3 * cols.saturating_sub(1);
+    // Shrink the widest column until the row (with the 2-space gutters and the
+    // block gutter) fits, never below 3 cells; longer cells then wrap within the
+    // column.
+    let overhead = disp(GUTTER) + 2 * cols.saturating_sub(1);
     let budget = width.saturating_sub(overhead);
     let mut total: usize = widths.iter().sum();
     while total > budget {
@@ -664,24 +668,29 @@ fn table_lines(table: &Table, width: usize) -> Vec<Line<'static>> {
         total -= 1;
     }
 
-    let mut out = vec![row_lines(
+    // A rule spans the full table width: the columns plus the 2-space gutters.
+    let rule = || {
+        vec![Line::from(Span::styled(
+            format!(
+                "{GUTTER}{}",
+                "─".repeat(widths.iter().sum::<usize>() + 2 * cols.saturating_sub(1))
+            ),
+            dim(),
+        ))]
+    };
+    let mut out: Vec<Vec<Line<'static>>> = Vec::new();
+    out.push(rule());
+    out.push(row_lines(
         &table.header,
         &widths,
         &table.aligns,
         heading_style(),
-    )];
-    let rule = widths
-        .iter()
-        .map(|w| "─".repeat(*w))
-        .collect::<Vec<_>>()
-        .join("─┼─");
-    out.push(vec![Line::from(Span::styled(
-        format!("{GUTTER}{rule}"),
-        dim(),
-    ))]);
+    ));
+    out.push(rule());
     for row in &table.rows {
         out.push(row_lines(row, &widths, &table.aligns, body_style()));
     }
+    out.push(rule());
     out.into_iter().flatten().collect()
 }
 
@@ -707,7 +716,7 @@ fn row_lines(cells: &[String], widths: &[usize], aligns: &[Align], style: Style)
             })
             .collect();
         out.push(Line::from(Span::styled(
-            format!("{GUTTER}{}", parts.join(" │ ")),
+            format!("{GUTTER}{}", parts.join("  ")),
             style,
         )));
     }
@@ -1207,11 +1216,46 @@ mod tests {
     #[test]
     fn tables_render_with_alignment() {
         let md = "| name | qty |\n|:-----|----:|\n| a | 1 |\n| bb | 22 |";
-        let text = text_of(&render(md, 60));
-        assert_eq!(text[0], "   name │ qty");
-        assert!(text[1].starts_with("   ─") && text[1].contains('┼'));
-        assert_eq!(text[2], "   a    │   1");
-        assert_eq!(text[3], "   bb   │  22");
+        let lines = render(md, 60);
+        let text = text_of(&lines);
+        // A booktabs plate — no vertical `│` and no crossing `┼` anywhere.
+        for line in &text {
+            assert!(!line.contains('│'), "a vertical rule survived: {line:?}");
+            assert!(!line.contains('┼'), "a crossing survived: {line:?}");
+        }
+        // Three solid `─` rules — above the header, under the header, below the
+        // last row — each spanning the table width (gutter + 4 + 2 + 3).
+        let rule = "   ─────────";
+        assert_eq!(text[0], rule, "the top rule");
+        assert_eq!(text[2], rule, "the header rule");
+        assert_eq!(text[5], rule, "the bottom rule");
+        // The header is bold; the columns are separated by whitespace alone.
+        assert_eq!(text[1], "   name  qty");
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "the header is bold: {:?}",
+            lines[1]
+        );
+        // Alignment: `a`/`bb` hug the left, the numbers hug the column's right.
+        assert_eq!(text[3], "   a       1");
+        assert_eq!(text[4], "   bb     22");
+        assert!(
+            text[3].ends_with('1') && text[4].ends_with("22"),
+            "the qty column is right-aligned: {text:?}"
+        );
+    }
+
+    #[test]
+    fn table_columns_center_align() {
+        // A `:-:` column centers its content, padding both sides.
+        let md = "| key | tag |\n|:----|:---:|\n| a | x |\n| b | wide |";
+        let text = text_of(&render(md, 40));
+        // `tag` is 4 wide (from `wide`), so `x` centers as ` x  `.
+        let row = text.iter().find(|l| l.contains('x')).expect("the x row");
+        assert!(row.contains(" x  "), "the center cell is centered: {row:?}");
     }
 
     #[test]

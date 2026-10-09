@@ -66,7 +66,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | spinner (running) | `⠋⠙⠹⠸…` | accent |
 | status separators | `·` | dim |
 | inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
-| table | `│ ─ ┼` | header bold; columns aligned, cells wrap |
+| table | `─` | header bold; three `─` rules (top / header / bottom); columns separated by a whitespace gutter; cells wrap |
 | tool panel / overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
 | collapsed affordance | `▸` | dim |
 | expanded affordance | `▾` | dim |
