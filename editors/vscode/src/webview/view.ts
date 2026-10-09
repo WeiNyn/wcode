@@ -561,6 +561,23 @@ export function workingGroup(members: SessionMember[], targetId: string | null):
   return { count: rows.length, rows };
 }
 
+/** The transcript-foot line's shape: nothing, ONE active member (`glyph name · action`),
+ *  or the aggregate `{n} working`. */
+export type LivelineSpec =
+  | { kind: "none" }
+  | { kind: "one"; glyph: string; glyphClass: string; running: boolean; name: string; action: string }
+  | { kind: "many"; count: number };
+
+/** Decide the foot line from the working group. Pure — the ONE place the branch is made. */
+export function livelineSpec(group: WorkingGroup): LivelineSpec {
+  if (group.count === 0) return { kind: "none" };
+  if (group.count === 1) {
+    const row = group.rows[0];
+    return { kind: "one", glyph: row.glyph, glyphClass: row.glyphClass, running: row.running, name: row.name, action: row.action };
+  }
+  return { kind: "many", count: group.count };
+}
+
 /** A manual override of a tool fold, recorded for the PHASE it was made in. */
 export interface FoldOverride {
   /** The tool's `done` value at the moment of the toggle. */

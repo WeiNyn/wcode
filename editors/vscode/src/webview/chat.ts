@@ -28,6 +28,7 @@ import {
   foldOpen,
   isActivationKey,
   livelineLabel,
+  livelineSpec,
   panelHeader,
   toolStatus,
   teamCaption,
@@ -461,8 +462,8 @@ function fnNote(note: TurnNote): HTMLElement {
 
 /** The one live type-line (draft `.liveline`): `{n} working` iff count > 0. Impure (DOM). */
 function renderLiveline(state: RenderedState): void {
-  const group = workingGroup(state.members, state.target?.id ?? null);
-  if (group.count === 0) {
+  const spec = livelineSpec(workingGroup(state.members, state.target?.id ?? null));
+  if (spec.kind === "none") {
     livelineEl.hidden = true;
     livelineEl.textContent = "";
     return;
@@ -470,21 +471,20 @@ function renderLiveline(state: RenderedState): void {
   livelineEl.hidden = false;
   livelineEl.textContent = "";
   // exactly ONE active member: the glyph + its name + what it is doing.
-  if (group.count === 1) {
-    const row = group.rows[0];
+  if (spec.kind === "one") {
     const line = el("span", "row live-one");
-    const glyph = el("span", `glyph ${row.glyphClass}${row.running ? " spin" : ""}`, row.glyph);
+    const glyph = el("span", `glyph ${spec.glyphClass}${spec.running ? " spin" : ""}`, spec.glyph);
     glyph.setAttribute("aria-hidden", "true");
     line.appendChild(glyph);
-    line.appendChild(el("span", "who", row.name));
-    if (row.action !== "") {
+    line.appendChild(el("span", "who", spec.name));
+    if (spec.action !== "") {
       const dot = el("span", null, "·");
       dot.setAttribute("aria-hidden", "true");
       line.appendChild(dot);
-      line.appendChild(el("span", "what", row.action));
+      line.appendChild(el("span", "what", spec.action));
     }
     livelineEl.appendChild(line);
-    livelineEl.setAttribute("aria-label", row.action === "" ? row.name : `${row.name} · ${row.action}`);
+    livelineEl.setAttribute("aria-label", spec.action === "" ? spec.name : `${spec.name} · ${spec.action}`);
     return;
   }
   // several: the aggregate count.
@@ -493,11 +493,11 @@ function renderLiveline(state: RenderedState): void {
   dots.setAttribute("aria-hidden", "true");
   line.appendChild(dots);
   const label = el("span", "lbl");
-  label.appendChild(el("b", null, String(group.count)));
+  label.appendChild(el("b", null, String(spec.count)));
   label.appendChild(document.createTextNode(" working"));
   line.appendChild(label);
   livelineEl.appendChild(line);
-  livelineEl.setAttribute("aria-label", livelineLabel(group.count));
+  livelineEl.setAttribute("aria-label", livelineLabel(spec.count));
 }
 
 function render(snapshot: ToWebview): void {

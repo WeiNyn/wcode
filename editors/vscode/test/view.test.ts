@@ -22,6 +22,7 @@ import {
   folio,
   turnNotes,
   livelineLabel,
+  livelineSpec,
   panelHeader,
   isActivationKey,
   teamCaption,
@@ -745,6 +746,43 @@ test("the footnote matter is declared: .fnmark / .footnotes / .fn-head / details
   assert.match(css, /details\.fn-out \{/, "details.fn-out");
   assert.match(css, /\.footnotes::before \{[^}]*width: 44%/, "the RULE is short (44%)");
   assert.ok(!/\.footnotes \{[^}]*width: 44%/.test(css), "the NOTES are full width — the output fits");
+});
+
+test("livelineSpec: one active member -> the detail line; several -> the count; none -> none", () => {
+  const one = workingGroup(
+    [{ id: "agent:w1", label: "explorer", state: "running", isRoot: false, liveAction: "grep onOpenDiff" }],
+    "root-1",
+  );
+  assert.deepEqual(livelineSpec(one), {
+    kind: "one",
+    glyph: memberGlyph("running").glyph,
+    glyphClass: memberGlyph("running").className,
+    running: true,
+    name: "explorer",
+    action: "grep onOpenDiff",
+  });
+  const several = workingGroup(
+    [
+      { id: "agent:w1", label: "e", state: "running", isRoot: false },
+      { id: "agent:w2", label: "d", state: "running", isRoot: false },
+    ],
+    "root-1",
+  );
+  assert.deepEqual(livelineSpec(several), { kind: "many", count: 2 }, "several -> the aggregate count");
+  assert.deepEqual(livelineSpec(workingGroup([], "root-1")), { kind: "none" }, "none -> hidden");
+});
+
+test("the roster pair is glyph+name with NO `.act` span", () => {
+  const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
+  const start = src.indexOf("function renderCaption");
+  const fn = src.slice(start, src.indexOf("\nfunction ", start + 10));
+  assert.match(fn, /el\("span", "nm", row\.name\)/, "the name is a `.nm` span");
+  assert.ok(!/"act"/.test(fn), "no `.act` span is appended");
+});
+
+test("no `.act` rule remains in the sheet (the action is not on the roster)", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.ok(!/\.act\s*\{/.test(css), "the roster's `.act` rule is gone");
 });
 
 /* -------------------------------------------------------- working group */
