@@ -45,7 +45,7 @@ The human's resolution rule: **`bash` output as bash; `read`/`edit` content high
 - The **fence rule** (`markdown.ts:26-31`) highlighting the code body; the `.code`/`.chead`/`.pre` plate markup is otherwise unchanged (W008's caption stays).
 - **Tool output**: `RenderedTool` gains `outputHtml?` (`editors/vscode/src/render.ts:18-39`, beside `outputText` at `:23`); `rawOutput` (`chat.ts:277-279`) inserts it.
 - **Tool input (the diff body)**: `RenderedTool` gains `diffLinesHtml?: string[]` (beside `diff?` at `render.ts:35`); the `reviewBlock` line loop (`chat.ts:307-313`) inserts each line's html.
-- The **token palette**: a `.token.*` rule set in `media/chat.css` mapping Prism's token classes to `--vscode-symbolIcon-*` (with `--vscode-editor-foreground` / `--vscode-descriptionForeground` fallbacks), after `pre.quote` (`media/chat.css:454`).
+- The **token palette**: a `.token.*` rule set in `media/chat.css` mapping Prism's token classes to `--vscode-symbolIcon-*` (with `--vscode-editor-foreground` / `--vscode-descriptionForeground` fallbacks), after `pre.quote` (`media/chat.css:458`).
 - The **one new dependency**: `prismjs` in `editors/vscode/package.json` `dependencies` (`package.json:118-120`, beside `markdown-it` at `:119`) — **host-side** (see §2.2).
 - The **record (E0)**: the placement + dependency + colour-budget audit in `docs/plans/vscode-ui-editorial-plan.md` + tracker row 66.
 
@@ -61,7 +61,7 @@ The human's resolution rule: **`bash` output as bash; `read`/`edit` content high
 - **The TUI.** `crates/wcode-tui` already highlights fenced code with `syntect` (`crates/wcode-tui/src/markdown.rs:583` `highlight_line`; syntax resolved at `markdown.rs:554` `fence_syntax` via `find_syntax_by_token` at `:556`). Rust `syntect` is **not usable in the webview**. Highlighting the **TUI tool panel** (`crates/wcode-tui/src/ui.rs:813` `tool_panel_body`, `:797` `panel_param_lines` — both `dim()`/`added_style()`, unhighlighted) is a **separate change with its own tests**, cited here only as the parity reference.
 - **A webview theme catalog / preset picker.** The webview has no theme of its own — it tracks the host's `--vscode-*`. The TUI's multi-preset `syntect` themes (`crates/wcode-tui/src/theme.rs:564-569`) do not travel here.
 - **A full language set / auto-detection.** Ship a **curated subset** matched to wcode's tools + the TUI's bundled syntaxes. **No `Prism.highlightAuto`** (auto-detect is fuzzy and pulls in every grammar).
-- **Restyling the plate / recess / card.** Only token spans are added *inside* `.code .pre` (`media/chat.css:442`), `pre.quote` (`:454`) and `.hunk .ln .txt` (`:979`); the layout, the `.hunk .ln.add/.del` backgrounds and the `reviewBlock` card (`chat.ts:279`) are unchanged.
+- **Restyling the plate / recess / card.** Only token spans are added *inside* `.code .pre` (`media/chat.css:446`), `pre.quote` (`:458`) and `.hunk .ln .txt` (`:1000`); the layout, the `.hunk .ln.add/.del` backgrounds and the `reviewBlock` card (`chat.ts:279`) are unchanged.
 - **A new wcode colour token or a second accent.** `--wc-accent` (`media/chat.css:28`, *"the one wcode accent"*) is unchanged; token colour is `--vscode-*` only.
 
 ---
@@ -104,9 +104,9 @@ export function languageForTool(name: string, path: string | undefined): string 
 | 1 | `editors/vscode/src/markdown.ts:30` | `const code = md.utils.escapeHtml(token.content);` | `const body = highlight(token.content, lang) ?? md.utils.escapeHtml(token.content);` and emit `body` at `:31` (use the **raw** `lang` for the grammar, keep the escaped `label` at `:29`). |
 | 2 | `editors/vscode/src/render.ts:23` / `:35` | `outputText: string;` / `diff?: string;` | add `outputHtml?: string;` and `diffLinesHtml?: string[];`. |
 | 3 | `editors/vscode/src/render.ts:165` (`renderTool`, the fields at `:169-176` e.g. `outputText: tool.output,` `:171`) | `outputText: tool.output,` | `outputHtml: highlight(tool.output, languageForTool(tool.name, tool.path)),` and, when `hasDiff` (`:176`), `diffLinesHtml` from `reviewHunk(tool.diff)` (`src/review.ts`, pure) — join the line texts with `\n`, `highlight` once (preserves multi-line context), split by `\n`. |
-| 4 | `editors/vscode/src/webview/chat.ts:277-279` | `return el("pre", "quote", tool.outputText);` | insert `tool.outputHtml` when present (a small helper: create `pre.quote`, set `innerHTML`, else `textContent = outputText`). Its one caller is `fnNote` (`chat.ts:422`, `rawOutput(note.tool)`). |
+| 4 | `editors/vscode/src/webview/chat.ts:277-279` | `return el("pre", "quote", tool.outputText);` | insert `tool.outputHtml` when present (a small helper: create `pre.quote`, set `innerHTML`, else `textContent = outputText`). Its one caller is `fnNote` (`chat.ts:425`, `rawOutput(note.tool)`). |
 | 5 | `editors/vscode/src/webview/chat.ts:307-312` | `row.appendChild(el("span", "txt", line.text));` | when `tool.diffLinesHtml?.[i]` is present, set the `.txt` span's **`innerHTML`** (Prism escapes its own output — do NOT route it through `el(tag, class, text)`, which sets `textContent`); else `textContent = line.text`. |
-| 6 | `editors/vscode/media/chat.css:454` (`pre.quote`), `:442` (`.code .pre`), `:979` (`.hunk .ln .txt`) | — | add a `.token.*` block (below). |
+| 6 | `editors/vscode/media/chat.css:458` (`pre.quote`), `:446` (`.code .pre`), `:1000` (`.hunk .ln .txt`) | — | add a `.token.*` block (below). |
 | 7 | `editors/vscode/package.json:118-120` | `"dependencies": { "markdown-it": "^14.1.0" }` | add `"prismjs": "^1.29.0"` (host dependency; bundled by `esbuild.mjs:13`/`:42`, `out/extension.js`). |
 
 **No wire/parser change:** `parseToWebview` checks only `Array.isArray(rendered.blocks)` and `rendered.status` — the added `RenderedTool` fields pass through (`editors/vscode/src/webview.ts`).
@@ -124,7 +124,7 @@ export function languageForTool(name: string, path: string | undefined): string 
 
 ### 4.3 The token palette (CSS) — `--vscode-symbolIcon-*`, no new token
 
-Add after `media/chat.css:454` (no new `:root` token; `--wc-accent` stays the one accent):
+Add after `media/chat.css:458` (no new `:root` token; `--wc-accent` stays the one accent):
 
 | Prism class | `--vscode-*` |
 |---|---|
@@ -237,7 +237,7 @@ Then ask wcode to: (a) show a fenced code block (a `.ts`/`.rs` snippet) — expe
 
 ## 10. References
 
-- `editors/vscode/src/markdown.ts` (`:7` the deferred note, `:26-31` the fence rule), `src/render.ts` (`:18-39` `RenderedTool`, `:165-176` `renderTool`, `:9` the dependency-free note), `src/review.ts` (`reviewHunk`), `src/webview/chat.ts` (`:277-279` `rawOutput`, `:307-313` the diff line loop, `:422` `fnNote`, `:433` the `.to` command), `src/webview.ts` (`:10` the pre-rendered note), `media/chat.css` (`:442` `.code .pre`, `:454` `pre.quote`, `:979` `.hunk .ln .txt`, `:28` `--wc-accent`).
+- `editors/vscode/src/markdown.ts` (`:7` the deferred note, `:26-31` the fence rule), `src/render.ts` (`:18-39` `RenderedTool`, `:165-176` `renderTool`, `:9` the dependency-free note), `src/review.ts` (`reviewHunk`), `src/webview/chat.ts` (`:277-279` `rawOutput`, `:307-313` the diff line loop, `:425` `fnNote`, `:433` the `.to` command), `src/webview.ts` (`:10` the pre-rendered note), `media/chat.css` (`:446` `.code .pre`, `:458` `pre.quote`, `:1000` `.hunk .ln .txt`, `:28` `--wc-accent`).
 - `editors/vscode/esbuild.mjs` (`:5` "dependency-free IIFE", `:13`/`:42` the host bundle), `package.json` (`:109`/`:111`/`:113` scripts, `:118-120` dependencies), `editors/vscode/README.md` (`:37`).
 - TUI parity: `crates/wcode-tui/src/markdown.rs` (`:554` `fence_syntax`, `:556` `find_syntax_by_token`, `:583` `highlight_line`), `crates/wcode-tui/src/theme.rs:564-569` (the scope→colour map), `crates/wcode-tui/src/ui.rs:797`/`:813` (the unhighlighted tool panel).
 - `docs/plans/vscode-ui-editorial-plan.md`, `docs/work/W008-paper-vscode-surface.md`, `docs/next-steps.md` (row 65 = W008 landed; row 66 = W009), `docs/sketches/vscode-extension.md:480`, `.wcode/skills/design-taste/SKILL.md` (§6 `[web]` tells; §7.3 amend-first).
