@@ -345,6 +345,31 @@ export function turnNotes(blocks: RenderedBlock[]): TurnNote[] {
     });
   }
   return notes;
+  return notes;
+}
+
+/**
+ * Split a turn's blocks into per-MESSAGE segments (A2 order). A segment is a maximal run of
+ * non-`tool` blocks followed by the `tool` blocks that immediately follow it, so
+ * `[A1, T1, A2, T2]` -> `[[A1, T1], [A2, T2]]`. The footnote apparatus is set PER segment, so
+ * a tool's detail follows its own message in BOTH the running and the settled state (no
+ * turn-end pooling). Pure.
+ */
+export function turnSegments(blocks: RenderedBlock[]): RenderedBlock[][] {
+  const segments: RenderedBlock[][] = [];
+  let current: RenderedBlock[] = [];
+  let afterTool = false;
+  for (const block of blocks) {
+    // A non-`tool` block that follows a `tool` block opens a NEW segment (a message boundary).
+    if (afterTool && block.kind !== "tool") {
+      segments.push(current);
+      current = [];
+    }
+    current.push(block);
+    afterTool = block.kind === "tool";
+  }
+  if (current.length > 0) segments.push(current);
+  return segments;
 }
 
 /** The member a turn is labeled by — the All-mode resolver's answer, or Focus's fallback. */

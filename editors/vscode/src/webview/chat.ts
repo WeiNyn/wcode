@@ -36,6 +36,7 @@ import {
   selectionRef,
   toggleFold,
   turnNotes,
+  turnSegments,
   turns,
   workingGroup,
   type FoldOverrides,
@@ -394,19 +395,24 @@ function renderTurn(turn: Turn): HTMLElement {
   if (turn.who.glyph !== "") byline.appendChild(el("span", "glyph", turn.who.glyph));
   byline.appendChild(el("span", "name", turn.who.name)); // no `.stamp` — no time on the wire
   wrap.appendChild(byline);
-  // The tool blocks LEAVE the flow (A2): each prints a reference at its own boundary and is
-  // collected; the apparatus is then set ONCE, at the turn's foot, after ALL blocks.
+  // The tool blocks LEAVE the flow (A2): each prints a reference at its own boundary, and the
+  // apparatus is set PER MESSAGE SEGMENT — so a tool's detail follows its own message, in
+  // event order, in BOTH the running and the settled state (no turn-end pooling).
   const notes = turnNotes(turn.blocks);
   let i = 0;
-  for (const block of turn.blocks) {
-    if (block.kind === "tool" && i < notes.length) {
-      wrap.appendChild(fnmark(notes[i]));
-      i += 1;
-    } else {
-      wrap.appendChild(blockShell(block));
+  for (const segment of turnSegments(turn.blocks)) {
+    const segmentNotes: TurnNote[] = [];
+    for (const block of segment) {
+      if (block.kind === "tool" && i < notes.length) {
+        wrap.appendChild(fnmark(notes[i]));
+        segmentNotes.push(notes[i]);
+        i += 1;
+      } else {
+        wrap.appendChild(blockShell(block));
+      }
     }
+    if (segmentNotes.length > 0) wrap.appendChild(renderFootnotes(segmentNotes));
   }
-  if (notes.length > 0) wrap.appendChild(renderFootnotes(notes));
   return wrap;
 }
 

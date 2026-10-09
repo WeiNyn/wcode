@@ -22,6 +22,7 @@ import {
   formatTokens,
   folio,
   turnNotes,
+  turnSegments,
   livelineLabel,
   livelineSpec,
   panelHeader,
@@ -769,6 +770,44 @@ test("turnNotes: the target falls back to the summary; a turn with no tool yield
   const [note] = turnNotes([aTool()]); // aTool()'s summary is "s", no target
   assert.equal(note.target, "s", "the summary is the fallback target");
   assert.deepEqual(turnNotes([{ kind: "assistant", html: "", live: false }]), [], "no tool \u21d2 no notes");
+});
+
+test("turnSegments: a turn splits at each message boundary, in event order", () => {
+  const A = (): RenderedBlock => ({ kind: "assistant", html: "", live: false });
+  const segs = turnSegments([A(), aTool(), A(), aTool()]);
+  assert.equal(segs.length, 2, "two message segments");
+  assert.deepEqual(
+    segs.map((s) => s.map((b) => b.kind)),
+    [["assistant", "tool"], ["assistant", "tool"]],
+  );
+});
+
+test("turnSegments: consecutive tools stay in one segment; prose-only and tool-only are each one", () => {
+  const A = (): RenderedBlock => ({ kind: "assistant", html: "", live: false });
+  assert.equal(turnSegments([A(), aTool(), aTool()]).length, 1, "prose + its tools = one segment");
+  assert.equal(turnSegments([A(), A()]).length, 1, "prose only = one segment");
+  assert.equal(turnSegments([aTool()]).length, 1, "a tool-only turn = one segment");
+});
+
+test("turnSegments: the RUNNING order equals the settled order (T1 before a live A2)", () => {
+  const A = (live: boolean): RenderedBlock => ({ kind: "assistant", html: "", live });
+  const running = turnSegments([A(false), aTool(), A(true)]);
+  assert.equal(running.length, 2, "the live message opens a new segment");
+  assert.deepEqual(running[0].map((b) => b.kind), ["assistant", "tool"], "T1's notes precede the live A2");
+  const settled = turnSegments([A(false), aTool(), A(false)]);
+  assert.deepEqual(
+    settled.map((s) => s.map((b) => b.kind)),
+    running.map((s) => s.map((b) => b.kind)),
+    "only `live` differs; the segmentation is identical",
+  );
+});
+
+test("renderTurn sets the apparatus PER segment (no single pooled list at the turn's foot)", () => {
+  const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
+  const body = src.slice(src.indexOf("function renderTurn("));
+  assert.match(body, /turnSegments\(turn\.blocks\)/, "renderTurn walks the segments");
+  assert.match(body, /renderFootnotes\(segmentNotes\)/, "each segment gets its own .footnotes");
+  assert.doesNotMatch(body, /renderFootnotes\(notes\)/, "no single pooled list at the turn's foot");
 });
 
 test("the footnote matter is declared: .fnmark / .footnotes / .fn-head / details.fn-out", () => {
