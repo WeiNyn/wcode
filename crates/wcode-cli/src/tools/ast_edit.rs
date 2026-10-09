@@ -3,9 +3,9 @@
 //! Companion to `ast_search`: same "auto if binary on PATH" registration. One
 //! FILE per call, applied atomically (rewrite into a same-directory temp copy
 //! that keeps the file's extension, then rename over the original — the same
-//! crash-safe pattern as `edit`/`write`). Structural rewrites bypass line
-//! anchors by design (whole-AST transforms), but the echoed diff carries line
-//! numbers so a follow-up `edit`/`read` can find the change.
+//! crash-safe pattern as `edit`/`write`). Structural rewrites bypass `edit`'s
+//! literal-text matching by design (whole-AST transforms), but the echoed diff
+//! carries line numbers so a follow-up `edit`/`read` can find the change.
 
 use std::sync::Arc;
 
@@ -52,7 +52,7 @@ impl TypedTool for AstEdit {
         "ast_edit"
     }
     fn description(&self) -> &str {
-        "AST-structural rewrite of ONE file via ast-grep. pattern uses $UPPERCASE wildcards; rewrite re-emits them (e.g. println!($A, $B) → dbg!($B)). commit:true (default) applies atomically and echoes the diff; commit:false dry-runs. Bypasses line anchors — re-read before further edits."
+        "AST-structural rewrite of ONE file via ast-grep. pattern uses $UPPERCASE wildcards; rewrite re-emits them (e.g. println!($A, $B) → dbg!($B)). commit:true (default) applies atomically and echoes the diff; commit:false dry-runs. Bypasses `edit`'s literal-text matching — re-read before further edits."
     }
     /// Mutates the workspace — blocked in plan mode (`MUTATING_TOOLS`).
     fn mutating(&self) -> bool {
