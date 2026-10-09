@@ -377,17 +377,18 @@ export function diffStat(diff: string): { added: number; removed: number } {
   return { added, removed };
 }
 /**
- * The composer's control set (draft `.composer`). Pure.
- *   mode     = `state.status.planMode` ? "Plan" : "Act"  (the `.seg`'s pressed segment)
- *   segments = the mode `.seg` — Act then Plan, exactly one pressed
+ * The composer's control set (draft `.composer .foot`). Pure.
+ *   mode     = `state.status.planMode` ? "Plan" : "Act"  (the toggle's pressed segment)
+ *   segments = the mode toggle — Act then Plan, exactly one pressed
  *   stop     = `status.running`  (Show `Stop`? Conditional chrome: Esc already cancels.)
- * The `Model: …` span is GONE (the model lives in the header's `▾` disclosure, V6), so
- * there is no `model` field to render. Effort and a context window are not on the wire.
+ * The `Model: …` span is GONE, and the model no longer renders anywhere (the `▾`
+ * disclosure was dropped in W005); there is no `model` field. Effort and a context
+ * window are not on the wire.
  */
 export interface ComposerControls {
-  /** The mode — the pressed segment of the mode `.seg`. */
+  /** The mode — the pressed segment of the mode toggle. */
   mode: "Plan" | "Act";
-  /** The mode `.seg`'s segments, in order; EXACTLY one is pressed. */
+  /** The mode toggle's segments, in order; EXACTLY one is pressed. */
   segments: Array<{ mode: "Plan" | "Act"; pressed: boolean }>;
   /** Show `Stop`? ONLY while a run is in flight — an idle Stop button is chrome. */
   stop: boolean;
@@ -430,7 +431,7 @@ export function selectionRef(context: SelectionContext): string {
 export function composeSubmit(text: string, context: SelectionContext | null): string {
   return context === null ? text : `${selectionRef(context)}\n\n${text}`;
 }
-/** One live subagent row — the working pill's source (draft `.pill`). */
+/** One live subagent row — the live type-line's source. */
 export interface WorkingRow {
   id: string;
   /** Display name; the ROOT reads as "orchestrator" (mirrors `reducer.displayLabel`). */
@@ -439,7 +440,7 @@ export interface WorkingRow {
   running: boolean;
   /** The dim right-hand text (the member's `liveAction`). */
   action: string;
-  /** The member's identity swatch — the avatar's fill (roster order). */
+  /** The member's identity swatch (roster order) — kept on the row; no avatar consumes it now. */
   swatch: MemberSwatch;
   /** The avatar glyph: the root's `❯`, else the initial (`memberInitial`). */
   initial: string;
@@ -460,7 +461,7 @@ export interface WorkingGroup {
  *   name    = member.isRoot ? "orchestrator" : member.label
  *   running = member.state === "running"
  *   action  = member.liveAction ?? ""      (empty ⇒ the DOM shows just the name)
- *   swatch  = memberSwatch(index, isRoot)   (the avatar's identity fill)
+ *   swatch  = memberSwatch(index, isRoot)   (kept on the row; unused by the surface)
  *   initial = memberInitial(name, isRoot)   (the root's ❯, else the initial)
  *   count   = rows.length
  *
@@ -524,7 +525,7 @@ export function toggleFold(overrides: FoldOverrides, callId: string, done: boole
   return next;
 }
 
-/* ------------------------------------------------------- member swatches (rail) */
+/* ------------------------------------------------------------- member swatches */
 
 /**
  * The rail's member palette: one identifiable colour per member, so a row (or a
@@ -539,7 +540,7 @@ export type MemberSwatch = (typeof MEMBER_SWATCHES)[number];
  * The colour for the member at roster `index`. Pure. The root takes the first
  * (accent-adjacent blue — it is `members[0]`), then the palette cycles by POSITION:
  * distinct for up to six members and stable across a render, unlike a hash that can
- * collide. The swatch is IDENTITY; the row's border carries STATE (`--st`).
+ * collide.
  */
 export function memberSwatch(index: number, isRoot: boolean): MemberSwatch {
   if (isRoot) return MEMBER_SWATCHES[0];

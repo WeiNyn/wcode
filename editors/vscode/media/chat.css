@@ -775,30 +775,19 @@ textarea::placeholder {
   outline-offset: 1px;
 }
 
-/* The state glyph (the rail rows + the header identity): IDENTITY is the `--sw` edge,
-   STATE is this glyph's colour — `⠋` running · `✓` done · `✗` failed · `○` idle. */
+/* The state glyph (the masthead identity + the team caption): the colour is the STATE —
+   `⠋` running · `✓` done · `✗` failed · `○` idle. */
 .glyph {
   font-family: var(--vscode-editor-font-family);
   font-weight: 700;
 }
 
-/* The state token, split in two: `--st` is always set (a member avatar rings with it),
-   while `color` is scoped to `.glyph` so a `.mav` keeps its swatch colour, whatever the
-   order of these rules. */
 .glyph.g-run {
   color: var(--wc-accent);
 }
 
 .glyph.g-idle {
   color: var(--vscode-descriptionForeground);
-}
-
-.g-run {
-  --st: var(--wc-accent);
-}
-
-.g-idle {
-  --st: var(--vscode-descriptionForeground);
 }
 
 /* -------------------------------------------- in-panel change review (P4) */
@@ -972,14 +961,6 @@ textarea::placeholder {
 
 .glyph.g-err {
   color: var(--vscode-errorForeground);
-}
-
-.g-done {
-  --st: var(--vscode-charts-green);
-}
-
-.g-err {
-  --st: var(--vscode-errorForeground);
 }
 
 /* ------------------------------------------------ docked at a sidebar width */

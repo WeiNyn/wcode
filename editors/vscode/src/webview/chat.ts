@@ -115,7 +115,7 @@ let attached = true;
 let lastContext: SelectionContext | null = null;
 /** The last rendered selection ref, so a NEW selection re-arms the chip. */
 let lastRef: string | null = null;
-/** The composer's current mode (the `.seg`'s pressed segment), for the click guard. */
+/** The composer's current mode (the mode toggle's pressed segment), for the click guard. */
 let composerMode: "Plan" | "Act" = "Act";
 
 /** The masthead's cells+caption signature; a matching snapshot skips the rebuild. */
@@ -248,7 +248,7 @@ function renderStateCard(state: RenderedState, session: PanelSessionInfo): HTMLE
 function blockShell(block: RenderedBlock): HTMLElement {
   // ONE element: `classNames` already names the content element ("body" /
   // "body notice" / …), so there is no outer wrap + nested `.body`. No `.role`
-  // line either — the `.who` line is per-TURN now.
+  // line either — the `.byline` line is per-TURN now.
   const node = el("div", classNames(block));
   if (block.live) node.dataset.live = "1"; // the newest live step (the running fold / live block)
   node.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
@@ -668,7 +668,7 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
   }
 });
 sendBtn.addEventListener("click", submit);
-// The mode `.seg`: post and let the HOST flip plan-mode; the next snapshot reflects it
+// The mode toggle: post and let the HOST flip plan-mode; the next snapshot reflects it
 // (no optimistic flip). The wire only carries `toggle-plan`, so a click on the segment
 // that is ALREADY active is a no-op — otherwise it would flip the mode the wrong way.
 mActEl.addEventListener("click", () => selectMode("Act"));
