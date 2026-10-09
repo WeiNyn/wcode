@@ -56,6 +56,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 |---|---|---|
 | user prompt | `❯` | accent, bold |
 | assistant prose | — | default fg |
+| section counter | `§` | heading |
 | thinking (in flight) | `···` | dim, italic |
 | thinking (collapsed row) | `··· thinking · N chars` | dim |
 | tool start | `» name  args` | dim |
@@ -192,6 +193,11 @@ divider marks the replayed prefix. With **no** history the transcript opens on a
 dim seeded hint (`❯ type a message · /help for commands · F1 for keys`), not a
 blank pane.
 
+- **Section head** — a `§N  title` block on its own line before each assistant
+  reply: the number is **per session, monotonic** (`§1`, `§2`, …) and the
+  reply's **first top-level `# h1`** is **consumed** into the head (the heading
+  line leaves the body); a reply with no `# h1` renders a bare `§N`. It is
+  **chrome** — never a browse selection target, never copied.
 - **Tool** (D31) — a framed **panel**: a `» name` header with a `▸`/`▾` toggle
   and a `▣` copy affordance, then keyed **params** rows (`cmd`, `cwd`, `path`, …)
   above the body. The **`bash` command is shown in full** — it wraps under its

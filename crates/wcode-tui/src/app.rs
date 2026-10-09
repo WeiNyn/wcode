@@ -127,6 +127,16 @@ pub enum Action {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     User(String),
+    /// A turn's numbered section head (`§N` + an optional title) — one per
+    /// assistant reply, drawn on its own line directly before the reply. It is
+    /// **chrome**: never a browse selection target and never copied.
+    TurnHead {
+        /// The turn's number, per surface, monotonic (`§1`, `§2`, …).
+        n: usize,
+        /// The reply's first top-level `# h1`, consumed into the head. `None`
+        /// when the reply opened with no h1 (a bare `§N`).
+        title: Option<String>,
+    },
     Assistant {
         /// The message's content blocks (text, thinking, tool calls).
         content: Vec<ContentBlock>,
@@ -283,6 +293,31 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
     )
 }
 
+/// Consume a reply's **first top-level `# h1`** as the turn head's title: scan
+/// the content's text blocks in order for the first whose trimmed text opens with
+/// `# ` (an h1 — `##`+ do not count), take the rest of that line as the title, and
+/// drop the heading line plus a following blank line from that block. `None` when
+/// the reply opens with no h1 (or an empty one).
+fn take_heading(content: &mut [ContentBlock]) -> Option<String> {
+    for block in content.iter_mut() {
+        let ContentBlock::Text { text } = block else {
+            continue;
+        };
+        let trimmed = text.trim_start();
+        let Some(rest) = trimmed.strip_prefix("# ") else {
+            continue;
+        };
+        let title = rest.lines().next().unwrap_or("").trim().to_string();
+        // Drop the heading line, and one blank line after it.
+        let after = rest.split_once('\n').map_or("", |(_, after)| after);
+        let after = after.strip_prefix('\n').unwrap_or(after);
+        let lead = &text[..text.len() - trimmed.len()];
+        *text = format!("{lead}{after}");
+        return (!title.is_empty()).then_some(title);
+    }
+    None
+}
+
 /// The text `y` copies for a block — `None` when there is nothing to copy.
 ///
 /// - `User` / `Notice` / `Error`: the block's text.
@@ -293,6 +328,8 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
 /// - `Diff`: the diff body.
 fn copy_text(block: &Block) -> Option<String> {
     let text = match block {
+        // A turn head is chrome — nothing to copy.
+        Block::TurnHead { .. } => return None,
         Block::User(text)
         | Block::Notice(text)
         | Block::Error(text)
@@ -1072,6 +1109,9 @@ pub struct Surface {
     transcript: Vec<Block>,
     /// The assistant message currently streaming (rendered below the transcript).
     live: Option<AgentMessage>,
+    /// The number of assistant turns committed on this surface — the `§N` series
+    /// (monotonic; it survives a resume because replay goes through `commit_turn`).
+    turns: usize,
     /// Files changed during the current run, in call order; reset when the next
     /// prompt starts a run, kept afterwards so the run stays reviewable.
     changes: Vec<Change>,
@@ -1163,6 +1203,7 @@ impl Surface {
             status,
             transcript: Vec::new(),
             live: None,
+            turns: 0,
             changes: Vec::new(),
             running: false,
             finished: false,
@@ -1298,6 +1339,21 @@ impl Surface {
         if let Some(rev) = self.block_revs.get_mut(i) {
             *rev = rev.saturating_add(1);
         }
+    }
+
+    /// Whether block `i` is a browse **selection target**. A `TurnHead` is chrome
+    /// — skipped like a blank separator (never selected, never copied).
+    fn selectable(&self, i: usize) -> bool {
+        !matches!(self.transcript.get(i), Some(Block::TurnHead { .. }))
+    }
+
+    /// The first / last selectable block index, if any.
+    fn first_selectable(&self) -> Option<usize> {
+        (0..self.transcript.len()).find(|&i| self.selectable(i))
+    }
+
+    fn last_selectable(&self) -> Option<usize> {
+        (0..self.transcript.len()).rev().find(|&i| self.selectable(i))
     }
 
     /// Push a committed block, keeping `cache`/`block_revs` index-aligned with
@@ -1561,8 +1617,34 @@ impl Surface {
         if let AgentMessage::Assistant { content, .. } = message
             && !content.is_empty()
         {
-            self.push_block(Block::assistant(content));
+            self.commit_turn(content);
         }
+    }
+
+    /// Commit one assistant turn: a numbered **section head** (`§N` + the reply's
+    /// consumed `# h1`) then the assistant block. The number is per-surface and
+    /// monotonic; replay ([`Surface::seed`]) goes through here too, so a resumed
+    /// session keeps its series.
+    ///
+    /// A head is emitted **only for a reply that carries text**: a tool-call-only
+    /// assistant message is part of the current turn (its tool is apparatus
+    /// *inside* the section), so it gets no head and does not advance the counter.
+    fn commit_turn(&mut self, mut content: Vec<ContentBlock>) {
+        let has_text = content.iter().any(|c| match c {
+            ContentBlock::Text { text } => !text.trim().is_empty(),
+            _ => false,
+        });
+        if !has_text {
+            self.push_block(Block::assistant(content));
+            return;
+        }
+        self.turns += 1;
+        let title = take_heading(&mut content);
+        self.push_block(Block::TurnHead {
+            n: self.turns,
+            title,
+        });
+        self.push_block(Block::assistant(content));
     }
 
     /// Commit a still-streaming message (a tool started, the run ended early).
@@ -1702,9 +1784,11 @@ impl Surface {
                 AgentMessage::Assistant { content, .. } => {
                     // The tool calls ride the block so a member's team strip action
                     // can name the call's target (§3); the renderer ignores them.
+                    // `commit_turn` also numbers the turn (the `§N` series survives
+                    // a resume) and consumes the reply's `# h1` into the head.
                     let visible = content.to_vec();
                     if !visible.is_empty() {
-                        self.push_block(Block::assistant(visible));
+                        self.commit_turn(visible);
                     }
                     self.record_usage(message);
                 }
@@ -2315,7 +2399,7 @@ impl App {
     /// composer draft and cursor are untouched; the completion popup is closed
     /// so browse owns the arrows.
     fn enter_browse(&mut self) {
-        let last = self.focused().transcript.len().checked_sub(1);
+        let last = self.focused().last_selectable();
         self.mode = Mode::Browse;
         self.completion = None;
         self.focused_mut().selected = last;
@@ -2554,15 +2638,27 @@ impl App {
     /// Move the selection by `delta` blocks, clamped to the transcript; then
     /// bring it into view.
     fn select_by(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
         let len = self.focused().transcript.len();
         if len == 0 {
             self.focused_mut().selected = None;
             return;
         }
-        let next = match self.focused().selected {
+        let step = delta.signum();
+        let mut next = match self.focused().selected {
             None => 0, // nothing selected yet: start at the first block
             Some(i) => (i as isize + delta).clamp(0, len as isize - 1) as usize,
         };
+        // Skip chrome (a turn head) — it is not a selection target.
+        while !self.focused().selectable(next) {
+            let cand = next as isize + step;
+            if cand < 0 || cand >= len as isize {
+                return; // no target in that direction: leave the selection
+            }
+            next = cand as usize;
+        }
         self.focused_mut().selected = Some(next);
         self.reveal_selected();
         self.dirty = true;
@@ -2570,8 +2666,8 @@ impl App {
 
     /// Select the first committed block.
     fn select_first(&mut self) {
-        if !self.focused().transcript.is_empty() {
-            self.focused_mut().selected = Some(0);
+        if let Some(i) = self.focused().first_selectable() {
+            self.focused_mut().selected = Some(i);
             self.reveal_selected();
             self.dirty = true;
         }
@@ -2579,9 +2675,8 @@ impl App {
 
     /// Select the last committed block.
     fn select_last(&mut self) {
-        let len = self.focused().transcript.len();
-        if len > 0 {
-            self.focused_mut().selected = Some(len - 1);
+        if let Some(i) = self.focused().last_selectable() {
+            self.focused_mut().selected = Some(i);
             self.reveal_selected();
             self.dirty = true;
         }
@@ -2810,7 +2905,11 @@ impl App {
             return None;
         }
         let line = hit.top_line + (row - hit.rect.y) as usize;
-        self.focused().ranges.iter().position(|r| r.contains(&line))
+        self.focused()
+            .ranges
+            .iter()
+            .position(|r| r.contains(&line))
+            .filter(|&i| self.focused().selectable(i))
     }
 
     /// Select committed block `i` in browse: enter `Browse` if not already (plan
@@ -4492,10 +4591,12 @@ mod tests {
         // A divider marks the replayed prefix, as the REPL's does.
         assert!(matches!(&app.transcript()[0], Block::Notice(t) if t.contains("3 earlier message")));
         assert_eq!(app.transcript()[1], Block::User("earlier question".into()));
+        // The turn head numbers the replayed reply (`§1`); no `# h1` → a bare head.
+        assert_eq!(app.transcript()[2], Block::TurnHead { n: 1, title: None });
         // The tool call rides the assistant block — the renderer ignores it, the
         // team strip reads its target (§3).
         assert_eq!(
-            app.transcript()[2],
+            app.transcript()[3],
             Block::assistant(vec![
                 ContentBlock::Text {
                     text: "earlier answer".into()
@@ -4509,7 +4610,7 @@ mod tests {
         );
         // The tool result keeps the one-line summary form.
         assert!(
-            matches!(&app.transcript()[3], Block::Tool(t)
+            matches!(&app.transcript()[4], Block::Tool(t)
                 if t.done && !t.is_error && t.name == "read" && t.output == "128 lines")
         );
         // The resumed context fill reads like a live turn's.
@@ -4524,6 +4625,139 @@ mod tests {
         app.seed_history(&root(), &[]);
         assert!(app.transcript().is_empty());
         assert!(!app.dirty());
+    }
+
+    #[test]
+    fn a_turn_head_consumes_the_replys_h1() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("# the anchor is the text\n\nAn anchor is the text you quote.\n"),
+            },
+        ));
+        // The head carries the consumed title…
+        assert_eq!(
+            app.transcript()[0],
+            Block::TurnHead {
+                n: 1,
+                title: Some("the anchor is the text".into()),
+            }
+        );
+        // …and the body no longer contains the `# h1` line (nor its blank).
+        let Block::Assistant { content, .. } = &app.transcript()[1] else {
+            panic!("the assistant block follows the head");
+        };
+        let body = match &content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("a text block"),
+        };
+        assert!(!body.contains("# the anchor"), "the h1 is consumed: {body:?}");
+        assert!(
+            body.starts_with("An anchor is the text you quote."),
+            "the heading and its blank are dropped: {body:?}"
+        );
+    }
+
+    #[test]
+    fn a_reply_without_an_h1_gets_a_bare_turn_head() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("no heading here"),
+            },
+        ));
+        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+    }
+
+    #[test]
+    fn a_deeper_heading_is_not_consumed() {
+        // Only a top-level `# ` is an h1; `##`+ stays inline.
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("## not an h1\n\nbody"),
+            },
+        ));
+        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+    }
+
+    #[test]
+    fn turn_heads_number_per_turn_and_survive_a_seed() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("one"),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("two"),
+            },
+        ));
+        // [§1, Assistant, §2, Assistant] — one head per reply, monotonic.
+        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+        assert_eq!(app.transcript()[2], Block::TurnHead { n: 2, title: None });
+
+        // A seeded history numbers its own series; a live reply continues it.
+        let mut app = App::new();
+        app.seed_history(
+            &root(),
+            &[
+                AgentMessage::user_text("q"),
+                assistant("a"),
+                assistant("b"),
+            ],
+        );
+        // [Notice(divider), User, §1, Assistant, §2, Assistant]
+        assert_eq!(app.transcript()[2], Block::TurnHead { n: 1, title: None });
+        assert_eq!(app.transcript()[4], Block::TurnHead { n: 2, title: None });
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("c"),
+            },
+        ));
+        // The live reply continues the series as `§3`.
+        assert_eq!(app.transcript()[6], Block::TurnHead { n: 3, title: None });
+    }
+
+    #[test]
+    fn a_tool_call_only_message_gets_no_head_and_does_not_advance_the_counter() {
+        let mut app = App::new();
+        // A tool-call-only assistant message is part of the current turn: no head,
+        // and it does not consume a number.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: Default::default(),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        assert!(
+            matches!(app.transcript()[0], Block::Assistant { .. }),
+            "no head before the tool call"
+        );
+        // The next TEXT reply is still `§1` — the counter never advanced.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant("the reply"),
+            },
+        ));
+        assert_eq!(app.transcript()[1], Block::TurnHead { n: 1, title: None });
     }
 
     #[test]
@@ -6598,22 +6832,23 @@ mod tests {
     fn ctrl_g_enters_browse_on_the_last_block_and_clamps_movement() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice(divider), User, Assistant]
+        // transcript: [Notice(divider), User, TurnHead(§1), Assistant]; the turn
+        // head is chrome, skipped by the selection.
         assert_eq!(app.mode(), Mode::Input);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         assert_eq!(app.mode(), Mode::Browse);
-        assert_eq!(app.selected(), Some(2), "the last committed block");
+        assert_eq!(app.selected(), Some(3), "the last selectable block");
 
         app.handle(AppEvent::Key(Key::Char('j'))); // clamp at the end
-        assert_eq!(app.selected(), Some(2));
-        app.handle(AppEvent::Key(Key::Char('k')));
+        assert_eq!(app.selected(), Some(3));
+        app.handle(AppEvent::Key(Key::Char('k'))); // skips the §1 head
         assert_eq!(app.selected(), Some(1));
         app.handle(AppEvent::Key(Key::Char('g')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('k'))); // clamp at the start
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('G')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3));
     }
 
     #[test]
@@ -6674,7 +6909,8 @@ mod tests {
         // Seed replays a session; on an empty transcript the divider lands first.
         app.seed_history(&root(), &[AgentMessage::user_text("q"), assistant("a")]);
         assert!(matches!(app.transcript()[0], Block::Notice(_)), "divider first");
-        assert_eq!(app.transcript().len(), 3);
+        // [Notice(divider), User, TurnHead(§1), Assistant]
+        assert_eq!(app.transcript().len(), 4);
         // The selection is still absent — never a stale index — and moving picks a
         // real block.
         assert_eq!(app.selected(), None);
@@ -6692,12 +6928,12 @@ mod tests {
             },
         ));
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(0));
-        // A seed on a non-empty transcript drops its divider at the end, so index
-        // 0 still names the same block.
+        assert_eq!(app.selected(), Some(1)); // the assistant (0 is the §1 head)
+        // A seed on a non-empty transcript drops its divider at the end, so the
+        // selected index still names the same block.
         app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
-        assert!(matches!(app.transcript()[0], Block::Assistant { .. }));
-        assert_eq!(app.selected(), Some(0));
+        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+        assert_eq!(app.selected(), Some(1));
     }
 
     #[test]
@@ -6705,7 +6941,7 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3)); // the last selectable block
         // The renderer reports a shorter block list: the selection clamps, never
         // pointing past the end.
         app.set_block_ranges(std::iter::once(0..1).collect());
@@ -7041,13 +7277,13 @@ mod tests {
     fn home_and_end_fall_back_to_the_transcript_ends() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, Assistant] — no frame has been measured.
+        // transcript: [Notice, User, TurnHead(§1), Assistant] — no frame measured.
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3));
         app.handle(AppEvent::Key(Key::Home));
         assert_eq!(app.selected(), Some(0), "fallback: the first committed block");
         app.handle(AppEvent::Key(Key::End));
-        assert_eq!(app.selected(), Some(2), "fallback: the last committed block");
+        assert_eq!(app.selected(), Some(3), "fallback: the last committed block");
 
         // With an empty transcript neither key does anything.
         let mut empty = App::new();
@@ -7061,14 +7297,14 @@ mod tests {
     fn brace_keys_step_blocks_and_clamp_at_the_ends() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, Assistant]
+        // transcript: [Notice, User, TurnHead(§1), Assistant]
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3));
 
         app.handle(AppEvent::Key(Key::Char('}')));
-        assert_eq!(app.selected(), Some(2), "}} clamps at the last block");
+        assert_eq!(app.selected(), Some(3), "}} clamps at the last block");
         app.handle(AppEvent::Key(Key::Char('{')));
-        assert_eq!(app.selected(), Some(1));
+        assert_eq!(app.selected(), Some(1)); // skips the §1 head
         app.handle(AppEvent::Key(Key::Char('{')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('{')));
@@ -7083,14 +7319,14 @@ mod tests {
         // browse accepts them exactly like the plain `Char` spelling.
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, Assistant]
+        // transcript: [Notice, User, TurnHead(§1), Assistant]
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3));
 
         app.handle(AppEvent::Key(Key::Alt('}')));
-        assert_eq!(app.selected(), Some(2), "Alt-}} clamps at the last block");
+        assert_eq!(app.selected(), Some(3), "Alt-}} clamps at the last block");
         app.handle(AppEvent::Key(Key::Alt('{')));
-        assert_eq!(app.selected(), Some(1));
+        assert_eq!(app.selected(), Some(1)); // skips the §1 head
         app.handle(AppEvent::Key(Key::Alt('{')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Alt('{')));
@@ -7106,17 +7342,17 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.selected(), Some(3));
 
         app.handle(AppEvent::Key(Key::Alt('x')));
-        assert_eq!(app.selected(), Some(2), "Alt-x is a no-op");
+        assert_eq!(app.selected(), Some(3), "Alt-x is a no-op");
         app.handle(AppEvent::Key(Key::Alt('y')));
-        assert_eq!(app.selected(), Some(2), "Alt-y must not copy");
+        assert_eq!(app.selected(), Some(3), "Alt-y must not copy");
         assert!(app.take_actions().is_empty(), "no action for Alt-y");
         app.handle(AppEvent::Key(Key::Alt('1')));
-        assert_eq!(app.selected(), Some(2), "Alt-1 must not focus a surface");
+        assert_eq!(app.selected(), Some(3), "Alt-1 must not focus a surface");
         app.handle(AppEvent::Key(Key::Alt('j')));
-        assert_eq!(app.selected(), Some(2), "Alt-j must not move the selection");
+        assert_eq!(app.selected(), Some(3), "Alt-j must not move the selection");
     }
 
     #[test]

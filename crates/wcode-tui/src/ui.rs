@@ -605,6 +605,15 @@ fn paint_bar(line: &mut Line<'static>) {
 pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
+        // A turn head: ` §N  title` (or a bare ` §N`), its own line before the
+        // assistant block. The 1-col leading margin matches the other blocks.
+        Block::TurnHead { n, title } => {
+            let text = match title {
+                Some(title) => format!(" §{n}  {title}"),
+                None => format!(" §{n}"),
+            };
+            vec![Line::from(Span::styled(text, heading()))]
+        }
         Block::Assistant {
             content,
             thinking_open,
@@ -1683,6 +1692,11 @@ pub(crate) fn dim() -> Style {
 /// A quieter grey than [`dim`] where color is available.
 fn muted() -> Style {
     theme::theme().muted
+}
+
+/// A markdown heading — the turn head (`§N  title`) shares it.
+fn heading() -> Style {
+    theme::theme().heading
 }
 
 /// The overlay / popup border and its title.
@@ -3242,15 +3256,15 @@ mod tests {
             ],
         );
         app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the last block (ALPHA three)
+        assert_eq!(app.selected(), Some(4));
+        // transcript: [⋯ 3 earlier, alpha, §1, beta, ALPHA] — "alpha" matches 1 and 4.
+        app.handle(AppEvent::Key(Key::Char('k'))); // step up to "beta two" (block 3)
         assert_eq!(app.selected(), Some(3));
-        // transcript: [⋯ 3 earlier, alpha, beta, ALPHA] — "alpha" matches 0 and 3.
-        app.handle(AppEvent::Key(Key::Char('k'))); // step up to "beta two" (block 2)
-        assert_eq!(app.selected(), Some(2));
         app.handle(AppEvent::Key(Key::Char('/')));
         typed(&mut app, "alpha");
         app.handle(AppEvent::Key(Key::Enter));
         assert!(app.search_query().is_none(), "Enter closes the prompt");
-        assert_eq!(app.selected(), Some(3), "first match at/after block 2 is 3");
+        assert_eq!(app.selected(), Some(4), "first match at/after block 3 is 4");
         let text = buffer_text(&render(&mut app, 60, 16));
         assert!(!barred(&text).is_empty(), "the jumped-to block is drawn with its bar");
     }
@@ -3404,6 +3418,47 @@ mod tests {
             first.contains("read"),
             "the tool line is the first row, with no leading blank:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_turn_head_renders_on_its_own_line_before_the_block() {
+        let mut app = App::new();
+        push_assistant(
+            &mut app,
+            "# the anchor is the text\n\nAn anchor is the text you quote.",
+        );
+        let text = buffer_text(&render(&mut app, 80, 12));
+        let lines: Vec<&str> = text.lines().collect();
+        // Row 0 is the head (its own line, before the block); the `# h1` is gone.
+        assert_eq!(lines[0].trim_end(), " §1  the anchor is the text", "{text}");
+        assert!(
+            text.contains("An anchor is the text you quote."),
+            "the body follows:\n{text}"
+        );
+        assert!(!text.contains("# the anchor"), "the h1 is consumed:\n{text}");
+    }
+
+    #[test]
+    fn a_bare_turn_head_renders_without_a_title() {
+        let mut app = App::new();
+        push_assistant(&mut app, "no heading");
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert_eq!(
+            text.lines().next().unwrap_or_default().trim_end(),
+            " §1",
+            "a headingless reply is a bare `§1`:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_turn_head_is_not_a_browse_selection_target() {
+        // The head is chrome: Ctrl-G selects the assistant block, not the head.
+        let mut app = App::new();
+        push_assistant(&mut app, "hello");
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.selected(), Some(1), "the assistant, not the §1 head");
+        app.handle(AppEvent::Key(Key::Char('k'))); // clamp — nothing above but the head
+        assert_eq!(app.selected(), Some(1), "the head is skipped");
     }
 
     #[test]
@@ -3643,12 +3698,13 @@ mod tests {
         push_assistant(&mut app, "hello there");
         let text = buffer_text(&render(&mut app, 80, 12));
         // D1b: there is no `session` band — the id folds into the composer's head
-        // line and the transcript still starts at row 0.
+        // line and the transcript still starts at row 0 (with the `§1` turn head).
         let first = text.lines().next().unwrap_or_default();
         assert!(
-            first.contains("hello there"),
+            first.contains("§1"),
             "the transcript starts at row 0 even with a session:\n{text}"
         );
+        assert!(text.contains("hello there"), "the reply body:\n{text}");
         assert!(
             text.contains("session abcdef01"),
             "the session id is not on the composer head line:\n{text}"
