@@ -225,7 +225,17 @@ Then ask wcode to: (a) show a fenced code block (a `.ts`/`.rs` snippet) — expe
 
 ---
 
-## 9. References
+## 9. Log
+
+### 2026-10-09 — W009 landed (E0–P6); F5 pending
+
+- **E0** `0a5e89c` (the plan note + D008 + row 66 + the brief). **P1** `e375fdf` (`src/highlight.ts` + `prismjs` + `@types/prismjs`, in `purity.test.ts`). **P2** `285a3c2` (the fence rule). **P3** `d4aacf9` (`RenderedTool.outputHtml` + `rawOutput`). **P4** `2c7bcfa` (`diffLinesHtml` + `splitHighlightedLines`). **P5** `343b53f` (the `.token.*` palette).
+- **Measured bundle delta (P1/P6):** `out/extension.js` **316,271 → 426,006 B (+109,735**, Prism core + 11 grammars, UNMINIFIED — `esbuild.mjs` sets no `minify`); `media/chat.js` **37,884 → 38,161 B (+277**, the DOM branches) — **no Prism in the webview** (`grep -c Prism media/chat.js` → 0).
+- **Gates:** `npm run typecheck` 0; `check-css: ok (chat.css)`; `npm run build` ok; `node --test --test-concurrency=1 test/*.test.ts` → **219 pass / 0 fail**. The two `!includes("hljs")` placeholders flipped to positive `class="token ` assertions (markdown.test.ts, render.test.ts).
+- **P4 multi-line construct:** a 2-line `.ts` block comment — `splitHighlightedLines` closes the span at the line end and RE-OPENS it on the continuation, so every fragment is well-formed AND the continuation keeps its colour (mutation-verified: a naive split fails the test).
+- **F5 — NOT run (no VS Code host here).** Mandatory: confirm the tokens actually PAINT, i.e. that the webview injects the `--vscode-symbolIcon-*` family. If absent, every declaration falls back to `--vscode-editor-foreground` and highlighting is a **silent no-op** (one colour). No `symbolIcon` reference exists in the repo (this is a fresh family), so this could not be verified from code. **This is the one open step.**
+
+## 10. References
 
 - `editors/vscode/src/markdown.ts` (`:7` the deferred note, `:26-31` the fence rule), `src/render.ts` (`:18-39` `RenderedTool`, `:165-176` `renderTool`, `:9` the dependency-free note), `src/review.ts` (`reviewHunk`), `src/webview/chat.ts` (`:277-279` `rawOutput`, `:307-313` the diff line loop, `:422` `fnNote`, `:433` the `.to` command), `src/webview.ts` (`:10` the pre-rendered note), `media/chat.css` (`:442` `.code .pre`, `:454` `pre.quote`, `:979` `.hunk .ln .txt`, `:28` `--wc-accent`).
 - `editors/vscode/esbuild.mjs` (`:5` "dependency-free IIFE", `:13`/`:42` the host bundle), `package.json` (`:109`/`:111`/`:113` scripts, `:118-120` dependencies), `editors/vscode/README.md` (`:37`).

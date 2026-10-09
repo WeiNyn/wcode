@@ -476,8 +476,10 @@ captured files as fixtures so the reducer's tests run with no model and no VS Co
   build deps. (`docs/tui-design.md:232`'s "hand-rolled" line is stale — do not cite it.)
   **Ruling: `markdown-it` with `html: false`**, bundled by esbuild. `html: false` escapes raw
   HTML rather than passing it through, so it keeps the injection safety that motivated
-  hand-rolling, while a real parser covers the surface the TUI already renders. **P1 ships fenced
-  code without token highlighting** — the `syntect` analogue is a separate, later decision. The
+  hand-rolling, while a real parser covers the surface the TUI already renders. **W009 closed the
+  `syntect` analogue** (D008): fenced code, tool output and tool input are token-highlighted
+  **host-side** by Prism (`editors/vscode/src/highlight.ts`, bundled into `out/extension.js`),
+  while the webview stays dependency-free (`media/chat.js` gains only DOM branches). The
   CSP admits only the bundled `media/*` assets.
 - **`engines.vscode` floor.** Conservative (support older VS Code) vs the native-chat-API
   era. The plan picks a webview, **not** the native chat API (`:rT6jP`), so the floor need
