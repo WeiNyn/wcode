@@ -653,6 +653,26 @@ test("the indent rhythm: .body > p + p indents; the first paragraph is flush; a 
   assert.match(css, /\.turn\.new \.body > p:first-child::first-line \{[^}]*font-variant: small-caps/, "the chapter open");
 });
 
+test("the reading face: .body names var(--ed-read) at line-height 1.75", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.body \{[^}]*font-family: var\(--ed-read\)/, "the prose is set in the reading face");
+  assert.match(css, /\.body \{[^}]*line-height: 1\.75/, "the reading leading");
+});
+
+test("the serif stack makes ZERO external requests (no @import / <link> / http)", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /--ed-read: [^;]*serif/, "the stack ends in the generic serif");
+  assert.ok(!/@import/.test(css), "no @import");
+  assert.ok(!/<link/.test(css), "no <link>");
+  assert.ok(!/https?:/.test(css), "no http(s) URL");
+});
+
+test("the code caption: .code .chead is a small-caps caption line", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  assert.match(css, /\.code \.chead \{[^}]*text-transform: uppercase/, "the caption is set small");
+  assert.match(css, /\.code \.chead \{[^}]*letter-spacing/, "with tracking");
+});
+
 /* -------------------------------------------------------- working group */
 
 test("workingGroup: other members that are running or carry a liveAction (the pill's source)", () => {

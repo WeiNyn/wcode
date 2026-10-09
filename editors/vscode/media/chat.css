@@ -100,6 +100,8 @@
   /* the local knobs, DERIVED from shipped steps, NOT new tokens */
   --ed-measure: 64ch; /* the text block's width (A6) */
   --ed-indent: 1.5em; /* the first-line indent that replaces inter-paragraph space (A5) */
+  --ed-read: "Iowan Old Style", "Charter", "Palatino Linotype", "Book Antiqua", Georgia,
+    "Times New Roman", serif; /* A1: a LOCAL stack — zero requests */
 }
 
 /* Density is a token switch, not a second design — which IS the proof the scale
@@ -301,8 +303,12 @@ body {
 }
 
 .body {
-  line-height: 1.7;
+  font-family: var(--ed-read);
+  line-height: 1.75;
   overflow-wrap: anywhere;
+  text-wrap: pretty;
+  orphans: 2;
+  widows: 2;
 }
 
 /* the indent-led rhythm (A5): paragraphs are set solid, a first-line indent separates
@@ -507,24 +513,18 @@ details.fold .inner pre {
 
 /* ------------------------------------------------- code block with header */
 
-/* A fill-only recess (L2b): the code block keeps its language label but loses the card
-   border — a quiet surface is worth more than the boundary. */
+/* A code block is a PLATE: a small-caps caption line, then a fill-only recess. */
 .code {
-  background: var(--vscode-textCodeBlock-background);
-  border-radius: var(--wc-radius);
-  overflow: hidden;
-  margin: var(--wc-2) 0;
+  margin: var(--wc-3) 0;
 }
 
 .code .chead {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  padding: var(--wc-1) var(--wc-2);
-  background: var(--vscode-textBlockQuote-background);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--vscode-descriptionForeground);
+  margin: 0 0 var(--wc-1);
 }
 
 .code .chead .spacer {
@@ -533,10 +533,13 @@ details.fold .inner pre {
 
 .code .pre {
   margin: 0;
-  padding: var(--wc-2);
+  padding: var(--wc-2) var(--wc-3);
+  background: var(--vscode-textCodeBlock-background);
+  border-radius: var(--wc-radius);
   overflow-x: auto;
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-code);
+  line-height: 1.55;
 }
 
 /* The fill-only recess a tool's output expands into. */
