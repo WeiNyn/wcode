@@ -454,9 +454,13 @@ export interface ComposerControls {
   segments: Array<{ mode: "Plan" | "Act"; pressed: boolean }>;
   /** Show `Stop`? Whenever ANY run is in flight — the root’s OR any member’s. */
   stop: boolean;
-  /** The ONE primary control's label: `Send` while idle, `Stop` while a run is in flight — the
-   *  Send button BECOMES the interrupt, so it sits exactly where Send was (W005 follow-up). */
-  sendLabel: "Send" | "Stop";
+}
+
+/** Which of the composer's TWO primary controls is SHOWN — exactly one (W005 follow-up). The
+ *  pair shares ONE slot: idle shows `Send`, a run in flight shows `Stop`. Pure. */
+export function composerActions(state: RenderedState): { send: boolean; stop: boolean } {
+  const stop = composerControls(state).stop;
+  return { send: !stop, stop };
 }
 
 export function composerControls(state: RenderedState): ComposerControls {
@@ -469,7 +473,6 @@ export function composerControls(state: RenderedState): ComposerControls {
       { mode: "Plan", pressed: mode === "Plan" },
     ],
     stop,
-    sendLabel: stop ? "Stop" : "Send",
   };
 }
 

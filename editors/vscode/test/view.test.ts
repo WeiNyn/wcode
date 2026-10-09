@@ -12,6 +12,7 @@ import {
   bodyKind,
   toolState,
   toolStatus,
+  composerActions,
   composerControls,
   composeSubmit,
   diffStat,
@@ -591,24 +592,36 @@ test("composerControls: `Stop` shows when a NON-root member is running while the
   assert.equal(composerControls(renderState(initialState(), null)).stop, false, "no run ⇒ no Stop");
 });
 
-test("composerControls: ONE primary control — Send when idle, Stop while running", () => {
-  assert.equal(composerControls(renderState(initialState(), null)).sendLabel, "Send", "idle -> Send");
+test("composerActions: exactly ONE primary action — Send idle / Stop running (inverse)", () => {
+  assert.deepEqual(composerActions(renderState(initialState(), null)), { send: true, stop: false }, "idle -> Send");
   const running: ViewState = {
     ...initialState(),
     members: [{ id: "root-1", label: "root-1", state: "running", isRoot: true }],
     targeted: "root-1",
     status: { running: true, planMode: false },
   };
-  assert.equal(composerControls(renderState(running, "root-1")).sendLabel, "Stop", "running -> Stop");
+  assert.deepEqual(composerActions(renderState(running, "root-1")), { send: false, stop: true }, "running -> Stop");
 });
 
-test("the composer has ONE primary Send/Stop control (no separate Stop button)", () => {
+test("composerActions: a NON-root member running while the root is idle still shows Stop", () => {
+  const state: ViewState = {
+    ...initialState(),
+    members: [
+      { id: "root-1", label: "root-1", state: "idle", isRoot: true },
+      { id: "agent:w1", label: "w1", state: "running", isRoot: false },
+    ],
+    targeted: "root-1",
+    status: { running: false, planMode: false },
+  };
+  assert.deepEqual(composerActions(renderState(state, "root-1")), { send: false, stop: true }, "a running worker shows Stop");
+});
+
+test("the composer foot has the Send + Stop buttons adjacent, with inverse `hidden`", () => {
   const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
   const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));
-  assert.equal((skeleton.match(/id="send"/g) ?? []).length, 1, "exactly one #send control");
-  assert.ok(!/id="cancel"/.test(skeleton), "no separate #cancel button");
-  assert.ok(!/requireEl\("cancel"\)/.test(src), "no cancel element handle");
-  assert.match(src, /sendBtn\.textContent = controls\.sendLabel/, "the label comes from the pure builder");
+  assert.match(skeleton, /id="send"[^\n]*\n[^\n]*id="cancel"/, "#send then #cancel, adjacent");
+  assert.match(src, /sendBtn\.hidden = actions\.stop/, "#send hides while a run is in flight");
+  assert.match(src, /cancelBtn\.hidden = !actions\.stop/, "#cancel shows only then");
 });
 
 test("selectionRef formats @path#Lstart-end (1-based, inclusive)", () => {

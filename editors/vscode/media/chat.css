@@ -794,6 +794,12 @@ details.fn-out .inner pre {
   color: var(--vscode-foreground);
 }
 
+/* `#send` and `#cancel` share the slot (inverse `hidden`); the interrupt reads PRIMARY while a
+   run is in flight — the accent, "active now" — so the swap is unmistakable. */
+.composer .foot .send.stop {
+  color: var(--wc-accent);
+}
+
 .composer .foot .send:hover {
   color: var(--wc-accent);
 }

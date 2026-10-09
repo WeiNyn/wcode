@@ -20,6 +20,7 @@ import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from 
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
 import {
   classNames,
+  composerActions,
   composerControls,
   composeSubmit,
   diffStat,
@@ -87,6 +88,7 @@ app.innerHTML = [
   '        <button id="mAct" class="linkbtn" type="button" aria-pressed="true">Act</button>',
   '        <button id="mPlan" class="linkbtn" type="button" aria-pressed="false">Plan</button>',
   '        <button id="send" class="linkbtn send" type="button">Send</button>',
+  '        <button id="cancel" class="linkbtn send stop" type="button" title="Stop the in-flight run (Esc)" hidden>Stop</button>',
   '      </div>',
   '    </div>',
   '  </footer>',
@@ -101,6 +103,7 @@ const transcriptEl = requireEl("transcript");
 const livelineEl = requireEl("liveline");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
+const cancelBtn = requireEl("cancel");
 const mActEl = requireEl("mAct");
 const mPlanEl = requireEl("mPlan");
 const cattachEl = requireEl("cattach");
@@ -122,8 +125,6 @@ let lastContext: SelectionContext | null = null;
 let lastRef: string | null = null;
 /** The composer's current mode (the mode toggle's pressed segment), for the click guard. */
 let composerMode: "Plan" | "Act" = "Act";
-/** Is a run in flight, so the ONE primary control is `Stop`? Set by `renderComposer`. */
-let composerStop = false;
 
 /** The masthead's cells+caption signature; a matching snapshot skips the rebuild. */
 let mastheadKey: string | null = null;
@@ -567,12 +568,13 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
   for (const segment of controls.segments) {
     (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
   }
-  // ONE primary control (W005 follow-up): `Send` BECOMES `Stop` while a run is in flight, so
-  // the interrupt sits exactly where Send was — unmissable, never a second competing control.
-  composerStop = controls.stop;
-  sendBtn.textContent = controls.sendLabel;
-  sendBtn.title = controls.stop ? "Stop the in-flight run (Esc)" : "Send the message";
-  sendBtn.setAttribute("aria-label", controls.stop ? "Stop the in-flight run" : "Send the message");
+  // ONE primary action in ONE slot (W005 follow-up): `Send` at idle, `Stop` while a run is in
+  // flight — the SAME slot (inverse `hidden`), and the interrupt reads in the accent so it is
+  // unmistakable. Both carry `.composer .foot .send { margin-left: auto }`, so whichever is
+  // shown stays right-aligned — the swap never shifts the layout.
+  const actions = composerActions(state);
+  sendBtn.hidden = actions.stop;
+  cancelBtn.hidden = !actions.stop;
 }
 
 function ctxChip(context: SelectionContext): HTMLElement {
@@ -752,9 +754,9 @@ inputEl.addEventListener("keydown", (event: KeyboardEvent) => {
     post({ kind: "cancel" });
   }
 });
-sendBtn.addEventListener("click", () => {
-  if (composerStop) post({ kind: "cancel" });
-  else submit();
+sendBtn.addEventListener("click", submit);
+cancelBtn.addEventListener("click", () => {
+  post({ kind: "cancel" });
 });
 // The mode toggle: post and let the HOST flip plan-mode; the next snapshot reflects it
 // (no optimistic flip). The wire only carries `toggle-plan`, so a click on the segment
