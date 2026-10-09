@@ -13,7 +13,6 @@ pub mod member;
 pub mod message;
 pub mod peers;
 pub mod read;
-pub mod replace;
 pub mod spawn;
 pub mod task;
 pub mod session_search;
@@ -48,7 +47,6 @@ pub fn default_tools(
         erased(background::Bg::new(bg.clone())),
         erased(edit::Edit::new(lock.clone())),
         erased(edits::Edits::new(lock.clone())),
-        erased(replace::Replace::new(lock.clone())),
         erased(write::Write::new(lock.clone())),
         // Session-local and event-sourced: every session (workers included) gets
         // it; not behind the mutation `lock` (its `parallel_safe` default makes a
@@ -134,7 +132,7 @@ pub(crate) fn include_path(
 }
 
 /// Whole-file compare-and-swap guard shared by the mutating tools (`edit`,
-/// `edits`, `replace`, `write`): when the caller supplied an `expected_digest`,
+/// `edits`, `write`): when the caller supplied an `expected_digest`,
 /// refuse (an error `ToolOutput` naming both digests) if the file's current
 /// content no longer matches it. `None` means the digest matched (or none was
 /// given) and the caller proceeds. `content` is the file's current text; `path`
@@ -164,7 +162,7 @@ pub(crate) fn stale_digest_guard(
 /// Contract:
 /// - Returns `"\n" + digest_header(path, &file_digest(written.as_bytes()))`
 ///   (so it both starts and ends with `\n`).
-/// - `written` is the EXACT post-write bytes (`edit`/`edits`/`replace`: `updated`;
+/// - `written` is the EXACT post-write bytes (`edit`/`edits`: `updated`;
 ///   `write`: `args.content`), hashed — never a re-read (W004 §4.4, no TOCTOU
 ///   against a concurrent peer).
 /// - The result never contains `anchor::ANCHOR_SEP`, so it is never an anchor
@@ -259,7 +257,6 @@ mod tests {
             "webfetch",
             "edit",
             "edits",
-            "replace",
             "write",
             "session_search",
             "todo",

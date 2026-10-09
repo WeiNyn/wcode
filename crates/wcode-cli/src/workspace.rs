@@ -138,21 +138,13 @@ impl WorkspaceHooks {
     }
 
     /// Extract the mutation target path from a call's arguments, per tool:
-    /// `write`/`edit`/`replace` → `arguments["path"]`; `edits` →
-    /// `arguments["edits"][0]["path"]` (ops must share one file —
-    /// `E_MIXED_FILES`). Returns the RAW path string; callers key on
-    /// [`cache_key`].
+    /// `write`/`edit`/`edits` → `arguments["path"]` (`edits` targets ONE file, so
+    /// its path is top-level, not per-op). Returns the RAW path string; callers
+    /// key on [`cache_key`].
     fn target_path(&self, name: &str, args: &serde_json::Value) -> Option<String> {
         match name {
-            "write" | "edit" | "replace" => args
+            "write" | "edit" | "edits" => args
                 .get("path")
-                .and_then(|p| p.as_str())
-                .map(str::to_string),
-            "edits" => args
-                .get("edits")
-                .and_then(|e| e.as_array())
-                .and_then(|ops| ops.first())
-                .and_then(|op| op.get("path"))
                 .and_then(|p| p.as_str())
                 .map(str::to_string),
             _ => None,
@@ -302,7 +294,7 @@ mod tests {
             .insert(cache_key("f.txt"), "batch".into());
         let mut c = call(
             "edits",
-            serde_json::json!({"edits": [{"path": "f.txt", "from": "a", "replacement": "b"}]}),
+            serde_json::json!({"path": "f.txt", "edits": [{"old_string": "a", "new_string": "b"}]}),
         );
         h.transform_tool_input(&mut c).await;
         assert_eq!(c.arguments[EXPECTED_DIGEST_KEY], "batch");

@@ -59,7 +59,7 @@ pub trait Hooks: Send + Sync {
 /// The workspace-mutating tools blocked in plan mode (D3). Read-only tools
 /// (`read`/`grep`/`find`/`ast_search`/`session_search`) and the plan-recording
 /// `todo` (and the team tools `task`/`peers`/`message`) are deliberately absent.
-pub const MUTATING_TOOLS: &[&str] = &["edit", "edits", "write", "replace", "ast_edit"];
+pub const MUTATING_TOOLS: &[&str] = &["edit", "edits", "write", "ast_edit"];
 
 /// A cheap, cloneable on/off switch shared between the [`PlanModeHooks`] (read
 /// from the run task) and the toggle that flips it (the actor, via

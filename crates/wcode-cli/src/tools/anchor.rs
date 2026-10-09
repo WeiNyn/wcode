@@ -160,34 +160,6 @@ pub fn find_ranges(
     out
 }
 
-/// Replace `range` in `lines` with `replacement`, preserving whether the file
-/// ends with a newline. Returns the new content and the 1-based first/last
-/// changed line (`None` when the replacement is a literal no-op).
-pub fn apply_replace(
-    lines: &[String],
-    range: &Range,
-    replacement: &str,
-    ends_with_newline: bool,
-) -> (String, Option<(usize, usize)>) {
-    let repl = split_lines(replacement);
-    let mut out_lines: Vec<String> = Vec::new();
-    out_lines.extend(lines[..range.start].iter().cloned());
-    let first = out_lines.len() + 1; // 1-based first changed line
-    out_lines.extend(repl.iter().cloned());
-    let last = out_lines.len(); // 1-based last changed line
-    out_lines.extend(lines[range.end + 1..].iter().cloned());
-
-    let mut out = out_lines.join("\n");
-    if ends_with_newline {
-        out.push('\n');
-    }
-    let expected = lines.join("\n") + if ends_with_newline { "\n" } else { "" };
-    if out == expected {
-        return (out, None);
-    }
-    (out, Some((first, last.max(first))))
-}
-
 /// First/last 1-based line, in the NEW content, that the change touches, or
 /// `None` when the two are byte-identical. Used to echo the fresh-anchor view
 /// of a just-edited region: insertions/replacements report the new lines, and a
@@ -367,27 +339,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_replace_mid_file_and_preserve_final_newline() {
-        let lines = ["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>();
-        let (out, changed) = apply_replace(&lines, &Range { start: 1, end: 1 }, "B1\nB2", true);
-        assert_eq!(out, "a\nB1\nB2\nc\n");
-        let (first, last) = changed.unwrap();
-        assert_eq!((first, last), (2, 3));
-    }
-
-    #[test]
-    fn apply_replace_delete_range() {
-        let lines = ["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>();
-        let (out, _) = apply_replace(&lines, &Range { start: 1, end: 2 }, "", true);
-        assert_eq!(out, "a\n");
-    }
 }
 
 /// Length of a whole-file digest in hex chars (48 bits of [`hash64`]).
