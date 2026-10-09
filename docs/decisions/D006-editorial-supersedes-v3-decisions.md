@@ -26,12 +26,18 @@ In `docs/vscode-ui-v3-plan.md`, **editorial supersedes**:
   output become fill-only recesses, so the change-review card is the only L2a object left;
 - **V12** (`:zTBVB`) — the tool output card, its `.chead` and its `Copy` go;
 - **V13r** (`:cXMdP`) — a complete tool is neutral, not green;
-- **V14** (`:Sc8DY`) — no spine, no head hairline and no `you` fill;
+- **V14** (`:Sc8DY`) — no spine, no head hairline, no `you` fill and no live accent wash;
 - **the composer `.seg`** of §1.4 / V9 (`:ywwQg`) — a quiet text toggle instead.
 
 It **drops** the **V11b** context-meter gauge (`:Sw11b`) and the six `charts-*` member
 swatches (`:WJJlL`). It **keeps** decision 2 (`:M3ETf`, the mode stays, restyled) and
 decision 12 (`:CSVRU`, the text `ctx 42k` default).
+
+Editorial also **narrows V13** (`:nYqsK`, the tool-status colour): the tool row's L1 rule
+is dropped — the A prototype draws the tool as a dim sentence
+(`docs/design/vscode-modern-editorial-draft.html:yQw0I`) — so the status lives on the `⚙`
+mark alone (neutral complete / accent running / red error). V14's removed live accent wash
+goes with the rule.
 
 ## Consequences
 

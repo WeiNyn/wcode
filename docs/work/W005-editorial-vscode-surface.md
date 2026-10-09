@@ -326,6 +326,14 @@ view.
 - The sketch's `<TBD>`s are settled: **A1** mode → `ModeCell`; **A2** the state word on `MeterCell`; **A3** `glyph` added to `TurnMember`; **A4** the caption glyph comes from `memberGlyph`; **A5** the caption action is `liveAction ?? row.state`; **A6** the liveline is count-only.
 - **E0 landed** as `39206ff` (v3 supersession notes), `5014026` (the plan doc), `e2f8f8c` (D006), `c54a6c7` (tracker row 62 + item 56). The design directions + prototypes are committed in `7d72c45`. E1–E7 are not started.
 
+### 2026-10-09 — direction A implemented (E1–E6); layer-2 APPROVED
+
+- **Implemented** in three `vscode:` commits: `f441b1a` (E1/E4/E5 — the masthead, the team caption, the live type-line, the composer), `20d77e0` (E2/E3 — the reading column + tool sentences), `8233fda` (E6 — the dead chrome CSS + stale comments).
+- **Gates** (in `editors/vscode`): `npm run typecheck` → exit 0; `npm test` → `check-css: ok`, 189 pass / 0 fail; `npm run build` → ok; **zero `SKETCH` markers**; the wire/kernel untouched.
+- **Layer-2 review APPROVED** the diff (no code blockers). Its deviations were authorised: the tool row drops its L1 rule (the status lives on the `⚙` mark — **V13 narrowed**, D006), the composer `.inner` wrapper, the small `livelineLabel` helper, and `.code` keeping its `.chead` markup (border dropped).
+- **Non-blocking notes folded (none deferred):** N1 the dead `data-live` stamp on a plain block is gone; N2 the caption row is keyboard-activatable (Enter/Space → `focus-member`); N3 two stale test names renamed; N4 this record synced.
+- **E7 (the F5 visual proof) is the only open step** — a human action; no browser / VS Code host runs in this session.
+
 ## 10. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).

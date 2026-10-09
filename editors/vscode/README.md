@@ -8,8 +8,9 @@ A second **client** of the wcode kernel, never a second kernel: it spawns
 per-session reducer, host-side markdown rendering, native diffs, and the team
 surface — all rendered **inside one webview**: a dockable `WebviewView`
 (`wcode.surface`, in the Activity Bar) plus an editor-tab `WebviewPanel`
-(`wcode: Open in Editor`), both fed by the one `SurfaceController`. The member
-rail, the transcript, the composer and the task list are webview DOM
+(`wcode: Open in Editor`), both fed by the one `SurfaceController`. The masthead
+(identity + status + a dim team caption), the transcript, the composer and the live
+type-line are webview DOM
 (`src/webview/chat.ts`) — rendered in-webview, not by a VS Code `TreeView`.
 
 ## Layout
@@ -18,7 +19,7 @@ rail, the transcript, the composer and the task list are webview DOM
 |---|---|
 | `src/protocol.ts` | the wire types — the ONE place the serde tags live |
 | `src/session.ts` | `WcodeSession`: spawn, NDJSON splitter (stdout only), FSM, restart |
-| `src/reducer.ts` | the pure `(state, event) -> state` view model (no `vscode`) — incl. `memberGlyph` (the state icon) and `memberViews` (the rail rows) |
+| `src/reducer.ts` | the pure `(state, event) -> state` view model (no `vscode`) — incl. `memberGlyph` (the state icon) and `memberViews` (the team-caption rows) |
 | `src/render.ts` | pure `ViewState` → blocks + HTML **for a target member** |
 | `src/surface.ts` | `SurfaceController` — the ONE state/throttle/message owner both hosts attach to |
 | `src/webviewView.ts` | the docked `wcode.surface` `WebviewViewProvider` |
@@ -33,7 +34,7 @@ rail, the transcript, the composer and the task list are webview DOM
 | `src/review.ts` | the pure change-review model (a hunk + per-call verdicts) |
 | `src/extension.ts` | `activate`/`deactivate`, the commands, the surface wiring, an OutputChannel |
 | `src/webview/chat.ts` | the webview script **source** (typed, dependency-free) |
-| `src/webview/view.ts` | the webview's pure half (`stateLabel`, `statusSegments`, …) |
+| `src/webview/view.ts` | the webview's pure half (`stateLabel`, `panelHeader`, `turns`, `teamCaption`, …) |
 | `media/chat.js` | the bundled webview script (esbuild IIFE; **generated**, gitignored) |
 | `media/chat.css` | the panel stylesheet (theme variables only; zero remote assets) |
 | `scripts/capture.mjs` | capture real frames into `test/fixtures/` |
@@ -80,9 +81,10 @@ live tests skip (do not fail) when `target/debug/wcode` is absent.
    **Extension Development Host** window opens.
 4. In that window: **Ctrl/Cmd+Shift+P** → **`wcode: Start Session`**.
    - Expect: the **wcode** view opens (the Activity Bar container, plus the
-     editor tab on `wcode: Open in Editor`); its status strip reads
-     `● starting` then `● ready`, followed by the **root session id**. With no
-     prior session the transcript shows *“No messages yet.”*; a resumed session
+     editor tab on `wcode: Open in Editor`); its **masthead** shows the identity
+     glyph + `orchestrator` on the left and `ctx N` + the mode toggle on the right
+     (a `starting`/`stopped`/`crashed` session also carries the state word). With
+     no prior session the transcript shows *“No messages yet.”*; a resumed session
      shows its history (the surface hydrates via `Request::GetHistory`).
    - The **wcode** OutputChannel (View → Output → `wcode`) logs
      `starting: … serve --stdio` and then every frame (`← sessions`, `← history`, …).
@@ -109,25 +111,24 @@ live tests skip (do not fail) when `target/debug/wcode` is absent.
    - A tool call that touched a file but changed **no line** shows **no** button:
      no diff is a normal case, not an error.
 8. **The team surface.** Open the **wcode** view (the `❯_` Activity Bar icon).
-   The webview draws the team **rail** beside the transcript: one row per served
-   session — `orchestrator` (the root) plus each worker — carrying a state glyph
-   (`memberGlyph`) and, while it runs, the action it is on.
-   - **Click a rail row**: the surface **retargets** — the status strip's target
-     segment changes from `orchestrator` to that member's name, and the
-     transcript switches to *that member's* conversation (hydrated via
-     `GetHistory` addressed to its id). Nothing already streamed is lost.
+   The webview draws the team as a **dim caption** under the masthead: one row per
+   served session — `orchestrator` (the root) plus each worker — carrying a state
+   glyph (`memberGlyph`) and, while it runs, the action it is on.
+   - **Click a caption row (or focus it and press Enter/Space)**: the surface
+     **retargets** — the masthead's identity names that member, the row is marked
+     `sel`, and the transcript switches to *that member's* conversation (hydrated
+     via `GetHistory` addressed to its id). Nothing already streamed is lost.
    - **Type in the composer**: the message is `Submit`ted **to the target
      member**, and your text is echoed into that member's transcript.
-   - **The composer's mode control** (`Act`/`Plan`) toggles plan mode —
-     optimistic, settled on `Ack`, reverted on `Error`; the plan chip appears in
-     the status strip. The same toggle is the palette command
-     **`wcode: Toggle Plan Mode`**.
+   - **The composer's mode control** (`Act`/`Plan`, a text toggle) toggles plan
+     mode — optimistic, settled on `Ack`, reverted on `Error`. The same toggle is
+     the palette command **`wcode: Toggle Plan Mode`**.
    - With **no session running**, the view shows *“No session. Run wcode: Start
-     Session.”* — never a blank rail.
+     Session.”* — never a blank caption.
 
-If no model/endpoint is configured, step 4 ends with the status strip reading
-`● crashed` and the child's **stderr tail** shown under it — that is the failure
-mode the status strip exists to make visible, not a silent empty view.
+If no model/endpoint is configured, step 4 ends with the masthead reading
+`✗ crashed` and the child's **stderr tail** shown in the transcript — that is the
+failure mode the empty-state card exists to make visible, not a silent empty view.
 
 ### Not yet wired — the member menu verbs
 
@@ -136,7 +137,7 @@ mode the status strip exists to make visible, not a silent empty view.
 `view/title` → `wcode.openInEditor`, so a palette invocation passes **no member
 id** and they are **inert** (`src/extension.ts`, the *“INERT until a rail-row
 menu lands”* note). Wiring a menu that supplies the member id — a
-`view/item/context`, or an in-webview rail-row menu — is a **follow-up**,
+`view/item/context`, or an in-webview caption-row menu — is a **follow-up**,
 deliberately not done in this pass.
 
 ## What is verified — and what is NOT
@@ -171,10 +172,10 @@ unexercised:
   before-image. `reverseApply` (the hard part) is tested; the plumbing that
   hands its result to VS Code is not;
 - **the CSP as a live webview enforces it**, and **the CSS** (never painted);
-- **the rail drawn inside the webview** — the DOM that paints the member rows
-  (the provider's *pure* half — `memberGlyph`, `memberViews` — and the live
+- **the team caption drawn inside the webview** — the DOM that paints the caption
+  rows (the provider's *pure* half — `memberGlyph`, `memberViews` — and the live
   roster it is fed are tested; the webview that draws them is not), the
-  click-to-retarget wiring, and the icon/theme rendering;
+  click/keyboard retarget wiring, and the icon/theme rendering;
 - **a real `Submit` turn IN A WORKER.** Every verified verb is **model-free**
   (`Status`, `SetPlanMode`, `Define`); a `Submit` addressed to a member takes the
   same `handle.ask` path, but no worker turn was ever run here, so "the composer

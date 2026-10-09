@@ -53,8 +53,9 @@ The one behaviour A drops — the pill's click-to-reveal — was client-local (`
 | **Decision 12** "the V6 meter is the text `ctx 42k`" | `:CSVRU` | **Kept** (editorial agrees). What is **dropped** is the **V11b** gauge (`:Sw11b`), not this decision |
 | **§1.4 / V9** the composer mode as a `.seg` | `:ywwQg` (phase `:XAlvl`) | **Superseded** — the composer mode control becomes a text toggle; the `Model:` removal, the `Stop` gate and the hint removal stand |
 | **V12** tool output L2b → L2a (`⚙ {tool} · output` + `Copy`) | `:zTBVB` | **Superseded** — the output reverts to a fill-only recess; the head and `Copy` go; identity moves to the dim summary line |
+| **V13** the tool row's L1 rule carries the status | `:nYqsK` | **Narrowed** — the rule is dropped (the tool is a dim sentence, `docs/design/vscode-modern-editorial-draft.html:yQw0I`); the status lives on the `⚙` mark (neutral complete / accent running / red error) |
 | **V13r** "complete is GREEN" | `:cXMdP` | **Superseded** — complete is neutral (`--vscode-foreground`); running stays accent, error red |
-| **V14** turn head / spine / alignment / rhythm | `:Sc8DY` | **Superseded** — no spine, no head hairline, no `you` fill; the `.new` beat survives at `--wc-5`, not `--wc-4` |
+| **V14** turn head / spine / alignment / rhythm | `:Sc8DY` | **Superseded** — no spine, no head hairline, no `you` fill, no live accent wash; the `.new` beat survives at `--wc-5`, not `--wc-4` |
 | **the six `charts-*` swatches** | `:WJJlL` | **Dropped** — every home (rail edge, turn rail, `.who` avatar, collapsed strip) is removed; the caption glyph is coloured by state, not identity |
 
 **Decisions 1, 4, 6–11 and V6–V11a are unaffected** and stay the shipped spec.
