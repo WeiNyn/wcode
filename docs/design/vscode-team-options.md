@@ -127,33 +127,34 @@ already the turn headings.
 - CSS: `.stream`/`.col` (`chat.css:wKAYF`) gain a margin; a narrow fallback in
   the shipped `@media` block (`chat.css:1106`).
 
-## Option 4 · Glyph row + foot action — CHOSEN
+## Option 4 · Glyph row + foot action — CHOSEN (revised: the row carries names)
 
-**Stance (one line):** the roster is a **strip of state glyphs** — one glyph per
-member, root first — and the member's *action* leaves the roster for the
-transcript's foot, where the live line already sits.
+**Stance (one line):** the roster is a **`·`-separated strip of `glyph name`
+pairs** — compact, one wrapping line, root first — and the member's *action*
+leaves the roster for the transcript's foot, where the live line already sits.
 
 **What it looks like.** Two moves.
 
-**Move 1 — the roster is a glyph row** (compact, one line, minimal height
-regardless of team size):
+**Move 1 — the roster is a `glyph name` strip** (compact: a line, not a name
+column; it WRAPS for a big team):
 
 ```
-  ⣿ orchestrator            ctx 42k   All Focus        12
-  ⣿ ⣿ ○ ✓                           ← the roster: one state glyph per member, root first
-  ─────────────────────────────────────────
+  ⠋ orchestrator            ctx 42k   All Focus        12
+  ⠋ orchestrator · ⠋ explorer · ○ developer · ✓ reviewer   ← the roster
+  ───────────────────────────────────────────────────────
 ```
 
-Hover a glyph and its `title` names the member and its action
-(`explorer · grep onOpenDiff`); the targeted member's glyph is underlined.
+Each pair is a keyed control (`tabindex="0"` + Enter/Space → `focus-member`); its
+`title`/`aria-label` carry the name + state; the **target** pair is underlined.
+The `.act` field is **gone from the roster** — the action is at the foot.
 
 **Move 2 — the action lives at the transcript's foot.** The liveline carries
 *what the active member is doing*, and falls back:
 
 ```
-  ⣿ explorer · grep onOpenDiff      ← exactly one running member
+  ⠋ explorer · grep onOpenDiff      ← exactly one running member
   ⋯ 2 working                       ← several running
-  (hidden)                            ← nothing running
+  (hidden)                          ← nothing running
 ```
 
 **The exact markup.**
@@ -162,23 +163,21 @@ Hover a glyph and its `title` names the member and its action
 <!-- the glyph row (in the masthead, under row1) -->
 <div class="team" role="list" aria-label="Team">
   <span class="m sel" role="listitem" tabindex="0"
-        title="orchestrator · editing chat.css"
-        aria-label="orchestrator, running: editing chat.css">
-    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+        title="orchestrator · running" aria-label="orchestrator, running">
+    <span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="nm">orchestrator</span>
   </span>
   <span class="m" role="listitem" tabindex="0"
-        title="explorer · grep onOpenDiff"
-        aria-label="explorer, running: grep onOpenDiff">
-    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+        title="explorer · running" aria-label="explorer, running">
+    <span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="nm">explorer</span>
   </span>
-  <!-- ○ idle · ✓ done · ✗ failed, root first -->
+  <!-- ○ idle · ✓ done · ✗ failed, root first; the `.act` span is gone -->
 </div>
 
 <!-- the foot action (the liveline, role="status") -->
 <div class="liveline" role="status">
   <span class="row live-count"><span class="dots" aria-hidden="true">⋯</span><span><b>2</b> working</span></span>
   <span class="row live-one">
-    <span class="glyph g-run spin" aria-hidden="true">⣿</span>
+    <span class="glyph g-run spin" aria-hidden="true">⠋</span>
     <span class="who">explorer</span>
     <span aria-hidden="true">·</span>
     <span class="what">grep onOpenDiff</span>
@@ -186,36 +185,48 @@ Hover a glyph and its `title` names the member and its action
 </div>
 ```
 
-**The CSS shape.** `.team` is a flex row with `gap:var(--wc-2)` and `line-height:1`
-(one line, no name column); `.m` keeps its hover/focus/`.sel`; `.sel` underlines
-the glyph (no new colour). The liveline swaps its one child on the mode: the count
-row (`{n} working`) or the detail row (`glyph name · action`) — one `·`, and
-`role="status"` announces the text (the glyph and the `·` are `aria-hidden`).
+**The CSS shape.** `.team`/`.glyphrow` is a WRAPPING flex row (`gap:var(--wc-2)`,
+`line-height:1`); `.m` is an inline-flex holding the glyph and the name span
+(`.nm`); the `·` between pairs is a generated `::before` on `.m + .m` (so it is
+not part of any control, and the list stays `list > listitem`); the target
+underlines both spans (`text-decoration`, no new colour). The liveline swaps its
+one child on the mode: the count row (`{n} working`) or the detail row
+(`glyph name · action`) — `role="status"` announces the text (the glyph and the
+`·` are `aria-hidden`).
+
+**The `·` tension (flag).** N-1 `·` on one metadata line conflicts with the locked
+"≤1 `·` per metadata line" rule. The human asked for `·`-separated pairs, so this
+ships them; to satisfy the rule, delete the `::before` rule and let the flex `gap`
+separate the pairs — which is exactly what Option 1's imprint already does (and
+Option 4 would then differ from it only by *where the action lives*).
 
 **What it costs.**
-- **Space:** one tiny line, **flat regardless of team size** — the smallest of
-  the four. **Discoverability:** lowest — a glyph row shows *state*, not names;
-  the name + action need a hover (or the foot line). **Retarget:** the glyphs
-  (the key stays: `tabindex="0"` + Enter/Space).
-- It is still a **status widget** (not page *content*), so it trades some of the
+- **Space:** one line, flat by team size (it wraps rather than growing a column).
+  **Discoverability:** good — the name is now visible inline, so every teammate is
+  identified at a glance; the *state* is the glyph's colour, the *action* is at the
+  foot. **Retarget:** the pairs (the key stays: `tabindex="0"` + Enter/Space).
+- It is still a **status line** (not page *content*), so it trades some of the
   paper stance for compactness — the accepted cost of the human's call.
 
 **Touch-points.**
-- **Glyph row:** `chat.ts:renderCaption` (`:KWHuo`) — drop the name text node and
-  the `.act` span, add `title` + `aria-label`. The row shape needs the member's
-  **state** as well as name/action for the `aria-label`: `view.ts:teamCaption`
-  (`:uWZi8`) + `CaptionRow` (`:LXxM3`) gain a state field (`memberGlyph`'s name is
-  already computed, `reducer.ts`). CSS: `.masthead .team` (`chat.css:pLaZr`) and
-  `.m` (`:50gNH`) compress; `.act` (`:2A7UY`) leaves the roster.
-- **Foot action:** `chat.ts:renderLiveline` (`:xAdWz`) — add the one/many branch (a
+- **Glyph row:** `chat.ts:renderCaption` (`:KWHuo`) — keep the glyph, **add the
+  name span** (`.nm`), drop the `.act` span entirely; add `title` + `aria-label`.
+  The row shape needs the member's **state** for the title/aria:
+  `view.ts:teamCaption` (`:uWZi8`) + `CaptionRow` (`:LXxM3`) gain a state field
+  (`memberGlyph`'s name is already computed, `reducer.ts`). CSS:
+  `.masthead .team` (`chat.css:pLaZr`) and `.m` (`:50gNH`) compress; `.act`
+  (`:2A7UY`) is dropped.
+- **Foot action:** `chat.ts:renderLiveline` (`:xAdWz`) — the one/many branch (a
   single running member → the detail row; else `{n} working`; zero → hidden).
   Source: `view.ts:workingGroup` (`:KeUWa`, rows `:MTdZD`) and `livelineLabel`
   (`:psxWY`); the skeleton `#liveline` (`chat.ts:rY4Ro`). CSS: `.liveline`
   (`chat.css:ZLzzY`).
 
-**Note.** This supersedes the earlier **cast** recommendation for the *chosen*
-path: the human wants compact + a foot action, not a cast block. The cast remains
-a viable variant if the plan/backlog ever wants the roster as front matter.
+**Note.** Putting the name back makes this **converge on Option 1 (the imprint)**:
+the real deltas of this direction are now (a) the **action moves to the foot**,
+(b) the roster drops `.act`, (c) `·` separators, and (d) the pair-underline
+marking. If the imprint's spacing (no `·`) is acceptable, Options 1 and 4 differ
+only by *where the action lives* — which is the actual question.
 
 
 | | where | carries | space | discoverability | retarget home | width |
@@ -223,7 +234,7 @@ a viable variant if the plan/backlog ever wants the roster as front matter.
 | 1 · imprint | head line | glyph + name (+action) | a line, always | highest (first glance) | the rows | safe |
 | 2 · cast | text front matter | glyph + name + role | a top block, then gone | highest on open, none mid-read | the rows | safe |
 | 3 · margin | outer margin | the live action | none in the column | per-turn only | the note | editor only |
-| 4 · glyph (chosen) | head strip | state glyph only | one tiny line | lowest (hover for name + action) | the glyphs | safe |
+| 4 · glyph (chosen) | head strip | glyph + name (action at the foot) | one line, wraps | good (names inline) | the pairs | safe |
 
 ## Which fits the paper stance best, and why
 
@@ -246,9 +257,10 @@ their own today.
 1. **Now:** ship the **Option 1 improvements** (active-first, drop the redundant
    `.act`) — pure, no DOM change, quieter head.
 2. **Chosen (the human's call): Option 4, the glyph row + the foot action.** The
-   roster becomes a compact strip of state glyphs (root first, keyed retarget,
-   name + action on hover) and the liveline carries the active member's action
-   (`⣿ name · action`), falling back to `{n} working` and to hidden. Steps 1 and
+   roster becomes a compact `·`-separated strip of `glyph name` pairs (root first,
+   keyed retarget, names inline) and the liveline carries the active member's
+   action (`⠋ name · action`), falling back to `{n} working` and to hidden. Steps
+   1 and 3 stay optional.
    3 stay optional.
 3. **Optional:** **Option 3** at editor width only, for a reader who wants the
    state beside the text.
@@ -268,20 +280,19 @@ their own today.
 
 **Option 4 (chosen) specifics.**
 
-- **Q6.** The glyph row is **width-safe for one line** only while the team is
-  small; with many members it wraps. Cap it (e.g. the first N glyphs + a `+N`), or
-  let it wrap?
+- **Q6 — settled:** the row **wraps** for a big team; it does not cap or grow a
+  column. (A cap, e.g. the first N + `+N`, remains an option if the wrap is noisy.)
 - **Q7.** The foot-action predicate: the shipped `workingGroup` **excludes the
   target** (`view.ts:KeUWa`) and counts a member with a `liveAction` even when not
   running. Should the one/many branch consider *all* running members (the target
   included), or keep the peer-only rule?
 - **Q8.** Is the name in the detail line the display label (`explorer`) or the id
   (`w1`)? The brief's example uses `w1`.
-- **Q9.** Hover `title` is mouse-only; the `aria-label` carries name + state +
-  action for SR. Should the glyph row also open a focus-visible name (one line),
-  or is the hover-only name an accepted cost of "compact"?
-- **Q10.** Does the targeted member's mark (the glyph underline) read at 80 cols
-  beside `.sel`'s old name-bold treatment?
+- **Q9.** Does the target's mark read from the wraps above — is the **pair
+  underline** right, or should the **name be weighted** instead (the brief allows
+  either)?
+- **Dropped:** the old hover-only-name question is moot — the name is now visible
+  inline.
 
 ## Facts NOT verified
 

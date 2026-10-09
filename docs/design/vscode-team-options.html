@@ -158,16 +158,24 @@ body{
 /* ------------ option 3 · MARGIN (marginalia, beside the turn it belongs to) */
 .mnote{ display:none; }
 
-/* ------------ option 4 · GLYPH ROW (chosen): one state glyph per member, root first.
-   Compact (one line, minimal height regardless of team size); the member's name +
-   action ride the `title`; the retarget key stays (focusable + Enter/Space). */
+/* ------------ option 4 · GLYPH ROW (chosen): `glyph name` PAIRS, ROOT FIRST,
+   `·`-separated, one WRAPPING line (not a name column). The ACTION is not here —
+   it lives at the transcript's foot — so the roster drops `.act`; the pair's
+   `title`/`aria-label` carry the name + state; the retarget key stays. */
 .glyphrow{
   margin-top:var(--wc-1); display:flex; flex-wrap:wrap; gap:var(--wc-2);
   align-items:baseline; line-height:1;
 }
-.glyphrow .m{ display:inline-flex; padding:0 1px; }
+.glyphrow .m{ display:inline-flex; align-items:baseline; gap:var(--wc-1); padding:0 1px; }
 .glyphrow .m .glyph{ font-size:var(--wc-fs-ui); }
-.glyphrow .m.sel .glyph{ text-decoration:underline; text-underline-offset:2px; }
+.glyphrow .m .nm{ color:var(--vscode-foreground); }
+/* `·` between pairs. NOTE: N-1 `·` on one metadata line tensions the "≤1 `·`"
+   rule; to drop it, delete this rule and let the flex `gap` separate the pairs
+   (the imprint does exactly that). */
+.glyphrow .m + .m::before{ content:"·"; color:var(--vscode-descriptionForeground); }
+/* the target: underline the whole `glyph name` pair (no new colour) */
+.glyphrow .m.sel .glyph,
+.glyphrow .m.sel .nm{ text-decoration:underline; text-underline-offset:2px; }
 /* move 2: the foot action — one running member gets the detail line, else the count */
 .liveline .row.live-one{ display:none; }
 .liveline .who{ color:var(--vscode-foreground); }
@@ -265,7 +273,8 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
     running head. It is also the retarget affordance: each row is focusable and
     opens on Enter/Space. These four options move it, or the state it carries,
     into the page's own idiom. The <b>glyph row</b> is the chosen one: a compact
-    strip of state glyphs, with the member's action moved to the foot of the
+    line of `glyph name` pairs, with the member's action moved to the foot of the
+    transcript. Switch with the toolbar; the page is identical.
     transcript. Switch with the toolbar; the page is identical.
   </p>
   <p class="read">Reading this as: a web screen (the VS Code webview), for a developer reading a multi-agent session inside VS Code, in VS Code's own theme-variable language, with the dominant constraint that nothing may be a container that is not content, so the roster must read as page matter, not a status strip.</p>
@@ -303,13 +312,14 @@ html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
         <span class="m" role="listitem" tabindex="0"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span></span>
       </div>
 
-      <!-- option 4 · GLYPH ROW (chosen): one state glyph per member, ROOT FIRST. The name +
-           action ride the title; the row keeps tabindex + Enter/Space (the retarget key). -->
+      <!-- option 4 · GLYPH ROW (chosen): `glyph name` PAIRS, root first, `·`-separated.
+           The action is NOT here (it lives at the foot); title/aria-label carry the
+           name + state; the pair keeps tabindex + Enter/Space (the retarget key). -->
       <div class="glyphrow" id="glyphrow" role="list" aria-label="Team">
-        <span class="m sel" role="listitem" tabindex="0" title="orchestrator · editing chat.css" aria-label="orchestrator, running: editing chat.css"><span class="glyph g-run spin" aria-hidden="true">⠋</span></span>
-        <span class="m" role="listitem" tabindex="0" title="explorer · grep onOpenDiff" aria-label="explorer, running: grep onOpenDiff"><span class="glyph g-run spin" aria-hidden="true">⠋</span></span>
-        <span class="m" role="listitem" tabindex="0" title="developer · waiting" aria-label="developer, idle: waiting"><span class="glyph g-idle" aria-hidden="true">○</span></span>
-        <span class="m" role="listitem" tabindex="0" title="reviewer · turn done" aria-label="reviewer, done: turn done"><span class="glyph g-done" aria-hidden="true">✓</span></span>
+        <span class="m sel" role="listitem" tabindex="0" title="orchestrator · running" aria-label="orchestrator, running"><span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="nm">orchestrator</span></span>
+        <span class="m" role="listitem" tabindex="0" title="explorer · running" aria-label="explorer, running"><span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="nm">explorer</span></span>
+        <span class="m" role="listitem" tabindex="0" title="developer · idle" aria-label="developer, idle"><span class="glyph g-idle" aria-hidden="true">○</span><span class="nm">developer</span></span>
+        <span class="m" role="listitem" tabindex="0" title="reviewer · done" aria-label="reviewer, done"><span class="glyph g-done" aria-hidden="true">✓</span><span class="nm">reviewer</span></span>
       </div>
     </div>
   </header>
