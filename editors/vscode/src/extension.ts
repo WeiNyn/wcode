@@ -564,7 +564,12 @@ function surfaceHandlers(): SurfaceHandlers {
     },
     onCancel: (target: string | null) => {
       try {
-        session?.send({ type: "cancel" }, target ?? undefined);
+        // Stop cancels the WHOLE team: every RUNNING agent, not only the target.
+        const running = viewState.members.filter((member) => member.state === "running").map((member) => member.id);
+        const ids = new Set(
+          running.length > 0 ? running : [target ?? viewState.targeted ?? session?.rootSessionId ?? ""],
+        );
+        for (const id of ids) if (id !== "") session?.send({ type: "cancel" }, id);
       } catch (err) {
         ensureOutput().appendLine(`cancel failed: ${errMessage(err)}`);
       }
