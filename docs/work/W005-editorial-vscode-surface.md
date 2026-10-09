@@ -361,6 +361,14 @@ foot action). Implemented in `cddbde6`:
 
 (The design doc's status was "Not authorized" at the time; it now records the implementation.)
 
+### 2026-10-09 — the composer: Send becomes Stop while running
+
+The composer had **two competing controls** while a run was in flight (Send always visible + a
+conditional Stop). It is now **ONE primary control**: `composerControls` gains `sendLabel`
+(`Send` idle / `Stop` running), and `renderComposer` relabels `#send` and retargets its click
+to `Request::Cancel` — the interrupt sits exactly where Send was, unmissable. The separate
+`#cancel` button is gone (Esc still cancels; the wire is unchanged). `7a946ad`.
+
 ## 10. References
 
 - `docs/design/vscode-modern-editorial-draft.html` — the A spec (the WHAT).

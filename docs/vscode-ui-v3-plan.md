@@ -238,7 +238,7 @@ indicator a chat app puts above its input.
 
 ### 1.4 The composer: 7 controls → 2 always, 4 at most
 
-**Amended by editorial (W005) — V9's `.seg` is superseded.** The composer mode control becomes a quiet text toggle, not a `.seg`; the `Model:` removal, the `Stop` gate and the hint removal stand. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md).
+**Amended by editorial (W005) — V9's `.seg` is superseded.** The composer mode control becomes a quiet text toggle, not a `.seg`; the `Model:` removal, the `Stop` gate and the hint removal stand. See [`plans/vscode-ui-editorial-plan.md`](plans/vscode-ui-editorial-plan.md). **Further amended (W005 follow-up):** the composer has **ONE** primary control — `Send` **becomes `Stop`** while a run is in flight (the `Stop` gate drives the Send button's label + action, not a second button), so the interrupt is unmissable.
 
 **Now** (`chat.ts:OghJl`…`:nFrit`): `@ selection`, `Mode: …`, a read-only `Model: …`
 span (`:l8HCM`), a `spacer`, the hint `Enter to send` (`:JpHql`), `Send`, and `Stop` —
