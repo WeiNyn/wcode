@@ -466,6 +466,88 @@ pre.quote {
   overflow-x: auto;
 }
 
+/* ---------------------------------------------------- the token palette (W009) */
+
+/* Prism's token classes → the host's --vscode-symbolIcon-* family. EACH declaration carries a
+   --vscode-editor-foreground FALLBACK: where the family is absent every token collapses to one
+   colour (a SILENT no-op) — the pre-flight F5 must rule that out (W009 P6). No new --wc-*, no
+   hex; the tokens colour wherever they appear (`.code .pre`, `pre.quote`, `.hunk .ln .txt`). */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: var(--vscode-descriptionForeground, var(--vscode-editor-foreground));
+}
+
+.token.keyword,
+.token.atrule,
+.token.important {
+  color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-editor-foreground));
+}
+
+.token.string,
+.token.char,
+.token.attr-value,
+.token.regex,
+.token.url {
+  color: var(--vscode-symbolIcon-stringForeground, var(--vscode-editor-foreground));
+}
+
+.token.number {
+  color: var(--vscode-symbolIcon-numberForeground, var(--vscode-editor-foreground));
+}
+
+.token.boolean {
+  color: var(--vscode-symbolIcon-booleanForeground, var(--vscode-editor-foreground));
+}
+
+.token.constant,
+.token.symbol {
+  color: var(--vscode-symbolIcon-constantForeground, var(--vscode-editor-foreground));
+}
+
+.token.function,
+.token.method {
+  color: var(--vscode-symbolIcon-functionForeground, var(--vscode-editor-foreground));
+}
+
+.token.class-name,
+.token.struct {
+  color: var(--vscode-symbolIcon-classForeground, var(--vscode-editor-foreground));
+}
+
+.token.interface {
+  color: var(--vscode-symbolIcon-interfaceForeground, var(--vscode-editor-foreground));
+}
+
+.token.builtin,
+.token.namespace,
+.token.module,
+.token.package {
+  color: var(--vscode-symbolIcon-namespaceForeground, var(--vscode-editor-foreground));
+}
+
+.token.property,
+.token.attr-name {
+  color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-editor-foreground));
+}
+
+.token.variable,
+.token.parameter {
+  color: var(--vscode-symbolIcon-variableForeground, var(--vscode-editor-foreground));
+}
+
+.token.operator {
+  color: var(--vscode-symbolIcon-operatorForeground, var(--vscode-editor-foreground));
+}
+
+.token.punctuation,
+.token.tag,
+.token.selector,
+.token.entity {
+  color: var(--vscode-editor-foreground);
+}
+
 /* ------------------------------------------------------- the footnote matter */
 
 /* A tool call leaves a printed REFERENCE (a superscript numeral); its detail is set as a

@@ -785,6 +785,19 @@ test("no `.act` rule remains in the sheet (the action is not on the roster)", ()
   assert.ok(!/\.act\s*\{/.test(css), "the roster's `.act` rule is gone");
 });
 
+test("the W009 token palette is --vscode-* ONLY: every colour a var, no hex, no --wc-*", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  const rules = [...css.matchAll(/\.token\.[\w-]+(?:\s*,\s*\.token\.[\w-]+)*\s*\{([^}]*)\}/g)];
+  assert.ok(rules.length >= 10, `the palette declares several rules (${rules.length})`);
+  for (const [, body] of rules) {
+    for (const [, value] of body.matchAll(/color:\s*([^;]+);/g)) {
+      assert.match(value.trim(), /^var\(--vscode-/, `a token colour must be a --vscode-* var: ${value}`);
+    }
+    assert.ok(!/#[0-9a-fA-F]{3}/.test(body), "no hex in the palette");
+    assert.ok(!/--wc-/.test(body), "no new --wc-* token");
+  }
+});
+
 /* -------------------------------------------------------- working group */
 
 test("workingGroup: other members that are running or carry a liveAction (the pill's source)", () => {
