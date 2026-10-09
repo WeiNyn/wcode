@@ -1,9 +1,9 @@
 # W006 — Slim tool schemas (prompt-token diet, Phase 1)
 
-- **Status:** in progress — Phase 1 implemented (`crates/wcode-harness/src/tool.rs`),
-  `cargo test --workspace` (1173 passed) + `cargo clippy --workspace --all-targets`
-  clean, live-measured; **second-layer review rejected the first cut (§5) and the fix
-  is in — re-review pending**
+- **Status:** Phase 1 **done** — landed in `100a201`; second-layer review **APPROVED**
+  (after rejecting the first cut, §5). `cargo test --workspace` (1173 passed) +
+  `cargo clippy --workspace --all-targets` clean, live-measured. **Phase 2 (§6) not
+  started.**
 - **Work item:** W006
 - **Decisions:** **no new `DNNN`** — this changes neither the wire contract (the same
   JSON-Schema *meaning*, minus annotation keys that no model acts on and that
