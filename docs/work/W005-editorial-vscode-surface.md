@@ -361,13 +361,19 @@ foot action). Implemented in `cddbde6`:
 
 (The design doc's status was "Not authorized" at the time; it now records the implementation.)
 
-### 2026-10-09 — the composer: Send becomes Stop while running
+### 2026-10-09 — the composer: Send and Stop share ONE slot
 
-The composer had **two competing controls** while a run was in flight (Send always visible + a
-conditional Stop). It is now **ONE primary control**: `composerControls` gains `sendLabel`
-(`Send` idle / `Stop` running), and `renderComposer` relabels `#send` and retargets its click
-to `Request::Cancel` — the interrupt sits exactly where Send was, unmissable. The separate
-`#cancel` button is gone (Esc still cancels; the wire is unchanged). `7a946ad`.
+The foot had two competing controls while a run was in flight (Send always visible, the
+conditional Stop hidden behind the same styling) — so the interrupt read as absent. It now has
+**ONE primary action in ONE slot**: `#send` and `#cancel` are adjacent (`#cattach · Act Plan
+#send #cancel`) with **inverse visibility**, driven by a new pure
+`composerActions(state) -> { send, stop }` (`sendBtn.hidden = actions.stop`;
+`cancelBtn.hidden = !actions.stop`). Both carry `.composer .foot .send { margin-left: auto }`,
+so whichever shows stays right-aligned (the swap neither shifts the layout nor shows two), and
+the interrupt reads in the accent (`--wc-accent`, "active now"). **Cancel semantics unchanged:**
+Stop posts `{ kind: "cancel" }` → the host's `cancelTargets`; Esc still cancels; the wire is
+untouched. `7a946ad` (a first cut that merged the two) → `e019ef3` (the shipped shape, the
+L2-folded presentation).
 
 ## 10. References
 
