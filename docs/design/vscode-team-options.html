@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-team="imprint">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode · paper surface · the team list: three options</title>
+<style>
+/* ============================================================================
+   wcode · paper surface · THE TEAM LIST — three options (prototype)
+
+   The shipped paper surface puts the roster in a dim caption under the running
+   head (a line of `glyph name action` rows, each a focusable retarget button).
+   This shows where else it can live, in the page's own idiom. Switch with the
+   toolbar; the surface is identical, only the team block moves.
+
+     imprint  the page's dim imprint line under the running head (the status quo)
+     cast     the dramatis personae: a CAST block as front matter, in the text
+     margin   the live action as marginalia, aligned to the turn it belongs to
+
+   Locked invariants (unchanged): colour is ONLY --vscode-* plus the ONE accent
+   --wc-accent = "active now"; the shipped --wc-* scale is reused, nothing added;
+   the glyph set is the locked TUI set (❯ ⚙ ✓ ✗ ⋯ ▌ ⠋ ● ○ ☑ ▸ ▾ ·); motion is
+   gated; the roster row stays the retarget affordance (focusable + Enter/Space).
+   self-contained: the :root carries the --vscode-* fallbacks; zero requests.
+   ========================================================================== */
+:root{
+  color-scheme: dark;
+  --vscode-editor-background:#1f1f1f;
+  --vscode-editor-foreground:#cccccc;
+  --vscode-panel-border:#2b2b2b;
+  --vscode-descriptionForeground:#9d9d9d;
+  --vscode-foreground:#cccccc;
+  --vscode-focusBorder:#0078d4;
+  --vscode-input-border:#3c3c3c;
+  --vscode-input-placeholderForeground:#989898;
+  --vscode-textCodeBlock-background:#1a1a1a;
+  --vscode-textLink-foreground:#4daafc;
+  --vscode-errorForeground:#f14c4c;
+  --vscode-charts-blue:#3794ff;
+  --vscode-charts-green:#89d185;
+  --vscode-editorWidget-border:#454545;
+  --vscode-editor-font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --vscode-font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  --vscode-font-size:13px;
+  --wc-1:4px; --wc-2:8px; --wc-3:12px; --wc-4:16px; --wc-5:24px;
+  --wc-fs-meta:11px; --wc-fs-ui:12px; --wc-fs-body:13px;
+  --wc-radius:6px;
+  --wc-accent:var(--vscode-charts-blue);
+  --ed-measure:64ch;
+  --ed-read:"Iowan Old Style","Charter","Palatino Linotype","Book Antiqua",Georgia,"Times New Roman",serif;
+}
+html[data-theme="light"]{
+  color-scheme:light;
+  --vscode-editor-background:#ffffff; --vscode-editor-foreground:#3b3b3b;
+  --vscode-panel-border:#e7e7e7; --vscode-descriptionForeground:#717171;
+  --vscode-foreground:#3b3b3b; --vscode-input-border:#cecece;
+  --vscode-input-placeholderForeground:#767676; --vscode-textCodeBlock-background:#f3f3f3;
+  --vscode-textLink-foreground:#006ab1; --vscode-errorForeground:#e51400;
+  --vscode-editorWidget-border:#c8c8c8;
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:#0d0d0d; color:var(--vscode-editor-foreground);
+  font-family:var(--vscode-font-family); font-size:var(--wc-fs-body);
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.mono{ font-family:var(--vscode-editor-font-family); }
+.glyph{ font-family:var(--vscode-editor-font-family); font-weight:700; font-size:var(--wc-fs-ui); }
+.g-run{ color:var(--wc-accent); }
+.g-done{ color:var(--vscode-charts-green); }
+.g-idle{ color:var(--vscode-descriptionForeground); }
+.spin{ display:inline-block; animation:wc-spin 1.2s steps(8) infinite; }
+@keyframes wc-spin{ to{ transform:rotate(360deg); } }
+
+/* ------------------------------------------------------ the draft's toolbar */
+.draft{ max-width:1100px; margin:0 auto; padding:20px 20px 6px; color:#c9c9c9; }
+.draft h1{ font-size:15px; font-weight:600; margin:0 0 2px; }
+.draft .sub{ color:#8a8a8a; font-size:12px; margin:0 0 10px; max-width:94ch; }
+.draft .read{
+  font-family:var(--vscode-editor-font-family); font-size:11.5px;
+  color:#9cd0ff; background:#12202b; border:1px solid #1d3446;
+  border-radius:6px; padding:8px 10px; margin:0 0 10px; white-space:pre-wrap;
+}
+.toolbar{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0 0 10px; }
+.tbtn{
+  font:inherit; font-size:12px; color:#cfe6ff; background:#15222e;
+  border:1px solid #24384a; border-radius:6px; padding:4px 10px; cursor:pointer;
+}
+.tbtn:hover{ background:#1b2c3b; }
+.tbtn:focus-visible{ outline:2px solid var(--wc-accent); outline-offset:2px; }
+.tbtn[aria-pressed="true"]{ background:var(--wc-accent); color:#fff; border-color:transparent; }
+.app{
+  max-width:1100px; margin:0 auto 40px; height:720px;
+  border:1px solid #2b2b2b; border-radius:8px; overflow:hidden;
+  box-shadow:0 18px 60px rgba(0,0,0,.55);
+  display:flex; flex-direction:column; background:var(--vscode-editor-background);
+}
+.app[data-width="sidebar"]{ max-width:380px; }
+
+/* ---------------------------------------------------------- the running head */
+.masthead{ flex:0 0 auto; padding:var(--wc-3) 0 0; }
+.masthead .inner{
+  max-width:var(--ed-measure); margin:0 auto;
+  padding:0 var(--wc-4) var(--wc-2);
+  border-bottom:1px solid var(--vscode-panel-border);
+}
+.row1{ display:flex; align-items:baseline; gap:var(--wc-2); }
+.ident{ display:inline-flex; align-items:baseline; gap:var(--wc-1); }
+.ident .name{ font-weight:700; color:var(--vscode-foreground); font-size:var(--wc-fs-ui); }
+.spacer{ flex:1; }
+.status{
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+  display:inline-flex; gap:var(--wc-2); white-space:nowrap;
+}
+.folio{
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  font-variant-numeric:tabular-nums; color:var(--vscode-descriptionForeground);
+}
+.linkbtn{ font:inherit; font-size:var(--wc-fs-meta); color:var(--vscode-descriptionForeground);
+  background:none; border:0; padding:0; cursor:pointer; }
+.linkbtn:hover{ color:var(--vscode-foreground); }
+.linkbtn:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:2px; }
+.linkbtn[aria-pressed="true"]{ color:var(--wc-accent); font-weight:600; }
+
+/* the roster, wherever it sits: one row shape, one retarget affordance */
+.m{
+  display:inline-flex; align-items:baseline; gap:var(--wc-1);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground); cursor:pointer;
+}
+.m:hover{ color:var(--vscode-foreground); }
+.m:focus-visible{ outline:2px solid var(--vscode-focusBorder); outline-offset:2px; }
+.m.sel{ color:var(--vscode-foreground); font-weight:600; }
+.m .act{ opacity:.7; }
+
+/* ------------ option 1 · IMPRINT (the status quo: a dim line under the head) */
+.imprint{
+  margin-top:var(--wc-1); display:flex; flex-wrap:wrap; gap:var(--wc-3);
+}
+
+/* ------------ option 2 · CAST (dramatis personae: front matter, in the text) */
+.cast{
+  margin:0 0 var(--wc-5); padding:0 0 var(--wc-4);
+  border-bottom:1px solid var(--vscode-panel-border);
+}
+.cast .label{
+  margin:0 0 var(--wc-2);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  letter-spacing:.08em; text-transform:uppercase;
+  color:var(--vscode-descriptionForeground);
+}
+.cast .row{ display:flex; align-items:baseline; gap:var(--wc-2); margin:0 0 var(--wc-1); }
+.cast .row .nm{ font-weight:600; color:var(--vscode-foreground); min-width:12ch; display:inline-flex; align-items:baseline; gap:var(--wc-1); }
+.cast .row .rl{ color:var(--vscode-descriptionForeground); }
+
+/* ------------ option 3 · MARGIN (marginalia, beside the turn it belongs to) */
+.mnote{ display:none; }
+
+/* the switch */
+html[data-team="cast"] .imprint,
+html[data-team="margin"] .imprint{ display:none; }
+html[data-team="imprint"] .cast,
+html[data-team="margin"] .cast{ display:none; }
+html[data-team="imprint"] .mnote,
+html[data-team="cast"] .mnote{ display:none; }
+
+/* --------------------------------------------------------------- the text */
+.stream{ flex:1 1 auto; overflow:auto; min-height:0; padding:var(--wc-5) 0; }
+.col{ width:100%; max-width:var(--ed-measure); margin:0 auto; padding:0 var(--wc-4); }
+.turn{ margin:0; }
+.turn.new{ margin-top:var(--wc-5); }
+.turn:first-child{ margin-top:0; }
+.byline{
+  margin:0 0 var(--wc-2);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  letter-spacing:.08em; text-transform:uppercase;
+  color:var(--vscode-descriptionForeground);
+}
+.byline .name{ font-weight:700; }
+.byline.you{ color:var(--vscode-foreground); }
+.body{ font-family:var(--ed-read); line-height:1.75; text-wrap:pretty; }
+.body p{ margin:0; }
+.body p + p{ text-indent:1.5em; }
+.body code{
+  font-family:var(--vscode-editor-font-family); font-size:.9em;
+  background:var(--vscode-textCodeBlock-background); border-radius:3px; padding:0 3px;
+}
+
+/* marginalia needs a wide page; below the switch falls back to the imprint */
+@media (min-width:561px){
+  html[data-team="margin"] .turn{ position:relative; }
+  html[data-team="margin"] .mnote{
+    display:block; position:absolute; left:100%; top:0; margin-left:var(--wc-4); width:20ch;
+    font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+    color:var(--vscode-descriptionForeground);
+  }
+}
+html[data-team="margin"] .app[data-width="sidebar"] .imprint{ display:flex; }
+html[data-team="margin"] .app[data-width="sidebar"] .mnote{ display:none; }
+@media (max-width:560px){
+  .masthead .inner{ padding:0 var(--wc-3) var(--wc-2); }
+  .col{ padding:0 var(--wc-3); }
+  html[data-team="margin"] .imprint{ display:flex; }
+  html[data-team="margin"] .mnote{ display:none; }
+}
+
+/* ---------------------------------------------------------------- the live */
+.liveline{
+  flex:0 0 auto; max-width:var(--ed-measure); margin:0 auto; width:100%;
+  padding:0 var(--wc-4);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+}
+.liveline .row{ display:flex; gap:var(--wc-2); align-items:baseline; }
+.liveline .dots{ color:var(--wc-accent); animation:wc-typing 1.4s ease-in-out infinite; }
+@keyframes wc-typing{ 0%,100%{ opacity:.25; } 50%{ opacity:1; } }
+
+/* ---------------------------------------------------------------- the write */
+.composer{ flex:0 0 auto; padding:0 0 var(--wc-3); }
+.composer .inner{
+  max-width:var(--ed-measure); margin:0 auto;
+  padding:var(--wc-3) var(--wc-4) 0;
+  border-top:1px solid var(--vscode-panel-border);
+  display:flex; flex-direction:column; gap:var(--wc-2);
+}
+.inputline{ display:flex; align-items:baseline; gap:var(--wc-2); border-bottom:1px solid var(--vscode-input-border); padding:var(--wc-1) 0; }
+.inputline .pfx{ font-family:var(--vscode-editor-font-family); color:var(--wc-accent); font-weight:700; }
+.inputline .ph{ color:var(--vscode-input-placeholderForeground); font-size:var(--wc-fs-ui); }
+
+@media (prefers-reduced-motion: reduce){
+  .spin, .liveline .dots{ animation:none; }
+}
+</style>
+</head>
+<body>
+
+<div class="draft">
+  <h1>wcode · paper surface · the team list: three options</h1>
+  <p class="sub">
+    The roster is the last widget on the page: a dim line of members under the
+    running head. It is also the retarget affordance: each row is focusable and
+    opens on Enter/Space. These three options move it, or the state it carries,
+    into the page's own idiom. Switch with the toolbar; the page is identical.
+  </p>
+  <p class="read">Reading this as: a web screen (the VS Code webview), for a developer reading a multi-agent session inside VS Code, in VS Code's own theme-variable language, with the dominant constraint that nothing may be a container that is not content, so the roster must read as page matter, not a status strip.</p>
+  <div class="toolbar">
+    <button class="tbtn" id="tImprint" aria-pressed="true">imprint</button>
+    <button class="tbtn" id="tCast" aria-pressed="false">cast</button>
+    <button class="tbtn" id="tMargin" aria-pressed="false">margin</button>
+    <span class="spacer" style="flex:1"></span>
+    <button class="tbtn" id="tWidth" aria-pressed="false">Dock: editor</button>
+  </div>
+</div>
+
+<div class="app" id="app" data-width="editor"
+     role="group" aria-label="wcode: the team list in three placements">
+
+  <header class="masthead" role="banner">
+    <div class="inner">
+      <div class="row1">
+        <span class="ident"><span class="glyph g-run spin" aria-hidden="true">⠋</span><span class="name">orchestrator</span></span>
+        <span class="spacer"></span>
+        <span class="status">
+          <span class="mono">ctx 42k</span>
+          <span><button class="linkbtn" id="mAll" type="button" aria-pressed="true">All</button></span>
+          <span><button class="linkbtn" id="mFocus" type="button" aria-pressed="false">Focus</button></span>
+        </span>
+        <span class="folio" id="folio">3</span>
+      </div>
+
+      <!-- option 1 · IMPRINT -->
+      <div class="imprint" id="imprint" role="list" aria-label="Team">
+        <span class="m sel" role="listitem" tabindex="0"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator <span class="act">editing chat.css</span></span>
+        <span class="m" role="listitem" tabindex="0"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer <span class="act">grep onOpenDiff</span></span>
+        <span class="m" role="listitem" tabindex="0"><span class="glyph g-idle" aria-hidden="true">○</span>developer <span class="act">waiting</span></span>
+        <span class="m" role="listitem" tabindex="0"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span></span>
+      </div>
+    </div>
+  </header>
+
+  <section class="stream" role="log" aria-label="Transcript">
+    <div class="col">
+
+      <!-- option 2 · CAST (front matter, in the text) -->
+      <section class="cast" id="cast" role="list" aria-label="Cast">
+        <p class="label">Cast</p>
+        <div class="row" role="listitem" tabindex="0"><span class="nm"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator</span><span class="rl">editing chat.css</span></div>
+        <div class="row" role="listitem" tabindex="0"><span class="nm"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer</span><span class="rl">grep onOpenDiff</span></div>
+        <div class="row" role="listitem" tabindex="0"><span class="nm"><span class="glyph g-idle" aria-hidden="true">○</span>developer</span><span class="rl">waiting</span></div>
+        <div class="row" role="listitem" tabindex="0"><span class="nm"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer</span><span class="rl">turn done</span></div>
+      </section>
+
+      <article class="turn you new">
+        <div class="byline you">You</div>
+        <div class="body"><p>Drop the rail and the spine. I want this to read like a page in a book.</p></div>
+      </article>
+
+      <article class="turn wcode new">
+        <span class="mnote"><span class="glyph g-run spin" aria-hidden="true">⠋</span> editing chat.css</span>
+        <div class="byline"><span class="glyph" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
+        <div class="body">
+          <p>Done. The transcript is a single column, and the whole panel is one page: the running head, the text and the writing line sit on the same measure.</p>
+          <p>The paragraph rhythm is the second move. Within one speaker the paragraphs are set solid and separated by a first-line indent, the way a novel sets a chapter.</p>
+        </div>
+      </article>
+
+      <article class="turn wcode new">
+        <span class="mnote"><span class="glyph g-run" aria-hidden="true">⠋</span> grep onOpenDiff</span>
+        <div class="byline"><span class="glyph g-run" aria-hidden="true">⠋</span><span class="name">explorer</span></div>
+        <div class="body"><p>The diff hook is at <code>chat.ts:88</code>. Passing it back to you.</p></div>
+      </article>
+
+    </div>
+  </section>
+
+  <div class="liveline" role="status">
+    <span class="row">
+      <span class="dots" aria-hidden="true">⋯</span>
+      <span><b>2</b> working</span>
+      <span>explorer grep onOpenDiff</span>
+    </span>
+  </div>
+
+  <footer class="composer">
+    <div class="inner">
+      <div class="inputline">
+        <span class="pfx" aria-hidden="true">❯</span>
+        <span class="ph">Message wcode…</span>
+      </div>
+      <div class="status" style="gap:var(--wc-3)">
+        <span class="linkbtn">Attach context</span>
+        <span class="linkbtn" aria-pressed="true">Act</span>
+        <span class="linkbtn">Plan</span>
+        <span class="linkbtn" style="margin-left:auto;color:var(--vscode-foreground)">Send</span>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+"use strict";
+(function () {
+  var root = document.documentElement;
+  var app = document.getElementById("app");
+
+  function press(btns, on) {
+    btns.forEach(function (b) { b.setAttribute("aria-pressed", b === on ? "true" : "false"); });
+  }
+
+  var tImprint = document.getElementById("tImprint");
+  var tCast = document.getElementById("tCast");
+  var tMargin = document.getElementById("tMargin");
+  function setTeam(mode, on) {
+    root.dataset.team = mode;
+    press([tImprint, tCast, tMargin], on);
+  }
+  tImprint.addEventListener("click", function () { setTeam("imprint", tImprint); });
+  tCast.addEventListener("click", function () { setTeam("cast", tCast); });
+  tMargin.addEventListener("click", function () { setTeam("margin", tMargin); });
+
+  var tWidth = document.getElementById("tWidth");
+  tWidth.addEventListener("click", function () {
+    var sidebar = app.dataset.width === "sidebar";
+    app.dataset.width = sidebar ? "editor" : "sidebar";
+    tWidth.textContent = "Dock: " + (sidebar ? "editor" : "sidebar");
+    tWidth.setAttribute("aria-pressed", sidebar ? "false" : "true");
+  });
+
+  /* the retarget: a roster row opens on Enter/Space (the shipped affordance) */
+  function activationKey(key) { return key === "Enter" || key === " " || key === "Spacebar"; }
+  Array.prototype.slice.call(document.querySelectorAll(".m, .cast .row")).forEach(function (row) {
+    row.addEventListener("keydown", function (event) {
+      if (!activationKey(event.key)) return;
+      event.preventDefault();
+      Array.prototype.slice.call(document.querySelectorAll(".m, .cast .row")).forEach(function (r) {
+        r.classList.toggle("sel", r === row);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

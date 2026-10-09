@@ -219,7 +219,7 @@ No structural data change, no wire change, no kernel change.
 ## References
 
 - [`vscode-paper-draft.html`](vscode-paper-draft.html) — this refinement (the WHAT); its **Team** toggle cycles the roster placements.
-- [`vscode-paper-team-options.md`](vscode-paper-team-options.md) — the team list: five placement / improvement options.
+- [`vscode-team-options.md`](vscode-team-options.md) + [`vscode-team-options.html`](vscode-team-options.html) — the team list: three placement options.
 - [`vscode-modern-editorial-draft.html`](vscode-modern-editorial-draft.html) — direction A, shipped in W005.
 - [`vscode-modern-directions.md`](vscode-modern-directions.md) §A — the stance, dials and locked vocabulary.
 - `editors/vscode/media/chat.css`, `src/webview/chat.ts`, `src/webview/view.ts` — the shipped editorial implementation and the seams.
