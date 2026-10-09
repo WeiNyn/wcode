@@ -14,36 +14,31 @@
  * `acquireVsCodeApi()`.
  */
 import { completionText, filterCommands, parseSlash, type SlashCommand } from "../commands.ts";
-import { memberGlyph, sidebarRails, todoGlyph, type RosterItem, type SidebarRails } from "../reducer.ts";
+import { memberViews } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
 import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
 import {
   classNames,
-  avatarStack,
   composerControls,
   composeSubmit,
   diffStat,
   emptyKind,
   emptySpec,
   foldOpen,
+  livelineLabel,
   MEMBER_SWATCHES,
-  memberInitial,
   memberSwatch,
   panelHeader,
   outputHead,
   bodyKind,
   toolStatus,
-  rosterRows,
+  teamCaption,
   selectionRef,
   toggleFold,
   turns,
   workingGroup,
   type FoldOverrides,
-  type HeaderCell,
-  type IdentCell,
-  type MoreCell,
-  type SegCell,
   type MemberSwatch,
   type Turn,
   type TurnMember,
@@ -64,35 +59,44 @@ const vscode = acquireVsCodeApi();
 
 const app = requireEl("app");
 app.innerHTML = [
-  '<header id="phead" class="phead" aria-label="Session"></header>',
-  '<div class="content">',
-  '  <aside id="side" class="side" aria-label="Team and tasks"></aside>',
-  '  <section class="main">',
-  '    <main id="transcript" class="transcript" role="log" aria-label="Transcript"></main>',
-  '    <button id="pill" class="pill" type="button" hidden></button>',
-  '    <footer id="composer" class="composer">',
-  '      <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
-  '      <div id="cmdmenu" class="cmdmenu" role="listbox" aria-label="Commands" hidden></div>',
-  '      <textarea id="input" rows="1" spellcheck="false"',
-  '        placeholder="Message wcode…  (Enter to send, Shift+Enter for newline, Esc to cancel)"></textarea>',
-  '      <div class="ctoolbar">',
-  '        <button id="cattach" class="tool-btn" type="button" title="Attach the current editor selection">@ selection</button>',
-  '        <span class="seg" role="group" aria-label="Mode">',
-  '          <button id="mAct" type="button">Act</button>',
-  '          <button id="mPlan" type="button">Plan</button>',
-  '        </span>',
-  '        <span class="spacer"></span>',
-  '        <button id="send" class="btn primary">Send</button>',
-  '        <button id="cancel" class="btn" title="Cancel the in-flight run (Esc)" hidden>Stop</button>',
+  '<header id="masthead" class="masthead" role="banner">',
+  '  <div class="row1">',
+  '    <span id="ident" class="ident"></span>',
+  '    <span class="spacer"></span>',
+  '    <span id="status" class="status"></span>',
+  '  </div>',
+  '  <div id="team" class="team" role="list" aria-label="Team"></div>',
+  '</header>',
+  '<section class="main">',
+  '  <main id="transcript" class="stream" role="log" aria-label="Transcript"></main>',
+  '  <div id="liveline" class="liveline" role="status" hidden></div>',
+  '  <footer id="composer" class="composer">',
+  '    <div id="ctx-chips" class="ctx-chips" aria-label="Attached context"></div>',
+  '    <div id="cmdmenu" class="cmdmenu" role="listbox" aria-label="Commands" hidden></div>',
+  '    <div class="inner">',
+  '      <div class="inputline">',
+  '        <span class="pfx" aria-hidden="true">❯</span>',
+  '        <textarea id="input" rows="1" spellcheck="false"',
+  '          placeholder="Message wcode…  (Enter to send, Shift+Enter for a newline, Esc to cancel)"></textarea>',
   '      </div>',
-  '    </footer>',
-  '  </section>',
-  "</div>",
+  '      <div class="foot">',
+  '        <button id="cattach" class="linkbtn" type="button" title="Attach the current editor selection">Attach context</button>',
+  '        <span aria-hidden="true">·</span>',
+  '        <button id="mAct" class="linkbtn" type="button" aria-pressed="true">Act</button>',
+  '        <button id="mPlan" class="linkbtn" type="button" aria-pressed="false">Plan</button>',
+  '        <button id="send" class="linkbtn send" type="button">Send</button>',
+  '        <button id="cancel" class="linkbtn send" type="button" title="Cancel the in-flight run (Esc)" hidden>Stop</button>',
+  '      </div>',
+  '    </div>',
+  '  </footer>',
+  '</section>',
 ].join("\n");
-const pheadEl = requireEl("phead");
+const identEl = requireEl("ident");
+const statusEl = requireEl("status");
+const teamEl = requireEl("team");
 
 const transcriptEl = requireEl("transcript");
-const sideEl = requireEl("side");
+const livelineEl = requireEl("liveline");
 const inputEl = requireEl("input") as HTMLTextAreaElement;
 const sendBtn = requireEl("send");
 const cancelBtn = requireEl("cancel");
@@ -101,7 +105,6 @@ const mPlanEl = requireEl("mPlan");
 const cattachEl = requireEl("cattach");
 const ctxChipsEl = requireEl("ctx-chips");
 const menuEl = requireEl("cmdmenu");
-const pillEl = requireEl("pill") as HTMLButtonElement;
 
 /** Per-callId tool-fold overrides (the user's manual toggle, keyed to its phase). */
 let foldOverrides: FoldOverrides = new Map();
@@ -119,17 +122,8 @@ let lastRef: string | null = null;
 /** The composer's current mode (the `.seg`'s pressed segment), for the click guard. */
 let composerMode: "Plan" | "Act" = "Act";
 
-/** Which header popover is open (webview-local view state): the target chip's menu
- *  or the `▾` disclosure. Only ONE is ever open. */
-let popover: "target" | "more" | null = null;
-/** The roving-tabindex item of the open menu. */
-let activeIndex = 0;
-/** The header's cell+menu signature; a matching snapshot skips the rebuild (B1). */
-let headerKey: string | null = null;
-/** Is the team rail collapsed to its avatar strip? (webview-local view state). */
-let railCollapsed = false;
-/** The rail's team+tasks+target signature; a matching snapshot skips the rebuild. */
-let railsKey: string | null = null;
+/** The masthead's cells+caption signature; a matching snapshot skips the rebuild. */
+let mastheadKey: string | null = null;
 
 /* ----------------------------------------------------------------- utilities */
 
@@ -162,251 +156,73 @@ function rerender(): void {
   if (lastState !== null) render(lastState);
 }
 
-/* ------------------------------------------------------------------ header */
+/* ------------------------------------------------------------------ masthead */
 
-function renderHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): void {
-  const key = headerSignature(state, session, mode);
-  if (key === headerKey) return; // same cells AND popover state: keep the SAME DOM (focus survives)
-  const focus = focusedControl(); // capture BEFORE the wipe: a rebuild discards the header DOM
-  headerKey = key;
+/** Paint the ONE-row masthead + the team caption. Impure (DOM). */
+function renderMasthead(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): void {
+  const key = mastheadSignature(state, session, mode);
+  if (key === mastheadKey) return; // same cells + caption: keep the SAME DOM
+  mastheadKey = key;
   const { cells } = panelHeader(state, session, mode);
-  pheadEl.textContent = "";
-  for (const cell of cells) pheadEl.appendChild(headerCellNode(cell, state));
-  // Focus restore: an open popover re-focuses its roving row; else the control that had it.
-  if (popover !== null) focusItem(activeIndex);
-  else if (focus !== null) pheadEl.querySelector<HTMLElement>(`[data-el="${focus}"]`)?.focus();
+  identEl.textContent = "";
+  statusEl.textContent = "";
+  for (const cell of cells) {
+    if (cell.kind === "ident") {
+      const glyph = el("span", cell.glyphClass, cell.glyph);
+      glyph.title = cell.stateTitle;
+      // `done`/`failed` read oddly as a SESSION state, so label it just `State: …`.
+      glyph.setAttribute("aria-label", `State: ${cell.stateTitle}`);
+      identEl.appendChild(glyph);
+      identEl.appendChild(el("span", "name", cell.name));
+    } else if (cell.kind === "meter") {
+      if (cell.word !== "") statusEl.appendChild(el("span", "word", cell.word));
+      if (cell.text !== "") statusEl.appendChild(el("span", "mono", cell.text));
+    } else if (cell.kind === "mode") {
+      statusEl.appendChild(modeToggle(cell.mode));
+    }
+    // a spacer cell needs no DOM: the skeleton's `.spacer` holds the row's gap
+  }
+  renderCaption(state);
 }
 
-/**
- * The header's cell + popover signature. `renderHeader` rebuilds ONLY when it changes,
- * so a token stream (which leaves the cells and the popover unchanged) keeps the SAME
- * chip DOM — the open popover and its focus survive a streamed snapshot.
- */
-function headerSignature(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): string {
+/** The masthead's cells + caption signature; a matching snapshot keeps the SAME DOM. */
+function mastheadSignature(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): string {
   const { cells } = panelHeader(state, session, mode);
   const head = cells.map((cell) => JSON.stringify(cell)).join("\u0002");
-  // The POPOVER state is part of the gate, or open/close would change nothing.
-  return `${head}\u0002${popover ?? ""}\u0002${activeIndex}`;
+  const caption = JSON.stringify(teamCaption(memberViews(state.members), state.target?.id ?? null));
+  return `${head}\u0002${caption}`;
 }
 
-/** The `data-el` of the focused header control, captured before a rebuild wipes it. */
-function focusedControl(): string | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !pheadEl.contains(active)) return null;
-  return active.dataset.el ?? null;
-}
-
-/** One header cell as a DOM node (the pure cell list drives the paint). */
-function headerCellNode(cell: HeaderCell, state: RenderedState): HTMLElement {
-  switch (cell.kind) {
-    case "ident":
-      return identNode(cell, state);
-    case "seg":
-      return segNode(cell);
-    case "spacer":
-      return el("span", "spacer");
-    case "meter":
-      return cell.gauge === undefined ? el("span", "meter", cell.text) : meterNode(cell.gauge);
-    case "more":
-      return moreNode(cell);
+/** The quiet All/Focus text toggle (A1) — the one mode control, in the `.status` line. */
+function modeToggle(current: ViewMode): HTMLElement {
+  const wrap = el("span", "modes");
+  wrap.setAttribute("role", "group");
+  wrap.setAttribute("aria-label", "View mode");
+  for (const mode of ["all", "focus"] as const) {
+    const button = el("button", "linkbtn", mode === "all" ? "All" : "Focus");
+    button.setAttribute("type", "button");
+    button.dataset.el = `mode-${mode}`;
+    button.setAttribute("aria-pressed", current === mode ? "true" : "false");
+    button.addEventListener("click", () => post({ kind: "set-mode", mode }));
+    wrap.appendChild(button);
   }
-}
-
-/** The monochrome gauge (draft `.meter.gauge`): `▰▰▰` fg + `▱▱` dim + `42k / 200k`. */
-function meterNode(gauge: { filled: string; empty: string; text: string }): HTMLElement {
-  const node = el("span", "meter gauge");
-  node.setAttribute("role", "img");
-  node.setAttribute("aria-label", `Context: ${gauge.text} tokens used`);
-  node.appendChild(el("span", "f", gauge.filled));
-  node.appendChild(el("span", "e", gauge.empty));
-  node.appendChild(document.createTextNode(" "));
-  node.appendChild(el("b", null, gauge.text));
-  return node;
-}
-
-/** The identity (draft `.ident`): the state glyph, the target chip, the state word. */
-function identNode(cell: IdentCell, state: RenderedState): HTMLElement {
-  const ident = el("span", "ident");
-  const glyph = el("span", cell.glyphClass, cell.glyph);
-  glyph.title = cell.stateTitle;
-  // `done`/`failed` read oddly as a SESSION state, so label it just `State: …`.
-  glyph.setAttribute("aria-label", `State: ${cell.stateTitle}`);
-  ident.appendChild(glyph);
-  if (cell.chip !== null) ident.appendChild(chipNode(cell, state));
-  if (cell.word !== "") ident.appendChild(el("span", cell.word === "crashed" ? "tag error" : "tag", cell.word));
-  return ident;
-}
-
-/** The target chip (draft `.chip`) + (when open) the member menu. HIDDEN in All mode. */
-function chipNode(cell: IdentCell, state: RenderedState): HTMLElement {
-  const wrap = el("span", "chip-wrap");
-  const chip = el("button", "chip", cell.chip ?? "");
-  chip.setAttribute("type", "button");
-  chip.setAttribute("aria-haspopup", "menu");
-  chip.setAttribute("aria-expanded", popover === "target" ? "true" : "false");
-  chip.dataset.el = "chip";
-  chip.hidden = cell.chipHidden; // All mode hides it; the element stays (the menu survives)
-  chip.addEventListener("click", () => (popover === "target" ? closePopover() : openPopover("target")));
-  wrap.appendChild(chip);
-  if (popover === "target") wrap.appendChild(memberMenu(state));
   return wrap;
 }
 
-/** The chip's dropdown: the roster, one `menuitem` per member (the ONE popover shell). */
-function memberMenu(state: RenderedState): HTMLElement {
-  const menu = popoverShell();
-  menu.setAttribute("aria-label", "Switch target member");
-  state.members.forEach((member, index) => {
-    const item = el("button", "item", member.isRoot ? "orchestrator" : member.label);
-    item.setAttribute("type", "button");
-    item.setAttribute("role", "menuitem");
-    item.tabIndex = index === activeIndex ? 0 : -1;
-    if (member.id === state.target?.id) item.setAttribute("aria-current", "true");
-    item.addEventListener("click", () => selectMember(member.id));
-    item.addEventListener("keydown", (event) => onMenuKey(event, index, state.members.length));
-    menu.appendChild(item);
-  });
-  return menu;
-}
-
-/** The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
-function segNode(cell: SegCell): HTMLElement {
-  const seg = el("span", "seg");
-  seg.setAttribute("role", "group");
-  seg.setAttribute("aria-label", "View mode");
-  seg.appendChild(segButton("All", "all", cell.mode));
-  seg.appendChild(segButton("Focus", "focus", cell.mode));
-  return seg;
-}
-
-function segButton(label: string, mode: ViewMode, current: ViewMode): HTMLElement {
-  const button = el("button", null, label);
-  button.setAttribute("type", "button");
-  button.dataset.el = `seg-${mode}`;
-  button.setAttribute("aria-pressed", current === mode ? "true" : "false");
-  button.addEventListener("click", () => post({ kind: "set-mode", mode }));
-  return button;
-}
-
-/** The `▾` disclosure (draft `.more`): session + model behind the ONE popover. */
-function moreNode(cell: MoreCell): HTMLElement {
-  const wrap = el("span", "more-wrap");
-  const button = el("button", "more", "▾");
-  button.setAttribute("type", "button");
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", popover === "more" ? "true" : "false");
-  button.setAttribute("aria-label", "Session and model details");
-  button.title = "Session details";
-  button.dataset.el = "more";
-  button.addEventListener("click", () => (popover === "more" ? closePopover() : openPopover("more")));
-  wrap.appendChild(button);
-  if (popover === "more") wrap.appendChild(disclosurePopover(cell.rows));
-  return wrap;
-}
-
-/** The disclosure's rows (draft `.prow`) in the shared `.menu` popover shell. */
-function disclosurePopover(rows: MoreCell["rows"]): HTMLElement {
-  const menu = popoverShell();
-  menu.setAttribute("aria-label", "Session details");
-  rows.forEach((row, index) => {
-    const item = el("div", "prow");
-    item.setAttribute("role", "menuitem");
-    item.tabIndex = index === activeIndex ? 0 : -1;
-    item.appendChild(el("span", "pk", row.key));
-    item.appendChild(el("span", "pv", row.value));
-    item.addEventListener("keydown", (event) => onMenuKey(event, index, rows.length));
-    menu.appendChild(item);
-  });
-  return menu;
-}
-
-/** The ONE popover shell (draft `.pop`) — reused by the chip's menu AND the disclosure. */
-function popoverShell(): HTMLElement {
-  const menu = el("div", "menu");
-  menu.setAttribute("role", "menu");
-  return menu;
-}
-
-/** The focusable rows of the OPEN popover (only one popover is ever open). */
-function popoverRows(): HTMLElement[] {
-  return Array.from(pheadEl.querySelectorAll<HTMLElement>('.menu [role="menuitem"]'));
-}
-
-/** Focus the open popover's row at `index`. */
-function focusItem(index: number): void {
-  popoverRows()[index]?.focus();
-}
-
-/**
- * Move the roving-tabindex position to `index` (so Tab / Shift+Tab behave) and focus
- * that row. Keeping `activeIndex` and the DOM tabindex in step means the next
- * snapshot's rebuild re-focuses the SAME row (`renderHeader` restores `focusItem`).
- */
-function moveTo(index: number): void {
-  activeIndex = index;
-  const rows = popoverRows();
-  rows.forEach((row, i) => {
-    row.tabIndex = i === index ? 0 : -1;
-  });
-  rows[index]?.focus();
-}
-
-function openPopover(which: "target" | "more"): void {
-  popover = which; // only ONE is ever open
-  activeIndex = 0;
-  rerender();
-  focusItem(0); // focus the first row
-}
-
-function closePopover(): void {
-  const was = popover;
-  popover = null;
-  rerender();
-  if (was !== null) pheadEl.querySelector<HTMLElement>(`[data-el="${was === "more" ? "more" : "chip"}"]`)?.focus();
-}
-
-function selectMember(id: string): void {
-  post({ kind: "focus-member", id });
-  closePopover();
-}
-
-/** The APG Menu-Button keyboard pattern (mirrors the WAI-ARIA example). */
-function onMenuKey(event: KeyboardEvent, index: number, count: number): void {
-  switch (event.key) {
-    case "ArrowDown":
-      moveTo((index + 1) % count);
-      event.preventDefault();
-      break;
-    case "ArrowUp":
-      moveTo((index - 1 + count) % count);
-      event.preventDefault();
-      break;
-    case "Home":
-      moveTo(0);
-      event.preventDefault();
-      break;
-    case "End":
-      moveTo(count - 1);
-      event.preventDefault();
-      break;
-    case "Tab":
-      closePopover(); // Tab LEAVES the popover (roving tabindex)
-      break;
-    case "Escape":
-      closePopover(); // -> focus the opener
-      event.preventDefault();
-      break;
+/** Paint the dim team caption (`#team`). Impure (DOM). */
+function renderCaption(state: RenderedState): void {
+  const rows = teamCaption(memberViews(state.members), state.target?.id ?? null);
+  teamEl.textContent = "";
+  for (const row of rows) {
+    const node = el("span", row.className);
+    node.setAttribute("role", "listitem");
+    node.appendChild(el("span", `glyph ${row.glyphClass}`, row.glyph));
+    node.appendChild(document.createTextNode(`${row.name} `));
+    node.appendChild(el("span", "act", row.action));
+    node.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
+    teamEl.appendChild(node);
   }
 }
-
-// Outside click closes the OPEN popover (a click INSIDE its wrap — the chip / ▾ or a
-// row — is left to their own handlers).
-document.addEventListener("click", (event) => {
-  const node = event.target;
-  if (popover === null || !(node instanceof Element)) return;
-  const wrap = popover === "more" ? ".more-wrap" : ".chip-wrap";
-  if (!node.closest(wrap)) closePopover();
-});
 
 /* -------------------------------------------------------------- transcript */
 
@@ -438,7 +254,7 @@ function blockShell(block: RenderedBlock): HTMLElement {
   // "body notice" / …), so there is no outer wrap + nested `.body`. No `.role`
   // line either — the `.who` line is per-TURN now.
   const node = el("div", classNames(block));
-  if (block.live) node.dataset.live = "1"; // the working pill's reveal targets the live step
+  if (block.live) node.dataset.live = "1"; // the newest live step (the running fold / live block)
   node.innerHTML = block.html; // host-rendered; markdown-it `html: false` escaped it
   return node;
 }
@@ -630,94 +446,45 @@ function renderTurn(turn: Turn): HTMLElement {
   return wrap;
 }
 
-/* ------------------------------------------------------- the working pill */
+/* ------------------------------------------------------- the one live line */
 
-/** The pill's rebuild signature; a matching snapshot keeps the SAME DOM (focus survives). */
-let pillKey: string | null = null;
-/** A reveal the pill asked for; run AFTER the next paint (so an All switch lands first). */
-let revealPending = false;
-
-/**
- * The working pill (draft `.pill`). An IN-FLOW band — a sibling of `.transcript` inside
- * `.main`, so it never overlays rendered content and never scrolls away. It owns the
- * team's AGGREGATE echo (how many OTHER members are working) and reveals the live step.
- */
-function renderPill(state: RenderedState): void {
+/** The one live type-line (draft `.liveline`): `{n} working` iff count > 0. Impure (DOM). */
+function renderLiveline(state: RenderedState): void {
   const group = workingGroup(state.members, state.target?.id ?? null);
-  const key = JSON.stringify(group);
-  if (key === pillKey) return;
-  pillKey = key;
-  pillEl.textContent = "";
   if (group.count === 0) {
-    pillEl.hidden = true;
+    livelineEl.hidden = true;
+    livelineEl.textContent = "";
     return;
   }
-  pillEl.hidden = false;
-  pillEl.setAttribute(
-    "aria-label",
-    `Show the newest working step (${group.count} member${group.count === 1 ? "" : "s"} working)`,
-  );
-  const stack = el("span", "stack");
-  stack.setAttribute("aria-hidden", "true");
-  const { shown, overflow } = avatarStack(group.rows);
-  for (const row of shown) stack.appendChild(el("span", `mav sw-${row.swatch}`, row.initial));
-  if (overflow > 0) stack.appendChild(el("span", "over", `+${overflow}`));
-  pillEl.appendChild(stack);
+  livelineEl.hidden = false;
+  livelineEl.textContent = "";
+  const dots = el("span", "dots", "⋯");
+  dots.setAttribute("aria-hidden", "true");
+  livelineEl.appendChild(dots);
   const label = el("span", "lbl");
   label.appendChild(el("b", null, String(group.count)));
   label.appendChild(document.createTextNode(" working"));
-  pillEl.appendChild(label);
-  const dots = el("span", "dots", "⋯");
-  dots.setAttribute("aria-hidden", "true");
-  pillEl.appendChild(dots);
+  livelineEl.appendChild(label);
+  livelineEl.setAttribute("aria-label", livelineLabel(group.count));
 }
-
-/**
- * The pill's click: REVEAL the newest live step. In Focus the other members' steps are
- * NOT in the transcript, so switch to All first and scroll on the next paint.
- */
-function revealLiveStep(): void {
-  if (lastState === null) return;
-  if (lastState.mode !== "all") {
-    revealPending = true;
-    post({ kind: "set-mode", mode: "all" });
-    return;
-  }
-  scrollToLiveStep();
-}
-
-/** Scroll the newest `[data-live]` element into view (the transcript bottom when none). */
-function scrollToLiveStep(): void {
-  const live = transcriptEl.querySelectorAll<HTMLElement>("[data-live]");
-  const newest = live.length > 0 ? live[live.length - 1] : transcriptEl.lastElementChild;
-  if (!(newest instanceof HTMLElement)) return;
-  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  newest.scrollIntoView({ block: "center", behavior: calm ? "auto" : "smooth" });
-}
-
-pillEl.addEventListener("click", revealLiveStep);
 
 function render(snapshot: ToWebview): void {
   const { state, session } = snapshot;
   const stick = nearBottom();
-  renderHeader(state, session, snapshot.mode);
-  renderRails(state);
+  renderMasthead(state, session, snapshot.mode);
   renderComposer(state, snapshot.context);
-  renderPill(state);
+  renderLiveline(state);
   lastVerdicts = snapshot.verdicts;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
     transcriptEl.appendChild(renderStateCard(state, session));
   } else {
+    const col = el("div", "col");
     const member = snapshot.mode === "all" ? memberOf(state) : undefined;
-    for (const turn of turns(state.blocks, member, targetSwatch(state))) transcriptEl.appendChild(renderTurn(turn));
+    for (const turn of turns(state.blocks, member, targetSwatch(state))) col.appendChild(renderTurn(turn));
+    transcriptEl.appendChild(col);
   }
   if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-  // A pending pill reveal runs AFTER the paint, so an All-mode switch has landed.
-  if (revealPending) {
-    revealPending = false;
-    scrollToLiveStep();
-  }
 }
 
 /** Resolve a block's `origin` (or a peer's `from`) to the member that labels its turn. */
@@ -763,7 +530,7 @@ function renderComposer(state: RenderedState, context: SelectionContext | null):
 
   const controls = composerControls(state);
   composerMode = controls.mode;
-  // The mode control is the SAME `.seg` component as the header's All/Focus.
+  // The mode control is the quiet text toggle (`.linkbtn`), the same in the masthead.
   for (const segment of controls.segments) {
     (segment.mode === "Act" ? mActEl : mPlanEl).setAttribute("aria-pressed", segment.pressed ? "true" : "false");
   }
@@ -788,119 +555,6 @@ function ctxChip(context: SelectionContext): HTMLElement {
 /** Flip plan-mode to `mode` unless it is already active (the wire op is a bare toggle). */
 function selectMode(mode: "Plan" | "Act"): void {
   if (mode !== composerMode) post({ kind: "toggle-plan" });
-}
-
-/* ------------------------------------------------------------------- rail */
-
-function renderRails(state: RenderedState): void {
-  // The rail is DURABLE: the roster + the ROOT session's plan (the OVERALL plan, NOT the
-  // shown member's) — `state.todos` is the root's (render.ts).
-  const rails = sidebarRails(state.members, state.todos);
-  const targetId = state.target?.id ?? null;
-  // The rail changes only when the roster / todos / target change — NOT on every
-  // streamed token. The signature keeps the SAME DOM (so a collapse toggle keeps its
-  // focus) while a live action still repaints.
-  const key = JSON.stringify([rails.team, rails.tasks, targetId]);
-  if (key === railsKey) return;
-  railsKey = key;
-  sideEl.textContent = "";
-  sideEl.appendChild(teamSection(rails.team, targetId));
-  if (rails.tasks.rows.length > 0) sideEl.appendChild(tasksSection(rails.tasks));
-  applyCollapsed();
-}
-
-/** The rail's collapse control, in the Team head. Its glyph/label/flags are set by
- *  `applyCollapsed`, which also runs after every rebuild. */
-function sideToggle(): HTMLElement {
-  const btn = el("button", "side-toggle");
-  btn.setAttribute("type", "button");
-  btn.addEventListener("click", () => {
-    railCollapsed = !railCollapsed;
-    applyCollapsed();
-  });
-  return btn;
-}
-
-/** Reflect `railCollapsed` on the rail. The class on `#side` drives the CSS; every
- *  toggle button keeps its glyph/label/`aria-expanded` in step. Idempotent, so it
- *  is safe to call after a rebuild. */
-function applyCollapsed(): void {
-  sideEl.classList.toggle("collapsed", railCollapsed);
-  sideEl.querySelectorAll<HTMLElement>(".side-toggle").forEach((btn) => {
-    btn.textContent = railCollapsed ? "»" : "«";
-    btn.title = railCollapsed ? "Expand the team rail" : "Collapse the team rail";
-    btn.setAttribute("aria-label", btn.title);
-    btn.setAttribute("aria-expanded", railCollapsed ? "false" : "true");
-  });
-}
-
-/** The COLLAPSED strip's chip (draft `.sc`): the fill is the member's `--sw` (identity),
- *  the `g-*` class rings it with STATE (`--st`), the initial is the glyph. A `<button>`. */
-function stripChip(row: RosterItem, index: number): HTMLButtonElement {
-  const cls = ["mav", `sw-${memberSwatch(index, row.isRoot)}`, memberGlyph(row.state).className];
-  const btn = el("button", cls.join(" "), memberInitial(row.label, row.isRoot));
-  btn.setAttribute("type", "button");
-  btn.title = `${row.label} · ${row.liveAction ?? row.state}`;
-  btn.setAttribute("aria-label", `Focus ${btn.title}`);
-  return btn;
-}
-
-function teamSection(rows: RosterItem[], targetId: string | null): HTMLElement {
-  const box = el("div", "sec team-sec");
-  const head = el("div", "side-head");
-  head.appendChild(el("span", "side-title", "Team"));
-  head.appendChild(el("span", "spacer"));
-  head.appendChild(el("span", "count", String(rows.length))); // O1: the member count lives here
-  head.appendChild(sideToggle());
-  box.appendChild(head);
-
-  // The EXPANDED row: the `--sw` identity edge + the STATE glyph + name + dim action.
-  const list = el("ul", "roster");
-  for (const row of rosterRows(rows, targetId)) {
-    const item = el("li", row.className);
-    item.appendChild(el("span", `glyph ${row.glyphClass}`, row.glyph));
-    const who = el("span", "who");
-    who.appendChild(el("b", null, row.name));
-    if (row.meta !== "") who.appendChild(el("span", "meta", row.meta));
-    item.appendChild(who);
-    item.appendChild(el("span", "act-line", row.action));
-    item.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
-    list.appendChild(item);
-  }
-  box.appendChild(list);
-
-  // The COLLAPSED form: the same members as a strip of avatar chips. The fill is the
-  // member's swatch (identity), the ring is the state colour — legible at ~30px wide.
-  const strip = el("ul", "avatars");
-  rows.forEach((row, index) => {
-    const cell = el("li", null);
-    const chip = stripChip(row, index);
-    chip.setAttribute("aria-current", row.id === targetId ? "true" : "false");
-    chip.addEventListener("click", () => post({ kind: "focus-member", id: row.id }));
-    cell.appendChild(chip);
-    strip.appendChild(cell);
-  });
-  box.appendChild(strip);
-  return box;
-}
-
-function tasksSection(tasks: SidebarRails["tasks"]): HTMLElement {
-  const box = el("div", "sec tasks-sec");
-  const head = el("div", "side-head");
-  head.appendChild(el("span", null, "Tasks"));
-  head.appendChild(el("span", "spacer"));
-  head.appendChild(el("span", "count", tasks.badge));
-  box.appendChild(head);
-  const list = el("ul", "todo");
-  for (const row of tasks.rows) {
-    const glyph = todoGlyph(row.status);
-    const item = el("li", glyph.className === "" ? null : glyph.className);
-    item.appendChild(el("span", "box", glyph.glyph));
-    item.appendChild(el("span", null, row.label));
-    list.appendChild(item);
-  }
-  box.appendChild(list);
-  return box;
 }
 
 /* ------------------------------------------------------------- / commands */

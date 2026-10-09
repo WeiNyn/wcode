@@ -13,7 +13,6 @@ import {
   toolState,
   toolStatus,
   outputHead,
-  avatarStack,
   composerControls,
   composeSubmit,
   diffStat,
@@ -21,9 +20,9 @@ import {
   emptySpec,
   foldOpen,
   formatTokens,
-  gauge,
+  livelineLabel,
   panelHeader,
-  rosterRows,
+  teamCaption,
   selectionRef,
   stateLabel,
   toggleFold,
@@ -34,6 +33,7 @@ import {
   MEMBER_SWATCHES,
   type FoldOverride,
   type IdentCell,
+  type MeterCell,
 } from "../src/webview/view.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -67,24 +67,33 @@ function headerState(memberState: SessionMember["state"], extra: Partial<ViewSta
   return renderState(state, "root-1");
 }
 
-/** The identity cell of the ONE-row header (asserts cell 1 IS the identity). */
+/** The identity cell of the ONE-row masthead (asserts cell 1 IS the identity). */
 function identOf(state: RenderedState, session: PanelSessionInfo, mode: ViewMode = "focus"): IdentCell {
   const cell = panelHeader(state, session, mode).cells[0];
   assert.equal(cell?.kind, "ident");
   return cell as IdentCell;
 }
 
-test("panelHeader: ONE row — identity, All/Focus seg, spacer, ctx meter, ▾ disclosure", () => {
+/** The `.status` (meter) cell of the masthead — it carries the state WORD + the `ctx N`. */
+function meterOf(state: RenderedState, session: PanelSessionInfo, mode: ViewMode = "focus"): MeterCell {
+  const cell = panelHeader(state, session, mode).cells.find((c) => c.kind === "meter");
+  assert.equal(cell?.kind, "meter");
+  return cell as MeterCell;
+}
+
+test("panelHeader: ONE row — identity, spacer, ctx meter, the mode toggle (no chip/seg/more)", () => {
   const state = headerState("idle", { status: { running: false, planMode: false, contextUsed: 42_000 } });
   assert.deepEqual(
     panelHeader(state, session(), "focus").cells.map((c) => c.kind),
-    ["ident", "seg", "spacer", "meter", "more"],
+    ["ident", "spacer", "meter", "mode"],
   );
-  // No `contextUsed` ⇒ no meter cell at all (the slot is conditional).
+  // No `contextUsed` ⇒ the meter cell is still there, its text empty (the word lives on it).
+  const bare = panelHeader(headerState("idle"), session(), "focus").cells;
   assert.deepEqual(
-    panelHeader(headerState("idle"), session(), "focus").cells.map((c) => c.kind),
-    ["ident", "seg", "spacer", "more"],
+    bare.map((c) => c.kind),
+    ["ident", "spacer", "meter", "mode"],
   );
+  assert.equal(meterOf(headerState("idle"), session()).text, "", "no count ⇒ no `ctx N` text");
 });
 
 test("formatTokens: a k/M suffix, `<1000` verbatim", () => {
@@ -105,42 +114,11 @@ test("panelHeader: the meter is `ctx 42k` WITHOUT a window — no gauge, no deno
   const meter = cells.find((c) => c.kind === "meter");
   assert.equal(meter?.kind, "meter", "a meter cell is present");
   assert.equal(meter?.kind === "meter" ? meter.text : "", "ctx 42k");
-  assert.equal(meter?.kind === "meter" ? meter.gauge : "absent", undefined, "no gauge without a window");
   for (const cell of cells) {
     const text = cell.kind === "meter" ? cell.text : "";
     assert.ok(!text.includes("▰"), `no gauge glyph in "${text}"`);
     assert.ok(!text.includes("/"), `no denominator in "${text}"`);
   }
-});
-
-test("panelHeader: the meter becomes the GAUGE when the TARGET's window is known", () => {
-  const withWindow = (window: number): RenderedState =>
-    headerState("idle", {
-      members: [
-        { id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet", contextWindow: window },
-      ],
-      status: { running: false, planMode: false, contextUsed: 42_000 },
-    });
-  const meter = panelHeader(withWindow(200_000), session(), "focus").cells.find((c) => c.kind === "meter");
-  assert.equal(meter?.kind === "meter" ? meter.gauge?.text : "", "42k / 200k", "the denominator is formatted");
-  assert.equal(meter?.kind === "meter" ? meter.gauge?.filled : "", "▰", "42k of 200k fills ONE of five cells");
-  assert.equal(meter?.kind === "meter" ? meter.gauge?.empty : "", "▱▱▱▱");
-  // A window of 0 is "unknown": the numerator-only form (never `▰▰▰▱▱ 42 / ?`).
-  const zero = panelHeader(withWindow(0), session(), "focus").cells.find((c) => c.kind === "meter");
-  assert.equal(zero?.kind === "meter" ? zero.text : "", "ctx 42k");
-  assert.equal(zero?.kind === "meter" ? zero.gauge : "absent", undefined);
-});
-
-test("gauge: a clamped ratio; a non-positive window paints all-empty (never NaN)", () => {
-  assert.equal(gauge(0, 100), "▱▱▱▱▱");
-  assert.equal(gauge(50, 100), "▰▰▰▱▱");
-  assert.equal(gauge(100, 100), "▰▰▰▰▰");
-  assert.equal(gauge(150, 100), "▰▰▰▰▰", "an over-run clamps full");
-  assert.equal(gauge(10, 0), "▱▱▱▱▱", "no window ⇒ all-empty, never NaN");
-  assert.equal(gauge(-5, 100), "▱▱▱▱▱", "a negative count clamps to empty");
-  assert.equal(gauge(1, 2, 2), "▰▱");
-  assert.equal(gauge(1, 2, 0), "", "no cells ⇒ no bar");
-  assert.ok(!gauge(Number.NaN, 100).includes("NaN"), "never NaN");
 });
 
 test("reducer: a `sessions` push threads effort + context_window onto the member", () => {
@@ -168,15 +146,15 @@ test("panelHeader: the identity glyph — the member's liveness for `ready`, the
   assert.equal(identOf(headerState("failed"), session()).glyph, "✗");
   // The running glyph spins; a healthy session carries NO word.
   assert.equal(identOf(headerState("running"), session()).glyphClass, "glyph g-run spin");
-  assert.equal(identOf(headerState("idle"), session()).word, "");
+  assert.equal(meterOf(headerState("idle"), session()).word, "");
 });
 
 test("panelHeader: a crashed session reads `✗` + the word 'crashed' (never a spinner)", () => {
   const crashed = identOf(headerState("idle"), session({ state: "crashed" }));
   assert.equal(crashed.glyph, "✗");
   assert.equal(crashed.glyphClass, "glyph g-err");
-  assert.equal(crashed.word, "crashed");
   assert.equal(crashed.stateTitle, "crashed");
+  assert.equal(meterOf(headerState("idle"), session({ state: "crashed" })).word, "crashed");
 });
 
 test("panelHeader: a `ready` session's glyph title reflects the MEMBER's liveness", () => {
@@ -190,13 +168,13 @@ test("panelHeader: a `ready` session's glyph title reflects the MEMBER's livenes
 test("panelHeader: starting spins `⠋`, stopped is `○`; both carry their word", () => {
   const starting = identOf(headerState("idle"), session({ state: "starting" }));
   assert.equal(starting.glyph, "⠋");
-  assert.equal(starting.word, "starting");
+  assert.equal(meterOf(headerState("idle"), session({ state: "starting" })).word, "starting");
   const stopped = identOf(headerState("idle"), session({ state: "stopped" }));
   assert.equal(stopped.glyph, "○");
-  assert.equal(stopped.word, "stopped");
+  assert.equal(meterOf(headerState("idle"), session({ state: "stopped" })).word, "stopped");
 });
 
-test("panelHeader: Focus shows the TARGET member; All hides the chip and shows the ROOT glyph", () => {
+test("panelHeader: Focus reads the TARGET member's glyph + name; All reads the ROOT's", () => {
   const state: ViewState = {
     ...initialState(),
     members: [
@@ -207,13 +185,11 @@ test("panelHeader: Focus shows the TARGET member; All hides the chip and shows t
   };
   const rendered = renderState(state, "agent:w1");
   const focus = identOf(rendered, session(), "focus");
-  assert.equal(focus.chip, "❯ w1 ▾");
-  assert.equal(focus.chipHidden, false);
   assert.equal(focus.glyph, "⠋", "Focus reads the TARGET's glyph");
+  assert.equal(focus.name, "w1", "Focus names the TARGET");
   const all = identOf(rendered, session(), "all");
   assert.equal(all.glyph, "○", "All reads the ROOT's glyph alone");
-  assert.equal(all.chip, "❯ w1 ▾", "the chip stays in the DOM…");
-  assert.equal(all.chipHidden, true, "…but is HIDDEN in All");
+  assert.equal(all.name, "orchestrator", "All names the root");
 });
 
 test("panelHeader: the identity glyph is the TARGET member's (a retarget changes it)", () => {
@@ -228,43 +204,14 @@ test("panelHeader: the identity glyph is the TARGET member's (a retarget changes
   assert.equal(identOf(renderState(state, "root-1"), session()).glyph, "○");
   const member = identOf(renderState(state, "agent:w1"), session());
   assert.equal(member.glyph, "⠋");
-  assert.equal(member.chip, "❯ w1 ▾");
+  assert.equal(member.name, "w1");
 });
 
-test("panelHeader: the seg cell carries the mode (the ONE All/Focus control)", () => {
-  const focus = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "seg");
-  assert.equal(focus?.kind === "seg" ? focus.mode : null, "focus");
-  const all = panelHeader(headerState("idle"), session(), "all").cells.find((c) => c.kind === "seg");
-  assert.equal(all?.kind === "seg" ? all.mode : null, "all");
-});
-
-test("panelHeader: the ▾ disclosure carries session + model + effort (each only when known)", () => {
-  const more = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "more");
-  assert.equal(more?.kind, "more");
-  assert.deepEqual(
-    more?.kind === "more" ? more.rows : [],
-    [
-      { key: "session", value: "root-1" },
-      { key: "model", value: "sonnet" },
-    ],
-    "no effort ⇒ NO effort row (never an empty row)",
-  );
-  // Effort known ⇒ the row appears, in order (session · model · effort).
-  const withEffort = headerState("idle", {
-    members: [{ id: "root-1", label: "root-1", state: "idle", isRoot: true, model: "sonnet", effort: "high" }],
-  });
-  const rows = panelHeader(withEffort, session(), "focus").cells.find((c) => c.kind === "more");
-  assert.deepEqual(rows?.kind === "more" ? rows.rows : [], [
-    { key: "session", value: "root-1" },
-    { key: "model", value: "sonnet" },
-    { key: "effort", value: "high" },
-  ]);
-  // No session id ⇒ "no session yet"; no member ⇒ no model/effort rows at all.
-  const bare = panelHeader(renderState(initialState(), null), session({ id: null }), "focus").cells.find(
-    (c) => c.kind === "more",
-  );
-  assert.equal(bare?.kind, "more");
-  assert.deepEqual(bare?.kind === "more" ? bare.rows : [], [{ key: "session", value: "no session yet" }]);
+test("panelHeader: the mode cell carries the mode (the ONE All/Focus control)", () => {
+  const focus = panelHeader(headerState("idle"), session(), "focus").cells.find((c) => c.kind === "mode");
+  assert.equal(focus?.kind === "mode" ? focus.mode : null, "focus");
+  const all = panelHeader(headerState("idle"), session(), "all").cells.find((c) => c.kind === "mode");
+  assert.equal(all?.kind === "mode" ? all.mode : null, "all");
 });
 
 /* ------------------------------------------------------------------- turns */
@@ -649,6 +596,20 @@ test("composeSubmit prepends the ref, else passes the text through", () => {
   assert.equal(composeSubmit("hi", null), "hi");
   assert.equal(composeSubmit("hi", { path: "src/p.ts", startLine: 1, endLine: 2 }), "@src/p.ts#L1-2\n\nhi");
 });
+/* --------------------------------------------------------- the live line */
+
+test("livelineLabel: the live type-line text is count-only (`{n} working`)", () => {
+  assert.equal(livelineLabel(0), "0 working");
+  assert.equal(livelineLabel(1), "1 working");
+  assert.equal(livelineLabel(3), "3 working");
+});
+
+test("reduced-motion freezes the liveline dots: the gate names `.liveline .dots`", () => {
+  const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
+  const gate = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.match(gate, /\.liveline \.dots\s*\{/, "the liveline dots are reduced-motion gated");
+});
+
 /* -------------------------------------------------------- working group */
 
 test("workingGroup: other members that are running or carry a liveAction (the pill's source)", () => {
@@ -664,12 +625,8 @@ test("workingGroup: other members that are running or carry a liveAction (the pi
   assert.equal(group.rows[0].name, "w1");
   assert.equal(group.rows[0].running, true);
   assert.equal(group.rows[0].action, "edit src/f.rs");
-  // Each row carries its avatar identity: the roster swatch + the initial (the pill's chips).
-  assert.equal(group.rows[0].swatch, memberSwatch(1, false), "the avatar's `--sw`");
-  assert.equal(group.rows[0].initial, "W");
   assert.equal(group.rows[1].running, false);
   assert.equal(group.rows[1].action, "grep onOpenDiff");
-  assert.equal(group.rows[1].swatch, memberSwatch(3, false));
 });
 
 test("workingGroup: a running member with no liveAction still appears (empty action)", () => {
@@ -695,31 +652,20 @@ test("workingGroup: the root reads as 'orchestrator' when it is NOT the target",
   const group = workingGroup(members, "agent:w1");
   assert.equal(group.rows[0].name, "orchestrator");
 });
-test("avatarStack: the first 3 chips, then a neutral +N overflow", () => {
-  const members = (n: number): SessionMember[] =>
-    Array.from({ length: n }, (_, i) => ({ id: `agent:w${i}`, label: `w${i}`, state: "running" as const, isRoot: false }));
-  const rows = (n: number) => workingGroup(members(n), null).rows;
-  assert.deepEqual(avatarStack(workingGroup(members(2), null).rows).shown.length, 2, "2 fits: no +N");
-  assert.equal(avatarStack(rows(5)).shown.length, 3, "the cap is 3");
-  assert.equal(avatarStack(rows(5)).overflow, 2, "the 4th and beyond collapse into +N");
-  assert.equal(avatarStack(rows(3)).overflow, 0, "exactly 3 fits: no +N");
-  assert.deepEqual(avatarStack(workingGroup([], null).rows), { shown: [], overflow: 0 });
-  // The order is the roster order (root first) — the stack is the first N rows.
-  assert.deepEqual(avatarStack(rows(4)).shown.map((r) => r.id), ["agent:w0", "agent:w1", "agent:w2"]);
-});
 
-test("rosterRows: the rail row is a `--sw` edge + the STATE glyph (no `.mav` box)", () => {
+
+test("teamCaption: one row per member; the glyph is memberGlyph(state) for EVERY row (the root too)", () => {
   const rows: RosterItem[] = [
-    { id: "root-1", label: "orchestrator", state: "running", isRoot: true }, // no model ⇒ "root"
-    { id: "agent:w1", label: "explorer", state: "done", isRoot: false, model: "sonnet" },
+    { id: "root-1", label: "orchestrator", state: "running", isRoot: true },
+    { id: "agent:w1", label: "explorer", state: "done", isRoot: false, model: "sonnet", liveAction: "grep onOpenDiff" },
     { id: "agent:w2", label: "developer", state: "failed", isRoot: false },
     { id: "agent:w3", label: "reviewer", state: "idle", isRoot: false },
   ];
-  const rail = rosterRows(rows, "agent:w1");
-  assert.equal(rail.length, 4);
-  // IDENTITY is the swatch class; STATE is the glyph's class + char — the SAME four states.
+  const caption = teamCaption(rows, "agent:w1");
+  assert.equal(caption.length, 4);
+  // STATE is the glyph's class + char — for every row, INCLUDING the root (never `❯`).
   assert.deepEqual(
-    rail.map((r) => [r.glyph, r.glyphClass]),
+    caption.map((r) => [r.glyph, r.glyphClass]),
     [
       ["⠋", "g-run"],
       ["✓", "g-done"],
@@ -727,13 +673,11 @@ test("rosterRows: the rail row is a `--sw` edge + the STATE glyph (no `.mav` box
       ["○", "g-idle"],
     ],
   );
-  assert.equal(rail[0].className, "sw-blue", "the root's edge is the first swatch");
-  assert.equal(rail[1].className, "sw-green sel", "the target carries the 3px edge (`sel`)");
-  assert.equal(rail[2].className, "sw-orange");
-  assert.equal(rail[0].name, "orchestrator");
-  assert.equal(rail[0].meta, "root", "a root with no model reads `root`");
-  assert.equal(rail[1].meta, "sonnet");
-  assert.equal(rail[3].action, "idle", "the action line falls back to the state word");
+  assert.equal(caption[0].className, "m", "no swatch edge; not the target");
+  assert.equal(caption[1].className, "m sel", "the target carries `sel` (the retarget affordance)");
+  assert.equal(caption[0].name, "orchestrator");
+  assert.equal(caption[1].action, "grep onOpenDiff", "the liveAction wins");
+  assert.equal(caption[3].action, "idle", "the action falls back to the state word");
 });
 
 test("panelHeader: no member-count cell remains on the bar (it lives in the rail now)", () => {
@@ -901,7 +845,7 @@ test("the V14 composition is in the sheet: spine, head, alignment, rhythm, the w
   );
   assert.match(css, /\.turn\.you \{[^}]*overflow: hidden/, "the fill clips the spine");
   // 4. the role-aware rhythm: a continuation is tight, a speaker change is a beat.
-  assert.match(css, /\.transcript \{[^}]*gap: var\(--wc-2\)/, "a continuation stays tight");
+  assert.match(css, /\.stream \{[^}]*gap: var\(--wc-2\)/, "a continuation stays tight");
   assert.match(css, /\.turn\.new \{[^}]*margin-top: var\(--wc-4\)/, "a speaker change gets the beat");
   // 5. the one live thing: a faint accent wash ("active now").
   assert.match(

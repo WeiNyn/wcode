@@ -26,6 +26,9 @@
 
   --wc-radius: 6px; /* the ONE card radius (small adornments round themselves) */
   --wc-accent: var(--vscode-charts-blue); /* the one wcode accent: "active now" */
+
+  /* editorial's one local knob: the reading-column width (derived, not a new token). */
+  --ed-measure: 66ch;
 }
 
 /* Density is a token switch, not a second design — which IS the proof the scale
@@ -63,233 +66,113 @@ body {
   height: 100vh;
 }
 
-/* ------------------------------------------------------------------ header */
+/* ---------------------------------------------------------------- masthead */
 
-/* The header is ONE row (draft `.bar`): identity · All/Focus seg · spacer · meter · ▾. */
-.phead {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  padding: var(--wc-2) var(--wc-3);
+/* One quiet line, and a rule. No box, no bar: everything the widget-header
+   shouted, this whispers. The team is a dim caption below, not a sidebar. */
+.masthead {
+  flex: 0 0 auto;
+  padding: var(--wc-3) var(--wc-5) var(--wc-2);
   border-bottom: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
-  font-size: var(--wc-fs-ui);
-  flex: 0 0 auto;
 }
 
-.phead .spacer {
+.masthead .row1 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wc-2);
+}
+
+.masthead .spacer {
   flex: 1;
 }
 
-/* The identity: the state glyph, the target chip, and the state word. */
-.ident {
+/* The identity: the state glyph + the member NAME (a byline, not a chip). */
+.masthead .ident {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: var(--wc-1);
   min-width: 0;
 }
 
-/* The target chip (draft `.chip`) — the ONE interactive element in the header. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--wc-1);
-  font-size: var(--wc-fs-ui);
-  font-weight: 600;
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--wc-accent);
-  background: color-mix(in srgb, var(--wc-accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--wc-accent) 35%, transparent);
-  border-radius: 999px;
-  padding: 0 var(--wc-2);
-  cursor: pointer;
-}
-
-/* All mode: the chip STAYS in the DOM but is hidden (the merged transcript is nobody's). */
-.chip[hidden] {
-  display: none;
-}
-
-.chip-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.chip:hover {
-  background: color-mix(in srgb, var(--wc-accent) 20%, transparent);
-}
-
-.chip:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
-.chip[aria-expanded="true"] {
-  background: color-mix(in srgb, var(--wc-accent) 24%, transparent);
-}
-
-/* The state WORD — only starting/stopped/crashed; error-red on a crash. */
-.tag {
-  font-size: var(--wc-fs-meta);
-  color: var(--vscode-descriptionForeground);
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 999px;
-  padding: 0 var(--wc-2);
-}
-
-.tag.error {
-  color: var(--vscode-errorForeground);
-  border-color: color-mix(in srgb, var(--vscode-errorForeground) 40%, transparent);
-}
-
-/* The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
-.seg {
-  display: inline-flex;
-  flex: 0 0 auto;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.seg button {
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  padding: 0 var(--wc-3);
-  cursor: pointer;
-  background: none;
-  border: 0;
-  color: var(--vscode-descriptionForeground);
-}
-
-.seg button:hover {
-  background: var(--vscode-list-hoverBackground);
+.masthead .ident .name {
+  font-weight: 700;
   color: var(--vscode-foreground);
+  font-size: var(--wc-fs-ui);
 }
 
-.seg button[aria-pressed="true"] {
-  background: var(--wc-accent);
-  color: var(--vscode-button-foreground);
-}
-
-.seg button:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: -2px;
-}
-
-/* The context meter — the TEXT `ctx N` (monochrome; the accent means "active now" only). */
-.meter {
+/* The right-aligned status: the state WORD, the `ctx N`, and the mode text toggle. */
+.masthead .status {
   display: inline-flex;
   align-items: baseline;
-  gap: var(--wc-1);
-  white-space: nowrap;
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-ui);
-  color: var(--vscode-foreground);
-}
-
-/* The gauge form (V11): MONOCHROME — `▰` in the foreground, `▱` dim. The accent is
-   reserved for "active now", so the meter never takes it (§1.5(d)). */
-.meter .f {
-  color: var(--vscode-foreground);
-}
-
-.meter .e {
-  color: var(--vscode-descriptionForeground);
-  opacity: 0.45;
-}
-
-.meter b {
-  font-weight: 600;
-}
-
-/* The glyphs need the tracking; the text token does not. */
-.meter.gauge {
-  letter-spacing: 1px;
-  color: var(--vscode-descriptionForeground);
-}
-
-.meter.gauge b {
-  letter-spacing: 0;
-  color: var(--vscode-foreground);
-}
-
-/* The `▾` disclosure button (draft `.more`) + its right-anchored popover. */
-.more-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.more {
-  font: inherit;
-  font-size: var(--wc-fs-meta);
-  line-height: 1.4;
-  color: var(--vscode-descriptionForeground);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 0 var(--wc-1);
-  cursor: pointer;
-}
-
-.more:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-.more:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
-.more[aria-expanded="true"] {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-/* The ▾ disclosure's rows (draft `.prow`) inside the shared `.menu` popover. */
-.menu .prow {
-  display: grid;
-  grid-template-columns: 62px 1fr;
   gap: var(--wc-2);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.masthead .status .word {
+  color: var(--vscode-descriptionForeground);
+}
+
+.masthead .status .mono {
+  font-family: var(--vscode-editor-font-family);
+}
+
+.masthead .status .modes {
+  display: inline-flex;
   align-items: baseline;
-  padding: var(--wc-1) var(--wc-2);
+  gap: var(--wc-2);
 }
 
-.menu .prow:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
-}
-
-.menu .pk {
+/* The dim team caption (draft `.team`): one `.m` per member. */
+.masthead .team {
+  margin-top: var(--wc-1);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--wc-3);
+  font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-meta);
   color: var(--vscode-descriptionForeground);
 }
 
-.menu .pv {
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-ui);
-  color: var(--vscode-foreground);
-  overflow-wrap: anywhere;
+.masthead .team .m {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--wc-1);
+  cursor: pointer;
 }
 
-/* The disclosure's popover anchors to the RIGHT edge; the chip's to the left. */
-.more-wrap .menu {
-  left: auto;
-  right: 0;
+.masthead .team .m:hover {
+  color: var(--vscode-foreground);
+}
+
+.masthead .team .m.sel {
+  color: var(--vscode-foreground);
+  font-weight: 600;
+}
+
+.masthead .team .act {
+  opacity: 0.7;
 }
 
 /* ----------------------------------------------------- transcript + turns */
 
-.transcript {
+.stream {
   flex: 1 1 auto;
   overflow: auto;
-  padding: var(--wc-4) var(--wc-3) var(--wc-2);
+  min-height: 0;
+  padding: var(--wc-4) var(--wc-4) var(--wc-5);
   display: flex;
   flex-direction: column;
   gap: var(--wc-2); /* the tight baseline: a CONTINUATION (a speaker change adds below) */
+}
+
+.col {
+  width: 100%;
+  max-width: var(--ed-measure);
+  margin: 0 auto;
 }
 
 /* V14 COMPOSITION: a turn head, a 3px rounded spine, conversation alignment and a
@@ -667,29 +550,6 @@ details.fold.thinking .tsum {
   font-size: var(--wc-fs-code);
 }
 
-/* The card action control (V12: the tool output card's `Copy`; the code card uses the
-   same component). */
-.mini {
-  font: inherit;
-  font-size: var(--wc-fs-meta);
-  color: var(--vscode-descriptionForeground);
-  background: none;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 4px;
-  padding: 0 var(--wc-1);
-  cursor: pointer;
-}
-
-.mini:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-.mini:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
 /* --------------------------------------------- empty / error state card */
 
 /* L2a BORDERED: the state card is a foreign object, so it earns a border. */
@@ -756,13 +616,116 @@ details.fold.thinking .tsum {
 
 /* ---------------------------------------------------------------- composer */
 
+/* A field on a page, not a panel: a hairline under a single line of type. */
 .composer {
   flex: 0 0 auto;
   border-top: 1px solid var(--vscode-panel-border);
-  padding: var(--wc-2) var(--wc-3) var(--wc-3);
+  padding: var(--wc-3) var(--wc-5);
+}
+
+.composer .inner {
+  max-width: var(--ed-measure);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: var(--wc-2);
+}
+
+.composer .inputline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wc-2);
+  border-bottom: 1px solid var(--vscode-input-border);
+  padding: var(--wc-1) 0;
+}
+
+.composer .inputline:focus-within {
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
+.composer .inputline .pfx {
+  font-family: var(--vscode-editor-font-family);
+  color: var(--wc-accent);
+  font-weight: 700;
+}
+
+.composer .foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wc-3);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+}
+
+.linkbtn {
+  font: inherit;
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.linkbtn:hover {
+  color: var(--vscode-foreground);
+}
+
+.linkbtn:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.linkbtn[aria-pressed="true"] {
+  color: var(--wc-accent);
+  font-weight: 600;
+}
+
+.composer .foot .send {
+  margin-left: auto;
+  color: var(--vscode-foreground);
+}
+
+.composer .foot .send:hover {
+  color: var(--wc-accent);
+}
+
+/* One dim type-line, shown only while a member is running. Not a pill, not a
+   button, not an overlay band. */
+.liveline {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--wc-2);
+  align-items: baseline;
+  padding: var(--wc-1) var(--wc-5);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--wc-fs-meta);
+  color: var(--vscode-descriptionForeground);
+}
+
+.liveline[hidden] {
+  display: none;
+}
+
+.liveline .dots {
+  color: var(--wc-accent);
+  animation: wc-typing 1.4s ease-in-out infinite;
+}
+
+.liveline .lbl b {
+  font-weight: 600;
+}
+
+@keyframes wc-typing {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 .ctx-chips {
@@ -832,56 +795,24 @@ details.fold.thinking .tsum {
   opacity: 0.85;
 }
 
-textarea#input {
+textarea {
+  flex: 1;
   width: 100%;
   resize: none;
-  min-height: 44px;
-  max-height: 160px;
-  padding: var(--wc-2);
-  border-radius: var(--wc-radius);
-  border: 1px solid var(--vscode-input-border);
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
+  min-height: 22px;
+  max-height: 120px;
+  border: 0;
+  background: none;
+  color: var(--vscode-editor-foreground);
   font-family: var(--vscode-editor-font-family);
   font-size: var(--wc-fs-ui);
-  line-height: 1.45;
+  line-height: 1.5;
+  padding: 0;
+  outline: none;
 }
 
-textarea#input::placeholder {
+textarea::placeholder {
   color: var(--vscode-input-placeholderForeground);
-}
-
-textarea#input:focus {
-  outline: 1px solid var(--vscode-focusBorder);
-  border-color: var(--vscode-focusBorder);
-}
-
-.ctoolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-1);
-  flex-wrap: wrap;
-}
-
-.ctoolbar .spacer {
-  flex: 1;
-}
-
-/* The composer toolbar controls (mode/model ship in P2; `＋` / `/` are deferred). */
-.tool-btn {
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  color: var(--vscode-descriptionForeground);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 0 var(--wc-2);
-  cursor: pointer;
-}
-
-.tool-btn:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
 }
 
 .btn {
@@ -914,7 +845,7 @@ textarea#input:focus {
 @media (prefers-reduced-motion: reduce) {
   .body.live::after,
   .spin,
-  .pill .dots {
+  .liveline .dots {
     animation: none;
   }
 }
@@ -956,11 +887,6 @@ textarea#input:focus {
   outline-offset: 1px;
 }
 
-.tool-btn:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
 /* The state glyph (the rail rows + the header identity): IDENTITY is the `--sw` edge,
    STATE is this glyph's colour — `⠋` running · `✓` done · `✗` failed · `○` idle. */
 .glyph {
@@ -985,50 +911,6 @@ textarea#input:focus {
 
 .g-idle {
   --st: var(--vscode-descriptionForeground);
-}
-
-/* ------------------------------------- interactive target chip + member menu */
-
-/* L2a BORDERED: the ONE popover (draft `.pop`) — the chip's member menu AND the ▾ disclosure. */
-.menu {
-  position: absolute;
-  top: calc(100% + var(--wc-1));
-  left: 0;
-  z-index: 10;
-  min-width: 160px;
-  display: flex;
-  flex-direction: column;
-  padding: var(--wc-1);
-  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
-  border-radius: var(--wc-radius);
-  box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
-}
-
-.menu .item {
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  text-align: left;
-  color: var(--vscode-foreground);
-  background: none;
-  border: 0;
-  border-radius: 4px;
-  padding: var(--wc-1) var(--wc-2);
-  cursor: pointer;
-}
-
-.menu .item:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
-.menu .item:focus-visible {
-  background: var(--vscode-list-hoverBackground);
-  outline: none;
-}
-
-.menu .item[aria-current="true"] {
-  color: var(--wc-accent);
-  font-weight: 600;
 }
 
 /* -------------------------------------------- in-panel change review (P4) */
@@ -1188,277 +1070,12 @@ textarea#input:focus {
   font-weight: 600;
 }
 
-/* ------------------------------------- the two-pane surface (rail + main) */
-
-.content {
-  flex: 1 1 auto;
-  display: flex;
-  min-height: 0;
-}
-
-.side {
-  flex: 0 0 190px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--vscode-sideBar-background);
-  border-right: 1px solid var(--vscode-sideBar-border);
-  overflow: auto;
-  color: var(--vscode-sideBar-foreground);
-}
-
-/* The rail's collapse: a head button, and (collapsed) a strip of avatar chips. The
-   class on `#side` is the whole state; the strip is always in the DOM, hidden by CSS. */
-.side-toggle {
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  line-height: 1;
-  padding: 0 var(--wc-1);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: var(--vscode-descriptionForeground);
-  cursor: pointer;
-}
-
-.side-toggle:hover {
-  background: var(--vscode-list-hoverBackground);
-  color: var(--vscode-foreground);
-}
-
-.side-toggle:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
-.side.collapsed {
-  flex: 0 0 auto;
-}
-
-.side.collapsed .side-head {
-  justify-content: center;
-  padding: var(--wc-2) 0 var(--wc-1);
-}
-
-.side.collapsed .side-title,
-.side.collapsed .count,
-.side.collapsed .side-head .spacer,
-.side.collapsed .roster,
-.side.collapsed .tasks-sec {
-  display: none;
-}
-
-.side:not(.collapsed) .avatars {
-  display: none;
-}
-
-.avatars {
-  list-style: none;
-  margin: 0;
-  padding: var(--wc-1) 0 var(--wc-2);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--wc-1);
-}
-
-.avatars .mav {
-  width: 24px;
-  height: 24px;
-  font-size: var(--wc-fs-meta);
-  padding: 0;
-  cursor: pointer;
-}
-
-.avatars .mav:hover {
-  background: color-mix(in srgb, var(--sw) 34%, transparent);
-}
-
-.avatars .mav:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: 1px;
-}
-
-.avatars .mav[aria-current="true"] {
-  box-shadow: 0 0 0 2px var(--vscode-list-activeSelectionBackground);
-}
-
 .main {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-}
-
-/* ------------------------------------------- the working pill (the typing cue) */
-
-/* An IN-FLOW band: a sibling of `.transcript` inside `.main`'s flex column, between the
-   scroller and the composer. It occupies real layout height and NEVER overlays rendered
-   content (it is NOT `position:absolute`). L2a: a bordered, interactive card. */
-.pill {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  width: 100%;
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--wc-fs-ui);
-  color: var(--vscode-foreground);
-  padding: var(--wc-1) var(--wc-3);
-  border: 0;
-  border-top: 1px solid var(--vscode-panel-border);
-  background: var(--vscode-editor-background);
-}
-
-.pill[hidden] {
-  display: none;
-}
-
-.pill:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
-.pill:focus-visible {
-  outline: 2px solid var(--vscode-focusBorder);
-  outline-offset: -2px;
-}
-
-/* The overlapping avatar stack: up to 3 chips, then a neutral `+N`. */
-.pill .stack {
-  display: inline-flex;
-  align-items: center;
-}
-
-.pill .mav {
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  background: color-mix(in srgb, var(--sw) 22%, transparent);
-  color: var(--sw);
-  box-shadow: 0 0 0 2px var(--vscode-editor-background); /* the band's own background */
-}
-
-.pill .mav + .mav {
-  margin-left: -7px; /* ~35% overlap */
-}
-
-/* The 4th and beyond: a count, not a member, so no swatch. */
-.pill .over {
-  margin-left: -7px;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 var(--wc-1);
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-meta);
-  font-weight: 700;
-  background: var(--vscode-badge-background);
-  color: var(--vscode-descriptionForeground);
-  box-shadow: 0 0 0 2px var(--vscode-editor-background);
-}
-
-.pill .lbl {
-  color: var(--vscode-foreground);
-}
-
-.pill .lbl b {
-  font-weight: 600;
-}
-
-/* The pulse: the surface's THIRD animation, one @keyframes on the locked glyph `⋯`. */
-.pill .dots {
-  font-family: var(--vscode-editor-font-family);
-  color: var(--wc-accent);
-  animation: wc-typing 1.4s ease-in-out infinite;
-}
-
-@keyframes wc-typing {
-  0%,
-  100% {
-    opacity: 0.25;
-  }
-
-  50% {
-    opacity: 1;
-  }
-}
-
-/* -------------------------------------------- the rail sections (Team/Tasks) */
-
-.side-head {
-  display: flex;
-  align-items: center;
-  gap: var(--wc-2);
-  padding: var(--wc-2) var(--wc-3) var(--wc-1);
-  font-size: var(--wc-fs-meta);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--vscode-descriptionForeground);
-}
-
-.side-head .spacer {
-  flex: 1;
-}
-
-/* The Tasks count is a NUMBER, not a label: no uppercase, no tracking. */
-.side-head .count {
-  font-family: var(--vscode-editor-font-family);
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.roster,
-.todo {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.roster li {
-  display: grid;
-  grid-template-columns: 14px 1fr;
-  gap: var(--wc-2);
-  align-items: baseline;
-  padding: var(--wc-1) var(--wc-3) var(--wc-1) calc(var(--wc-3) - 2px);
-  cursor: pointer;
-  /* IDENTITY: the member's `--sw` edge — the same language the turn rail speaks. */
-  border-left: 2px solid var(--sw, transparent);
-}
-
-.roster li:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
-.roster li.sel {
-  background: var(--vscode-list-activeSelectionBackground);
-  color: var(--vscode-list-activeSelectionForeground);
-  border-left-width: 3px; /* the target's edge is THICKER — identity, not accent */
-}
-
-.roster .who {
-  display: flex;
-  gap: var(--wc-2);
-  align-items: baseline;
-}
-
-.roster .who b {
-  font-weight: 600;
-}
-
-.roster .who .meta {
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wc-fs-meta);
-}
-
-.roster .act-line {
-  grid-column: 2;
-  color: var(--vscode-descriptionForeground);
-  font-size: var(--wc-fs-meta);
 }
 
 .glyph.g-done {
@@ -1480,97 +1097,17 @@ textarea#input:focus {
 /* A member avatar: the swatch is IDENTITY (the fill), the `--st` state colour is the
    ring, the initial is the glyph. Shared by the collapsed strip (`.sc`) and the working
    pill (`.pill .mav`); the EXPANDED rail row uses the `--sw` edge + glyph instead. */
-.mav {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  font-family: var(--vscode-editor-font-family);
-  font-size: var(--wc-fs-meta);
-  font-weight: 700;
-  background: color-mix(in srgb, var(--sw) 20%, transparent);
-  color: var(--sw);
-  border: 1.5px solid var(--st, var(--vscode-panel-border));
-  flex: 0 0 auto;
-}
-
-/* The member palette: VS Code's chart tokens, so a colour follows the theme. */
-.sw-blue {
-  --sw: var(--vscode-charts-blue);
-}
-
-.sw-green {
-  --sw: var(--vscode-charts-green);
-}
-
-.sw-orange {
-  --sw: var(--vscode-charts-orange);
-}
-
-.sw-purple {
-  --sw: var(--vscode-charts-purple);
-}
-
-.sw-yellow {
-  --sw: var(--vscode-charts-yellow);
-}
-
-.sw-red {
-  --sw: var(--vscode-charts-red);
-}
-
-.todo li {
-  display: grid;
-  grid-template-columns: 16px 1fr;
-  gap: var(--wc-2);
-  padding: var(--wc-1) var(--wc-3);
-  font-size: var(--wc-fs-ui);
-  align-items: baseline;
-}
-
-.todo .box {
-  font-family: var(--vscode-editor-font-family);
-}
-
-.todo .done {
-  color: var(--vscode-charts-green);
-}
-
-.todo li.done span:last-child {
-  color: var(--vscode-descriptionForeground);
-  text-decoration: line-through;
-}
-
-.todo li.doing span:last-child {
-  color: var(--vscode-foreground);
-  font-weight: 600;
-}
-
-/* RESPONSIVE: a webview's VIEWPORT is its docked width, so a plain @media. At a
-   sidebar/panel width the rail STACKS above the transcript; an editor tab keeps the
-   two-pane left rail. (Preferred over a ResizeObserver — the viewport width IS the
-   panel width.) */
+/* ------------------------------------------------ docked at a sidebar width */
 @media (max-width: 560px) {
-  .content {
-    flex-direction: column;
+  .masthead {
+    padding: var(--wc-2) var(--wc-3);
   }
 
-  .side {
-    flex: 0 0 auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--vscode-sideBar-border);
-    max-height: 46%;
+  .composer {
+    padding: var(--wc-2) var(--wc-3);
   }
 
-  /* Stacked, the collapsed strip reads as a horizontal avatar row, not a tall column. */
-  .side.collapsed {
-    max-height: none;
-  }
-
-  .side.collapsed .avatars {
-    flex-direction: row;
-    flex-wrap: wrap;
+  .stream {
+    padding: var(--wc-3);
   }
 }
-

@@ -26,9 +26,9 @@ export function stateLabel(state: SessionState): string {
 }
 
 /** One cell of the ONE-row panel header (draft `.bar > *`). */
-export type HeaderCell = IdentCell | SegCell | SpacerCell | MeterCell | MoreCell;
+export type HeaderCell = IdentCell | SpacerCell | MeterCell | ModeCell;
 
-/** The identity cell (draft `.ident`): the state glyph, the chip, the state word. */
+/** The identity cell (draft `.ident`): the state glyph + the member NAME (a byline, not a chip). */
 export interface IdentCell {
   kind: "ident";
   /** The state glyph: `⠋` running · `✓` done · `✗` failed · `○` idle. */
@@ -37,39 +37,29 @@ export interface IdentCell {
   glyphClass: string;
   /** The full state, carried on the glyph's `title`/`aria-label`. */
   stateTitle: string;
-  /** The state WORD — only starting/stopped/crashed; "" for a healthy session. */
-  word: string;
-  /** The target chip's text (`❯ {label} ▾`), or null when there is no target. */
-  chip: string | null;
-  /** All mode hides the chip (the merged transcript is nobody's); KEPT in the DOM. */
-  chipHidden: boolean;
+  /** The member's display name — the identity is a byline now, NOT a target chip. */
+  name: string;
 }
 
-/** The All / Focus segmented control (draft `.seg`) — the ONE mode control. */
-export interface SegCell {
-  kind: "seg";
-  mode: ViewMode;
-}
-
-/** Layout: the flexible gap between the identity and the meter. */
+/** Layout: the flexible gap between the identity and the status line. */
 export interface SpacerCell {
   kind: "spacer";
 }
 
-/** The context meter — the TEXT `ctx N`, or the gauge `▰▰▰▱▱ 42k / 200k` when the window is known. */
-export interface MeterCell {
-  kind: "meter";
-  /** The plain numerator-only text (`ctx 42k`) — the form used when the window is unknown. */
-  text: string;
-  /** The gauge parts, when the TARGET member's window is known (`▰▰▰▱▱ 42k / 200k`). */
-  gauge?: { filled: string; empty: string; text: string };
+/** The mode text toggle (A1): the quiet All/Focus control, in the `.status` line. */
+export interface ModeCell {
+  kind: "mode";
+  /** The current `ViewMode`; → the toggle's pressed state. */
+  mode: ViewMode;
 }
 
-/** The `▾` disclosure (draft `.more`): session + model behind the ONE popover. */
-export interface MoreCell {
-  kind: "more";
-  /** The popover rows, in order: session · model · effort (each omitted when unknown). */
-  rows: Array<{ key: string; value: string }>;
+/** The `.status` line (draft `.status`): the state WORD + the plain `ctx N`. */
+export interface MeterCell {
+  kind: "meter";
+  /** The state WORD — only starting/stopped/crashed; "" for a healthy session. */
+  word: string;
+  /** The plain numerator-only text (`ctx 42k`), or "" when the count is unknown. */
+  text: string;
 }
 
 /** The ONE glanceable row of the header (draft `header.bar`). */
@@ -83,18 +73,6 @@ export function formatTokens(n: number): string {
   const scaled = (value: number, suffix: string): string =>
     `${value < 10 ? Number(value.toFixed(1)) : Math.round(value)}${suffix}`;
   return n < 1_000_000 ? scaled(n / 1000, "k") : scaled(n / 1_000_000, "M");
-}
-
-/**
- * The `▰▰▰▱▱` bar for `used` of `window`, `cells` wide (draft `.meter.gauge`). Pure.
- * The ratio is CLAMPED to [0,1] (an over-run pins the bar full); a non-positive window
- * paints all-empty rather than NaN. `▰` is the filled run, `▱` the empty one.
- */
-export function gauge(used: number, window: number, cells = 5): string {
-  if (cells <= 0) return "";
-  const ratio = window > 0 && Number.isFinite(used) ? Math.min(1, Math.max(0, used / window)) : 0;
-  const filled = Math.round(ratio * cells);
-  return "▰".repeat(filled) + "▱".repeat(cells - filled);
 }
 
 /** The ROOT member — the merged transcript's identity (roster order, root first). Pure. */
@@ -136,62 +114,33 @@ function identityGlyph(
 }
 
 /**
- * The header as ONE row of cells (draft `.bar`). Pure.
+ * The masthead as ONE row of cells (draft `.masthead .row1`). Pure.
  *
- * In order: (1) the IDENTITY — the target's (Focus) or the root's (All) state glyph,
- * plus the target chip (Focus only; `chipHidden` in All); (2) the All/Focus `.seg`;
- * (3) a spacer; (4) the context meter — the gauge `▰▰▰▱▱ 42k / 200k` (monochrome) when the
- * TARGET member's window is known, else the numerator-only `ctx 42k`; (5) the `▾`
- * disclosure, whose rows are the session id, the model, and the effort when known. The
- * state WORD survives only for starting/stopped/crashed, and
- * a `crashed` session reads `✗` (never a recoloured spinner).
+ * In order: (1) the IDENTITY — the target's (Focus) or the root's (All) state glyph +
+ * its display NAME; (2) a spacer; (3) the `.status` — the state WORD (only
+ * starting/stopped/crashed) and the plain `ctx N`; (4) the mode text toggle (`ModeCell`).
+ * No chip, no All/Focus `.seg`, no gauge, no `▾` disclosure (all dropped, W005).
  */
 export function panelHeader(state: RenderedState, session: PanelSessionInfo, mode: ViewMode): PanelHeader {
   const member = identityMember(state, mode);
   const glyph = identityGlyph(session, member);
-  const cells: HeaderCell[] = [
-    {
-      kind: "ident",
-      glyph: glyph.glyph,
-      glyphClass: `glyph ${glyph.className}${glyph.spin ? " spin" : ""}`,
-      stateTitle: glyph.stateTitle,
-      word: session.state === "ready" ? "" : stateLabel(session.state),
-      chip: state.target !== null ? `❯ ${state.target.label} ▾` : null,
-      chipHidden: mode === "all",
-    },
-    { kind: "seg", mode },
-    { kind: "spacer" },
-  ];
-  // (4) The context meter — the TEXT `ctx N` (the window is not on the wire).
-  if (typeof state.status.contextUsed === "number") {
-    const used = state.status.contextUsed;
-    const window = member?.contextWindow;
-    const text = `ctx ${formatTokens(used)}`;
-    if (window !== undefined && window > 0) {
-      // The gauge does NOT exist without a window (never `▰▰▰▱▱ 42 / ?`).
-      const bar = gauge(used, window);
-      const cut = bar.indexOf("▱");
-      cells.push({
-        kind: "meter",
-        text,
-        gauge: {
-          filled: cut < 0 ? bar : bar.slice(0, cut),
-          empty: cut < 0 ? "" : bar.slice(cut),
-          text: `${formatTokens(used)} / ${formatTokens(window)}`,
-        },
-      });
-    } else {
-      cells.push({ kind: "meter", text });
-    }
-  }
-  // (5) The ▾ disclosure: session + model (the effort row is omitted while absent).
-  const rows: Array<{ key: string; value: string }> = [{ key: "session", value: session.id ?? "no session yet" }];
-  const model = member?.model;
-  if (model !== undefined && model !== "") rows.push({ key: "model", value: model });
-  const effort = member?.effort;
-  if (effort !== undefined && effort !== "") rows.push({ key: "effort", value: effort });
-  cells.push({ kind: "more", rows });
-  return { cells };
+  const name = member === undefined ? "wcode" : member.isRoot ? "orchestrator" : member.label;
+  const used = state.status.contextUsed;
+  const text = typeof used === "number" ? `ctx ${formatTokens(used)}` : "";
+  return {
+    cells: [
+      {
+        kind: "ident",
+        glyph: glyph.glyph,
+        glyphClass: `glyph ${glyph.className}${glyph.spin ? " spin" : ""}`,
+        stateTitle: glyph.stateTitle,
+        name,
+      },
+      { kind: "spacer" },
+      { kind: "meter", word: session.state === "ready" ? "" : stateLabel(session.state), text },
+      { kind: "mode", mode },
+    ],
+  };
 }
 
 /** Which empty state to show (the transcript is empty). */
@@ -529,6 +478,11 @@ export interface WorkingGroup {
  * and why the predicate is NOT widened to done/failed. A `running` member that has
  * not emitted a tool call yet has `action === ""`.
  */
+/** The one live type-line's text (A6: count-only). Pure. */
+export function livelineLabel(count: number): string {
+  return `${count} working`;
+}
+
 export function workingGroup(members: SessionMember[], targetId: string | null): WorkingGroup {
   const rows: WorkingRow[] = [];
   members.forEach((member, index) => {
@@ -545,14 +499,6 @@ export function workingGroup(members: SessionMember[], targetId: string | null):
     });
   });
   return { count: rows.length, rows };
-}
-
-/**
- * The overlapping avatar stack: the first `cap` rows, plus the overflow count (the 4th
- * and beyond collapse into ONE neutral `+N`). Pure.
- */
-export function avatarStack(rows: WorkingRow[], cap = 3): { shown: WorkingRow[]; overflow: number } {
-  return { shown: rows.slice(0, cap), overflow: Math.max(0, rows.length - cap) };
 }
 
 /** A manual override of a tool fold, recorded for the PHASE it was made in. */
@@ -610,38 +556,33 @@ export function memberSwatch(index: number, isRoot: boolean): MemberSwatch {
   return MEMBER_SWATCHES[index % MEMBER_SWATCHES.length];
 }
 
-/** One EXPANDED rail row (draft `.roster li`): the `--sw` identity edge + the STATE glyph. */
-export interface RosterRow {
+/** One team-caption row (draft `.team .m`): glyph + name + dim action. */
+export interface CaptionRow {
   id: string;
-  /** → the `<li>`'s class list: the `--sw` identity swatch, plus `sel` on the target. */
+  /** → the `<span class="m">` class list; `sel` on the target (the retarget affordance). */
   className: string;
-  /** → the state glyph's class (`g-run` / `g-done` / `g-err` / `g-idle`); its colour is STATE. */
+  /** → the state glyph's class (`g-run` / `g-done` / `g-err` / `g-idle`) — colour is STATE. */
   glyphClass: string;
-  /** → the state glyph (`⠋ ✓ ✗ ○`). */
+  /** → the state glyph (`⠋ ✓ ✗ ○`), from `memberGlyph(row.state)`. */
   glyph: string;
   name: string;
-  /** The dim text beside the name (the member's model, else "root"). */
-  meta: string;
-  /** The dim action line (`liveAction`, else the state word). */
+  /** → the dim `.act` text (`row.liveAction ?? row.state`). */
   action: string;
 }
 
 /**
- * The rail rows, ready to paint (draft `.roster`). Pure. Identity is the `--sw` edge colour;
- * STATE is the glyph's colour — the SAME language the transcript turn rail speaks. The 18px
- * `.mav` swatch box is GONE from the EXPANDED row; it survives in the collapsed strip
- * (`.sc`) and the working pill (`.pill .mav`), where a chip needs a fill.
+ * The team caption rows, ready to paint (draft `.team`). Pure. Identity is the NAME; the
+ * glyph's colour is STATE. There is NO `--sw` edge (the swatches are dropped) and NO `meta`.
  */
-export function rosterRows(rows: RosterItem[], targetId: string | null): RosterRow[] {
-  return rows.map((row, index) => {
+export function teamCaption(rows: RosterItem[], targetId: string | null): CaptionRow[] {
+  return rows.map((row) => {
     const glyph = memberGlyph(row.state);
     return {
       id: row.id,
-      className: `sw-${memberSwatch(index, row.isRoot)}${row.id === targetId ? " sel" : ""}`,
+      className: row.id === targetId ? "m sel" : "m",
       glyphClass: glyph.className,
       glyph: glyph.glyph,
       name: row.label,
-      meta: row.model ?? (row.isRoot ? "root" : ""),
       action: row.liveAction ?? row.state,
     };
   });
