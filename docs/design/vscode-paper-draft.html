@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark" data-density="calm" data-face="page" data-notes="on">
+<html lang="en" data-theme="dark" data-density="calm" data-face="page" data-notes="on" data-team="caption">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -225,6 +225,41 @@ body{
 }
 .masthead-team .m{ display:inline-flex; align-items:baseline; gap:var(--wc-1); }
 .masthead-team .m .act{ opacity:.7; }
+/* ---- the roster's PLACEMENT options (gallery-driven; the default is A's caption).
+   The improvement levers are shared across placements: order active-first, keep one
+   line, drop the per-member action where the liveline already carries it, and — in
+   index mode — give each name a real location. See docs/design/vscode-paper-team-options.md. */
+.masthead-team .m .idx{ display:none; } /* the index's location numbers */
+/* the COLOPHON: the cast as the page's imprint at the foot, no per-member action */
+.colophon{
+  flex:0 0 auto; display:none; flex-wrap:wrap; gap:var(--wc-3);
+  max-width:var(--ed-measure); margin:0 auto; width:100%;
+  padding:0 var(--wc-4) var(--wc-2);
+  font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+  color:var(--vscode-descriptionForeground);
+}
+.colophon .c{ display:inline-flex; align-items:baseline; gap:var(--wc-1); }
+/* the MARGIN: the live action as marginalia, aligned to the turn it belongs to */
+.mnote{ display:none; }
+html[data-team="colophon"] .masthead-team,
+html[data-team="margin"] .masthead-team,
+html[data-team="none"] .masthead-team{ display:none; }
+html[data-team="colophon"] .colophon{ display:flex; }
+html[data-team="index"] .masthead-team .m .act{ display:none; }
+html[data-team="index"] .masthead-team .m .idx{ display:inline; color:var(--vscode-foreground); }
+/* marginalia needs a wide page: only at editor width, outside the measure. The
+   app-width guard below wins over this block, so a sidebar dock falls back. */
+@media (min-width:561px){
+  html[data-team="margin"] .turn{ position:relative; }
+  html[data-team="margin"] .mnote{
+    display:block; position:absolute; left:100%; top:0; margin-left:var(--wc-4);
+    width:18ch;
+    font-family:var(--vscode-editor-font-family); font-size:var(--wc-fs-meta);
+    color:var(--vscode-descriptionForeground);
+  }
+}
+html[data-team="margin"] #app[data-width="sidebar"] .masthead-team{ display:flex; }
+html[data-team="margin"] #app[data-width="sidebar"] .mnote{ display:none; }
 
 /* ============================================================== 2. the text
    A text block on the page, on the head's and the writing line's measure. No
@@ -416,6 +451,8 @@ textarea::placeholder{
   .composer .inner{ padding:var(--wc-2) var(--wc-3) 0; }
   .composer{ padding:0 0 var(--wc-2); }
   .footnotes{ width:100%; }
+  /* margin mode needs width: below 560px it falls back to the head caption */
+  html[data-team="margin"] .masthead-team{ display:flex; }
 }
 /* one gate, both animations off: the ⠋ spinner and the ▌ live cursor */
 @media (prefers-reduced-motion: reduce){
@@ -437,7 +474,9 @@ textarea::placeholder{
     and their detail is set as <b>footnote matter</b> at the turn's foot, not a
     fold in the flow. The folio at the outer edge is the step count, a real
     reading position. Drive it with the toolbar; the Face and Notes toggles A/B
-    the two judgment calls.
+    reading position. Drive it with the toolbar: the Face and Notes toggles A/B the
+    two judgment calls, and the <b>Team</b> toggle cycles the roster's placement
+    (<i>caption</i>, <i>colophon</i>, <i>index</i>, <i>margin</i>, <i>none</i>).
   </p>
   <p class="read">Reading this as: a web screen (the VS Code webview), for a developer reading a long multi-agent session inside VS Code, in VS Code's own theme-variable language (only --vscode-* tokens for colour), with the dominant constraint that the whole panel reads as one printed page: a single measure governs the running head, the text block and the writing line.</p>
   <div class="dials">
@@ -455,6 +494,8 @@ textarea::placeholder{
     <span class="sp"></span>
     <button class="tbtn" id="tNotes" aria-pressed="true">Notes: footnotes</button>
     <button class="tbtn" id="tNoNotes" aria-pressed="false">Notes: off</button>
+    <span class="sp"></span>
+    <button class="tbtn" id="tTeam" aria-pressed="false">Team: caption</button>
     <span class="sp"></span>
     <button class="tbtn" id="tAll" aria-pressed="true">View: All</button>
     <button class="tbtn" id="tFocus" aria-pressed="false">View: Focus</button>
@@ -491,10 +532,10 @@ textarea::placeholder{
         <span class="folio" id="folio" title="steps in this session">3</span>
       </div>
       <div class="masthead-team" role="list" aria-label="Team">
-        <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator <span class="act">editing chat.css</span></span>
-        <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer <span class="act">grep onOpenDiff</span></span>
-        <span class="m" role="listitem"><span class="glyph g-idle" aria-hidden="true">○</span>developer <span class="act">waiting</span></span>
-        <span class="m" role="listitem"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span></span>
+        <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator <span class="act">editing chat.css</span><span class="idx"> 2, 3</span></span>
+        <span class="m" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer <span class="act">grep onOpenDiff</span><span class="idx"> 4</span></span>
+        <span class="m" role="listitem"><span class="glyph g-idle" aria-hidden="true">○</span>developer <span class="act">waiting</span><span class="idx"></span></span>
+        <span class="m" role="listitem"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer <span class="act">turn done</span><span class="idx"></span></span>
       </div>
     </div>
   </header>
@@ -509,6 +550,7 @@ textarea::placeholder{
       </article>
 
       <article class="turn wcode new">
+        <span class="mnote"><span class="glyph g-run spin" aria-hidden="true">⠋</span> editing chat.css</span>
         <div class="byline"><span class="glyph" aria-hidden="true">❯</span><span class="name">orchestrator</span></div>
         <div class="body live">
           <p>Done. The transcript is a single column, and the whole panel is one page: the running head, the text and the writing line sit on the same measure, so the two rules that bound the sheet run to the column, not the viewport.</p>
@@ -567,6 +609,7 @@ test webview::panel_header ... ok</pre></div>
       </article>
 
       <article class="turn wcode new" data-member="w1">
+        <span class="mnote"><span class="glyph g-run" aria-hidden="true">⠋</span> grep onOpenDiff</span>
         <div class="byline"><span class="glyph g-run" aria-hidden="true">⠋</span><span class="name">explorer</span></div>
         <div class="body">
           <p>The diff hook is at <code>chat.ts:88</code>. Passing it back to you.</p>
@@ -603,6 +646,14 @@ test webview::panel_header ... ok</pre></div>
         <button class="linkbtn send" type="button" id="send">Send</button>
       </div>
     </div>
+  </footer>
+
+  <!-- the COLOPHON option: the cast as the page's imprint at the foot -->
+  <footer class="colophon" role="list" aria-label="Team">
+    <span class="c" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>orchestrator</span>
+    <span class="c" role="listitem"><span class="glyph g-run spin" aria-hidden="true">⠋</span>explorer</span>
+    <span class="c" role="listitem"><span class="glyph g-idle" aria-hidden="true">○</span>developer</span>
+    <span class="c" role="listitem"><span class="glyph g-done" aria-hidden="true">✓</span>reviewer</span>
   </footer>
 </div>
 
@@ -641,6 +692,19 @@ test webview::panel_header ... ok</pre></div>
   var tNoNotes = document.getElementById("tNoNotes");
   tNotes.addEventListener("click", function () { root.dataset.notes = "on"; press([tNotes, tNoNotes], tNotes); });
   tNoNotes.addEventListener("click", function () { root.dataset.notes = "off"; press([tNotes, tNoNotes], tNoNotes); });
+
+  /* the third A/B: the roster's PLACEMENT. One cycling control, gallery-only:
+     caption (A's) → colophon → index → margin → none. */
+  var tTeam = document.getElementById("tTeam");
+  var teamModes = ["caption", "colophon", "index", "margin", "none"];
+  var teamAt = 0;
+  tTeam.addEventListener("click", function () {
+    teamAt = (teamAt + 1) % teamModes.length;
+    var mode = teamModes[teamAt];
+    root.dataset.team = mode;
+    tTeam.textContent = "Team: " + mode;
+    tTeam.setAttribute("aria-pressed", mode === "caption" ? "false" : "true");
+  });
 
   /* the mode: in All every speaker's section shows; in Focus only the target's
      (the quiet page has no chip to retarget, only the running head's toggle). */
