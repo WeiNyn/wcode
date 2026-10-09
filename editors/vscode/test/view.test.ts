@@ -621,6 +621,7 @@ test("the composer foot always shows Send + Stop; Stop is disabled until a run i
   const src = readFileSync(resolve(here, "../src/webview/chat.ts"), "utf8");
   const skeleton = src.slice(src.indexOf("app.innerHTML"), src.indexOf("].join"));
   assert.match(skeleton, /id="send"[^\n]*\n[^\n]*id="cancel"/, "#send then #cancel, adjacent");
+  assert.doesNotMatch(skeleton, /id="cancel"[^\n]*hidden/, "the Stop is NOT hidden in the skeleton");
   assert.match(src, /cancelBtn\.disabled = !actions\.stop/, "Stop is DISABLED while idle, enabled while running");
   assert.doesNotMatch(src, /cancelBtn\.hidden/, "the Stop is never hidden — it is always present");
 });

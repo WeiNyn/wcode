@@ -89,7 +89,7 @@ app.innerHTML = [
   '        <button id="mAct" class="linkbtn" type="button" aria-pressed="true">Act</button>',
   '        <button id="mPlan" class="linkbtn" type="button" aria-pressed="false">Plan</button>',
   '        <button id="send" class="linkbtn send" type="button">Send</button>',
-  '        <button id="cancel" class="linkbtn send stop" type="button" title="Stop the in-flight run (Esc)" hidden>Stop</button>',
+  '        <button id="cancel" class="linkbtn send stop" type="button" title="Stop the in-flight run (Esc)">Stop</button>',
   '      </div>',
   '    </div>',
   '  </footer>',
