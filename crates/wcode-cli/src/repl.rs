@@ -797,9 +797,13 @@ pub async fn run(
         Some(e) => println!("effort: {e}"),
         None => println!("(no effort)"),
     }
-    if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
-        println!("context: {} tokens", limit.context);
-    }
+    // The context window and where it came from — the same line `--dump-config`
+    // prints, so an unrecognized model still names the window being assumed
+    // (128k by default) instead of leaving the reader to guess.
+    println!(
+        "{}",
+        crate::context_window_line(llm.base_url.as_deref(), &llm.model, &compaction)
+    );
     match &session_path {
         Some(p) => println!("session: {}", p.display()),
         None => println!("(no session)"),

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use wcode_harness::actor::SessionActor;
 use wcode_harness::agent::Agent;
+use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::event::AgentEvent;
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::protocol::{Request, SessionId};
@@ -468,6 +469,7 @@ fn config_dump(cfg: &Config) -> String {
         redact_key(cfg.api_key.as_deref()),
         cfg.provenance.api_key
     );
+    let _ = writeln!(out, "{}", context_window_line(effective_base, &cfg.model, &cfg.compaction));
     let _ = writeln!(out, "effort: {}", cfg.effort.as_deref().unwrap_or("(none)"));
     let _ = writeln!(
         out,
@@ -502,6 +504,32 @@ fn config_dump(cfg: &Config) -> String {
 fn redact_key(key: Option<&str>) -> &'static str {
     if key.is_some() { "(set)" } else { "(none)" }
 }
+
+/// The effective context window and WHERE it came from — the one line that
+/// answers "why did it compact so early?" without a network call.
+///
+/// The precedence is the kernel's, [`CompactionPolicy::context_window`]: the
+/// model catalog (a known model on a recognized endpoint) wins, then the
+/// `[compaction] window` override, then [`wcode_harness::limits::DEFAULT_CONTEXT_WINDOW`].
+/// Shared by `--dump-config` and the REPL banner so the two cannot drift.
+pub(crate) fn context_window_line(
+    base_url: Option<&str>,
+    model: &str,
+    compaction: &CompactionPolicy,
+) -> String {
+    let source = if wcode_harness::limits::model_limit(base_url, model).is_some() {
+        "model catalog"
+    } else if compaction.window.is_some() {
+        "[compaction] window"
+    } else {
+        "default"
+    };
+    format!(
+        "context: {} tokens (source: {source})",
+        compaction.context_window(base_url, model)
+    )
+}
+
 fn load_config_raw(args: &mut Args) -> Config {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
@@ -2868,6 +2896,89 @@ mod tests {
         for secret in ["sk-secret-12345", "sk-team-999", "sk-model-777"] {
             assert!(!dump.contains(secret), "secret leaked: {secret}\n{dump}");
         }
+    }
+
+    /// The context-window line names the window AND its source, in the kernel's
+    /// precedence order: model catalog → `[compaction] window` → default. This is
+    /// the keyless proof that `step-5-preview-free` is no longer measured against
+    /// the 128k default (and any model can be checked the same way).
+    #[test]
+    fn config_dump_names_the_context_window_source() {
+        let zen = "https://opencode.ai/zen/go/v1";
+
+        // 1. The catalog knows the model: 1M, and the source says so.
+        let catalog = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("step-5-preview-free".into()),
+                base_url: Some(zen.into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&catalog).contains("context: 1000000 tokens (source: model catalog)"),
+            "{}",
+            config_dump(&catalog)
+        );
+
+        // 2. Unknown model, `[compaction] window` set: the override is the window.
+        let overridden = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("not-a-real-model".into()),
+                base_url: Some("https://api.example.com/v1".into()),
+                compaction: crate::config::CompactionConfig {
+                    window: Some(200_000),
+                    ..crate::config::CompactionConfig::default()
+                },
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&overridden)
+                .contains("context: 200000 tokens (source: [compaction] window)"),
+            "{}",
+            config_dump(&overridden)
+        );
+
+        // 3. Unknown model, no override: the conservative default is named.
+        let unknown = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("not-a-real-model".into()),
+                base_url: Some("https://api.example.com/v1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&unknown).contains(&format!(
+                "context: {} tokens (source: default)",
+                wcode_harness::limits::DEFAULT_CONTEXT_WINDOW
+            )),
+            "{}",
+            config_dump(&unknown)
+        );
+
+        // The override is IGNORED for a model the catalog knows (precedence).
+        let ignored = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("step-5-preview-free".into()),
+                base_url: Some(zen.into()),
+                compaction: crate::config::CompactionConfig {
+                    window: Some(200_000),
+                    ..crate::config::CompactionConfig::default()
+                },
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        let dump = config_dump(&ignored);
+        assert!(dump.contains("context: 1000000 tokens (source: model catalog)"), "{dump}");
+        assert!(!dump.contains("200000"), "{dump}");
     }
 
     #[test]
