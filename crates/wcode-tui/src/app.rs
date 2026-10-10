@@ -122,29 +122,82 @@ pub enum Action {
     Copy(String),
 }
 
-/// A committed transcript block. Thinking and prose share [`Block::Assistant`]
-/// (an assistant message interleaves them); tool calls get their own line.
+/// One **exchange**: a user prompt → the assistant's answer, as ONE block.
+/// Replaces the `TurnHead` + `Assistant` + `Notes` trio. Its head is the
+/// speaker (`WCODE`), its body is the whole run's prose, its foot is the
+/// **ledger** (the run's tools, in call order). Placement, order and the
+/// `¹`↔`N` numbering are correct **by construction** — no retrospective fold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turn {
+    /// The exchange number, per surface, monotonic (`1`, `2`, …). The rendered
+    /// `§N` is gone (the speaker head replaces it); the folio still counts this.
+    pub n: usize,
+    /// The run's prose + thinking, in order — every assistant message's
+    /// `Text`/`Thinking` blocks concatenated, each message's `ToolCall` kept
+    /// **in place**. The `¹` is emitted at each `ToolCall`; its ordinal IS the
+    /// ledger's `N` (one per-turn series).
+    pub content: Vec<ContentBlock>,
+    /// The run's apparatus, in CALL order — the ledger. `tools[k]` renders as
+    /// ledger row `k + 1`; its `¹` is the `(k+1)`-th `ToolCall` in `content`.
+    pub tools: Vec<Tool>,
+    /// The turn's thinking expanded (D33). Set by the `▸` affordance / `Ctrl-T`;
+    /// the affordance attaches to the leading `Thinking` block only.
+    pub thinking_open: bool,
+    /// `true` while the run is in flight; sealed at `AgentEnd`. A flip bumps the
+    /// block's rev (the `(rev, width)` cache re-renders).
+    pub open: bool,
+}
+
+/// The scroll-away book header (D009 §1): `WCODE · session <id> ──── project · ⎇
+/// branch` (+ `model · effort` far right) over a `─` rule on the measure. The
+/// transcript's FIRST committed block; **chrome** — never a browse selection
+/// target, never copied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionHead {
+    /// The **RAW** session id (matching `Status.session`); `session_head_row`
+    /// (in `ui.rs`, where `short_id` lives) shortens it. `None` hides the group.
+    pub session: Option<String>,
+    /// The cwd (or `wcode`); **muted**.
+    pub project: String,
+    /// The branch, WITHOUT the `⎇` (the renderer adds it); `None` hides it.
+    pub branch: Option<String>,
+    /// The model id — the far-right group (D009 §3, option A).
+    pub model: String,
+    /// The effort id; joins `model` with ` · `; `None` → model alone.
+    pub effort: Option<String>,
+}
+
+impl SessionHead {
+    /// Snapshot the header from `App`: the focused surface's `Status`
+    /// (`session`/`model`/`effort`) + cwd/git — the same source `corner_titles`
+    /// read before the head row was dropped. Stores the **raw** `session` id
+    /// (NOT shortened). # Contracts: infallible; a missing session/branch/effort
+    /// is `None` (its group is omitted by the renderer).
+    pub(crate) fn of(app: &App) -> SessionHead {
+        SessionHead {
+            session: app.status().session.clone(),
+            project: app.cwd().unwrap_or("wcode").to_string(),
+            branch: app.git().map(str::to_string),
+            model: app.status().model.clone(),
+            effort: app.status().effort.clone(),
+        }
+    }
+}
+
+/// A committed transcript block. Thinking and prose share [`Block::Turn`] (an
+/// assistant message interleaves them); a standalone tool call gets its own
+/// block only when it has no open turn to join.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     User(String),
-    /// A turn's numbered section head (`§N` + an optional title) — one per
-    /// assistant reply, drawn on its own line directly before the reply. It is
-    /// **chrome**: never a browse selection target and never copied.
-    TurnHead {
-        /// The turn's number, per surface, monotonic (`§1`, `§2`, …).
-        n: usize,
-        /// The reply's first top-level `# h1`, consumed into the head. `None`
-        /// when the reply opened with no h1 (a bare `§N`).
-        title: Option<String>,
-    },
-    Assistant {
-        /// The message's content blocks (text, thinking, tool calls).
-        content: Vec<ContentBlock>,
-        /// Whether the message's thinking is expanded (D33). `false` — the commit
-        /// default — draws the collapsed `··· thinking · N chars ▸ ▣` row; the `▸`
-        /// affordance (or browse `Enter`) flips it.
-        thinking_open: bool,
-    },
+    /// The scroll-away book header (D009) — the transcript's first block.
+    SessionHead(SessionHead),
+    /// One exchange — the whole run's prose + a ledger of its tools. Rendered as
+    /// the `WCODE` speaker head, the prose, then the ledger (its foot).
+    Turn(Turn),
+    /// A standalone tool invocation, with no open turn to join (an orphan tool,
+    /// or a live/running tool before its answer commits). Rendered as a one-note
+    /// list under a `── notes ──` rule.
     Tool(Tool),
     Notice(String),
     Error(String),
@@ -156,23 +209,6 @@ pub enum Block {
     /// The `todo` tool's live checklist in the transcript (D35). ONE block that
     /// updates in place as the `AgentEvent::Todo` feed advances.
     Todos(Vec<TodoItem>),
-    /// A turn's apparatus, re-homed from the flow to its foot: one row per tool
-    /// the turn called, under a `── notes ──` rule. `items[k]`'s `¹` number is
-    /// `k + 1` (the turn's tool order). One block, one range — browse-selectable,
-    /// copied as the joined tool outputs. The D31 panel is retired for the
-    /// transcript; this is its replacement.
-    Notes(Vec<Tool>),
-}
-
-impl Block {
-    /// A committed assistant message, its thinking collapsed (D33); the `▸`
-    /// affordance (or browse `Enter`) expands it.
-    pub(crate) fn assistant(content: Vec<ContentBlock>) -> Self {
-        Block::Assistant {
-            content,
-            thinking_open: false,
-        }
-    }
 }
 
 
@@ -300,65 +336,46 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
     )
 }
 
-/// Whether an assistant message carries any prose — a non-empty `Text` block. A
-/// tool-call-only (or thinking-only) message does not.
-fn content_has_text(content: &[ContentBlock]) -> bool {
-    content.iter().any(|c| match c {
-        ContentBlock::Text { text } => !text.trim().is_empty(),
-        _ => false,
-    })
-}
-
-/// Consume a reply's **first top-level `# h1`** as the turn head's title: scan
-/// the content's text blocks in order for the first whose trimmed text opens with
-/// `# ` (an h1 — `##`+ do not count), take the rest of that line as the title, and
-/// drop the heading line plus a following blank line from that block. `None` when
-/// the reply opens with no h1 (or an empty one).
-fn take_heading(content: &mut [ContentBlock]) -> Option<String> {
-    for block in content.iter_mut() {
-        let ContentBlock::Text { text } = block else {
-            continue;
-        };
-        let trimmed = text.trim_start();
-        let Some(rest) = trimmed.strip_prefix("# ") else {
-            continue;
-        };
-        let title = rest.lines().next().unwrap_or("").trim().to_string();
-        // Drop the heading line, and one blank line after it.
-        let after = rest.split_once('\n').map_or("", |(_, after)| after);
-        let after = after.strip_prefix('\n').unwrap_or(after);
-        let lead = &text[..text.len() - trimmed.len()];
-        *text = format!("{lead}{after}");
-        return (!title.is_empty()).then_some(title);
-    }
-    None
-}
-
 /// The text `y` copies for a block — `None` when there is nothing to copy.
 ///
 /// - `User` / `Notice` / `Error`: the block's text.
-/// - `Assistant`: the text blocks only — **thinking is internal reasoning and is
+/// - `Turn`: the text blocks only — **thinking is internal reasoning and is
 ///   never copied** — with code fences preserved.
 /// - `Tool`: the **full `output`**, never the collapsed preview on screen (the
 ///   headline case: yanking the whole `bash` result).
 /// - `Diff`: the diff body.
 fn copy_text(block: &Block) -> Option<String> {
     let text = match block {
-        // A turn head is chrome — nothing to copy.
-        Block::TurnHead { .. } => return None,
+        // The session head is chrome — nothing to copy.
+        Block::SessionHead(_) => return None,
         Block::User(text)
         | Block::Notice(text)
         | Block::Error(text)
         | Block::Btw(text) => text.clone(),
-        Block::Assistant { content, .. } => content
-            .iter()
-            .filter_map(|c| match c {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                // Thinking is reasoning; a tool call has its own line, not text.
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        // The exchange copies as its prose only — thinking is internal reasoning
+        // and is never copied. A prose-less turn (a tool-only round) falls back to
+        // the joined tool outputs (the retired `Block::Notes` copy), so `y` is
+        // never a silent no-op on a tool-only exchange.
+        Block::Turn(turn) => {
+            let prose = turn
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if prose.trim().is_empty() {
+                turn.tools
+                    .iter()
+                    .map(|t| t.output.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                prose
+            }
+        }
         Block::Tool(tool) => tool.output.clone(),
         Block::Diff { diff, .. } => diff.clone(),
         Block::Todos(todos) => todos
@@ -367,12 +384,6 @@ fn copy_text(block: &Block) -> Option<String> {
                 TodoStatus::Completed => format!("☑ {}", t.content),
                 _ => format!("☐ {}", t.content),
             })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        // The turn's foot: the joined tool outputs.
-        Block::Notes(items) => items
-            .iter()
-            .map(|t| t.output.clone())
             .collect::<Vec<_>>()
             .join("\n"),
     };
@@ -759,10 +770,12 @@ fn tool_param_keys(name: &str) -> &'static [&'static str] {
 /// skipped. Never names `serde_json` (it stays a dev-dependency).
 fn call_arg(transcript: &[Block], call_id: &str, key_order: &[&str]) -> Option<String> {
     for block in transcript.iter().rev() {
-        let Block::Assistant { content, .. } = block else {
+        // A call's arguments live in the exchange's `Turn`.
+        let Block::Turn(turn) = block else {
             continue;
         };
-        let call = content
+        let call = turn
+            .content
             .iter()
             .find(|b| matches!(b, ContentBlock::ToolCall { id, .. } if id == call_id));
         let Some(ContentBlock::ToolCall { arguments, .. }) = call else {
@@ -1131,8 +1144,13 @@ pub struct Surface {
     transcript: Vec<Block>,
     /// The assistant message currently streaming (rendered below the transcript).
     live: Option<AgentMessage>,
-    /// The number of assistant turns committed on this surface — the `§N` series
-    /// (monotonic; it survives a resume because replay goes through `commit_turn`).
+    /// The index of the in-progress `Block::Turn` (the run's exchange), or `None`
+    /// when idle. Set when the run's first assistant content lands; cleared at
+    /// `AgentEnd`. While `Some`, the turn is the LAST block.
+    open_turn: Option<usize>,
+    /// The number of exchanges committed on this surface — the folio series
+    /// (monotonic; it survives a resume because replay goes through
+    /// `absorb_message`/`open_turn`).
     turns: usize,
     /// Files changed during the current run, in call order; reset when the next
     /// prompt starts a run, kept afterwards so the run stays reviewable.
@@ -1185,7 +1203,8 @@ pub struct Surface {
     ranges: Vec<Range<usize>>,
     /// Per-block render cache, index-aligned with `transcript`.
     cache: Vec<CacheEntry>,
-    /// Per-block revision, bumped at each `Block::Tool` mutation; `0` = append-only.
+    /// Per-block revision, bumped at each `Block::Turn`/`Block::Tool` mutation;
+    /// `0` = append-only.
     block_revs: Vec<u64>,
     /// The streamed message's revision; bumped on every `MessageStart` /
     /// `MessageUpdate` (and on a theme change), so the live cache re-renders
@@ -1225,6 +1244,7 @@ impl Surface {
             status,
             transcript: Vec::new(),
             live: None,
+            open_turn: None,
             turns: 0,
             changes: Vec::new(),
             running: false,
@@ -1355,18 +1375,20 @@ impl Surface {
         self.live_renders
     }
 
-    /// Bump block `i`'s revision (saturating). Call at every `Block::Tool`
-    /// mutation so the next frame re-renders that block.
+    /// Bump block `i`'s revision (saturating). Call at every `Block::Turn` /
+    /// `Block::Tool` mutation so the next frame re-renders that block.
     fn bump_rev(&mut self, i: usize) {
         if let Some(rev) = self.block_revs.get_mut(i) {
             *rev = rev.saturating_add(1);
         }
     }
 
-    /// Whether block `i` is a browse **selection target**. A `TurnHead` is chrome
-    /// — skipped like a blank separator (never selected, never copied).
+    /// Whether block `i` is a browse **selection target**. Every committed block
+    /// is selectable — the `Turn`'s speaker head shares its range, and the
+    /// selection bar just paints its column 0 — except the session head, which is
+    /// chrome (a click on it selects nothing).
     fn selectable(&self, i: usize) -> bool {
-        !matches!(self.transcript.get(i), Some(Block::TurnHead { .. }))
+        !matches!(self.transcript.get(i), Some(Block::SessionHead(_)))
     }
 
     /// The first / last selectable block index, if any.
@@ -1389,23 +1411,29 @@ impl Surface {
     }
 
     /// Seed the D5 empty-state hint when this is a genuinely empty surface (no
-    /// committed block, no live message). The renderer calls this once per frame;
-    /// it is a no-op after the first block lands.
+    /// committed block beyond the session head, no live message). The renderer
+    /// calls this once per frame; it is a no-op after the first block lands.
     fn seed_hint_if_empty(&mut self) {
-        if self.transcript.is_empty() && self.live.is_none() {
+        let empty = self.transcript.is_empty()
+            || matches!(self.transcript.as_slice(), [Block::SessionHead(_)]);
+        if empty && self.live.is_none() {
             self.transcript.push(Block::Notice(EMPTY_HINT.into()));
             self.block_revs.push(0);
             self.cache.push(CacheEntry::never());
         }
     }
 
-    /// Drop the leading D5 empty-state hint, if present.
+    /// Drop the D5 empty-state hint, if present. The session head (block 0) sits
+    /// above it, so the hint lands at index 1 once the head exists; scan the
+    /// leading two slots to find it either way.
     fn clear_hint(&mut self) {
-        if matches!(self.transcript.first(), Some(Block::Notice(t)) if t.as_str() == EMPTY_HINT)
-        {
-            self.transcript.remove(0);
-            self.block_revs.remove(0);
-            self.cache.remove(0);
+        let idx = self.transcript.iter().take(2).position(
+            |b| matches!(b, Block::Notice(t) if t.as_str() == EMPTY_HINT),
+        );
+        if let Some(i) = idx {
+            self.transcript.remove(i);
+            self.block_revs.remove(i);
+            self.cache.remove(i);
         }
     }
 
@@ -1416,6 +1444,19 @@ impl Surface {
         self.transcript.insert(at, block);
         self.block_revs.insert(at, 0);
         self.cache.insert(at, CacheEntry::never());
+        // An insert shifts every later index: keep the open-turn pointer in step
+        // (the `SessionHead` seats at 0 mid-run), or `seal_turn` misses the turn.
+        if let Some(i) = self.open_turn
+            && at <= i
+        {
+            self.open_turn = Some(i + 1);
+        }
+        // The browse selection is an index too — shift it with the insert.
+        if let Some(sel) = self.selected
+            && at <= sel
+        {
+            self.selected = Some(sel + 1);
+        }
     }
 
     /// Cache misses so far (each is a `ui::block_lines` render). Test-only; the
@@ -1460,37 +1501,35 @@ impl Surface {
             }
             AgentEvent::MessageEnd { message } => {
                 self.live = None;
-                self.commit(message);
+                self.absorb_message(message);
                 true
             }
             AgentEvent::ToolExecutionStart { call_id, name } => {
                 self.flush_live();
-                // The committed assistant block carries this call's arguments
-                // (§3), so resolve a short "name target" label for the team strip.
+                // The committed turn carries this call's arguments, so resolve a
+                // short "name target" label for the team strip.
                 self.last_action = Some(action_label(&self.transcript, &call_id, &name));
                 let target = call_target(&self.transcript, &call_id);
                 let params = call_params(&self.transcript, &call_id, &name);
-                self.push_block(Block::Tool(Tool {
-                    name,
-                    target,
-                    output: String::new(),
-                    done: false,
-                    is_error: false,
-                    expanded: false,
-                    diff: None,
-                    path: None,
-                    duration_ms: None,
-                    params,
-                }));
+                self.turn_start_tool(&call_id, name, target, params);
                 true
             }
             AgentEvent::ToolExecutionUpdate { partial, .. } => {
                 let idx = self.transcript.len().wrapping_sub(1);
-                let changed = if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
-                    tool.output.push_str(&partial);
-                    true
-                } else {
-                    false
+                let changed = match self.transcript.last_mut() {
+                    Some(Block::Turn(turn)) => {
+                        if let Some(tool) = turn.tools.last_mut() {
+                            tool.output.push_str(&partial);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Some(Block::Tool(tool)) => {
+                        tool.output.push_str(&partial);
+                        true
+                    }
+                    _ => false,
                 };
                 if changed {
                     self.bump_rev(idx);
@@ -1506,9 +1545,9 @@ impl Surface {
                 ..
             } => {
                 let idx = self.transcript.len().wrapping_sub(1);
-                let matched = if let Some(Block::Tool(tool)) = self.transcript.last_mut() {
+                let apply = |tool: &mut Tool| {
                     if !output.is_empty() {
-                        tool.output = output;
+                        tool.output = output.clone();
                     }
                     tool.done = true;
                     tool.is_error = is_error;
@@ -1519,9 +1558,21 @@ impl Surface {
                     tool.path = path.clone();
                     tool.diff = diff.clone();
                     tool.duration_ms = duration_ms;
-                    true
-                } else {
-                    false
+                };
+                let matched = match self.transcript.last_mut() {
+                    Some(Block::Turn(turn)) => {
+                        if let Some(tool) = turn.tools.last_mut() {
+                            apply(tool);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Some(Block::Tool(tool)) => {
+                        apply(tool);
+                        true
+                    }
+                    _ => false,
                 };
                 if matched {
                     self.bump_rev(idx);
@@ -1543,6 +1594,7 @@ impl Surface {
             }
             AgentEvent::AgentEnd => {
                 self.flush_live();
+                self.seal_turn();
                 self.running = false;
                 self.finished = true;
                 self.last_action = None;
@@ -1632,89 +1684,96 @@ impl Surface {
         }
     }
 
-    /// Commit an assistant message. Tool calls ride the block (the team strip reads
-    /// their arguments, §3; the renderer ignores them); empty messages are not
-    /// committed.
-    fn commit(&mut self, message: AgentMessage) {
+    /// Absorb one assistant message into the run's open `Block::Turn`: append the
+    /// message's `content` blocks (Text/Thinking/ToolCall) in order, creating the
+    /// turn via [`Surface::open_turn`] when this is the run's first content. An
+    /// empty message is ignored. # Contracts: one exchange = one turn, so every
+    /// assistant message in a run appends to the SAME turn.
+    fn absorb_message(&mut self, message: AgentMessage) {
         if let AgentMessage::Assistant { content, .. } = message
             && !content.is_empty()
         {
-            self.commit_turn(content);
-        }
-    }
-
-    /// Commit one assistant turn: a numbered **section head** (`§N` + the reply's
-    /// consumed `# h1`) then the assistant block. The number is per-surface and
-    /// monotonic; replay ([`Surface::seed`]) goes through here too, so a resumed
-    /// session keeps its series.
-    ///
-    /// A head is emitted **only for a reply that carries text**: a tool-call-only
-    /// assistant message is part of the current turn (its tool is apparatus
-    /// *inside* the section), so it gets no head and does not advance the counter.
-    fn commit_turn(&mut self, mut content: Vec<ContentBlock>) {
-        if !content_has_text(&content) {
-            self.push_block(Block::assistant(content));
-            return;
-        }
-        // Take the turn's apparatus out of the flow FIRST (it sits above the head),
-        // then push the head + the reply, then re-home the apparatus at the foot.
-        let notes = self.take_trailing_tools();
-        self.turns += 1;
-        let title = take_heading(&mut content);
-        self.push_block(Block::TurnHead {
-            n: self.turns,
-            title,
-        });
-        self.push_block(Block::assistant(content));
-        if !notes.is_empty() {
-            self.push_block(Block::Notes(notes));
-        }
-    }
-
-    /// Take the WHOLE turn's apparatus out of the flow. Walk the transcript
-    /// BACKWARD from the tail, collecting every `Block::Tool` (reversed to turn
-    /// order) and REMOVING every text-less tool-call `Block::Assistant`; STOP at
-    /// the first block that is neither — the previous section's text reply, a
-    /// `Notice`, `Todos`, …. Pop `transcript`, `block_revs`, and `cache` together
-    /// so the three stay index-aligned.
-    ///
-    /// The turn is `A(tc) → T → A(tc) → T → … → A(answer)` — NOT a contiguous
-    /// `Tool` run (the text-less `Assistant`s sit between the tools), so a
-    /// "stop at the first non-`Tool`" drain would LOSE tools. This walk collects
-    /// the `Tool`s in order and drops the empty assistants.
-    ///
-    /// Returns an EMPTY vec (and mutates nothing) when the tail is not the current
-    /// turn's apparatus — a pure-prose reply adds no `Notes` block. Called ONLY
-    /// from `commit_turn`'s `has_text` branch.
-    fn take_trailing_tools(&mut self) -> Vec<Tool> {
-        let mut start = self.transcript.len();
-        let mut tools: Vec<Tool> = Vec::new();
-        while start > 0 {
-            match &self.transcript[start - 1] {
-                Block::Tool(tool) => {
-                    tools.push(tool.clone());
-                    start -= 1;
-                }
-                Block::Assistant { content, .. } if !content_has_text(content) => {
-                    start -= 1;
-                }
-                _ => break,
+            let idx = self.open_turn();
+            if let Some(Block::Turn(turn)) = self.transcript.get_mut(idx) {
+                turn.content.extend(content);
             }
+            self.bump_rev(idx);
         }
-        if start == self.transcript.len() {
-            return Vec::new(); // nothing to fold
+    }
+
+    /// Open (or fetch) the run's `Block::Turn`. On the first call of a run it
+    /// pushes a fresh, empty `Turn` (numbering it `++self.turns`) and records its
+    /// index; thereafter it returns the same index. # Contracts: pushes at most
+    /// ONE turn per run (so `turns` counts *exchanges* and the folio agrees).
+    fn open_turn(&mut self) -> usize {
+        // A turn that is still `open` is the run's — absorb into it (replay
+        // calls `seal_turn` at every exchange boundary, so a boundary opens one).
+        if let Some(Block::Turn(turn)) = self.transcript.last()
+            && turn.open
+        {
+            let idx = self.transcript.len() - 1;
+            self.open_turn = Some(idx);
+            return idx;
         }
-        self.transcript.truncate(start);
-        self.block_revs.truncate(start);
-        self.cache.truncate(start);
-        tools.reverse(); // back to turn (call) order
-        tools
+        self.turns += 1;
+        self.push_block(Block::Turn(Turn {
+            n: self.turns,
+            content: Vec::new(),
+            tools: Vec::new(),
+            thinking_open: false,
+            open: true,
+        }));
+        // Index AFTER the push: `push_block` first clears the D5 hint, which
+        // shifts the new turn's index down by one.
+        let idx = self.transcript.len() - 1;
+        self.open_turn = Some(idx);
+        idx
+    }
+
+    /// Seal the run's turn at `AgentEnd`: flip `Turn.open = false` and clear
+    /// `open_turn`. # Contracts: idempotent when no turn is open; re-numbers
+    /// nothing (the turn is already in place).
+    fn seal_turn(&mut self) {
+        if let Some(idx) = self.open_turn.take()
+            && let Some(Block::Turn(turn)) = self.transcript.get_mut(idx)
+        {
+            turn.open = false;
+        }
+    }
+
+    /// Append a running tool to the open turn at `ToolExecutionStart`, opening the
+    /// turn on demand (a tool call always implies an exchange), and bumping the
+    /// turn's rev so the `(rev, width)` cache re-renders it.
+    fn turn_start_tool(
+        &mut self,
+        _call_id: &str,
+        name: String,
+        target: Option<String>,
+        params: Vec<(String, String)>,
+    ) {
+        let tool = Tool {
+            name,
+            target,
+            output: String::new(),
+            done: false,
+            is_error: false,
+            expanded: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+            params,
+        };
+        let idx = self.open_turn();
+        if let Some(Block::Turn(turn)) = self.transcript.get_mut(idx) {
+            turn.tools.push(tool);
+        }
+        self.bump_rev(idx);
     }
 
     /// Commit a still-streaming message (a tool started, the run ended early).
     fn flush_live(&mut self) {
         if let Some(message) = self.live.take() {
-            self.commit(message);
+            self.absorb_message(message);
         }
     }
 
@@ -1755,8 +1814,9 @@ impl Surface {
     /// The text of the most recent assistant reply, if any.
     fn last_assistant_text(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|block| match block {
-            Block::Assistant { content, .. } => {
-                let text: String = content
+            Block::Turn(turn) => {
+                let text: String = turn
+                    .content
                     .iter()
                     .filter_map(|c| match c {
                         ContentBlock::Text { text } => Some(text.as_str()),
@@ -1837,22 +1897,26 @@ impl Surface {
         // Replayed history supersedes the D5 empty-state hint.
         self.clear_hint();
         let start = self.transcript.len();
+        // One `Block::Turn` per replayed exchange: a `User` message seals the
+        // previous turn; every `Assistant`/`ToolResult` belongs to the current one.
         for message in messages {
             match message {
                 AgentMessage::User { .. } => {
+                    self.seal_turn();
                     let text = message.as_text();
                     if !text.trim().is_empty() {
                         self.push_block(Block::User(text));
                     }
                 }
                 AgentMessage::Assistant { content, .. } => {
-                    // The tool calls ride the block so a member's team strip action
-                    // can name the call's target (§3); the renderer ignores them.
-                    // `commit_turn` also numbers the turn (the `§N` series survives
-                    // a resume) and consumes the reply's `# h1` into the head.
+                    // The tool calls ride the turn so the renderer numbers them and
+                    // a member's team strip action can name the call's target (§3).
                     let visible = content.to_vec();
                     if !visible.is_empty() {
-                        self.commit_turn(visible);
+                        let idx = self.open_turn();
+                        if let Some(Block::Turn(turn)) = self.transcript.get_mut(idx) {
+                            turn.content.extend(visible);
+                        }
                     }
                     self.record_usage(message);
                 }
@@ -1862,11 +1926,11 @@ impl Surface {
                     output,
                     is_error,
                 } => {
-                    // Recover the call's target from the preceding assistant
-                    // block's `ToolCall` arguments, so a replayed block shows it.
+                    // Recover the call's target from the turn's `ToolCall` arguments,
+                    // so a replayed tool shows it, then append it to the turn's ledger.
                     let target = call_target(&self.transcript, tool_call_id);
                     let params = call_params(&self.transcript, tool_call_id, name);
-                    self.push_block(Block::Tool(Tool {
+                    let tool = Tool {
                         name: name.clone(),
                         target,
                         output: output.clone(),
@@ -1877,10 +1941,17 @@ impl Surface {
                         path: None,
                         duration_ms: None,
                         params,
-                    }));
+                    };
+                    match self.transcript.last_mut() {
+                        Some(Block::Turn(turn)) => turn.tools.push(tool),
+                        _ => self.push_block(Block::Tool(tool)),
+                    }
+                    let idx = self.transcript.len() - 1;
+                    self.bump_rev(idx);
                 }
             }
         }
+        self.seal_turn();
         // Mark where the replayed prefix ends, mirroring the REPL's divider.
         // Goes through `insert_block` so `cache`/`block_revs` shift WITH
         // `transcript` (a mid-vec insert shifts every later index).
@@ -2020,8 +2091,9 @@ pub(crate) struct AffordanceHit {
     /// Index into the FOCUSED surface's `transcript` (a committed block, never
     /// the live block).
     pub(crate) block: usize,
-    /// The sub-item a hit addresses (a note index within `Block::Notes`); `None`
-    /// for a whole-block hit (a thinking row).
+    /// The sub-item a hit addresses (a ledger tool index within a `Block::Turn`,
+    /// or the single note of a `Block::Tool`); `None` for a whole-block hit (a
+    /// turn's thinking row).
     pub(crate) item: Option<usize>,
     /// The panel header ROW's toggle region (1 row tall): from the panel's
     /// inner-left through the `▸`/`▾` glyph, ending before the gap/`▣` so it never
@@ -2280,16 +2352,17 @@ impl App {
         }
     }
 
-    /// Expand or collapse every tool block on the focused surface — the
-    /// all-tools complement to browse mode's per-block toggle. All expanded
-    /// collapses; anything else expands all.
+    /// Expand or collapse every tool row on the focused surface — the all-tools
+    /// complement to browse mode's per-block toggle (`Ctrl-T`). All expanded
+    /// collapses; anything else expands all. Covers both a `Turn`'s ledger and a
+    /// standalone `Block::Tool`.
     fn toggle_all_tools(&mut self) {
         let indices: Vec<usize> = self
             .focused()
             .transcript
             .iter()
             .enumerate()
-            .filter_map(|(i, block)| matches!(block, Block::Tool(_) | Block::Notes(_)).then_some(i))
+            .filter_map(|(i, block)| matches!(block, Block::Tool(_) | Block::Turn(_)).then_some(i))
             .collect();
         if indices.is_empty() {
             return;
@@ -2297,15 +2370,15 @@ impl App {
         // All expanded collapses; anything else expands all.
         let all_expanded = indices.iter().all(|&i| match &self.focused().transcript[i] {
             Block::Tool(tool) => tool.expanded,
-            Block::Notes(items) => items.iter().all(|t| t.expanded),
+            Block::Turn(turn) => turn.tools.iter().all(|t| t.expanded),
             _ => false,
         });
         let expand = !all_expanded;
         for i in indices {
             match self.focused_mut().transcript.get_mut(i) {
                 Some(Block::Tool(tool)) => tool.expanded = expand,
-                Some(Block::Notes(items)) => {
-                    for tool in items.iter_mut() {
+                Some(Block::Turn(turn)) => {
+                    for tool in turn.tools.iter_mut() {
                         tool.expanded = expand;
                     }
                 }
@@ -2759,37 +2832,26 @@ impl App {
     }
 
     /// Toggle block `i`'s detail. A no-op (silent) unless the block is expandable —
-    /// a `Block::Tool` panel, or a committed assistant block with thinking (D33).
-    /// Bumps block `i`'s rev so the `(rev, width)` cache re-renders its glyph.
+    /// a `Block::Tool`, a `Block::Turn` (its thinking or one of its ledger rows),
+    /// or a committed assistant block with thinking (D33). Bumps block `i`'s rev
+    /// so the `(rev, width)` cache re-renders its glyph.
     fn toggle_block(&mut self, i: usize, item: Option<usize>) {
         let toggled = match self.focused_mut().transcript.get_mut(i) {
             Some(Block::Tool(tool)) => {
                 tool.expanded = !tool.expanded;
                 true
             }
-            // A turn's foot: a note toggles its own body; a block-level toggle
-            // (browse `Enter` / `Ctrl-T`) expands or collapses every note.
-            Some(Block::Notes(items)) => {
+            // The exchange: `Some(k)` toggles ledger row `k`; `None` flips the
+            // turn's thinking (the `WCODE` head's leading `▸`).
+            Some(Block::Turn(turn)) => {
                 match item {
                     Some(k) => {
-                        if let Some(tool) = items.get_mut(k) {
+                        if let Some(tool) = turn.tools.get_mut(k) {
                             tool.expanded = !tool.expanded;
                         }
                     }
-                    None => {
-                        let expand = !items.iter().all(|t| t.expanded);
-                        for tool in items.iter_mut() {
-                            tool.expanded = expand;
-                        }
-                    }
+                    None => turn.thinking_open = !turn.thinking_open,
                 }
-                true
-            }
-            // A committed assistant block with thinking: expand/collapse it (D33).
-            Some(Block::Assistant { content, thinking_open })
-                if content.iter().any(|c| matches!(c, ContentBlock::Thinking { .. })) =>
-            {
-                *thinking_open = !*thinking_open;
                 true
             }
             _ => false,
@@ -2811,7 +2873,8 @@ impl App {
                 .transcript
                 .get(i)
                 .and_then(|b| match b {
-                    Block::Notes(items) => items.get(k).map(|t| t.output.clone()),
+                    Block::Turn(turn) => turn.tools.get(k).map(|t| t.output.clone()),
+                    Block::Tool(tool) => (k == 0).then(|| tool.output.clone()),
                     _ => None,
                 })
                 .filter(|t| !t.trim().is_empty()),
@@ -4114,6 +4177,30 @@ impl App {
         &self.focused().changes
     }
 
+    /// Ensure the focused surface's leading block is a `SessionHead` carrying the
+    /// current `SessionHead::of(self)`, refreshing its text (and bumping its rev)
+    /// when the inputs changed; creates the head as block 0 when absent. Called by
+    /// `ui::draw` BEFORE `seed_empty_hint` (so the head is block 0 and the D5 hint
+    /// lands at index 1). # Contracts: idempotent; a cheap `String` compare on a
+    /// steady frame (a no-op, not a re-render). Uses `insert_block` (NOT
+    /// `push_block`, which would `clear_hint` before the hint is seeded).
+    pub(crate) fn sync_session_head(&mut self) {
+        let head = SessionHead::of(self);
+        let s = self.focused_mut();
+        if matches!(s.transcript.first(), Some(Block::SessionHead(cur)) if *cur == head) {
+            return; // steady — a no-op
+        }
+        match s.transcript.first() {
+            Some(Block::SessionHead(_)) => {
+                if let Some(Block::SessionHead(cur)) = s.transcript.first_mut() {
+                    *cur = head;
+                }
+                s.bump_rev(0);
+            }
+            _ => s.insert_block(0, Block::SessionHead(head)),
+        }
+    }
+
     /// Seed the focused surface's D5 empty-state hint if it is empty (called by
     /// `ui::draw`; a no-op once real content lands).
     pub(crate) fn seed_empty_hint(&mut self) {
@@ -4453,11 +4540,14 @@ mod tests {
 
         assert!(app.live().is_none());
         assert!(!app.running());
-        assert_eq!(
-            app.transcript().last(),
-            Some(&Block::assistant(vec![ContentBlock::Text {
-                text: "hello".into()
-            }]))
+        assert!(
+            matches!(
+                app.transcript().last(),
+                Some(Block::Turn(t))
+                    if t.content == vec![ContentBlock::Text { text: "hello".into() }]
+                        && !t.open
+            ),
+            "the sealed turn carries the reply"
         );
     }
 
@@ -4472,10 +4562,7 @@ mod tests {
             output: "128 lines".into(), is_error: false,
             diff: None, path: None, duration_ms: Some(12),
         }));
-        match app.transcript().last() {
-            Some(Block::Tool(tool)) => assert_eq!(tool.duration_ms, Some(12)),
-            other => panic!("expected a tool block, got {other:?}"),
-        }
+        assert_eq!(last_tool(&app).duration_ms, Some(12));
     }
 
     #[test]
@@ -4499,15 +4586,11 @@ mod tests {
             path: None,
             duration_ms: None,
         }));
-        match app.transcript().last() {
-            Some(Block::Tool(tool)) => {
-                assert_eq!(tool.name, "bash");
-                assert!(tool.done);
-                assert!(!tool.is_error);
-                assert_eq!(tool.output, "building\nok");
-            }
-            other => panic!("expected a tool block, got {other:?}"),
-        }
+        let tool = last_tool(&app);
+        assert_eq!(tool.name, "bash");
+        assert!(tool.done);
+        assert!(!tool.is_error);
+        assert_eq!(tool.output, "building\nok");
     }
 
     #[test]
@@ -4702,13 +4785,14 @@ mod tests {
         // A divider marks the replayed prefix, as the REPL's does.
         assert!(matches!(&app.transcript()[0], Block::Notice(t) if t.contains("3 earlier message")));
         assert_eq!(app.transcript()[1], Block::User("earlier question".into()));
-        // The turn head numbers the replayed reply (`§1`); no `# h1` → a bare head.
-        assert_eq!(app.transcript()[2], Block::TurnHead { n: 1, title: None });
-        // The tool call rides the assistant block — the renderer ignores it, the
-        // team strip reads its target (§3).
+        // One exchange = one turn: the replayed reply + its tool live in ONE block.
+        let Block::Turn(t) = &app.transcript()[2] else {
+            panic!("a turn");
+        };
+        assert_eq!(t.n, 1);
         assert_eq!(
-            app.transcript()[3],
-            Block::assistant(vec![
+            t.content,
+            vec![
                 ContentBlock::Text {
                     text: "earlier answer".into()
                 },
@@ -4717,13 +4801,11 @@ mod tests {
                     name: "read".into(),
                     arguments: Default::default(),
                 },
-            ])
+            ]
         );
-        // The tool result keeps the one-line summary form.
-        assert!(
-            matches!(&app.transcript()[4], Block::Tool(t)
-                if t.done && !t.is_error && t.name == "read" && t.output == "128 lines")
-        );
+        assert_eq!(t.tools.len(), 1);
+        assert!(t.tools[0].done && !t.tools[0].is_error && t.tools[0].name == "read");
+        assert_eq!(t.tools[0].output, "128 lines");
         // The resumed context fill reads like a live turn's.
         assert_eq!(app.context_used(), Some(700));
         assert!(app.dirty());
@@ -4739,7 +4821,9 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_head_consumes_the_replys_h1() {
+    fn the_h1_stays_inline_in_the_turn() {
+        // Amendment 9: the speaker head replaces `§N`, so the reply's `# h1` is
+        // NOT consumed — it stays as the reply's markdown heading.
         let mut app = App::new();
         app.handle(AppEvent::Agent(
             root(),
@@ -4747,130 +4831,66 @@ mod tests {
                 message: assistant("# the anchor is the text\n\nAn anchor is the text you quote.\n"),
             },
         ));
-        // The head carries the consumed title…
-        assert_eq!(
-            app.transcript()[0],
-            Block::TurnHead {
-                n: 1,
-                title: Some("the anchor is the text".into()),
-            }
-        );
-        // …and the body no longer contains the `# h1` line (nor its blank).
-        let Block::Assistant { content, .. } = &app.transcript()[1] else {
-            panic!("the assistant block follows the head");
+        let Block::Turn(t) = &app.transcript()[0] else {
+            panic!("a turn");
         };
-        let body = match &content[0] {
-            ContentBlock::Text { text } => text.clone(),
-            _ => panic!("a text block"),
-        };
-        assert!(!body.contains("# the anchor"), "the h1 is consumed: {body:?}");
+        assert_eq!(t.n, 1);
         assert!(
-            body.starts_with("An anchor is the text you quote."),
-            "the heading and its blank are dropped: {body:?}"
+            matches!(&t.content[0], ContentBlock::Text { text } if text.contains("# the anchor")),
+            "the h1 is kept inline"
         );
     }
 
     #[test]
-    fn a_reply_without_an_h1_gets_a_bare_turn_head() {
+    fn turns_number_per_exchange_and_survive_a_seed() {
+        // One run (`AgentStart`…`AgentEnd`) = one turn; two runs number 1, 2.
         let mut app = App::new();
-        app.handle(AppEvent::Agent(
-            root(),
-            AgentEvent::MessageEnd {
-                message: assistant("no heading here"),
-            },
-        ));
-        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
+        for text in ["one", "two"] {
+            app.handle(AppEvent::Agent(root(), AgentEvent::AgentStart));
+            app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd { message: assistant(text) }));
+            app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
+        }
+        let Block::Turn(t1) = &app.transcript()[0] else { panic!("turn 1") };
+        assert_eq!(t1.n, 1);
+        assert!(!t1.open, "the first turn is sealed");
+        let Block::Turn(t2) = &app.transcript()[1] else { panic!("turn 2") };
+        assert_eq!(t2.n, 2);
+
+        // A seeded history numbers its own series; a live exchange continues it.
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("q"), assistant("a")]);
+        // [Notice(divider), User, Turn(1)]
+        let Block::Turn(t) = &app.transcript()[2] else { panic!("the replayed turn") };
+        assert_eq!(t.n, 1);
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentStart));
+        app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd { message: assistant("b") }));
+        app.handle(AppEvent::Agent(root(), AgentEvent::AgentEnd));
+        let Block::Turn(t2) = &app.transcript()[3] else { panic!("the live turn") };
+        assert_eq!(t2.n, 2);
     }
 
     #[test]
-    fn a_deeper_heading_is_not_consumed() {
-        // Only a top-level `# ` is an h1; `##`+ stays inline.
+    fn a_tool_call_message_rides_the_turn() {
+        // A tool-call message and the following reply are the SAME turn.
         let mut app = App::new();
         app.handle(AppEvent::Agent(
             root(),
             AgentEvent::MessageEnd {
-                message: assistant("## not an h1\n\nbody"),
+                message: tool_call_msg("c1", "read"),
             },
         ));
-        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
-    }
-
-    #[test]
-    fn turn_heads_number_per_turn_and_survive_a_seed() {
-        let mut app = App::new();
-        app.handle(AppEvent::Agent(
-            root(),
-            AgentEvent::MessageEnd {
-                message: assistant("one"),
-            },
-        ));
-        app.handle(AppEvent::Agent(
-            root(),
-            AgentEvent::MessageEnd {
-                message: assistant("two"),
-            },
-        ));
-        // [§1, Assistant, §2, Assistant] — one head per reply, monotonic.
-        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
-        assert_eq!(app.transcript()[2], Block::TurnHead { n: 2, title: None });
-
-        // A seeded history numbers its own series; a live reply continues it.
-        let mut app = App::new();
-        app.seed_history(
-            &root(),
-            &[
-                AgentMessage::user_text("q"),
-                assistant("a"),
-                assistant("b"),
-            ],
-        );
-        // [Notice(divider), User, §1, Assistant, §2, Assistant]
-        assert_eq!(app.transcript()[2], Block::TurnHead { n: 1, title: None });
-        assert_eq!(app.transcript()[4], Block::TurnHead { n: 2, title: None });
-        app.handle(AppEvent::Agent(
-            root(),
-            AgentEvent::MessageEnd {
-                message: assistant("c"),
-            },
-        ));
-        // The live reply continues the series as `§3`.
-        assert_eq!(app.transcript()[6], Block::TurnHead { n: 3, title: None });
-    }
-
-    #[test]
-    fn a_tool_call_only_message_gets_no_head_and_does_not_advance_the_counter() {
-        let mut app = App::new();
-        // A tool-call-only assistant message is part of the current turn: no head,
-        // and it does not consume a number.
-        app.handle(AppEvent::Agent(
-            root(),
-            AgentEvent::MessageEnd {
-                message: AgentMessage::Assistant {
-                    content: vec![ContentBlock::ToolCall {
-                        id: "c1".into(),
-                        name: "read".into(),
-                        arguments: Default::default(),
-                    }],
-                    stop_reason: StopReason::ToolUse,
-                    usage: None,
-                    model: None,
-                },
-            },
-        ));
-        assert!(
-            matches!(app.transcript()[0], Block::Assistant { .. }),
-            "no head before the tool call"
-        );
-        // The next TEXT reply is still `§1` — the counter never advanced, and the
-        // text-less tool-call message folded into the turn's foot.
         app.handle(AppEvent::Agent(
             root(),
             AgentEvent::MessageEnd {
                 message: assistant("the reply"),
             },
         ));
-        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
-        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+        assert_eq!(app.transcript().len(), 1, "one exchange = one turn");
+        let Block::Turn(t) = &app.transcript()[0] else {
+            panic!("a turn");
+        };
+        assert_eq!(t.n, 1);
+        assert_eq!(t.content.len(), 2, "the call + the reply");
     }
 
     /// An assistant message carrying one tool call (a text-less round).
@@ -4908,50 +4928,51 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_turn_collects_its_tools_into_one_foot_note() {
+    fn a_tool_turn_collects_its_tools_into_one_turn() {
         let mut app = App::new();
         push_tool_round(&mut app, "c1", "read");
         app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
             message: assistant("the answer"),
         }));
-        // [TurnHead §1, Assistant, Notes([read])] — the empty tool-call message gone.
-        assert_eq!(app.transcript()[0], Block::TurnHead { n: 1, title: None });
-        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
-        let Block::Notes(items) = &app.transcript()[2] else {
-            panic!("a notes block");
+        // One exchange = one turn: the tool-call message, the tool, and the answer.
+        assert_eq!(app.transcript().len(), 1);
+        let Block::Turn(t) = &app.transcript()[0] else {
+            panic!("a turn");
         };
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].name, "read");
-        assert!(items[0].done);
-        assert_eq!(app.transcript().len(), 3);
+        assert_eq!(t.tools.len(), 1);
+        assert_eq!(t.tools[0].name, "read");
+        assert!(t.tools[0].done);
     }
 
     #[test]
-    fn a_prose_only_reply_gets_no_notes_block() {
+    fn a_prose_only_reply_is_one_turn_with_no_ledger() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
             message: assistant("just prose"),
         }));
-        assert_eq!(app.transcript().len(), 2);
-        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
+        assert_eq!(app.transcript().len(), 1);
+        let Block::Turn(t) = &app.transcript()[0] else {
+            panic!("a turn");
+        };
+        assert!(t.tools.is_empty(), "no ledger without tools");
     }
 
     #[test]
     fn a_multi_round_turn_collects_every_tool_in_order() {
+        // The traced-bug case: [A(tc) → T → A(tc) → T → A(answer)] is ONE turn,
+        // its ledger in CALL order (this is the whole point of the change).
         let mut app = App::new();
-        // [A(tc) → T → A(tc) → T → A(answer)] folds to Notes([read, grep]).
         push_tool_round(&mut app, "c1", "read");
         push_tool_round(&mut app, "c2", "grep");
         app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
             message: assistant("the answer"),
         }));
-        // BOTH text-less assistants are gone; only the head, reply, and foot remain.
-        assert_eq!(app.transcript().len(), 3);
-        let Block::Notes(items) = &app.transcript()[2] else {
-            panic!("a notes block");
+        assert_eq!(app.transcript().len(), 1, "one exchange = one turn");
+        let Block::Turn(t) = &app.transcript()[0] else {
+            panic!("a turn");
         };
         assert_eq!(
-            items.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            t.tools.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
             ["read", "grep"],
             "the tools are in call order"
         );
@@ -5400,12 +5421,10 @@ mod tests {
             path: Some("f.rs".into()),
             duration_ms: None,
         }));
-        match app.transcript().last() {
-            Some(Block::Tool(tool)) => {
-                assert_eq!(tool.diff.as_deref(), Some("@@ -1 +1 @@\n-old\n+new"));
-            }
-            other => panic!("expected a tool block, got {other:?}"),
-        }
+        assert_eq!(
+            last_tool(&app).diff.as_deref(),
+            Some("@@ -1 +1 @@\n-old\n+new")
+        );
     }
 
     /// Drive a tool lifecycle whose end carries the UI-only (path, diff) pair.
@@ -5476,10 +5495,7 @@ mod tests {
     fn the_tool_block_carries_the_changed_path() {
         let mut app = App::new();
         tool_end(&mut app, "edit", Some("src/a.rs"), Some("@@ -1 +1 @@\n-old\n+new"));
-        match app.transcript().last() {
-            Some(Block::Tool(tool)) => assert_eq!(tool.path.as_deref(), Some("src/a.rs")),
-            other => panic!("expected a tool block, got {other:?}"),
-        }
+        assert_eq!(last_tool(&app).path.as_deref(), Some("src/a.rs"));
     }
 
     #[test]
@@ -6306,7 +6322,7 @@ mod tests {
             },
         ));
         let open = |a: &App| {
-            matches!(&a.transcript()[0], Block::Assistant { thinking_open, .. } if *thinking_open)
+            matches!(&a.transcript()[0], Block::Turn(t) if t.thinking_open)
         };
 
         app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse selects the assistant block
@@ -6878,16 +6894,35 @@ mod tests {
         ));
     }
 
+    /// The transcript's tools, newest first: a `Turn`'s inline tools (reversed)
+    /// then any standalone `Block::Tool` fallback — the post-`Turn` shape.
+    fn tools_from_end(app: &App) -> Vec<&Tool> {
+        let mut out: Vec<&Tool> = Vec::new();
+        for b in app.transcript().iter().rev() {
+            match b {
+                Block::Turn(t) => out.extend(t.tools.iter().rev()),
+                Block::Tool(t) => out.push(t),
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn tool_expanded(app: &App, nth_from_end: usize) -> bool {
-        app.transcript()
-            .iter()
-            .rev()
-            .filter_map(|b| match b {
-                Block::Tool(t) => Some(t.expanded),
-                _ => None,
-            })
-            .nth(nth_from_end)
+        tools_from_end(app)
+            .get(nth_from_end)
             .expect("a tool block")
+            .expanded
+    }
+
+    /// The newest tool in the transcript — a `Turn`'s last inline tool, or a
+    /// standalone `Block::Tool`.
+    fn last_tool(app: &App) -> &Tool {
+        match app.transcript().last().expect("a transcript block") {
+            Block::Turn(t) => t.tools.last().expect("a tool in the turn"),
+            Block::Tool(t) => t,
+            other => panic!("expected a tool-bearing block, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7042,23 +7077,22 @@ mod tests {
     fn ctrl_g_enters_browse_on_the_last_block_and_clamps_movement() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice(divider), User, TurnHead(§1), Assistant]; the turn
-        // head is chrome, skipped by the selection.
+        // transcript: [Notice(divider), User, Turn] — every block is selectable.
         assert_eq!(app.mode(), Mode::Input);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
         assert_eq!(app.mode(), Mode::Browse);
-        assert_eq!(app.selected(), Some(3), "the last selectable block");
+        assert_eq!(app.selected(), Some(2), "the last selectable block");
 
         app.handle(AppEvent::Key(Key::Char('j'))); // clamp at the end
-        assert_eq!(app.selected(), Some(3));
-        app.handle(AppEvent::Key(Key::Char('k'))); // skips the §1 head
+        assert_eq!(app.selected(), Some(2));
+        app.handle(AppEvent::Key(Key::Char('k')));
         assert_eq!(app.selected(), Some(1));
         app.handle(AppEvent::Key(Key::Char('g')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('k'))); // clamp at the start
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('G')));
-        assert_eq!(app.selected(), Some(3));
+        assert_eq!(app.selected(), Some(2));
     }
 
     #[test]
@@ -7119,8 +7153,8 @@ mod tests {
         // Seed replays a session; on an empty transcript the divider lands first.
         app.seed_history(&root(), &[AgentMessage::user_text("q"), assistant("a")]);
         assert!(matches!(app.transcript()[0], Block::Notice(_)), "divider first");
-        // [Notice(divider), User, TurnHead(§1), Assistant]
-        assert_eq!(app.transcript().len(), 4);
+        // [Notice(divider), User, Turn]
+        assert_eq!(app.transcript().len(), 3);
         // The selection is still absent — never a stale index — and moving picks a
         // real block.
         assert_eq!(app.selected(), None);
@@ -7138,12 +7172,13 @@ mod tests {
             },
         ));
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(1)); // the assistant (0 is the §1 head)
+        assert_eq!(app.selected(), Some(0)); // the turn (block 0)
         // A seed on a non-empty transcript drops its divider at the end, so the
         // selected index still names the same block.
         app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
-        assert!(matches!(app.transcript()[1], Block::Assistant { .. }));
-        assert_eq!(app.selected(), Some(1));
+        assert!(matches!(app.transcript()[0], Block::Turn(_)));
+        assert!(matches!(app.transcript()[1], Block::Notice(_)), "the divider at the end");
+        assert_eq!(app.selected(), Some(0));
     }
 
     #[test]
@@ -7151,7 +7186,7 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(3)); // the last selectable block
+        assert_eq!(app.selected(), Some(2)); // the last selectable block
         // The renderer reports a shorter block list: the selection clamps, never
         // pointing past the end.
         app.set_block_ranges(std::iter::once(0..1).collect());
@@ -7224,24 +7259,20 @@ mod tests {
     }
 
     #[test]
-    fn enter_toggles_the_selected_tool_in_browse() {
+    fn ctrl_t_toggles_the_inline_tool_output() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         push_done_tool(&mut app, &output); // collapsed by default
-        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse selects the tool
-        assert_eq!(app.selected(), Some(0));
         assert!(!tool_expanded(&app, 0));
 
-        app.handle(AppEvent::Key(Key::Enter));
-        assert!(tool_expanded(&app, 0), "Enter expands the selected tool");
-        app.handle(AppEvent::Key(Key::Enter));
-        assert!(!tool_expanded(&app, 0), "Enter collapses it again");
-        // Space is the same.
-        app.handle(AppEvent::Key(Key::Char(' ')));
-        assert!(tool_expanded(&app, 0), "Space matches Enter");
+        // A tool lives inline in its `Turn`; `Ctrl-T` toggles its output.
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        assert!(tool_expanded(&app, 0), "Ctrl-T expands the inline tool");
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        assert!(!tool_expanded(&app, 0), "Ctrl-T collapses it again");
     }
 
     #[test]
@@ -7487,13 +7518,13 @@ mod tests {
     fn home_and_end_fall_back_to_the_transcript_ends() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, TurnHead(§1), Assistant] — no frame measured.
+        // transcript: [Notice, User, Turn] — no frame measured.
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(3));
+        assert_eq!(app.selected(), Some(2));
         app.handle(AppEvent::Key(Key::Home));
         assert_eq!(app.selected(), Some(0), "fallback: the first committed block");
         app.handle(AppEvent::Key(Key::End));
-        assert_eq!(app.selected(), Some(3), "fallback: the last committed block");
+        assert_eq!(app.selected(), Some(2), "fallback: the last committed block");
 
         // With an empty transcript neither key does anything.
         let mut empty = App::new();
@@ -7507,14 +7538,14 @@ mod tests {
     fn brace_keys_step_blocks_and_clamp_at_the_ends() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, TurnHead(§1), Assistant]
+        // transcript: [Notice, User, Turn]
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(3));
+        assert_eq!(app.selected(), Some(2));
 
         app.handle(AppEvent::Key(Key::Char('}')));
-        assert_eq!(app.selected(), Some(3), "}} clamps at the last block");
+        assert_eq!(app.selected(), Some(2), "}} clamps at the last block");
         app.handle(AppEvent::Key(Key::Char('{')));
-        assert_eq!(app.selected(), Some(1)); // skips the §1 head
+        assert_eq!(app.selected(), Some(1));
         app.handle(AppEvent::Key(Key::Char('{')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Char('{')));
@@ -7529,14 +7560,14 @@ mod tests {
         // browse accepts them exactly like the plain `Char` spelling.
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
-        // transcript: [Notice, User, TurnHead(§1), Assistant]
+        // transcript: [Notice, User, Turn]
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(3));
+        assert_eq!(app.selected(), Some(2));
 
         app.handle(AppEvent::Key(Key::Alt('}')));
-        assert_eq!(app.selected(), Some(3), "Alt-}} clamps at the last block");
+        assert_eq!(app.selected(), Some(2), "Alt-}} clamps at the last block");
         app.handle(AppEvent::Key(Key::Alt('{')));
-        assert_eq!(app.selected(), Some(1)); // skips the §1 head
+        assert_eq!(app.selected(), Some(1));
         app.handle(AppEvent::Key(Key::Alt('{')));
         assert_eq!(app.selected(), Some(0));
         app.handle(AppEvent::Key(Key::Alt('{')));
@@ -7552,17 +7583,17 @@ mod tests {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("a"), assistant("b")]);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(3));
+        assert_eq!(app.selected(), Some(2));
 
         app.handle(AppEvent::Key(Key::Alt('x')));
-        assert_eq!(app.selected(), Some(3), "Alt-x is a no-op");
+        assert_eq!(app.selected(), Some(2), "Alt-x is a no-op");
         app.handle(AppEvent::Key(Key::Alt('y')));
-        assert_eq!(app.selected(), Some(3), "Alt-y must not copy");
+        assert_eq!(app.selected(), Some(2), "Alt-y must not copy");
         assert!(app.take_actions().is_empty(), "no action for Alt-y");
         app.handle(AppEvent::Key(Key::Alt('1')));
-        assert_eq!(app.selected(), Some(3), "Alt-1 must not focus a surface");
+        assert_eq!(app.selected(), Some(2), "Alt-1 must not focus a surface");
         app.handle(AppEvent::Key(Key::Alt('j')));
-        assert_eq!(app.selected(), Some(3), "Alt-j must not move the selection");
+        assert_eq!(app.selected(), Some(2), "Alt-j must not move the selection");
     }
 
     #[test]

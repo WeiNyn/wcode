@@ -12,16 +12,17 @@ TUI reads as the same product, given a full screen.
 ## 1. Principles
 
 1. **The base is the transcript over the composer.** Transcript (flex) → the
-   composer (a head line over a full-width `─` rule, the input, a foot line);
-   the transcript renders in a **measure** (a ≤68-col content column, centered
-   once the band reaches 84 cols), while the composer stays full-width. The
-   **head and foot lines carry all chrome** (project/branch + session
-   left/right on the head, the context gauge left and
-   `⏻ plan`/`▤ browse`/state/`↑ N` right on the foot). There is **no session row
-   and no separate status row** — the session id is folded into the head line. A
-   **0–3-row team strip rides above the composer** only while a member is
-   running; it is a rider, not a band. A palette, side panel, or diff is an
-   *overlay* or an addition — never a reflow of the base.
+   composer (the input over a full-width `─` rule, a foot line); the transcript
+   renders in a **measure** (a ≤68-col content column, centered once the band
+   reaches 84 cols), while the composer stays full-width. The chrome rides the
+   transcript's **session-head block** (a scroll-away first block:
+   `WCODE · session <id> ──── project · ⎇ branch`, with `model · effort` far
+   right) and the composer's **foot line** (the context gauge left and
+   `⏻ plan`/`▤ browse`/state/`↑ N`/folio right). There is **no session row, no
+   status row, and no composer head row** — the head chrome scrolls away with the
+   session head. A **0–3-row team strip rides above the composer** only while a
+   member is running; it is a rider, not a band. A palette, side panel, or diff
+   is an *overlay* or an addition — never a reflow of the base.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
    glance; wrapped continuation lines align under it. A **tool panel** adds its
@@ -56,7 +57,6 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 |---|---|---|
 | user prompt | `❯` | accent, bold |
 | assistant prose | — | default fg |
-| section counter | `§` | heading |
 | footnote reference | `¹²³` (`[n]` for n ≥ 10) | link |
 | thinking (in flight) | `···` | dim, italic |
 | thinking (collapsed row) | `··· thinking · N chars` | dim |
@@ -87,9 +87,10 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 
 > **Historical.** Drafts A–E below predate the composer redesign (D1b/D4b) and
 > the D29–D36 work: they show a flat status line and a `────` rule, whereas the
-> shipped screen carries the chrome in the **composer's head and foot lines** and has
-> no status row or session row. Read **§4** for the shipped layout; the drafts
-> are kept for the reasoning, not as current targets.
+> shipped screen carries the chrome in a **scroll-away session-head block** and
+> the composer's **foot line**, and has no status row or session row. Read **§4**
+> for the shipped layout; the drafts are kept for the reasoning, not as current
+> targets.
 
 ### A — idle, a completed exchange (78 cols)
 
@@ -183,7 +184,8 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 ## 4. Component specs
 
 **Transcript** — a `Vec<Block>` of committed blocks plus one live block. Block
-kinds: `User`, `Assistant`, `Tool`, `Notice`, `Error`, `Btw`, `Diff`, **`Todos`**.
+kinds: `User`, `Turn`, `Tool`, `Notice`, `Error`, `Btw`, `Diff`, `Todos`,
+and the transcript's first block, **`SessionHead`**.
 Each block computes its own height at draw time. A wrapped-line cache keyed by
 `(revision, width)` is the P2 optimization (do not re-wrap static history every
 frame). Follow-tail while streaming; scroll-lock when the user scrolls up (P1).
@@ -194,10 +196,18 @@ divider marks the replayed prefix. With **no** history the transcript opens on a
 dim seeded hint (`❯ type a message · /help for commands · F1 for keys`), not a
 blank pane.
 
-- **Section head** — a `§N  title` block on its own line before each assistant
-  reply: the number is **per session, monotonic** (`§1`, `§2`, …) and the
-  reply's **first top-level `# h1`** is **consumed** into the head (the heading
-  line leaves the body); a reply with no `# h1` renders a bare `§N`. It is
+- **Session head** — the transcript's **first committed block** (D009): a
+  scroll-away running head `WCODE · session <id> ──── project · ⎇ branch`
+  (reading (i)), over a **single** `─` rule **on the measure** — one row + one
+  rule. `WCODE` is a **reverse-video** run (`Modifier::REVERSED`; no glyph, no
+  role), then `· session <id>`; `project · ⎇ branch` reads left-to-right and
+  `model · effort` is a **far-right group** on the same row (option A). It is a
+  **transcript block**, not a fourth band — it scrolls away. At 48 cols the
+  ladder sheds `session` first, then the branch.
+- **Speaker head** — each message opens with a **speaker** head: `YOU` for the
+  user block (replacing the transcript's `❯`) and `WCODE` for the assistant turn —
+  a **reverse-video** run (`Modifier::REVERSED`; no glyph, no role). It replaces
+  the retired `§N` section head (`§` is no longer in the glyph table, §2). It is
   **chrome** — never a browse selection target, never copied.
 - **Code plate** — a fenced code block renders a **caption line** above it,
   `plate N — <info>` (the fence's info string verbatim; just `plate N` when
@@ -205,16 +215,15 @@ blank pane.
   monotonic**. **No disclosure** — the code always shows (the design's `▸`
   collapse is deferred). No new glyph (`plate`/`—`/the digits/`/` are ASCII;
   `─` is declared).
-- **Turn foot (notes)** (D31, revised) — a tool is **not** a mid-flow panel any
-  more. At the answer reply's commit the turn's tools fold into ONE
-  `Block::Notes`, drawn **frameless** at the turn's foot under a `── notes ──`
-  rule: one row per note, `{n} » {name}  {target}` with a `▸`/`▣` toggle, and —
-  expanded or errored — the params + the full body + the
-  `✓ {name} · {note} · {ms}` summary. The prose keeps a `¹` reference where the
-  call was (suppressed on a text-less tool-call round). The **`bash` command is
-  shown in full** (it wraps, never clips). A tool error is forced expanded.
-  `Ctrl-T` toggles every note; browse `Enter`/`Space`/`y` act per note. The
-  framed D31 **panel is retired**.
+- **Tools (inline)** (D009) — a tool renders **inline, in call order**: at the
+  **position it was called**, flowed with the prose. The render walks the turn's
+  `content` and emits tool `k` at the `k`-th `ToolCall`; the prose keeps a `¹²³`
+  mark where the call was (suppressed on a text-less tool-call round). Each tool
+  is a `» name  target` row with a `▸`/`▣` toggle, and — expanded or errored —
+  the params + the full body + the `✓ {name} · {note} · {ms}` summary. The
+  **`bash` command is shown in full** (it wraps, never clips). A tool error is
+  forced expanded. `Ctrl-T` toggles every tool's output; browse
+  `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
 - **Thinking** (D33) — **in flight** it streams expanded inline (the `···` gutter
   plus the `thinking` italic body); on **commit** it collapses to a one-line
   `··· thinking · N chars` row with the same `▸`/`▾`/`▣` affordances, expandable.
@@ -257,9 +266,10 @@ beside the sessions. (Shift-Enter needs a terminal that reports the modifier —
 kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
 **Layout** — top to bottom (the sidebar, `Ctrl-B`, is an optional left column):
-1. the **transcript** (flex, plain, scrollable; committed assistant messages
-   render as markdown — headings, bullets, fenced code, aligned tables, inline
-   `code`/`**bold**`). It renders in a **measure** — a content column at most
+1. the **transcript** (flex, plain, scrollable; its first block is the
+   **session head** — see above). Committed assistant messages render as
+   markdown — headings, bullets, fenced code, aligned tables, inline
+   `code`/`**bold**`. It renders in a **measure** — a content column at most
    **68 cols** wide, **centered** in its band once the band reaches **84 cols**
    (a real margin each side); below 84 the content uses the full band width (so
    an 80-col terminal keeps its `❯` at the gutter). The **composer band is never
@@ -269,20 +279,21 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
    a band: it collapses to nothing when no teammate runs;
-3. the **composer** — a **running-head block** (a head line over a full-width
-   `─` rule) above an **open writing line** (the input), with a **foot line**
-   below. The head line carries `project ⎇ branch · session a1b2c3d4` left and
-   `model · effort` right; the foot line carries the context gauge left and
+3. the **composer** — an **open writing line** (the input) over a full-width
+   `─` rule, with a **foot line** below. The composer's **head row is dropped**
+   (D009): the chrome it carried (`project`/`branch`/`session`, `model`/`effort`)
+   now rides the transcript's **session head** (above), and the composer keeps
+   only the **foot line** — the context gauge left and
    `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` `<N>/<M>` right
    (the `btw…` state while a `/btw` side ask is in flight; the **folio**
    `<N>/<M>` is the surface's turn count, `N == M`, so a first turn reads
-   `1/1`). There is **no box and
-   no corners**, and **no session row and no status row**.
+   `1/1`). There is **no box and no corners**, and **no session row, no status
+   row, and no head row**.
 The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored
-green→yellow→red by fill, then `used / limit`. The head/foot titles clip with
-`…` then drop least-important-first (head: the session id, then branch; foot:
-the `[↑ N]` scroll, then the gauge, then `⏻ plan`/`▤ browse`). The session id is
-shortened to 8 chars.
+green→yellow→red by fill, then `used / limit`. The session-head and composer-foot
+titles clip with `…` then drop least-important-first (session head: the session
+id, then branch; foot: the `[↑ N]` scroll, then the gauge, then
+`⏻ plan`/`▤ browse`). The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
 ≥ 80 cols; below that the layout is untouched), **off by default** so the base
@@ -348,7 +359,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 - **Thinking** — **resolved (D33)**: in flight it streams **expanded** inline; on commit it collapses to a one-line `··· thinking · N chars` row, expandable. Tool *output* is a panel (D31), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
 - **Timestamps** on turns: lean no.
-- **Header/title bar**: decided **no** — the **composer's head and foot lines** carry session/project/branch and model/effort, and `Ctrl-B` docks the sidebar for the rest.
+- **Header/title bar**: decided **no** — the chrome rides the transcript's **session-head block** (a scroll-away block, not a fixed top band) and the composer's **foot line**; `Ctrl-B` docks the sidebar for the rest.
 - **Block separation**: blank between *roles* (kept); a tool is a panel and a thinking block is an affordance row, so "between every block" is moot.
 - **Gutter vs flat**: gutter (drafted) — it is the main thing the TUI buys over
   the line loop. Revisit only if it costs width on 80-col terminals.

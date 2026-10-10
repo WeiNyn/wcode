@@ -17,7 +17,7 @@ use wcode_harness::event::{TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{AffordanceHit, App, Block, InputView, KEYS, Mode, Overlay, Picker, Tool};
+use crate::app::{AffordanceHit, App, Block, InputView, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::app::{ChangeRow, change_totals, changes_header};
 use crate::markdown;
 use crate::theme;
@@ -33,6 +33,11 @@ const PANEL_GUTTER: &str = "  ";
 /// The tool block's own gutter before the panel frame (matching the other
 /// blocks' 3-column indent).
 const PANEL_INDENT: &str = "   ";
+/// The three-column gutter the speaker head sits in (` WCODE`), so the content
+/// column (col 6) aligns under a two-space gap after the name.
+const SPEAKER_PREFIX: &str = "   ";
+/// The gap between the speaker name and the content column on the head row.
+const SPEAKER_GAP: &str = "  ";
 /// Output lines a collapsed tool shows before a `… +N more` hint.
 const TOOL_PREVIEW_LINES: usize = 4;
 /// Output lines a fully expanded tool shows before the hint returns.
@@ -82,6 +87,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // so every geometry below — and every popup/overlay anchor — is
     // byte-identical.
     // D5: a fresh, empty transcript carries a dim `type a message …` hint.
+    // Seat/refresh the session-head block FIRST (D009): it is block 0, so the D5
+    // hint lands below it (index 1).
+    app.sync_session_head();
     app.seed_empty_hint();
     let (sidebar, area) = if app.sidebar() && full.width >= SIDEBAR_MIN_WIDTH {
         let [sb, bands] = Layout::horizontal([
@@ -122,19 +130,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         working_count as u16
     };
 
-    // At least one transcript row is reserved; the composer band (the head line,
-    // the rule, the input, and the foot line) then has priority over the team
-    // region, so a short terminal degrades gracefully instead of overflowing.
-    // There is no session band — the id folds into the composer's head line
-    // (D1b).
+    // At least one transcript row is reserved; the composer band (the rule, the
+    // input, and the foot line) then has priority over the team region, so a short
+    // terminal degrades gracefully instead of overflowing. There is no session
+    // band and no composer head row — the id folds into the transcript's
+    // session-head block (D009).
     let spare = area.height.saturating_sub(1);
-    let box_h = (input_height + 3).min(spare).max(1);
+    let box_h = (input_height + 2).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
     let areas = Layout::vertical([
         Constraint::Min(1),         // transcript (flexes)
         Constraint::Length(team_h), // working-team region (a rider, 0..=3)
-        Constraint::Length(box_h),  // composer band (head · rule · input · foot)
+        Constraint::Length(box_h),  // composer band (rule · input · foot)
     ])
     .split(area);
     let body = areas[0];
@@ -148,9 +156,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_input_box(frame, editor, app, &view);
     // The completion/search popups anchor on the composer band's TOP row — the
-    // head line — so their bottom edge rests on the head line and they float
-    // over the transcript interior, never over the composer. (The row below is
-    // the rule; resting on the rule would cover the head line.)
+    // full-width rule — so their bottom edge rests on the rule and they float over
+    // the transcript interior, never over the composer.
     let above = Rect {
         y: editor.y,
         height: 1,
@@ -488,9 +495,9 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     // D32 — publish the affordance cells. A thinking block's collapsed `▸`/`▣`
-    // row is the block's FIRST line; a `Block::Notes` publishes one hit PER NOTE
-    // (each note's head row is its toggle row). The rects are pure functions of
-    // (kind, width, range) — recomputed every frame, never cached (the
+    // row is the block's FIRST line; a `Block::Turn` publishes one hit PER INLINE
+    // TOOL (each tool's head row is its toggle row). The rects are pure functions
+    // of (kind, width, range) — recomputed every frame, never cached (the
     // (rev, width) cache stores `Line`s, not geometry).
     let (_, note_copy) = note_affordance_cols(measure);
     let affordances: Vec<AffordanceHit> = ranges
@@ -499,12 +506,27 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .filter_map(|(i, range)| {
             let row0 = range.start.checked_sub(start)?;
             match &app.transcript()[i] {
-                Block::Notes(items) => {
-                    // Mirror `notes_lines`: the rule (1 row), then each note's head
-                    // (its toggle row) + its expanded body.
+                Block::Turn(turn) => {
+                    // A `Turn` is: the `WCODE` head (1 row), then the prose and the
+                    // tools interleaved INLINE in call order. Publish the thinking
+                    // affordance (on the prose's first row) and one hit per inline
+                    // tool's head row.
                     let mut hits = Vec::new();
-                    let mut off = 1usize; // past the `── notes ──` rule
-                    for (k, tool) in items.iter().enumerate() {
+                    if matches!(turn.content.first(), Some(ContentBlock::Thinking { .. })) {
+                        let r = row0 + 1;
+                        if r < window.len() {
+                            let y = area.y + r as u16;
+                            hits.push(AffordanceHit {
+                                block: i,
+                                item: None,
+                                toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
+                                copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
+                            });
+                        }
+                    }
+                    // The inline tool offsets MIRROR the render walk exactly (both
+                    // come from `turn_inline`), so a hit can never drift.
+                    for (k, off) in inline_tool_offsets(turn, measure) {
                         let r = row0 + off;
                         if r < window.len() {
                             let y = area.y + r as u16;
@@ -517,15 +539,15 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                                 copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
                             });
                         }
-                        off += note_height(tool, measure);
                     }
                     Some(hits)
                 }
                 Block::Tool(tool) => {
                     // A standalone tool (a live/running tool, before its answer
-                    // commits) is a one-note list; its head follows the rule.
+                    // commits) is a single inline panel; with NO `── notes ──` rule
+                    // its head row is block-relative line 0.
                     let _ = tool;
-                    let r = row0 + 1;
+                    let r = row0;
                     if r >= window.len() {
                         return None;
                     }
@@ -533,20 +555,6 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                     Some(vec![AffordanceHit {
                         block: i,
                         item: Some(0),
-                        toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
-                        copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
-                    }])
-                }
-                Block::Assistant { content, .. }
-                    if matches!(content.first(), Some(ContentBlock::Thinking { .. })) =>
-                {
-                    if row0 >= window.len() {
-                        return None;
-                    }
-                    let y = area.y + row0 as u16;
-                    Some(vec![AffordanceHit {
-                        block: i,
-                        item: None,
                         toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
                         copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
                     }])
@@ -632,29 +640,255 @@ fn paint_bar(line: &mut Line<'static>) {
 
 pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
-        Block::User(text) => wrap(text, width, " ❯ ", "   ", user()),
-        // A turn head: ` §N  title` (or a bare ` §N`), its own line before the
-        // assistant block. The 1-col leading margin matches the other blocks.
-        Block::TurnHead { n, title } => {
-            let text = match title {
-                Some(title) => format!(" §{n}  {title}"),
-                None => format!(" §{n}"),
-            };
-            vec![Line::from(Span::styled(text, heading()))]
-        }
-        Block::Assistant {
-            content,
-            thinking_open,
-        } => content_lines(content, width, false, *thinking_open),
-        Block::Tool(tool) => notes_lines(std::slice::from_ref(tool), width),
+        // The transcript's user block: a `YOU` speaker head + the wrapped prompt
+        // (the `❯` glyph stays the composer's, not the transcript's).
+        Block::User(text) => speaker_lines(Speaker::You, text, width),
+        // The book header (D009): the running head + its `─` rule, on the measure.
+        Block::SessionHead(head) => session_head_lines(head, width),
+        // One exchange: the `WCODE` head, the run's prose (with `¹` marks), and
+        // the ledger (its foot).
+        Block::Turn(turn) => turn_lines(turn, width),
+        // A standalone tool (a live/running tool before its answer commits, or an
+        // orphan with no turn): a single inline tool panel (no `── notes ──` rule).
+        Block::Tool(tool) => tool_inline_lines(1, tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
         Block::Todos(todos) => todos_lines(todos, width),
-        // The turn's foot: the note apparatus, frameless (§11).
-        Block::Notes(items) => notes_lines(items, width),
     }
+}
+
+/// A transcript speaker head (`YOU` / `WCODE`) — a reverse-video run of the name
+/// in the gutter, one row (`§15 (b)`). No glyph, no role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Speaker {
+    You,
+    Wcode,
+}
+
+impl Speaker {
+    fn label(self) -> &'static str {
+        match self {
+            Speaker::You => "YOU",
+            Speaker::Wcode => "WCODE",
+        }
+    }
+}
+
+/// The head row's spans for a speaker: a 3-cell gutter holding the reverse-video
+/// name, then a `SPEAKER_GAP` to the content column (col 6), then the first line
+/// of `text`. The name is padded to `SPEAKER_PREFIX` width so the head cell is a
+/// filled run (reverse video over the padded name).
+fn speaker_head(speaker: Speaker, text: &str) -> Line<'static> {
+    let name = speaker.label();
+    let pad = SPEAKER_PREFIX.chars().count().saturating_sub(name.chars().count());
+    Line::from(vec![
+        Span::styled(format!(" {}", name), selection_style()),
+        Span::styled(" ".repeat(pad + SPEAKER_GAP.chars().count()), dim()),
+        Span::styled(text.to_string(), body()),
+    ])
+}
+
+/// The continuation row gutter, aligning the body under the content column.
+fn speaker_cont(text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(SPEAKER_PREFIX.to_string(), dim()),
+        Span::styled(SPEAKER_GAP.to_string(), dim()),
+        Span::styled(text.to_string(), body()),
+    ])
+}
+
+/// A speaker-headed text block: line 0 is the head + the first wrapped line, the
+/// rest the body gutter. An empty `text` renders the bare head.
+fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static>> {
+    let head_w = SPEAKER_PREFIX.chars().count() + SPEAKER_GAP.chars().count();
+    let cont_w = SPEAKER_PREFIX.chars().count() + SPEAKER_GAP.chars().count();
+    let mut out = Vec::new();
+    let mut first_line = true;
+    for raw in text.split('\n') {
+        let prefix_w = if first_line { head_w } else { cont_w };
+        let avail = width.saturating_sub(prefix_w).max(1);
+        let segments = greedy_wrap(raw, avail);
+        let mut iter = segments.into_iter();
+        let head = iter.next().unwrap_or_default();
+        if first_line {
+            out.push(speaker_head(speaker, &head));
+            first_line = false;
+        } else {
+            out.push(speaker_cont(&head));
+        }
+        for segment in iter {
+            out.push(speaker_cont(&segment));
+        }
+    }
+    out
+}
+
+/// The session-head block's lines (D009 §1; tui-design §4): row 0 is the running
+/// head, row 1 a full-width `─` rule **on the measure**. Blocks render at
+/// `width == measure`, so "on the measure" is automatic — at ≥84 cols the head
+/// sits in the centered 68-col column, not full-bleed. # Contracts: EXACTLY 2
+/// lines (row 0 + the rule). No `¹`, no affordance — the head is chrome.
+fn session_head_lines(head: &SessionHead, width: usize) -> Vec<Line<'static>> {
+    vec![
+        session_head_row(head, width),
+        Line::from(Span::styled("─".repeat(width), dim())),
+    ]
+}
+
+/// Row 0 of the session head: `padded_row(left, right, "─", dim(), width)`, where
+/// `left` = `[ WCODE reversed ] · session <short_id>` and `right` =
+/// `"project · ⎇ branch   model · effort"` — the **3-space gap sits INSIDE the
+/// right run** (D009 §3 option A), and `padded_row` supplies the ONE `─` fill
+/// between `left` and `right`. The ladder (fed to `pick_titles`): full → drop
+/// `session` → drop the branch → drop `effort` → truncate with `…`. The raw
+/// `head.session` is shortened via `short_id`.
+fn session_head_row(head: &SessionHead, width: usize) -> Line<'static> {
+    let session = head
+        .session
+        .as_deref()
+        .map(|id| format!(" · session {}", short_id(id)));
+    let branch = head.branch.as_deref().map(|b| format!("⎇ {b}"));
+    let effort = head.effort.as_deref();
+
+    let left = |with_session: bool| -> Vec<Span<'static>> {
+        let mut spans = vec![Span::styled("WCODE", selection_style())];
+        if let (true, Some(s)) = (with_session, &session) {
+            spans.push(Span::styled(s.clone(), dim()));
+        }
+        spans
+    };
+    let right = |with_branch: bool, with_effort: bool| -> Vec<Span<'static>> {
+        // `project · ⎇ branch` — the project is `muted`, the joined rest `dim`.
+        let project_branch = if with_branch {
+            join_title(&head.project, branch.as_deref())
+        } else {
+            head.project.clone()
+        };
+        let (head_part, rest) = split_at_char(&project_branch, head.project.chars().count());
+        let mut spans = vec![Span::styled(head_part, muted())];
+        if !rest.is_empty() {
+            spans.push(Span::styled(rest, dim()));
+        }
+        // The 3-space gap before the model group, INSIDE the right run.
+        spans.push(Span::styled("   ".to_string(), dim()));
+        spans.push(Span::styled(head.model.clone(), dim()));
+        if let (true, Some(e)) = (with_effort, &effort) {
+            spans.push(Span::styled(format!(" · {e}"), dim()));
+        }
+        spans
+    };
+
+    let levels = vec![
+        (left(true), right(true, true)),
+        (left(false), right(true, true)),
+        (left(false), right(false, true)),
+        (left(false), right(false, false)),
+    ];
+    // A 1-col gap so the `─` fill always has room; `padded_row` fills it.
+    let (l, r) = pick_titles(&levels, width.saturating_sub(1));
+    padded_row(&l, &r, "─", dim(), width as u16)
+}
+
+/// One exchange (`Block::Turn`): the `WCODE` head over the run's body (prose +
+/// tools, inline).
+fn turn_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
+    let mut out = speaker_lines(Speaker::Wcode, "", width);
+    out.extend(turn_inline_lines(turn, width));
+    out
+}
+
+/// The turn's body: the prose/thinking interleaved with each tool's panel, in
+/// call order. # Contracts: exactly one panel per tool (a `ToolCall` whose result
+/// is not yet in `turn.tools` emits the mark but no panel); the `¹` is SUPPRESSED
+/// when no prose landed since the previous tool (a text-less round, D009 §4).
+fn turn_inline_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
+    turn_inline(turn, width).0
+}
+
+/// The turn-relative row offset (line 0 = the `WCODE` head) of each inline tool's
+/// head row, in call order — the D32 mirror of `turn_inline_lines`. # Contracts:
+/// one `(k, off)` per tool ACTUALLY emitted (a `ToolCall` with no result is
+/// skipped); `off` accounts for every prose/thinking/tool row above it. A drift
+/// from the render misaligns EVERY hit below it.
+fn inline_tool_offsets(turn: &Turn, width: usize) -> Vec<(usize, usize)> {
+    turn_inline(turn, width).1
+}
+
+/// The single walk behind [`turn_inline_lines`] and [`inline_tool_offsets`], so
+/// the render and the D32 hit map can never drift: it returns the turn's body
+/// lines and the head-relative row offset of each emitted tool's head row.
+fn turn_inline(turn: &Turn, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut offsets: Vec<(usize, usize)> = Vec::new();
+    // Line 0 is the `WCODE` head; the body starts at line 1.
+    let mut off = 1usize;
+    // The `¹` ordinal: the count of `ToolCall`s seen (one per-turn series).
+    let mut refn = 0usize;
+    // Whether the line just emitted is prose (a `¹` may attach) or a tool row —
+    // the structural "suppressed on a text-less round" rule (D009 §4).
+    let mut tail_is_prose = false;
+    for (i, block) in turn.content.iter().enumerate() {
+        match block {
+            ContentBlock::Text { text } => {
+                let lines = markdown::render(text, width);
+                tail_is_prose |= !lines.is_empty();
+                off += lines.len();
+                out.extend(lines);
+            }
+            ContentBlock::Thinking { text } => {
+                // The affordance belongs to the leading `Thinking` only.
+                let lines = thinking_block_lines(text, width, turn.thinking_open, i == 0);
+                tail_is_prose = true;
+                off += lines.len();
+                out.extend(lines);
+            }
+            ContentBlock::ToolCall { .. } => {
+                refn += 1;
+                if tail_is_prose && let Some(last) = out.last_mut() {
+                    last.spans.push(Span::styled(footnote_mark(refn), link()));
+                }
+                // Mid-run: the assistant message commits BEFORE
+                // `ToolExecutionStart`, so the result may not be in `tools` yet —
+                // emit the mark, but no panel.
+                if let Some(tool) = turn.tools.get(refn - 1) {
+                    offsets.push((refn - 1, off));
+                    let lines = tool_inline_lines(refn, tool, width);
+                    off += lines.len();
+                    out.extend(lines);
+                }
+                tail_is_prose = false;
+            }
+        }
+    }
+    (out, offsets)
+}
+
+/// One tool's inline panel: the `» name  target` head row (its `▸`/`▣` toggle,
+/// [`note_head_row`]), then — running, OR expanded-or-errored — the params + the
+/// full body + the `✓ {name} · {note} · {ms}` summary. NO `── notes ──` rule. `n`
+/// is the tool's 1-based call order. # Contracts: ≥1 line; row 0 is the D32 toggle
+/// row; the standalone `Block::Tool` also uses it with `n = 1`.
+fn tool_inline_lines(n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
+    let content_w = panel_content_width(width);
+    let mut out = vec![note_head_row(n, tool, width)];
+    let expanded = tool.expanded || tool.is_error;
+    if !tool.done {
+        // Running: the head + the growing tail (no `✓` yet).
+        out.extend(panel_param_lines(&tool.params, content_w));
+        out.extend(tool_panel_body(tool, content_w, expanded));
+        return out;
+    }
+    if expanded {
+        out.extend(panel_param_lines(&tool.params, content_w));
+        out.extend(tool_panel_body(tool, content_w, true));
+    } else {
+        // Collapsed: the summary row only — the body is behind the disclosure.
+        let (note, _) = summary_line(&tool.output);
+        out.push(tool_summary_row(tool, &note));
+    }
+    out
 }
 
 /// Render the live (streaming) assistant message for `width` — the same body
@@ -730,36 +964,6 @@ fn footnote_mark(n: usize) -> String {
     }
 }
 
-/// The turn's footnote list: ONE `── notes ──` rule row, then one group per note
-/// — the head `{n} » {name}  {target}` (its `▸`/`▣` affordances right-aligned),
-/// and, when expanded or errored, the params + full output + the
-/// `  ✓ {name} · {note} · {ms}` summary. **Frameless** (§11). Note `k`'s FIRST
-/// line is its toggle row (D32).
-fn notes_lines(items: &[Tool], width: usize) -> Vec<Line<'static>> {
-    let content_w = panel_content_width(width);
-    let mut out = vec![notes_rule(width)];
-    for (k, tool) in items.iter().enumerate() {
-        out.push(note_head_row(k + 1, tool, width));
-        let expanded = tool.expanded || tool.is_error;
-        if !tool.done {
-            // Running: the head + the growing tail (no `✓` yet).
-            out.extend(panel_param_lines(&tool.params, content_w));
-            out.extend(tool_panel_body(tool, content_w, expanded));
-            continue;
-        }
-        if expanded {
-            out.extend(panel_param_lines(&tool.params, content_w));
-            out.extend(tool_panel_body(tool, content_w, true));
-        } else {
-            // Collapsed: the summary row only — the body (params + output) is
-            // behind the disclosure.
-            let (note, _) = summary_line(&tool.output);
-            out.push(tool_summary_row(tool, &note));
-        }
-    }
-    out
-}
-
 /// One note's head row: `   {n} » {name}  {target}`, the `▸`/`▣` affordances
 /// right-aligned (this row is the note's D32 toggle/copy row). `{n}` is `dim`;
 /// the `» {name}` run is `tool_name()`.
@@ -788,36 +992,6 @@ fn note_head_row(n: usize, tool: &Tool, width: usize) -> Line<'static> {
 /// `▸ ▣` run flush right).
 fn note_affordance_cols(width: usize) -> (usize, usize) {
     (width.saturating_sub(3), width.saturating_sub(1))
-}
-
-/// The rendered height of one note group in [`notes_lines`]: its head row plus
-/// the running tail, the expanded body, or the collapsed summary. Mirrors
-/// `notes_lines` exactly.
-fn note_height(tool: &Tool, width: usize) -> usize {
-    let content_w = panel_content_width(width);
-    let expanded = tool.expanded || tool.is_error;
-    if !tool.done {
-        return 1
-            + panel_param_lines(&tool.params, content_w).len()
-            + tool_panel_body(tool, content_w, expanded).len();
-    }
-    if expanded {
-        1 + panel_param_lines(&tool.params, content_w).len()
-            + tool_panel_body(tool, content_w, true).len()
-    } else {
-        2 // head + summary
-    }
-}
-
-/// The `── notes ──` rule: `   ── notes ` + `─`.repeat(fill) to `width`, all `dim`
-/// (the `todos_lines` head idiom). `─` is already in the §2 table.
-fn notes_rule(width: usize) -> Line<'static> {
-    let head = "   ── notes ";
-    let fill = width.saturating_sub(head.chars().count());
-    Line::from(vec![
-        Span::styled(head.to_string(), dim()),
-        Span::styled("─".repeat(fill), dim()),
-    ])
 }
 
 /// A committed thinking block (D33): the collapsed `··· thinking · N chars
@@ -1356,30 +1530,17 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
 /// The input is drawn at the band's **full width**, so the composer wraps at
 /// `area.width - 3` (the `❯ ` gutter), not the box's narrower inner width.
 ///
-/// On a band too short to seat all four rows the **rule drops first** (it is
+/// On a band too short to seat all three rows the **rule drops first** (it is
 /// pure decoration), then the foot line — so a 1-row input always keeps its
-/// writing line when the band has room for the head + the input.
+/// writing line. The composer's **head row is dropped** (D009): the chrome it
+/// carried now rides the transcript's session-head block.
 fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
-    let (tl, tr, bl, br) = corner_titles(app, area);
+    let (bl, br) = corner_titles(app, area);
     let w = area.width;
     let h = area.height;
     let mut row = area.y;
-    // Head line — always drawn. A running head is plain: the two titles are
-    // separated by spaces, not a rule.
-    if h >= 1 {
-        frame.render_widget(
-            Paragraph::new(padded_row(&tl, &tr, " ", Style::default(), w)),
-            Rect {
-                x: area.x,
-                y: row,
-                width: w,
-                height: 1,
-            },
-        );
-        row += 1;
-    }
-    // The full-width rule — only when the band seats head · rule · input · foot.
-    if h >= 4 {
+    // The full-width rule — only when the band seats rule · input · foot.
+    if h >= 3 {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled("─".repeat(w as usize), dim()))),
             Rect {
@@ -1392,7 +1553,7 @@ fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
         row += 1;
     }
     // Foot line — pinned to the last row when it leaves the input a row.
-    let foot = (h >= 3).then(|| area.y + h - 1);
+    let foot = (h >= 2).then(|| area.y + h - 1);
     // The writing line fills the gap between the head/rule and the foot line.
     let input_end = foot.unwrap_or(area.y + h);
     if input_end > row {
@@ -1444,61 +1605,23 @@ fn padded_row(
     Line::from(spans)
 }
 
-/// Assemble the composer's head/foot titles, width-budgeted to `area` so the two
-/// titles on a row never overdraw each other.
+/// Assemble the composer's foot-line pair (left: the context gauge; right:
+/// `[⏻ plan] · [▤ browse] · {state} · [↑ N] <N>/<M>`), width-budgeted to `area` so
+/// the two titles never overdraw each other. The composer's **head-row pair is
+/// gone** (D009) — the chrome it carried now rides the transcript's session-head
+/// block.
 ///
-/// Each row's two titles share the row: `area.width` minus a 1-col gap so they
-/// never touch (there are no border columns — the composer is frameless). Fields
-/// are dropped least-important-first (top: ` · ⎇ branch` then ` · effort`;
-/// bottom: `↑ N` scroll, then the gauge, then `⏻ plan`/`▤ browse`), and a
-/// still-too-long title is truncated with a trailing `…`. The surviving minimum
-/// is the project (head-left) and the mode/state (foot-right).
-fn corner_titles(
-    app: &App,
-    area: Rect,
-) -> (Line<'static>, Line<'static>, Line<'static>, Line<'static>) {
-    // Title columns available per row (a 1-col gap between the two titles; the
-    // composer is frameless, so there are no border columns to reserve).
+/// Each title shares the row: `area.width` minus a 1-col gap so they never touch
+/// (there are no border columns — the composer is frameless). Fields are dropped
+/// least-important-first (the `↑ N` scroll, then the gauge, then
+/// `⏻ plan`/`▤ browse`), and a still-too-long title is truncated with a trailing
+/// `…`. The surviving minimum is the mode/state (foot-right).
+fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
+    // Title columns available (a 1-col gap between the two titles; the composer
+    // is frameless, so there are no border columns to reserve).
     let avail = (area.width as usize).saturating_sub(1);
 
-    // --- top row: `{project} · ⎇ {branch}`   ·   `{model} · {effort}` --------
-    let project = app.cwd().unwrap_or("wcode").to_string();
-    let model = app.status().model.clone();
-    let branch = app.git().map(|git| format!("⎇ {git}"));
-    let session = app
-        .status()
-        .session
-        .as_deref()
-        .map(|id| format!("session {}", short_id(id)));
-    let effort = app.status().effort.clone();
-    let tl = |text: &str| -> Vec<Span<'static>> {
-        let (head, rest) = split_at_char(text, project.chars().count());
-        let mut spans = vec![Span::styled(head, muted())];
-        if !rest.is_empty() {
-            spans.push(Span::styled(rest, dim()));
-        }
-        spans
-    };
-    let tr = |text: String| -> Vec<Span<'static>> { vec![Span::styled(text, dim())] };
-    let top_levels = vec![
-        // Fullest → dropped: `session` goes first (D1b).
-        (
-            tl(&join_title(
-                &join_title(&project, branch.as_deref()),
-                session.as_deref(),
-            )),
-            tr(join_title(&model, effort.as_deref())),
-        ),
-        (
-            tl(&join_title(&project, branch.as_deref())),
-            tr(join_title(&model, effort.as_deref())),
-        ),
-        (tl(&project), tr(join_title(&model, effort.as_deref()))),
-        (tl(&project), tr(model.clone())),
-    ];
-    let (top_left, top_right) = pick_titles(&top_levels, avail);
-
-    // --- bottom row: the gauge   ·   `⏻ plan · ▤ browse · {state} · ↑ N` -----
+    // --- foot row: the gauge   ·   `⏻ plan · ▤ browse · {state} · ↑ N` --------
     let (state, state_style) = match (app.running(), app.run_elapsed()) {
         (true, Some(d)) => (
             format!("⠹ running {}", format_ms(d.as_millis() as u64)),
@@ -1529,7 +1652,7 @@ fn corner_titles(
             spans.push(Span::styled(format!("↑ {}", app.scroll()), dim()));
         }
         // The folio: `<N>/<M>` = the surface's turn count (N == M — the same
-        // series as the `§N` heads); a first turn reads `1/1`. Space-joined (the
+        // series as the turn order); a first turn reads `1/1`. Space-joined (the
         // design's folio convention), not a second `·`, so the foot line keeps
         // ≤1 `·` per metadata group.
         if app.turns() > 0 {
@@ -1545,9 +1668,7 @@ fn corner_titles(
         (Vec::new(), br(true, true, false)),
         (Vec::new(), br(false, false, false)),
     ];
-    let (bottom_left, bottom_right) = pick_titles(&bottom_levels, avail);
-
-    (top_left, top_right, bottom_left, bottom_right)
+    pick_titles(&bottom_levels, avail)
 }
 
 /// Join a title's base with an optional extra using the ` · ` separator.
@@ -1688,14 +1809,14 @@ pub(crate) fn dim() -> Style {
     theme::theme().dim
 }
 
+/// Assistant prose — the uncolorized default.
+fn body() -> Style {
+    theme::theme().body
+}
+
 /// A quieter grey than [`dim`] where color is available.
 fn muted() -> Style {
     theme::theme().muted
-}
-
-/// A markdown heading — the turn head (`§N  title`) shares it.
-fn heading() -> Style {
-    theme::theme().heading
 }
 
 /// A markdown link — the turn's `¹` footnote reference shares it.
@@ -1716,11 +1837,6 @@ fn thinking() -> Style {
 /// A tool's name in its `»` / `✓` header.
 fn tool_name() -> Style {
     theme::theme().tool_name
-}
-
-/// The user's own prompt block.
-fn user() -> Style {
-    theme::theme().user
 }
 
 /// A completed tool's `✓` mark.
@@ -1962,6 +2078,17 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wcode_harness::protocol::SessionId;
+
+/// A committed `Turn` block for render tests.
+fn a_turn(content: Vec<ContentBlock>) -> Block {
+    Block::Turn(crate::app::Turn {
+        n: 1,
+        content,
+        tools: Vec::new(),
+        thinking_open: false,
+        open: false,
+    })
+}
 
     /// The default root surface's id (`App::new`'s single surface).
     fn root() -> SessionId {
@@ -2215,7 +2342,7 @@ mod tests {
         app.handle(AppEvent::Key(Key::Enter));
         let text = buffer_text(&render(&mut app, 40, 8));
         assert!(text.contains("ping"), "transcript block missing: {text}");
-        assert!(text.contains("❯ ping"));
+        assert!(text.contains("YOU"), "the user block renders a `YOU` head: {text}");
     }
 
     #[test]
@@ -2259,6 +2386,15 @@ mod tests {
     #[test]
     fn a_completed_tool_shows_its_duration() {
         let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::MessageEnd {
+            message: AgentMessage::Assistant {
+                content: vec![ContentBlock::ToolCall {
+                    id: "t1".into(), name: "read".into(), arguments: serde_json::json!({}),
+                }],
+                stop_reason: wcode_harness::message::StopReason::ToolUse,
+                usage: None, model: None,
+            },
+        }));
         app.handle(AppEvent::Agent(root(), wcode_harness::event::AgentEvent::ToolExecutionStart {
             call_id: "t1".into(), name: "read".into(),
         }));
@@ -2275,6 +2411,21 @@ mod tests {
     #[test]
     fn a_tool_diff_renders_when_expanded() {
         let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t1".into(),
+                        name: "edit".into(),
+                        arguments: serde_json::json!({ "path": "f.rs" }),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
         app.handle(AppEvent::Agent(
             root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
@@ -2306,6 +2457,21 @@ mod tests {
         let mut app = App::new();
         app.handle(AppEvent::Agent(
             root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t1".into(),
+                        name: "edit".into(),
+                        arguments: serde_json::json!({ "path": "src/a.rs" }),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
                 call_id: "t1".into(),
                 name: "edit".into(),
@@ -2330,7 +2496,10 @@ mod tests {
 
         let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("1 file changed"), "summary missing: {text}");
-        // The `»` line names the changed file.
+        // The `»` row names the tool; the changed path rides its params.
+        assert!(text.contains("» edit"), "tool head missing: {text}");
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand to reveal the path
+        let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("src/a.rs"), "tool path missing: {text}");
 
         for c in "/changes".chars() {
@@ -2511,8 +2680,25 @@ mod tests {
             .unwrap();
     }
 
-    /// Push one tool invocation (start → end) into the focused surface.
+    /// Push one tool invocation (its call, then start → end) into the focused
+    /// surface. The assistant's `ToolCall` commits FIRST (the inline render emits
+    /// a tool panel only at its `ToolCall` site), then the lifecycle events.
     fn push_tool(app: &mut App, name: &str, output: &str, is_error: bool, diff: Option<&str>) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t".into(),
+                        name: name.into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
         app.handle(AppEvent::Agent(
             root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
@@ -2545,8 +2731,8 @@ mod tests {
         let text = buffer_text(&render(&mut app, 70, 20));
         // A collapsed note is its head row + the `✓` summary; the body is behind
         // the disclosure (no preview, no `… +N more` hint).
-        assert!(text.contains("── notes"), "the rule:\n{text}");
-        assert!(text.contains("1 » bash"), "the head:\n{text}");
+        assert!(!text.contains("── notes"), "no foot rule:\n{text}");
+        assert!(text.contains("» bash"), "the inline tool head:\n{text}");
         assert!(text.contains("✓ bash · line-1"), "the summary:\n{text}");
         assert!(!text.contains("line-2"), "the body is collapsed:\n{text}");
         assert!(!text.contains("more lines"), "no preview hint:\n{text}");
@@ -2560,9 +2746,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
-        // Browse selects the last block (this tool); Enter expands it.
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        // `Ctrl-T` expands every inline tool's output.
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
         let text = buffer_text(&render(&mut app, 70, 30));
         assert!(text.contains("line-20"), "the full output should show:\n{text}");
         assert!(
@@ -2608,8 +2793,7 @@ mod tests {
             "the diff is collapsed:\n{collapsed}"
         );
 
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
         let expanded = buffer_text(&render(&mut app, 70, 40));
         assert!(expanded.contains("+add-30"), "the full diff should show:\n{expanded}");
     }
@@ -2627,8 +2811,7 @@ mod tests {
             "the tail must be hidden while collapsed:\n{collapsed}"
         );
 
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
         let expanded = buffer_text(&render(&mut app, 70, 20));
         assert!(
             expanded.contains("TAIL-REACHABLE"),
@@ -2662,8 +2845,7 @@ mod tests {
         assert!(collapsed.contains("row 1"), "the summary:\n{collapsed}");
         assert!(!collapsed.contains("row 2"), "the body is collapsed:\n{collapsed}");
 
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // `Ctrl-T` expands every tool
         let expanded = buffer_text(&render(&mut app, 70, 20));
         assert!(expanded.contains("row 10"), "not all lines shown:\n{expanded}");
     }
@@ -2723,7 +2905,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_toggles_only_the_selected_note() {
+    fn a_tool_row_toggles_independently() {
         let mut app = App::new();
         let first = (1..=20)
             .map(|i| format!("FIRST-{i}"))
@@ -2736,14 +2918,22 @@ mod tests {
         push_tool(&mut app, "bash", &first, false, None);
         push_tool(&mut app, "bash", &last, false, None);
 
-        // Browse selects the last block; Enter expands just it.
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        // A click on the LAST tool row's toggle expands only it.
+        let _ = render(&mut app, 70, 50); // publish the hit map
+        let toggle = {
+            let hit = app.hit.transcript.as_ref().expect("a hit");
+            hit.affordances.last().expect("a tool hit").toggle
+        };
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            app.handle(AppEvent::Mouse(MouseEvent {
+                kind,
+                col: toggle.x + 3,
+                row: toggle.y,
+            }));
+        }
         let text = buffer_text(&render(&mut app, 70, 50));
-        // The selected block is fully expanded…
-        assert!(text.contains("LAST-20"), "the selected note should expand:\n{text}");
-        // …while the first stays collapsed (its body is behind the disclosure).
-        assert!(!text.contains("FIRST-2"), "only the selected note toggles:\n{text}");
+        assert!(text.contains("LAST-20"), "the clicked tool expands:\n{text}");
+        assert!(!text.contains("FIRST-2"), "only the clicked tool expands:\n{text}");
     }
 
     #[test]
@@ -2782,6 +2972,21 @@ mod tests {
         let line = format!("START{}END", "y".repeat(300));
         app.handle(AppEvent::Agent(
             root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({ "command": "yes" }),
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
             wcode_harness::event::AgentEvent::ToolExecutionStart {
                 call_id: "t".into(),
                 name: "bash".into(),
@@ -2795,8 +3000,7 @@ mod tests {
                 partial: line,
             },
         ));
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
-        app.handle(AppEvent::Key(Key::Enter));
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the running tool
 
         // A short terminal: the wrapped body overflows the transcript band.
         let _ = buffer_text(&render(&mut app, 40, 8));
@@ -2805,11 +3009,15 @@ mod tests {
         }
         assert!(
             app.scroll() > 0,
-            "the wrapped rows must count toward the scroll height, not just be drawn"
+            "the wrapped rows must count toward the scroll height (total={}, scroll={}):\n{}",
+            app.total_lines(),
+            app.scroll(),
+            buffer_text(&render(&mut app, 40, 8))
         );
         // Scrolled to the top, the start of the wrapped body is reachable — it
-        // would not be if the body were counted as a single line.
-        let text = buffer_text(&render(&mut app, 40, 8));
+        // would not be if the body were counted as a single line. A taller band
+        // so the body clears the head + `WCODE` + the tool head.
+        let text = buffer_text(&render(&mut app, 40, 16));
         assert!(
             text.contains("START"),
             "the top of the wrapped body must be reachable:\n{text}"
@@ -2872,8 +3080,8 @@ mod tests {
         let _ = render(&mut app, 60, 20); // publish the hit map
         // Read the band geometry back rather than hardcoding a row: click the
         // first visible row of the transcript band.
-        let hit = app.hit.transcript.as_ref().expect("a transcript hit");
-        let row = hit.rect.y;
+        // Click a real block row (row 0 is the session head — chrome, not a target).
+        let (row, _x0) = row_of(&app, "hello");
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 2, row }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: 2, row }));
         let text = buffer_text(&render(&mut app, 60, 20));
@@ -2931,7 +3139,7 @@ mod tests {
         // A narrower width re-wraps: the ranges are re-measured, not stale.
         let narrow = buffer_text(&render(&mut app, 20, 20));
         assert_eq!(barred(&narrow).len(), 3, "re-wrapped at 20 cols:\n{narrow}");
-        assert_eq!(app.selected(), Some(1), "the same block stays selected");
+        assert_eq!(app.selected(), Some(2), "the same block stays selected");
     }
 
     #[test]
@@ -2953,7 +3161,7 @@ mod tests {
         }
 
         let text = buffer_text(&render(&mut app, 40, 10));
-        assert_eq!(app.selected(), Some(1), "the selection names the same block");
+        assert_eq!(app.selected(), Some(2), "the selection names the same block");
         assert!(
             text.contains("KEEP"),
             "the selected block must stay in view:\n{text}"
@@ -3036,23 +3244,26 @@ mod tests {
     fn a_drag_highlight_reverses_exactly_the_selected_cells() {
         let mut app = App::new();
         app.seed_history(&root(), &[AgentMessage::user_text("hello")]);
-        let _ = render(&mut app, 60, 20);
-        let (row, x0) = row_of(&app, "hello");
-
-        // Drag over "hel" (the row is " ❯ hello", so the text begins at char col 3).
-        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x0 + 3, row }));
-        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x0 + 5, row }));
-
-        let terminal = render(&mut app, 60, 20);
-        // Locate "hello" in the drawn buffer so the expectation is robust to the
-        // gutter's rendered width.
+        let first = render(&mut app, 60, 20);
+        let (row, _x0) = row_of(&app, "hello");
+        // Locate the 'h' of "hello" (the `YOU` head fills the gutter before it).
         let start = {
-            let buffer = terminal.backend().buffer();
+            let buffer = first.backend().buffer();
             (0..buffer.area.width)
                 .find(|&x| buffer[(x, row)].symbol() == "h")
                 .expect("the 'h' of hello")
         };
-        let mut cells = reversed_cells(&terminal);
+
+        // Drag over "hel".
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: start, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: start + 2, row }));
+
+        let terminal = render(&mut app, 60, 20);
+        // The `YOU` head run is reversed by design; filter to the text region.
+        let mut cells: Vec<(u16, u16)> = reversed_cells(&terminal)
+            .into_iter()
+            .filter(|&(x, y)| y == row && x >= start)
+            .collect();
         cells.sort_unstable();
         assert_eq!(
             cells,
@@ -3089,10 +3300,18 @@ mod tests {
             "a past-end anchor copies nothing"
         );
         let terminal = render(&mut app, 60, 20);
-        assert!(
-            reversed_cells(&terminal).is_empty(),
-            "a past-end anchor highlights nothing"
-        );
+        // The `YOU` head is reversed by design; the drag must add no text cell.
+        let start = {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .find(|&x| buffer[(x, row)].symbol() == "h")
+                .expect("the 'h' of hello")
+        };
+        let stray: Vec<(u16, u16)> = reversed_cells(&terminal)
+            .into_iter()
+            .filter(|&(x, y)| y == row && x >= start)
+            .collect();
+        assert!(stray.is_empty(), "a past-end anchor highlights no text: {stray:?}");
     }
 
     #[test]
@@ -3225,15 +3444,15 @@ mod tests {
             ],
         );
         app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the last block (ALPHA three)
-        assert_eq!(app.selected(), Some(4));
-        // transcript: [⋯ 3 earlier, alpha, §1, beta, ALPHA] — "alpha" matches 1 and 4.
-        app.handle(AppEvent::Key(Key::Char('k'))); // step up to "beta two" (block 3)
         assert_eq!(app.selected(), Some(3));
+        // transcript: [⋯ earlier, alpha, beta-turn, ALPHA] — "alpha" matches 1 and 3.
+        app.handle(AppEvent::Key(Key::Char('k'))); // step up to "beta two" (block 2)
+        assert_eq!(app.selected(), Some(2));
         app.handle(AppEvent::Key(Key::Char('/')));
         typed(&mut app, "alpha");
         app.handle(AppEvent::Key(Key::Enter));
         assert!(app.search_query().is_none(), "Enter closes the prompt");
-        assert_eq!(app.selected(), Some(4), "first match at/after block 3 is 4");
+        assert_eq!(app.selected(), Some(3), "first match at/after block 2 is 3");
         let text = buffer_text(&render(&mut app, 60, 16));
         assert!(!barred(&text).is_empty(), "the jumped-to block is drawn with its bar");
     }
@@ -3251,7 +3470,7 @@ mod tests {
     #[test]
     fn paint_bar_never_shifts_a_text_row() {
         // Every block kind the transcript can draw.
-        let assistant = Block::assistant(vec![
+        let assistant = a_turn(vec![
             ContentBlock::Text {
                 text: "# Heading\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n\
                        text `code` and [link](http://x) and **bold**"
@@ -3316,7 +3535,7 @@ mod tests {
         // Mirror `paint_bar_never_shifts_a_text_row`: a restyle must not move a glyph.
         for block in [
             Block::User("hi there".into()),
-            Block::assistant(vec![ContentBlock::Text {
+            a_turn(vec![ContentBlock::Text {
                 text: "# Head\n\ntext `code` and **bold**".into(),
             }]),
             Block::Notice("a note".into()),
@@ -3331,25 +3550,20 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_browse_expands_the_selected_note_in_the_frame() {
+    fn ctrl_t_expands_the_inline_tool_in_the_frame() {
         let mut app = App::new();
         let output = (1..=20)
             .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
-        app.handle(AppEvent::Key(Key::Ctrl('g')));
 
         let collapsed = buffer_text(&render(&mut app, 70, 30));
         assert!(!collapsed.contains("line-20"), "collapsed hides the tail:\n{collapsed}");
-        // The bar covers the collapsed note: the rule + the head + the summary.
-        assert_eq!(barred(&collapsed).len(), 3, "{collapsed}");
 
-        app.handle(AppEvent::Key(Key::Enter));
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the inline tool
         let expanded = buffer_text(&render(&mut app, 70, 30));
-        assert!(expanded.contains("line-20"), "Enter shows the full output:\n{expanded}");
-        // The bar still covers the note's rows (rule + head + body, scrolled).
-        assert!(barred(&expanded).len() >= 20, "{expanded}");
+        assert!(expanded.contains("line-20"), "`Ctrl-T` shows the full output:\n{expanded}");
     }
 
     #[test]
@@ -3381,51 +3595,46 @@ mod tests {
         ));
 
         let text = buffer_text(&render(&mut app, 80, 12));
-        let lines: Vec<&str> = text.lines().collect();
-        // The empty assistant block renders nothing, so the note's rule is row 0 —
-        // no stray leading blank.
-        assert!(lines[0].contains("── notes"), "the note rule leads:\n{text}");
-        assert!(lines[1].contains("» read"), "the note head follows:\n{text}");
+        // A tool-call-only round renders the tool INLINE — no foot rule, and no
+        // stray blank between the `WCODE` head and the tool row.
+        assert!(text.contains("» read"), "the inline tool:\n{text}");
+        assert!(!text.contains("── notes"), "no foot rule:\n{text}");
     }
 
     #[test]
-    fn a_turn_head_renders_on_its_own_line_before_the_block() {
+    fn the_turn_opens_with_a_wcode_speaker_head() {
         let mut app = App::new();
         push_assistant(
             &mut app,
             "# the anchor is the text\n\nAn anchor is the text you quote.",
         );
         let text = buffer_text(&render(&mut app, 80, 12));
-        let lines: Vec<&str> = text.lines().collect();
-        // Row 0 is the head (its own line, before the block); the `# h1` is gone.
-        assert_eq!(lines[0].trim_end(), " §1  the anchor is the text", "{text}");
+        // The turn opens with the `WCODE` speaker head (the `§N` head is gone).
+        assert!(text.contains("WCODE"), "the speaker head:\n{text}");
         assert!(
             text.contains("An anchor is the text you quote."),
             "the body follows:\n{text}"
         );
-        assert!(!text.contains("# the anchor"), "the h1 is consumed:\n{text}");
     }
 
     #[test]
-    fn a_bare_turn_head_renders_without_a_title() {
+    fn a_headingless_turn_still_renders_the_speaker_head() {
         let mut app = App::new();
         push_assistant(&mut app, "no heading");
         let text = buffer_text(&render(&mut app, 80, 12));
-        assert_eq!(
-            text.lines().next().unwrap_or_default().trim_end(),
-            " §1",
-            "a headingless reply is a bare `§1`:\n{text}"
-        );
+        assert!(text.contains("WCODE"), "the speaker head:\n{text}");
+        assert!(text.contains("no heading"), "the body:\n{text}");
     }
 
     #[test]
-    fn a_turn_head_is_not_a_browse_selection_target() {
-        // The head is chrome: Ctrl-G selects the assistant block, not the head.
+    fn the_session_head_is_not_a_browse_selection_target() {
+        // The session head is chrome: Ctrl-G selects the turn, not the head.
         let mut app = App::new();
         push_assistant(&mut app, "hello");
+        let _ = render(&mut app, 80, 12); // seats the `SessionHead` at block 0
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(1), "the assistant, not the §1 head");
-        app.handle(AppEvent::Key(Key::Char('k'))); // clamp — nothing above but the head
+        assert_eq!(app.selected(), Some(1), "the turn, not the session head");
+        app.handle(AppEvent::Key(Key::Char('k'))); // the head above is skipped
         assert_eq!(app.selected(), Some(1), "the head is skipped");
     }
 
@@ -3558,7 +3767,7 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_carries_the_head_and_foot_lines() {
+    fn the_composer_carries_the_foot_line_only() {
         let mut app = App::new();
         app.set_cwd(Some("myrepo".into()));
         app.set_git(Some("main*".into()));
@@ -3570,37 +3779,20 @@ mod tests {
             plan: false,
         });
         let text = buffer_text(&render(&mut app, 80, 14));
-        // The composer is a rule-set head + open writing line — NO box, NO corners.
+        // The composer is rule + open writing line — NO box, NO corners.
         assert!(
             !text.contains('╭') && !text.contains('╮') && !text.contains('╰') && !text.contains('╯'),
             "the composer must be frameless:\n{text}"
         );
         assert!(!text.contains('│'), "no side border columns:\n{text}");
         let lines: Vec<&str> = text.lines().collect();
-        // The rule is the full band width and sits directly under the head line.
+        // No composer head row (D009): the LAST full-width rule leads the composer
+        // band, the writing line below it, the foot line below that.
         let rule = lines
             .iter()
-            .position(|l| *l == "─".repeat(80))
-            .expect("a full-width rule");
-        let head = lines[rule - 1];
-        assert!(head.contains("myrepo"), "project on the head line:\n{text}");
-        assert!(head.contains("⎇ main*"), "branch missing:\n{text}");
-        assert!(head.contains("zephyr-9"), "model on the head line:\n{text}");
-        assert!(head.contains("high"), "effort missing:\n{text}");
-        assert!(
-            head.starts_with("myrepo"),
-            "the project leads the head line:\n{text}"
-        );
-        assert!(
-            head.ends_with("zephyr-9 · high"),
-            "the model/effort trail the head line:\n{text}"
-        );
-        // The writing line rides below the rule, the foot line below that.
+            .rposition(|l| *l == "─".repeat(80))
+            .expect("a composer rule");
         assert!(lines[rule + 1].contains('❯'), "the writing line:\n{text}");
-        assert!(
-            !head.contains('─'),
-            "the head line is plain (a running head, no leader):\n{text}"
-        );
         assert!(
             lines[rule + 2].contains('─') && lines[rule + 2].ends_with("⏸ idle"),
             "the foot line carries the leader + state:\n{text}"
@@ -3613,25 +3805,114 @@ mod tests {
         // No turn yet → no folio.
         let text = buffer_text(&render(&mut app, 80, 14));
         assert!(!text.contains("0/0"), "no folio before a turn:\n{text}");
-        // A first turn reads `1/1`; a second `2/2`.
+        // A first turn reads `1/1`; a second `2/2` (an `AgentEnd` seals the turn,
+        // so the next reply opens a NEW exchange).
+        // Each run is `AgentStart` … `AgentEnd`; one run = one turn (the folio).
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
         push_assistant(&mut app, "one");
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentEnd,
+        ));
         let text = buffer_text(&render(&mut app, 80, 14));
         assert!(text.contains("1/1"), "the folio:\n{text}");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
         push_assistant(&mut app, "two");
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentEnd,
+        ));
         let text = buffer_text(&render(&mut app, 80, 14));
         assert!(text.contains("2/2"), "the folio updates:\n{text}");
     }
 
     #[test]
-    fn the_project_is_muted_and_the_run_state_is_accent() {
+    fn the_head_renders_row_zero_with_the_session_and_branch_groups() {
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        app.set_status(crate::app::Status {
+            session: Some("abcdef0123456789".into()),
+            model: "zephyr-9".into(),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        let text = buffer_text(&render(&mut app, 80, 14));
+        let first = text.lines().next().unwrap_or_default();
+        // Row 0: the reverse-video `WCODE`, the session, the project · branch, and
+        // the model · effort far right.
+        assert!(first.contains("WCODE"), "the speaker head:\n{text}");
+        assert!(first.contains("session abcdef01"), "the session group:\n{text}");
+        assert!(first.contains("wcode"), "the project group:\n{text}");
+        assert!(first.contains("⎇ main*"), "the branch:\n{text}");
+        assert!(first.contains("zephyr-9 · high"), "model · effort:\n{text}");
+        // The rule follows the head, on the measure.
+        assert_eq!(
+            text.lines().nth(1),
+            Some("─".repeat(80).as_str()),
+            "the rule:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_composer_draws_no_head_row() {
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        let text = buffer_text(&render(&mut app, 80, 14));
+        // The chrome rides the head block; the composer has no head row above its
+        // rule (the row directly above the composer rule carries no `wcode`/`⎇`).
+        let lines: Vec<&str> = text.lines().collect();
+        let rule = lines
+            .iter()
+            .rposition(|l| *l == "─".repeat(80))
+            .expect("the composer rule");
+        assert!(
+            !lines[rule - 1].contains("wcode") && !lines[rule - 1].contains('⎇'),
+            "no composer head row above the rule:\n{text}"
+        );
+    }
+
+    #[test]
+    fn tools_render_inline_in_call_order_not_at_the_foot() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "first", false, None);
+        push_assistant(&mut app, "between");
+        push_tool(&mut app, "bash", "second", false, None);
+        let text = buffer_text(&render(&mut app, 70, 30));
+        assert!(!text.contains("── notes"), "no foot ledger rule:\n{text}");
+        // The tools sit at their call sites, in call order, around the prose.
+        let one = text.find("1 » bash").expect("the first tool");
+        let mid = text.find("between").expect("the prose");
+        let two = text.find("2 » bash").expect("the second tool");
+        assert!(one < mid && mid < two, "tools inline in call order:\n{text}");
+    }
+
+    #[test]
+    fn the_foot_notes_rule_is_gone() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "ok", false, None);
+        let text = buffer_text(&render(&mut app, 70, 20));
+        assert!(!text.contains("── notes"), "the `── notes ──` rule is gone:\n{text}");
+        assert!(text.contains("» bash"), "the tool is inline:\n{text}");
+    }
+
+    #[test]
+    fn the_foot_line_run_state_is_dim_idle_and_accent_running() {
         let mut app = App::new();
         app.set_cwd(Some("wcode".into()));
         let area = Rect::new(0, 0, 100, 3);
 
-        // Idle: the project recedes to `muted`, the state stays `dim` (D4b).
-        let (tl, _tr, _bl, br) = corner_titles(&app, area);
-        assert_eq!(tl.spans[0].content, "wcode");
-        assert_eq!(tl.spans[0].style, muted(), "project → muted");
+        // Idle: the state stays `dim` (D4b). (The project's `muted` style now rides
+        // the session-head block — see the header tests.)
+        let (_bl, br) = corner_titles(&app, area);
         let state = br
             .spans
             .iter()
@@ -3645,7 +3926,7 @@ mod tests {
             id,
             wcode_harness::event::AgentEvent::AgentStart,
         ));
-        let (_tl, _tr, _bl, br) = corner_titles(&app, area);
+        let (_bl, br) = corner_titles(&app, area);
         let state = br
             .spans
             .iter()
@@ -3671,26 +3952,21 @@ mod tests {
     }
 
     #[test]
-    fn the_session_id_rides_the_composer_head_line() {
+    fn the_session_id_rides_the_session_head() {
         let mut app = App::new();
         app.set_status(crate::app::Status {
             session: Some("abcdef0123456789".into()),
             ..Default::default()
         });
-        // Real content, so the D5 empty-state hint is not what shows at row 0.
         push_assistant(&mut app, "hello there");
         let text = buffer_text(&render(&mut app, 80, 12));
-        // D1b: there is no `session` band — the id folds into the composer's head
-        // line and the transcript still starts at row 0 (with the `§1` turn head).
+        // The session id rides the session-head block (the composer has no head row).
         let first = text.lines().next().unwrap_or_default();
-        assert!(
-            first.contains("§1"),
-            "the transcript starts at row 0 even with a session:\n{text}"
-        );
+        assert!(first.contains("WCODE"), "the head leads at row 0:\n{text}");
         assert!(text.contains("hello there"), "the reply body:\n{text}");
         assert!(
             text.contains("session abcdef01"),
-            "the session id is not on the composer head line:\n{text}"
+            "the session id is not on the session head:\n{text}"
         );
     }
 
@@ -3808,16 +4084,11 @@ mod tests {
                 "the composer is frameless at height {height}:\n{text}"
             );
         }
-        // At five rows the band seats all four: head · rule · input · foot.
+        // At five rows the composer band seats rule · input · foot (no head row).
         let text = buffer_text(&render(&mut app, 80, 5));
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].contains("wcode"), "the head line:\n{text}");
-        assert!(
-            lines[2] == "─".repeat(80),
-            "the rule rides the second band row:\n{text}"
-        );
-        assert!(lines[3].contains('❯'), "the input survives:\n{text}");
-        assert!(lines[4].contains("⏸ idle"), "the foot line survives:\n{text}");
+        assert!(text.lines().any(|l| l == "─".repeat(80)), "a rule:\n{text}");
+        assert!(text.contains('❯'), "the input survives:\n{text}");
+        assert!(text.contains("⏸ idle"), "the foot line survives:\n{text}");
     }
 
     #[test]
@@ -3987,7 +4258,9 @@ mod tests {
         for bad in ['╭', '╮', '╰', '╯', '│', '├', '┤'] {
             assert!(!text.contains(bad), "a frame glyph {bad} survives:\n{text}");
         }
-        assert!(text.contains("── notes"), "the rule:\n{text}");
+        // The tool renders inline; there is no `── notes ──` foot rule.
+        assert!(text.contains("» bash"), "the inline tool:\n{text}");
+        assert!(!text.contains("── notes"), "no foot rule:\n{text}");
     }
 
     #[test]
@@ -4000,14 +4273,14 @@ mod tests {
     }
 
     #[test]
-    fn a_rendered_turn_shows_the_notes_apparatus() {
+    fn a_rendered_turn_shows_its_tool_inline() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "ok");
         push_assistant(&mut app, "# the head\n\nSome prose.");
         let text = buffer_text(&render(&mut app, 80, 16));
-        assert!(text.contains("── notes"), "the rule:\n{text}");
-        assert!(text.contains("1 » bash"), "the numbered note:\n{text}");
+        assert!(text.contains("» bash"), "the inline tool:\n{text}");
         assert!(text.contains("✓ bash"), "the summary:\n{text}");
+        assert!(!text.contains("── notes"), "no foot rule:\n{text}");
         for bad in ['╭', '╮', '╰', '╯', '│'] {
             assert!(!text.contains(bad), "frameless — no {bad}:\n{text}");
         }
@@ -4071,18 +4344,28 @@ mod tests {
             }));
         }
         assert!(
-            matches!(&app.transcript()[block], Block::Tool(t) if t.expanded),
-            "the click expands the note"
+            matches!(&app.transcript()[block], Block::Turn(t) if t.tools[0].expanded),
+            "the click expands the tool"
         );
 
-        // Browse `y` on the note block copies its output.
-        app.handle(AppEvent::Key(Key::Ctrl('g'))); // selects the note block
-        app.handle(AppEvent::Key(Key::Char('y')));
+        // The `▣` cell on the tool row copies that tool's output.
+        let _ = render(&mut app, 80, 20); // republish the hit map
+        let copy = {
+            let hit = app.hit.transcript.as_ref().expect("a hit");
+            hit.affordances[0].copy
+        };
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            app.handle(AppEvent::Mouse(MouseEvent {
+                kind,
+                col: copy.x,
+                row: copy.y,
+            }));
+        }
         assert!(
             app.take_actions()
                 .iter()
                 .any(|a| matches!(a, Action::Copy(t) if t == "the output")),
-            "the copy yields the note's output"
+            "the copy yields the tool's output"
         );
     }
 
@@ -4093,27 +4376,30 @@ mod tests {
         push_bash_panel(&mut app, "ls", "/w", "first output");
         push_bash_panel(&mut app, "pwd", "/w", "second output");
         push_assistant(&mut app, "the answer");
-        let Block::Notes(items) = &app.transcript()[2] else {
-            panic!("a notes block");
-        };
-        assert_eq!(items.len(), 2, "both tools folded into the foot");
+        {
+            let Block::Turn(t) = &app.transcript()[0] else {
+                panic!("a turn, got {:?}", app.transcript());
+            };
+            assert_eq!(t.tools.len(), 2, "both tools in the ledger");
+        }
 
         let _ = render(&mut app, 80, 24);
         let (hits, rows) = {
             let hit = app.hit.transcript.as_ref().expect("a hit");
-            assert_eq!(hit.affordances.len(), 2, "one hit per note");
+            assert_eq!(hit.affordances.len(), 2, "one hit per row");
             let hits: Vec<_> = hit.affordances.iter().map(|a| (a.block, a.item)).collect();
             let rows: Vec<_> = hit.affordances.iter().map(|a| a.toggle.y).collect();
             (hits, rows)
         };
+        // The `SessionHead` seats at block 0, so the turn is block 1.
         assert_eq!(
             hits,
-            [(2, Some(0)), (2, Some(1))],
-            "same block, one hit per note"
+            [(1, Some(0)), (1, Some(1))],
+            "same block, one hit per row"
         );
         assert_ne!(rows[0], rows[1], "the two hits sit on distinct rows");
 
-        // Toggling the SECOND note expands only it.
+        // Toggling the SECOND row expands only it.
         let toggle2 = app.hit.transcript.as_ref().unwrap().affordances[1].toggle;
         for kind in [MouseKind::Down, MouseKind::Up] {
             app.handle(AppEvent::Mouse(MouseEvent {
@@ -4122,11 +4408,14 @@ mod tests {
                 row: toggle2.y,
             }));
         }
-        let Block::Notes(items) = &app.transcript()[2] else {
-            panic!("a notes block");
-        };
-        assert!(items[1].expanded, "the second note expands");
-        assert!(!items[0].expanded, "the first note stays collapsed");
+        {
+            // The `SessionHead` seats at block 0, so the turn is block 1.
+            let Block::Turn(t) = &app.transcript()[1] else {
+                panic!("a turn, got {:?}", app.transcript());
+            };
+            assert!(t.tools[1].expanded, "the second row expands");
+            assert!(!t.tools[0].expanded, "the first row stays collapsed");
+        }
 
         // Copying the SECOND note yields its output (re-read the freshly drawn cells).
         let _ = render(&mut app, 80, 24);
@@ -4182,8 +4471,8 @@ mod tests {
         };
         assert_eq!(item, Some(0), "the hit names note 0");
         assert!(
-            matches!(&app.transcript()[block], Block::Tool(_)),
-            "the affordance names the note block"
+            matches!(&app.transcript()[block], Block::Turn(t) if !t.tools.is_empty()),
+            "the affordance names the turn block"
         );
 
         let buf = terminal.backend().buffer();
@@ -4209,8 +4498,8 @@ mod tests {
             col: click_col,
             row: toggle.y,
         }));
-        let expanded = matches!(&app.transcript()[block], Block::Tool(t) if t.expanded);
-        assert!(expanded, "clicking the note head expands it");
+        let expanded = matches!(&app.transcript()[block], Block::Turn(t) if t.tools[0].expanded);
+        assert!(expanded, "clicking the tool head expands it");
 
         // The freshly toggled frame draws `▾` in the same cell.
         terminal = render(&mut app, 80, 20);
@@ -4228,12 +4517,17 @@ mod tests {
         // The content is indented by the pad: the `❯` gutter moves from col 3
         // to col 29; the margin to its left is blank.
         let first = text.lines().next().unwrap_or_default();
+        // The transcript's first block is the session head, centered on the measure.
         assert_eq!(
-            first.chars().nth(29),
-            Some('❯'),
-            "the content is indented by the pad:\n{text}"
+            first.chars().take(26).collect::<String>().trim(),
+            "",
+            "the margin is blank:\n{text}"
         );
-        assert_eq!(first.chars().nth(3), Some(' '), "the margin is blank:\n{text}");
+        assert_eq!(
+            first.chars().nth(26),
+            Some('W'),
+            "the head starts at the measure:\n{text}"
+        );
 
         // 80 cols: below the threshold — the content rides the gutter.
         let mut app = App::new();
@@ -4246,9 +4540,9 @@ mod tests {
         );
         let first = text.lines().next().unwrap_or_default();
         assert_eq!(
-            first.chars().nth(3),
-            Some('❯'),
-            "the content is at the gutter:\n{text}"
+            first.chars().next(),
+            Some('W'),
+            "the head rides the gutter at 80 cols:\n{text}"
         );
     }
 
@@ -4436,7 +4730,7 @@ mod tests {
             let a = &hit.affordances[0];
             (a.block, a.toggle)
         };
-        assert!(matches!(&app.transcript()[block], Block::Assistant { .. }));
+        assert!(matches!(&app.transcript()[block], Block::Turn(_)));
 
         // A click on the published toggle cell expands the row.
         app.handle(AppEvent::Mouse(MouseEvent {
