@@ -2003,7 +2003,7 @@ impl Surface {
 fn default_root() -> Surface {
     Surface::new(SurfaceInfo {
         id: SessionId::agent("root"),
-        label: "root".to_string(),
+        label: "wcode".to_string(),
         model: String::new(),
         is_root: true,
     })
@@ -2122,15 +2122,17 @@ impl AffordanceHit {
     }
 }
 
-/// The open sidebar as drawn: its rect and each member row's `(surface index, y)`.
+/// The open sidebar as drawn: its rect and each drawn row's
+/// `(surface index, y)` — the root row included.
 /// A click on a row focuses that surface index via `set_focus`.
 pub(crate) struct SidebarHit {
     /// The sidebar band's rect. A click outside it is not a sidebar hit; a click
-    /// inside but not on a member row is a no-op.
+    /// inside but not on a drawn row is a no-op.
     pub(crate) rect: Rect,
-    /// `(surface index, screen y)` per drawn member row, in draw order. The index
-    /// is a real index into `App::surfaces` — recovered by `member_rows_indexed`
-    /// (the plain `member_rows` drops it).
+    /// `(surface index, screen y)` per drawn row (root included), in draw order.
+    /// The index is a real index into `App::surfaces` — recovered by
+    /// `sidebar_rows_indexed`, the row list `draw_sidebar` iterates (the plain
+    /// `member_rows` drops it, and drops the root).
     pub(crate) members: Vec<(usize, u16)>,
 }
 
@@ -2245,6 +2247,12 @@ pub const MEASURE_MIN: usize = 40;
 pub const MEASURE_LIMIT: usize = 200;
 /// Columns an `Alt-[` / `Alt-]` key press moves the measure.
 const MEASURE_STEP: usize = 8;
+
+/// One DRAWN sidebar row, as a positional tuple: `(surface index, label, state,
+/// focused, live action, is_root)`. Named only because clippy counts six fields
+/// as a complex type — it is still a plain tuple, so callers destructure it
+/// positionally exactly as `member_rows_indexed`'s five-field twin.
+pub(crate) type SidebarRow<'a> = (usize, &'a str, TeamState, bool, Option<&'a str>, bool);
 
 impl Default for App {
     /// Same as [`App::new`] — a `Default` app still has its (root) surface, so
@@ -3012,7 +3020,7 @@ impl App {
     }
 
     /// Publish the open sidebar for hit-testing (called by `draw_sidebar`).
-    /// `members` is `(surface index, y)` per drawn member row.
+    /// `members` is `(surface index, y)` per drawn row (root included).
     pub(crate) fn set_sidebar_hit(&mut self, rect: Rect, members: Vec<(usize, u16)>) {
         self.hit.sidebar = Some(SidebarHit { rect, members });
     }
@@ -3043,7 +3051,7 @@ impl App {
             .find_map(|a| a.kind_at(row, col).map(|kind| (a.block, a.item, kind)))
     }
 
-    /// Button down. Records the cell; a hit on a sidebar member row focuses that
+    /// Button down. Records the cell; a hit on a sidebar row focuses that
     /// surface and stops (the sidebar has no drag semantics). A miss is a no-op.
     fn on_mouse_down(&mut self, col: u16, row: u16) {
         // Capture the affordance under the button FIRST — before the sidebar
@@ -3140,8 +3148,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// The surface index of the sidebar member row at screen `(row, col)` (inside
-    /// the published sidebar rect), or `None`.
+    /// The surface index of the sidebar row at screen `(row, col)` (inside the
+    /// published sidebar rect), or `None`.
     fn sidebar_member_at(&self, row: u16, col: u16) -> Option<usize> {
         let hit = self.hit.sidebar.as_ref()?;
         if !hit.rect.contains((col, row).into()) {
@@ -3154,6 +3162,9 @@ impl App {
     /// canonical order (D34) — the index-carrying sibling of `member_rows` (which
     /// drops the index and delegates here). Stable: activity never reorders the
     /// rows; the state glyph is a marker.
+    ///
+    /// The sidebar draws [`Self::sidebar_rows_indexed`] instead (root-inclusive);
+    /// this accessor stays member-only for `/team` and the composer strip.
     pub(crate) fn member_rows_indexed(&self) -> Vec<(usize, &str, TeamState, bool, Option<&str>)> {
         self.canonical_order()
             .into_iter()
@@ -3166,6 +3177,59 @@ impl App {
                     s.state(),
                     i == self.focus,
                     s.last_action.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    /// Every surface as a sidebar row — ROOT-INCLUSIVE, in the canonical order
+    /// (D34: exactly one root surface, drawn first; the members follow it in
+    /// creation order). This is the row list `draw_sidebar` draws and the hit map
+    /// `set_sidebar_hit` publishes. It is NOT a roster: `/team`
+    /// (`team_text(&self.member_rows())`) and the composer's working-team strip
+    /// (`working_team_rows`) keep calling the member-only accessors and are
+    /// untouched by it.
+    ///
+    /// # Contract
+    ///
+    /// * `len() == surfaces.len()` — one row per surface, root included. Unlike
+    ///   `member_rows_indexed` (`.filter(|&i| !self.surfaces[i].is_root)`) it
+    ///   drops NOTHING.
+    /// * Row 0 is ALWAYS the root: `canonical_order` sorts `!is_root` first.
+    ///   Should `set_surfaces` ever hand in a list with no root, the list still
+    ///   starts at `surfaces[0]` and its trailing flag is `false` — the renderer
+    ///   keys the badge on the flag (presence) and the member ordinal (number).
+    /// * Every field except the last is exactly what `member_rows_indexed`
+    ///   yields for the same surface: the root is not a special case in the DATA,
+    ///   only in the RENDERING (its badge). `focused` is `i == self.focus`, so
+    ///   the root row carries the `*` marker and the focused row's run elapsed
+    ///   exactly like a member row.
+    /// * Order is stable (D34): activity never reorders; `TeamState` is a marker,
+    ///   never a sort key. Position `n` is `canonical_order()[n]` — precisely
+    ///   what `focus_digit` targets (`canonical_order().get(n as usize)`), so a
+    ///   drawn badge `k` and `Alt-k` land on the same surface. The root occupies
+    ///   position 0 and is never badged, which is why `Alt-N` still means MEMBER
+    ///   `N`.
+    /// * Borrows `&self`; the `&str` fields live as long as the borrow, so the
+    ///   caller must collect the owned `Vec` (as `draw_sidebar` already does)
+    ///   before any `&mut app` call.
+    ///
+    /// # Panics
+    ///
+    /// None. No indexing beyond `surfaces`, and `canonical_order` only yields
+    /// valid indices.
+    pub(crate) fn sidebar_rows_indexed(&self) -> Vec<SidebarRow<'_>> {
+        self.canonical_order()
+            .into_iter()
+            .map(|i| {
+                let s = &self.surfaces[i];
+                (
+                    i,
+                    s.label.as_str(),
+                    s.state(),
+                    i == self.focus,
+                    s.last_action.as_deref(),
+                    s.is_root,
                 )
             })
             .collect()
@@ -6476,6 +6540,38 @@ mod tests {
         app.set_sidebar_hit(rect(0, 0, 30, 10), vec![(1, 1)]); // member 1 at y = 1
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: 3, row: 1 }));
         assert_eq!(app.focus(), 1, "the clicked member is focused");
+    }
+
+    /// The root-inclusive row list: one row per surface, the ROOT first and
+    /// flagged, the members after it in canonical order and unflagged — while the
+    /// member-only accessor `/team` and the composer strip use still drops it.
+    #[test]
+    fn sidebar_rows_indexed_is_root_inclusive_and_orders_members_after() {
+        let mut app = App::new();
+        set_surfaces(&mut app, &["wcode", "explorer", "developer"]);
+
+        let rows = app.sidebar_rows_indexed();
+        assert_eq!(
+            rows.len(),
+            app.member_rows_indexed().len() + 1,
+            "one row per surface: {rows:?}"
+        );
+        // Row 0 is the root: its own index, its label, and the trailing flag.
+        assert_eq!(rows[0], (0, "wcode", TeamState::Idle, true, None, true));
+        // The members follow, in creation order, badged 1..N and unflagged.
+        assert_eq!(rows[1].0, 1, "the first member is surfaces[1]: {rows:?}");
+        assert_eq!(rows[1].1, "explorer");
+        assert!(!rows[1].5, "a member is never the root");
+        assert_eq!(rows[2].0, 2, "the second member is surfaces[2]: {rows:?}");
+        assert_eq!(rows[2].1, "developer");
+        assert!(!rows[2].5);
+
+        // The member-only twin still EXCLUDES the root — `/team` and the composer
+        // strip read it, so it must not grow the root row.
+        let members = app.member_rows_indexed();
+        assert_eq!(members.len(), 2, "member rows only: {members:?}");
+        assert_eq!(members[0].0, 1);
+        assert_eq!(members[1].0, 2);
     }
 
     #[test]

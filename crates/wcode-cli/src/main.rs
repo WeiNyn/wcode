@@ -1003,7 +1003,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     let surfaces: Vec<wcode_tui::SurfaceSpec> = if roster.is_empty() {
                         vec![wcode_tui::SurfaceSpec {
                             id: SessionId::agent("root"),
-                            label: "root".to_string(),
+                            label: "wcode".to_string(),
                             model: llm.model.clone(),
                             is_root: true,
                             backend: Backend::from(client.clone()),
@@ -1014,7 +1014,13 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                             .iter()
                             .map(|info| wcode_tui::SurfaceSpec {
                                 id: info.id.clone(),
-                                label: crate::agents::short_name(&info.id),
+                                // The root reads `wcode` — the header's reverse-video
+                                // `WCODE` run lowercased — whatever its session id is.
+                                label: if &info.id == root {
+                                    "wcode".to_string()
+                                } else {
+                                    crate::agents::short_name(&info.id)
+                                },
                                 model: info.model.clone().unwrap_or_else(|| llm.model.clone()),
                                 is_root: &info.id == root,
                                 backend: Backend::from(client.with_session(info.id.clone())),
@@ -1040,7 +1046,14 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                                     }
                                     let spec = wcode_tui::SurfaceSpec {
                                         id: info.id.clone(),
-                                        label: crate::agents::short_name(&info.id),
+                                        // The root reads `wcode` here too, so a
+                                        // runtime-spawned root row matches the
+                                        // seeded one.
+                                        label: if Some(&info.id) == root_id.as_ref() {
+                                            "wcode".to_string()
+                                        } else {
+                                            crate::agents::short_name(&info.id)
+                                        },
                                         model: info.model.clone().unwrap_or_else(|| model.clone()),
                                         is_root: Some(&info.id) == root_id.as_ref(),
                                         backend: Backend::from(
@@ -1625,8 +1638,8 @@ async fn serve(
     if let Some(o) = orchestrator {
         o.register_root(handle.clone());
     }
-    // Serve the root first (labelled by its session id), then the live
-    // team: the registry's local sessions minus the root's own
+    // Serve the root first (labelled `wcode`, the header run lowercased), then
+    // the live team: the registry's local sessions minus the root's own
     // `agent:orchestrator` alias. The roster stays live, so a worker
     // spawned at runtime is served without a restart.
     // The registry the server reads each served session's model from, so
@@ -1821,7 +1834,9 @@ async fn dispatch(
                     .as_ref()
                     .map(|o| o.id().clone())
                     .unwrap_or_else(|| SessionId::agent("root")),
-                label: "root".to_string(),
+                // `wcode` — the header's reverse-video `WCODE` run lowercased —
+                // so the sidebar's row 0 reads `wcode` (D018/O3).
+                label: "wcode".to_string(),
                 model: llm.model.clone(),
                 is_root: true,
                 backend: Backend::from(handle),

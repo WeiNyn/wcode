@@ -105,7 +105,7 @@ fn fixture() -> App {
     app.set_surfaces(vec![
         SurfaceInfo {
             id: root.clone(),
-            label: "root".into(),
+            label: "wcode".into(),
             model: "zephyr-9".into(),
             is_root: true,
         },
@@ -220,6 +220,11 @@ fn fixture() -> App {
     app.handle(AppEvent::Key(Key::Ctrl('g')));
     app.handle(AppEvent::Key(Key::Enter));
     app.handle(AppEvent::Key(Key::Esc));
+
+    // Dock the sidebar (Ctrl-B), so every frame shows the team column — the
+    // `wcode` root row plus the badged members. Below `SIDEBAR_MIN_WIDTH` the
+    // panel never docks, so the 48x20 frame keeps its base layout.
+    app.handle(AppEvent::Key(Key::Ctrl('b')));
 
     app
 }

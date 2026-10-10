@@ -155,7 +155,7 @@ async fn main() -> std::io::Result<()> {
     let surfaces = vec![
         wcode_tui::SurfaceSpec {
             id: SessionId::agent("root"),
-            label: "root".to_string(),
+            label: "wcode".to_string(),
             model: "demo".to_string(),
             is_root: true,
             backend: Backend::from(handle.clone()),

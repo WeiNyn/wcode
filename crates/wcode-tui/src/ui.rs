@@ -2037,8 +2037,10 @@ fn change_tree_lines(rows: &[ChangeRow], width: usize) -> Vec<Line<'static>> {
 /// draws nothing.
 ///
 /// Data, per section:
-/// - agents  → [`App::member_rows`] (`label`, [`crate::TeamState`], focused,
-///   live action); glyph `state.glyph()` styled by `state_style(state)`.
+/// - agents  → [`App::sidebar_rows_indexed`] (root-INCLUSIVE: row 0 is the root,
+///   unbadged) — `label`, [`crate::TeamState`], focused, live action; glyph
+///   `state.glyph()` styled by `state_style(state)`. `/team` uses the
+///   member-only [`App::member_rows`].
 ///   `member_rows` carries no per-member elapsed, so the elapsed is not
 ///   reachable; only the focused surface's [`App::run_elapsed`] rides its row.
 /// - changes → [`App::change_tree`] (a directory tree, D36).
@@ -2051,17 +2053,26 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // ---- agents ---------------------------------------------------------
     lines.push(section_rule("agents", None, w));
-    // Publish each drawn member row for hit-testing. `member_rows_indexed`
-    // borrows `app` immutably; that borrow ends before `set_sidebar_hit` needs
-    // `&mut app`, so iterate the owned rows BY VALUE and collect `(index, y)`.
-    let indexed = app.member_rows_indexed();
+    // Publish each drawn row for hit-testing — the root included.
+    // `sidebar_rows_indexed` borrows `app` immutably; that borrow ends before
+    // `set_sidebar_hit` needs `&mut app`, so iterate the owned rows BY VALUE and
+    // collect `(index, y)`.
+    let indexed = app.sidebar_rows_indexed();
     let mut members: Vec<(usize, u16)> = Vec::new();
     if indexed.is_empty() {
         lines.push(Line::from(Span::styled("  —", dim())));
     }
     let bottom = area.y.saturating_add(area.height);
     // The "agents" header owns area.y.
-    for (n, (idx, label, state, focused, action)) in indexed.into_iter().enumerate() {
+    // The badge counts MEMBERS, not drawn rows: it is the ordinal among the
+    // non-root rows drawn so far, so badge `k` is `canonical_order()[k]` and
+    // `Alt-k` lands on the same surface (D34). The root is DRAWN (row 0, so it is
+    // clickable and focusable like any other surface) but never badged; its badge
+    // column is blank SPACES, not an empty span, because `clipped_row` drops empty
+    // spans and a dropped span would shift the root's glyph a column left of every
+    // member glyph.
+    let mut member_no = 0usize;
+    for (n, (idx, label, state, focused, action, is_root)) in indexed.into_iter().enumerate() {
         let y = area.y + 1 + n as u16;
         if y < bottom {
             members.push((idx, y));
@@ -2070,7 +2081,12 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
         // visible), the glyph colored by state, the live action dim, `*` marks the
         // focused surface. A per-member elapsed is not exposed, so the focused row
         // carries the run elapsed instead.
-        let number = format!("  {}", n + 1);
+        let number = if is_root {
+            "   ".to_string()
+        } else {
+            member_no += 1;
+            format!("  {member_no}")
+        };
         let mut head = format!(
             " {} {}{}",
             state.glyph(),
@@ -3826,6 +3842,94 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(text.contains("── agents"), "the agents section rule:\n{text}");
         assert!(text.contains("explorer"), "a member row:\n{text}");
         assert!(text.contains("── changes"), "the changes section rule:\n{text}");
+    }
+
+    /// Every `TeamState` glyph, so a row lookup can tell a sidebar row from a
+    /// band row that merely repeats a label (the status band's repo name).
+    const GLYPHS: &str = "○●✓✗";
+
+    /// A root + two members, the sidebar open: the fixture slice b's sidebar rows
+    /// are drawn from. The root is labelled `wcode` (the header run lowercased).
+    fn root_plus_two_members() -> App {
+        let mut app = App::new();
+        let surf = |id: &str, label: &str, is_root: bool| crate::SurfaceInfo {
+            id: SessionId::agent(id),
+            label: label.into(),
+            model: "m".into(),
+            is_root,
+        };
+        app.set_surfaces(vec![
+            surf("root", "wcode", true),
+            surf("explorer", "explorer", false),
+            surf("developer", "developer", false),
+        ]);
+        app.handle(AppEvent::Key(Key::Ctrl('b'))); // open the sidebar
+        app
+    }
+
+    #[test]
+    fn the_sidebar_root_row_keeps_member_badges_stable() {
+        let mut app = root_plus_two_members();
+        let frame = buffer_text(&render(&mut app, 120, 24));
+        // The root is row 0 and is DRAWN, but carries NO badge (O2) — its badge
+        // column is blank, so its glyph still lines up with every member glyph.
+        let root_row = frame
+            .lines()
+            .find(|l| l.contains("○ wcode"))
+            .unwrap_or_else(|| panic!("the root row is missing:\n{frame}"));
+        assert!(
+            root_row.starts_with("    ○ wcode"),
+            "the unbadged root row, glyph at col 4:\n{root_row:?}"
+        );
+        // The members keep `1..N`, so `Alt-N` still means member `N` (D34).
+        assert!(frame.contains("  1 ○ explorer"), "member 1:\n{frame}");
+        assert!(frame.contains("  2 ○ developer"), "member 2:\n{frame}");
+        for label in ["wcode", "explorer", "developer"] {
+            let row = frame
+                .lines()
+                .find(|l| l.contains(label) && GLYPHS.contains(|g| l.contains(g)))
+                .unwrap_or_else(|| panic!("no row for {label}:\n{frame}"));
+            let glyph = row
+                .find(|c: char| GLYPHS.contains(c))
+                .unwrap_or_else(|| panic!("no state glyph in {label}'s row: {row:?}"));
+            assert_eq!(
+                glyph, 4,
+                "{label}'s glyph must share the badge column: {row:?}"
+            );
+        }
+    }
+
+    /// The root row is a first-class row: it is PUBLISHED in the hit map and a
+    /// click on it focuses the root — through the same index-agnostic dispatch a
+    /// member row uses, so this is the drawn-row proof `set_sidebar_hit`'s
+    /// members vector now carries the root too.
+    #[test]
+    fn the_root_row_is_clickable_through_the_published_hits() {
+        let mut app = root_plus_two_members();
+        let _ = render(&mut app, 120, 24);
+        let hit = app.hit.sidebar.as_ref().expect("the sidebar published a hit");
+        let rect = hit.rect;
+        let root_y = rect.y + 1; // the agents header owns rect.y
+        assert!(
+            hit.members.contains(&(0, root_y)),
+            "the root publishes (0, rect.y+1): {:?}",
+            hit.members
+        );
+        assert!(
+            hit.members.contains(&(1, root_y + 1)),
+            "member 1 sits one row lower: {:?}",
+            hit.members
+        );
+        // Move the focus OFF the root first, so the assertion reads "the click
+        // MOVED focus to the root" rather than "nothing changed it".
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 1, "Ctrl-N moved the focus to member 1");
+        app.handle(AppEvent::Mouse(MouseEvent {
+            kind: MouseKind::Down,
+            col: rect.x + 3,
+            row: root_y,
+        }));
+        assert_eq!(app.focus(), 0, "clicking the root row focuses the root");
     }
 
     #[test]
