@@ -39,6 +39,26 @@ export interface SelectionContext {
 /** The client-local view mode: `all` = the merged transcript; `focus` = the target. */
 export type ViewMode = "all" | "focus";
 
+/** How a fold (a `thinking` block, a tool output) starts. `auto` = the live-while-running rule. */
+export type FoldDefault = "auto" | "collapsed" | "expanded";
+
+/**
+ * The PRESENTATION preferences (D015), read from VS Code settings by the host and
+ * ridden on every snapshot. They are DEFAULTS, not locks: a manual fold toggle still
+ * wins (the per-callId override), and `mode` is the INITIAL mode of a new session.
+ */
+export interface ViewPrefs {
+  /** The initial view mode for a new session (all | focus). */
+  mode: ViewMode;
+  /** How a `thinking` block starts (auto = open while streaming, collapsed once settled). */
+  thinking: FoldDefault;
+  /** How a tool-output fold starts (auto = open while running, collapsed once done). */
+  tools: FoldDefault;
+}
+
+/** The built-in presentation defaults — identical to the pre-settings behavior. */
+export const DEFAULT_PREFS: ViewPrefs = { mode: "all", thinking: "auto", tools: "auto" };
+
 /** host → webview. Full snapshots only — there is no append/diff fast path. */
 export type ToWebview = {
   kind: "state";
@@ -50,6 +70,8 @@ export type ToWebview = {
   verdicts: Record<string, Verdict>;
   /** The client-local view mode (all = the merged transcript; focus = the target). */
   mode: ViewMode;
+  /** The presentation preferences (D015): the mode default + the fold defaults. */
+  prefs: ViewPrefs;
 };
 
 /** webview → host. */
@@ -141,6 +163,7 @@ export function parseToWebview(raw: unknown): ToWebview | null {
   const context = parseContext(message.context);
   const verdicts = parseVerdicts(message.verdicts);
   const mode = message.mode === "all" ? "all" : "focus";
+  const prefs = parsePrefs(message.prefs);
 
   return {
     kind: "state",
@@ -149,11 +172,32 @@ export function parseToWebview(raw: unknown): ToWebview | null {
     context,
     verdicts,
     mode,
+    prefs,
   };
 }
 
 function isSessionState(value: string): value is SessionState {
   return value === "stopped" || value === "starting" || value === "ready" || value === "crashed";
+}
+
+/** One `FoldDefault`, or `"auto"` for anything unrecognized. Pure. */
+function foldDefault(raw: unknown): FoldDefault {
+  return raw === "collapsed" || raw === "expanded" ? raw : "auto";
+}
+
+/**
+ * Narrow untrusted `prefs` to a `ViewPrefs`. LENIENT like `context`: presentation is
+ * not load-bearing, so anything unrecognized degrades to the built-in default and the
+ * WHOLE snapshot is kept. Pure.
+ */
+function parsePrefs(raw: unknown): ViewPrefs {
+  if (raw === null || typeof raw !== "object") return DEFAULT_PREFS;
+  const p = raw as Record<string, unknown>;
+  return {
+    mode: p.mode === "focus" ? "focus" : "all",
+    thinking: foldDefault(p.thinking),
+    tools: foldDefault(p.tools),
+  };
 }
 
 /**

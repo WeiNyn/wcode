@@ -9,7 +9,7 @@ import type { MemberState } from "../protocol.ts";
 import { memberGlyph, type RosterItem, type SessionMember } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import type { SessionState } from "../session.ts";
-import type { PanelSessionInfo, SelectionContext, ViewMode } from "../webview.ts";
+import type { FoldDefault, PanelSessionInfo, SelectionContext, ViewMode } from "../webview.ts";
 
 /** The FSM state as the user reads it. */
 export function stateLabel(state: SessionState): string {
@@ -628,9 +628,17 @@ export type FoldOverrides = ReadonlyMap<string, FoldOverride>;
  * So `new Map()` yields `true` while running and `false` once done, and an override
  * silently EXPIRES at the running -> done transition (the "next state change").
  */
-export function foldOpen(overrides: FoldOverrides, callId: string, done: boolean): boolean {
+export function foldOpen(
+  overrides: FoldOverrides,
+  callId: string,
+  done: boolean,
+  def: FoldDefault = "auto",
+): boolean {
   const override = overrides.get(callId);
-  return override !== undefined && override.done === done ? override.open : !done;
+  if (override !== undefined && override.done === done) return override.open;
+  if (def === "expanded") return true;
+  if (def === "collapsed") return false;
+  return !done; // `auto` (D015 default): open while running, collapsed once done
 }
 
 /**

@@ -12,6 +12,7 @@
 import type { ContentBlock, TodoItem } from "./protocol.ts";
 import type { Block, SessionMember, ToolBlock, ViewState, ViewStatus } from "./reducer.ts";
 import { targetLabel, transcriptOf } from "./reducer.ts";
+import type { FoldDefault } from "./webview.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { highlight, highlightLines, languageForTool } from "./highlight.ts";
 import { reviewHunk } from "./review.ts";
@@ -80,10 +81,14 @@ export interface RenderedState {
  * Pure. The transcript comes from that session's key, so a retarget only
  * changes what is rendered — nothing is lost.
  */
-export function renderState(state: ViewState, target: string | null = state.targeted): RenderedState {
+export function renderState(
+  state: ViewState,
+  target: string | null = state.targeted,
+  thinking: FoldDefault = "auto",
+): RenderedState {
   const blocks = transcriptOf(state, target);
   return {
-    blocks: blocks.map(renderBlock),
+    blocks: blocks.map((block) => renderBlock(block, thinking)),
     members: state.members,
     // The rail is DURABLE (it does not retarget), so it shows the ROOT session's plan.
     todos: rootTodos(state),
@@ -109,10 +114,14 @@ function targetRunning(state: ViewState, target: string | null): boolean {
   return member.state === "running";
 }
 /** Render one block. Pure. */
-export function renderBlock(block: Block): RenderedBlock {
+export function renderBlock(block: Block, thinking: FoldDefault = "auto"): RenderedBlock {
   switch (block.kind) {
     case "assistant":
-      return { kind: "assistant", html: renderContent(block.content ?? [], block.live ?? false), live: block.live ?? false };
+      return {
+        kind: "assistant",
+        html: renderContent(block.content ?? [], block.live ?? false, thinking),
+        live: block.live ?? false,
+      };
     case "tool":
       return { kind: "tool", html: "", live: false, tool: renderTool(block.tool) };
     case "user":
@@ -152,18 +161,22 @@ export function escapeHtml(text: string): string {
 
 /* ------------------------------------------------------------------ helpers */
 
-function renderContent(content: ContentBlock[], live: boolean): string {
+function renderContent(content: ContentBlock[], live: boolean, thinking: FoldDefault): string {
   const parts: string[] = [];
   for (const block of content) {
     switch (block.type) {
       case "text":
         parts.push(renderMarkdown(block.text));
         break;
-      case "thinking":
+      case "thinking": {
+        // The fold's initial `open` (D015): `expanded`/`collapsed` override, `auto`
+        // keeps the original rule — open while streaming, collapsed once settled.
+        const open = thinking === "expanded" ? true : thinking === "collapsed" ? false : live;
         parts.push(
-          `<details class="fold thinking"${live ? " open" : ""}><summary><span class="chev"></span><span class="tname">thinking</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
+          `<details class="fold thinking"${open ? " open" : ""}><summary><span class="chev"></span><span class="tname">thinking</span></summary><div class="inner">${renderMarkdown(block.text)}</div></details>`,
         );
         break;
+      }
       // A `tool_call` content block renders as NOTHING (TUI parity:
       // crates/wcode-tui/src/ui.rs:559 `ContentBlock::ToolCall { .. } => {}`); the
       // tool's own `details.fold.tool` row (chat.ts `renderToolFold`) carries the call.
@@ -208,9 +221,9 @@ function clip(text: string, max: number): string {
  * between — which is exactly the timeline the panel should show. Blocks without a
  * seq (a hand-built state) keep their relative order (a stable sort).
  */
-export function renderMerged(state: ViewState): RenderedBlock[] {
+export function renderMerged(state: ViewState, thinking: FoldDefault = "auto"): RenderedBlock[] {
   const merged = state.members.flatMap((member) =>
-    transcriptOf(state, member.id).map((block) => ({ ...renderBlock(block), origin: member.id, seq: block.seq })),
+    transcriptOf(state, member.id).map((block) => ({ ...renderBlock(block, thinking), origin: member.id, seq: block.seq })),
   );
   return merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }

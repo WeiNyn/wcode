@@ -108,6 +108,18 @@ test("a thinking block renders as the draft's folded `thinking` row", () => {
   assert.match(block.html, /class="fold thinking"/, "the renamed fold class is present");
 });
 
+test("a thinking fold honours the `thinking` preference: auto / collapsed / expanded (D015)", () => {
+  const block = { kind: "assistant" as const, content: [{ type: "thinking" as const, text: "x" }] };
+  assert.match(renderBlock(block, "collapsed").html, /class="fold thinking">/, "collapsed -> no `open`");
+  assert.match(renderBlock(block, "expanded").html, /class="fold thinking" open>/, "expanded -> `open`");
+  assert.match(renderBlock(block, "auto").html, /class="fold thinking">/, "auto + settled -> collapsed");
+  assert.match(
+    renderBlock({ ...block, live: true }, "auto").html,
+    /class="fold thinking" open>/,
+    "auto + live -> open (the original rule)",
+  );
+});
+
 test("a fenced code block renders as a titled `.code` card with Prism tokens", () => {
   const block = renderBlock({
     kind: "assistant",

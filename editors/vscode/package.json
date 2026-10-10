@@ -101,6 +101,38 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Path to the `wcode` binary. Empty resolves `wcode` from `PATH`."
+        },
+        "wcode.view.mode": {
+          "type": "string",
+          "enum": ["all", "focus"],
+          "default": "all",
+          "enumDescriptions": [
+            "All: the merged transcript of every member",
+            "Focus: only the targeted member's transcript"
+          ],
+          "markdownDescription": "The **initial** view mode of a new session. A manual All/Focus toggle still wins for the session."
+        },
+        "wcode.view.thinking": {
+          "type": "string",
+          "enum": ["auto", "collapsed", "expanded"],
+          "default": "auto",
+          "enumDescriptions": [
+            "Open while streaming, collapsed once settled",
+            "Always start collapsed",
+            "Always start expanded"
+          ],
+          "markdownDescription": "How a `thinking` block starts."
+        },
+        "wcode.view.tools": {
+          "type": "string",
+          "enum": ["auto", "collapsed", "expanded"],
+          "default": "auto",
+          "enumDescriptions": [
+            "Open while running, collapsed once done",
+            "Always start collapsed",
+            "Always start expanded"
+          ],
+          "markdownDescription": "How a tool-output fold starts."
         }
       }
     }

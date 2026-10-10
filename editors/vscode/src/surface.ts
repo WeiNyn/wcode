@@ -4,6 +4,7 @@ import { renderMerged, renderState, type RenderedState } from "./render.ts";
 import type { ViewState } from "./reducer.ts";
 import type { Verdict } from "./review.ts";
 import {
+  DEFAULT_PREFS,
   createThrottle,
   parseFromWebview,
   realScheduler,
@@ -12,6 +13,7 @@ import {
   type Throttle,
   type ToWebview,
   type ViewMode,
+  type ViewPrefs,
 } from "./webview.ts";
 
 /**
@@ -128,12 +130,16 @@ export class SurfaceController {
   private target: string | null = null;
   /** The client-local view mode (shared by every host; resets on restart). */
   private mode: ViewMode = "all";
+  /** The presentation preferences (D015): the mode default + the fold defaults. */
+  private prefs: ViewPrefs = DEFAULT_PREFS;
 
-  constructor(extensionUri: vscode.Uri, handlers: SurfaceHandlers, state: ViewState) {
+  constructor(extensionUri: vscode.Uri, handlers: SurfaceHandlers, state: ViewState, prefs: ViewPrefs = DEFAULT_PREFS) {
     this.mediaRoot = vscode.Uri.joinPath(extensionUri, "media");
     this.handlers = handlers;
     this.state = state;
     this.target = state.targeted;
+    this.prefs = prefs;
+    this.mode = prefs.mode;
     this.throttle = createThrottle(THROTTLE_MS, (rendered) => this.broadcast(rendered), realScheduler);
   }
 
@@ -207,6 +213,16 @@ export class SurfaceController {
     this.push(true);
   }
 
+  /**
+   * Apply new presentation preferences (D015; a settings change). Repaints every host
+   * with the new fold defaults. The CURRENT mode is deliberately NOT touched — `mode`
+   * is the default for a new session, and a repaint must not fight a manual toggle.
+   */
+  setPrefs(prefs: ViewPrefs): void {
+    this.prefs = prefs;
+    this.push(true);
+  }
+
   dispose(): void {
     this.throttle.dispose();
     for (const host of [...this.hosts]) this.detach(host);
@@ -228,8 +244,10 @@ export class SurfaceController {
    * already-built `RenderedState` and only TAGS the mode, so it does NOT call this.
    */
   private snapshot(): RenderedState {
-    const base = renderState(this.state, this.target);
-    return this.mode === "all" ? { ...base, blocks: renderMerged(this.state) } : base;
+    const base = renderState(this.state, this.target, this.prefs.thinking);
+    return this.mode === "all"
+      ? { ...base, blocks: renderMerged(this.state, this.prefs.thinking) }
+      : base;
   }
 
   /** The throttle's sink: build the message ONCE and post it to every READY host. */
@@ -249,6 +267,7 @@ export class SurfaceController {
       context: this.context,
       verdicts: this.verdicts,
       mode: this.mode,
+      prefs: this.prefs,
     };
   }
 

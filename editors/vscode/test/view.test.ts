@@ -318,6 +318,19 @@ test("foldOpen: auto-open while running, auto-collapse when done", () => {
   assert.equal(foldOpen(none, "t1", true), false, "done -> collapsed");
 });
 
+test("foldOpen: the `def` preference overrides `auto`, but a manual toggle wins (D015)", () => {
+  const none = new Map<string, FoldOverride>();
+  assert.equal(foldOpen(none, "t1", false, "expanded"), true, "expanded forces open while running");
+  assert.equal(foldOpen(none, "t1", true, "expanded"), true, "…and when done");
+  assert.equal(foldOpen(none, "t1", false, "collapsed"), false, "collapsed forces closed while running");
+  assert.equal(foldOpen(none, "t1", true, "collapsed"), false, "…and when done");
+  // A user's manual toggle still beats the default.
+  const closed = toggleFold(none, "t1", false);
+  assert.equal(foldOpen(closed, "t1", false, "expanded"), false, "the override wins over `expanded`");
+  // The parameter defaults to `auto` (the original rule).
+  assert.equal(foldOpen(none, "t1", true), false);
+});
+
 test("toggleFold records an override that wins in its phase", () => {
   const none = new Map<string, FoldOverride>();
   const closed = toggleFold(none, "t1", false); // the user closes a RUNNING fold
@@ -460,6 +473,7 @@ test("parseToWebview accepts a well-formed snapshot", () => {
     context: null,
     verdicts: {},
     mode: "focus",
+    prefs: { mode: "all", thinking: "auto", tools: "auto" },
   };
   const parsed = parseToWebview(message);
   assert.ok(parsed);
@@ -475,6 +489,23 @@ test("parseToWebview accepts a well-formed snapshot", () => {
 
   const withV = parseToWebview({ ...message, verdicts: { t1: "accepted" } });
   assert.deepEqual(withV?.verdicts, { t1: "accepted" });
+
+  // `prefs` round-trips, and a missing/foreign value degrades to the built-in default.
+  assert.deepEqual(parseToWebview(message)?.prefs, { mode: "all", thinking: "auto", tools: "auto" });
+  assert.deepEqual(
+    parseToWebview({ ...message, prefs: { mode: "focus", thinking: "collapsed", tools: "expanded" } })?.prefs,
+    { mode: "focus", thinking: "collapsed", tools: "expanded" },
+  );
+  assert.deepEqual(
+    parseToWebview({ ...message, prefs: { mode: "nope", thinking: 7, tools: "expanded" } })?.prefs,
+    { mode: "all", thinking: "auto", tools: "expanded" },
+    "each unknown field degrades independently",
+  );
+  assert.deepEqual(parseToWebview({ ...message, prefs: undefined })?.prefs, {
+    mode: "all",
+    thinking: "auto",
+    tools: "auto",
+  });
 
   // LENIENT (like `context`): a bad verdict degrades to `{}`; the snapshot SURVIVES.
   const bad = parseToWebview({ ...message, verdicts: { t1: "bogus" } });
@@ -677,9 +708,10 @@ test("the team caption is keyboard-activatable: a tabindex row whose keydown pos
 
 /* ------------------------------------------------------ the paper sheet */
 
-test("the measure: --ed-measure is 64ch and shared by .col, .masthead .inner, .composer .inner", () => {
+test("the measure: --ed-measure FILLS the editor width and is shared by .col, .masthead .inner, .composer .inner", () => {
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-  assert.match(css, /--ed-measure: 64ch/, "the measure is 64ch (A6)");
+  assert.match(css, /--ed-measure: 100%/, "the measure fills the width (D014, adaptive)");
+  assert.doesNotMatch(css, /--ed-measure: \d+ch/, "no fixed `ch` cap remains");
   assert.match(css, /\.col \{[^}]*max-width: var\(--ed-measure\)/, ".col shares the measure");
   assert.match(css, /\.masthead \.inner \{[^}]*max-width: var\(--ed-measure\)/, ".masthead .inner shares it");
   assert.match(css, /\.composer \.inner \{[^}]*max-width: var\(--ed-measure\)/, ".composer .inner shares it");
@@ -1099,8 +1131,8 @@ test("turns: two peer blocks from the SAME sender are one speaker (the second co
 
 test("the composition is in the sheet: a reading column, a byline, the paragraph beat (no spine)", () => {
   const css = readFileSync(resolve(here, "../media/chat.css"), "utf8");
-  // the reading column is capped + centered.
-  assert.match(css, /\.col \{[^}]*max-width: var\(--ed-measure\)/, "the column is capped");
+  // the reading column FILLS the editor width + is centered (D014).
+  assert.match(css, /\.col \{[^}]*max-width: var\(--ed-measure\)/, "the column shares the adaptive measure");
   assert.match(css, /\.col \{[^}]*margin: 0 auto/, "the column is centered");
   // the byline: small-caps mono, no avatar box.
   assert.match(css, /\.byline \{[^}]*text-transform: uppercase/, "the byline is small-caps");

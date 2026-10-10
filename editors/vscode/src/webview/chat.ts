@@ -17,7 +17,7 @@ import { completionText, filterCommands, parseSlash, type SlashCommand } from ".
 import { memberGlyph, memberViews } from "../reducer.ts";
 import type { RenderedBlock, RenderedState, RenderedTool } from "../render.ts";
 import { reviewHunk, verdictOf, verdictUi, type ReviewHunk, type Verdict } from "../review.ts";
-import { parseToWebview, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
+import { parseToWebview, type FoldDefault, type FromWebview, type PanelSessionInfo, type SelectionContext, type ToWebview, type ViewMode } from "../webview.ts";
 import {
   classNames,
   composerActions,
@@ -126,6 +126,8 @@ let lastContext: SelectionContext | null = null;
 let lastRef: string | null = null;
 /** The composer's current mode (the mode toggle's pressed segment), for the click guard. */
 let composerMode: "Plan" | "Act" = "Act";
+/** The tool-fold default from the LAST snapshot (D015 `wcode.view.tools`). */
+let toolFoldDefault: FoldDefault = "auto";
 
 /** The masthead's cells+caption signature; a matching snapshot skips the rebuild. */
 let mastheadKey: string | null = null;
@@ -422,7 +424,7 @@ function fnmark(note: TurnNote): HTMLElement {
   button.setAttribute("type", "button");
   button.id = `fnm-${note.n}`;
   button.setAttribute("aria-controls", `fn-${note.n}`);
-  button.setAttribute("aria-expanded", foldOpen(foldOverrides, note.callId, note.done) ? "true" : "false");
+  button.setAttribute("aria-expanded", foldOpen(foldOverrides, note.callId, note.done, toolFoldDefault) ? "true" : "false");
   button.title = `Note ${note.n}, ${note.name}`;
   button.addEventListener("click", () => {
     foldOverrides = toggleFold(foldOverrides, note.callId, note.done);
@@ -457,7 +459,7 @@ function fnNote(note: TurnNote): HTMLElement {
   // `textContent = ""` rebuild (a native `details` open would be lost on every tick).
   const details = el("details", "fn-out");
   details.id = `fn-${note.n}-out`;
-  if (foldOpen(foldOverrides, note.callId, note.done)) details.setAttribute("open", "");
+  if (foldOpen(foldOverrides, note.callId, note.done, toolFoldDefault)) details.setAttribute("open", "");
   const summary = el("summary", null);
   summary.appendChild(el("span", "chev"));
   summary.appendChild(document.createTextNode(" output"));
@@ -524,6 +526,7 @@ function render(snapshot: ToWebview): void {
   renderComposer(state, snapshot.context);
   renderLiveline(state);
   lastVerdicts = snapshot.verdicts;
+  toolFoldDefault = snapshot.prefs.tools;
   transcriptEl.textContent = "";
   if (state.blocks.length === 0) {
     transcriptEl.appendChild(renderStateCard(state, session));
