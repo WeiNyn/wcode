@@ -54,3 +54,18 @@ partly implemented in the working tree). Its head is a **speaker** (`WCODE`, §1
 - The retired `── notes ──` foot rule and the `Block::Notes`-shaped ledger go.
 - The 34 drifted tests in `crates/wcode-tui` must be updated to the new model, and
   new tests added for the header + inline order.
+
+## Outcome (2026-10-09)
+
+Shipped in `3553118` (`tui: one block per turn — the book header and tools inline
+in call order`) + `20621be` (the `¹`-mark tests, review N1). Second-layer review
+**APPROVED**; `cargo test --workspace` 1124 passed, clippy clean, no `SKETCH`
+markers.
+
+Three index bugs surfaced that the sketch did **not** cover — the transcript's
+index fields must stay in step with an insert: `Surface::insert_block` now shifts
+`open_turn` **and** `selected` (the `SessionHead` seats at 0 mid-run), and
+`Surface::open_turn` computes its index **after** `push_block` (which may first
+`clear_hint`, shifting the new turn down by one). Non-blocking residual:
+`clear_hint` removes without the same shift, safe only by the invariant that the
+D5 hint exists iff the transcript is empty-or-head-only.
