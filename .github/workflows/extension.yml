@@ -1,0 +1,86 @@
+name: Extension
+
+# Releases the VS Code extension as a `.vsix` attached to a GitHub release.
+# The extension versions INDEPENDENTLY of the crates (its own `0.0.x` line), so
+# it gets its own tag namespace: `ext-v0.0.7`. Install with:
+#   code --install-extension wcode-vscode-0.0.7.vsix
+# A manual run only packages the VSIX (a workflow artifact) for inspection.
+on:
+  push:
+    tags:
+      - "ext-v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: package + release the VSIX
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/reuse the release + upload the asset
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # Fail fast when the tag and the manifest disagree — the extension versions
+      # independently, so `ext-v0.0.7` must match package.json's `version`.
+      - name: Guard — tag and manifest version agree
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          want="${GITHUB_REF_NAME#ext-v}"
+          got="$(node -p "require('./package.json').version")"
+          [ "$want" = "$got" ] || {
+            echo "::error title=ext-tag-version-mismatch::tag '${GITHUB_REF_NAME}' implies ${want}, manifest is ${got}"; exit 1; }
+
+      - name: Package the VSIX
+        run: |
+          set -euo pipefail
+          ver="$(node -p "require('./package.json').version")"
+          npx --yes @vscode/vsce@3 package --out "wcode-vscode-${ver}.vsix"
+
+      # A tag run creates (or reuses) the release and attaches the VSIX.
+      - name: Publish the VSIX to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="$(node -p "require('./package.json').version")"
+          vsix="wcode-vscode-${ver}.vsix"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; reusing it"
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          fi
+          gh release upload "$tag" "$vsix" --clobber
+
+      # A manual run only builds the VSIX, uploaded for inspection.
+      - name: Upload the VSIX as an artifact (manual runs)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wcode-vscode-vsix
+          path: editors/vscode/wcode-vscode-*.vsix
