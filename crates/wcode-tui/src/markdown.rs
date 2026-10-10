@@ -16,8 +16,9 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use crate::theme::{self, ColorMode};
 use crate::ui::{code_style, dim};
 
-/// The 3-column gutter every assistant line shares.
-const GUTTER: &str = "   ";
+/// The shared content-column gutter every assistant line sits at — one column
+/// with the user block and the tool tree (D010), so a prompt and its reply align.
+const GUTTER: &str = "       ";
 
 /// A markdown heading.
 fn heading_style() -> Style {
@@ -917,7 +918,7 @@ mod tests {
     #[test]
     fn heading_levels_differ() {
         let lines = render("# h1\n## h2\n###### h6", 40);
-        assert_eq!(text_of(&lines), ["   h1", "   h2", "   h6"]);
+        assert_eq!(text_of(&lines), ["       h1", "       h2", "       h6"]);
         let style_of = |line: &Line| line.spans.last().unwrap().style;
         assert_ne!(
             style_of(&lines[0]),
@@ -935,12 +936,12 @@ mod tests {
     fn ordered_lists_renumber_and_align_continuations() {
         // CommonMark renumbers from the list's start (1, 2, 3 …), not the literals.
         let text = text_of(&render("1. a\n2. b\n10. c", 40));
-        assert_eq!(text, ["   1. a", "   2. b", "   3. c"]);
+        assert_eq!(text, ["       1. a", "       2. b", "       3. c"]);
 
         // A wrapped item's continuation aligns under the text (real marker width).
         let lines = render("10. one two three four five six", 20);
         assert!(lines.len() >= 2, "the item wraps");
-        assert_eq!(lines[0].spans[0].content.as_ref(), "   10. ");
+        assert_eq!(lines[0].spans[0].content.as_ref(), "       10. ");
         assert_eq!(
             lines[1].spans[0].content.as_ref(),
             format!("{GUTTER}{}", " ".repeat(4)),
@@ -951,8 +952,8 @@ mod tests {
     #[test]
     fn blockquotes_get_a_gutter() {
         let lines = render("> quoted", 40);
-        assert_eq!(text_of(&lines), ["   │ quoted"]);
-        assert_eq!(lines[0].spans[0].content.as_ref(), "   │ ");
+        assert_eq!(text_of(&lines), ["       │ quoted"]);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "       │ ");
         assert_eq!(
             lines[0].spans[1].style,
             theme::theme().muted,
@@ -960,13 +961,13 @@ mod tests {
         );
 
         // Nesting: one `│ ` per `>` level.
-        assert_eq!(text_of(&render("> > deep", 40)), ["   │ │ deep"]);
+        assert_eq!(text_of(&render("> > deep", 40)), ["       │ │ deep"]);
     }
 
     #[test]
     fn nested_bullets_indent_under_the_parent() {
         let text = text_of(&render("- a\n  - b\n    - c", 40));
-        assert_eq!(text, ["   • a", "     • b", "       • c"]);
+        assert_eq!(text, ["       • a", "         • b", "           • c"]);
     }
 
     #[test]
@@ -993,7 +994,7 @@ mod tests {
     fn underscores_inside_identifiers_stay_plain() {
         // C2: the `_x_` word-boundary rule keeps identifiers plain.
         let lines = render("foo_bar_baz", 40);
-        assert_eq!(text_of(&lines), ["   foo_bar_baz"]);
+        assert_eq!(text_of(&lines), ["       foo_bar_baz"]);
         assert!(
             lines
                 .iter()
@@ -1005,7 +1006,7 @@ mod tests {
         // A `__` run (a dunder) is STRONG (CommonMark), never italic.
         for (dunder, inner) in [("__init__", "init"), ("__dunder__", "dunder")] {
             let lines = render(dunder, 40);
-            assert_eq!(text_of(&lines), [format!("   {inner}")]);
+            assert_eq!(text_of(&lines), [format!("       {inner}")]);
             let spans: Vec<&Span> = lines.iter().flat_map(|l| l.spans.iter()).collect();
             assert!(
                 spans
@@ -1036,7 +1037,7 @@ mod tests {
     #[test]
     fn spaced_asterisks_stay_plain() {
         let lines = render("a * b * c", 40);
-        assert_eq!(text_of(&lines), ["   a * b * c"]);
+        assert_eq!(text_of(&lines), ["       a * b * c"]);
         assert!(
             lines
                 .iter()
@@ -1050,7 +1051,7 @@ mod tests {
     #[test]
     fn seven_hashes_are_not_a_heading() {
         let lines = render("####### x", 40);
-        assert_eq!(text_of(&lines), ["   ####### x"]);
+        assert_eq!(text_of(&lines), ["       ####### x"]);
         assert_ne!(
             lines[0].spans.last().unwrap().style,
             heading_level_style(1),
@@ -1059,22 +1060,22 @@ mod tests {
     }
     #[test]
     fn inline_run_boundary_keeps_no_space() {
-        assert_eq!(text_of(&render("see `foo`.", 40)), ["   see foo."]);
+        assert_eq!(text_of(&render("see `foo`.", 40)), ["       see foo."]);
     }
 
     #[test]
     fn glued_runs_stay_glued() {
-        assert_eq!(text_of(&render("a**b**c", 40)), ["   abc"]);
+        assert_eq!(text_of(&render("a**b**c", 40)), ["       abc"]);
     }
 
     #[test]
     fn punctuation_after_italic_keeps_no_space() {
-        assert_eq!(text_of(&render("*i*,", 40)), ["   i,"]);
+        assert_eq!(text_of(&render("*i*,", 40)), ["       i,"]);
     }
 
     #[test]
     fn a_real_space_between_words_is_preserved() {
-        assert_eq!(text_of(&render("one two", 40)), ["   one two"]);
+        assert_eq!(text_of(&render("one two", 40)), ["       one two"]);
         // A wrap point still inserts exactly one space.
         let lines = render("one two three four five six seven", 20);
         let rejoined = text_of(&lines)
@@ -1087,14 +1088,14 @@ mod tests {
 
     #[test]
     fn multiple_spaces_collapse_to_one() {
-        assert_eq!(text_of(&render("one   two", 40)), ["   one two"]);
+        assert_eq!(text_of(&render("one   two", 40)), ["       one two"]);
     }
 
     #[test]
     fn a_cross_run_space_is_kept_once_in_either_direction() {
         // A trailing space on run k, a leading space on run k+1 — exactly one space.
-        assert_eq!(text_of(&render("a `b`", 40)), ["   a b"]);
-        assert_eq!(text_of(&render("`x` y", 40)), ["   x y"]);
+        assert_eq!(text_of(&render("a `b`", 40)), ["       a b"]);
+        assert_eq!(text_of(&render("`x` y", 40)), ["       x y"]);
     }
 
     #[test]
@@ -1145,7 +1146,7 @@ mod tests {
             assert_eq!(lines.len(), 2, "the caption + the code: {md:?}");
             assert_eq!(
                 lines[1].spans[0].content.as_ref(),
-                "   │ ",
+                "       │ ",
                 "the gutter proves it is a code block, not reparsed prose: {md:?}"
             );
             assert!(
@@ -1160,8 +1161,8 @@ mod tests {
         // B1 regression guard: a non-Rgb mode is still a fence, never prose.
         let lines = render_mode("```rust\nfn main() {}\n```", 60, ColorMode::Named);
         assert_eq!(lines.len(), 2, "the plate caption + the code");
-        assert_eq!(text_of(&lines)[0], "   plate 1 — rust");
-        assert_eq!(lines[1].spans[0].content.as_ref(), "   │ ");
+        assert_eq!(text_of(&lines)[0], "       plate 1 — rust");
+        assert_eq!(lines[1].spans[0].content.as_ref(), "       │ ");
         assert!(
             lines[1].spans.iter().skip(1).all(|s| s.style == code_style()),
             "a non-Rgb fence falls back to the uniform code style"
@@ -1172,7 +1173,7 @@ mod tests {
     fn an_unclosed_fence_at_eof_renders_as_code() {
         let lines = render_mode("```rust\nlet x = 1;", 60, ColorMode::Rgb);
         assert_eq!(lines.len(), 2, "the caption + one code line");
-        assert_eq!(lines[1].spans[0].content.as_ref(), "   │ ");
+        assert_eq!(lines[1].spans[0].content.as_ref(), "       │ ");
         assert!(text_of(&lines)[1].contains("let x = 1;"));
     }
 
@@ -1219,17 +1220,17 @@ mod tests {
     #[test]
     fn headings_and_bullets_get_markers() {
         let text = text_of(&render("# Title\n- one\n- two", 40));
-        assert_eq!(text[0], "   Title");
-        assert_eq!(text[1], "   • one");
-        assert_eq!(text[2], "   • two");
+        assert_eq!(text[0], "       Title");
+        assert_eq!(text[1], "       • one");
+        assert_eq!(text[2], "       • two");
     }
 
     #[test]
     fn fenced_code_is_marked_and_not_wrapped_inline() {
         let text = text_of(&render("text\n```rust\nlet x = 1; // **not bold**\n```", 60));
-        assert_eq!(text[0], "   text");
-        assert_eq!(text[1], "   plate 1 — rust");
-        assert_eq!(text[2], "   │ let x = 1; // **not bold**");
+        assert_eq!(text[0], "       text");
+        assert_eq!(text[1], "       plate 1 — rust");
+        assert_eq!(text[2], "       │ let x = 1; // **not bold**");
     }
 
     #[test]
@@ -1244,17 +1245,17 @@ mod tests {
     fn a_fenced_block_renders_a_plate_caption() {
         // An info string rides the caption verbatim.
         let with = text_of(&render("```rust\nlet x = 1;\n```", 40));
-        assert_eq!(with[0], "   plate 1 — rust", "{with:?}");
+        assert_eq!(with[0], "       plate 1 — rust", "{with:?}");
         assert!(with.iter().any(|l| l.contains("let x = 1;")), "{with:?}");
 
         // A bare fence → just `plate 1`.
         let bare = text_of(&render("```\ncode\n```", 40));
-        assert_eq!(bare[0], "   plate 1", "{bare:?}");
+        assert_eq!(bare[0], "       plate 1", "{bare:?}");
 
         // Two blocks number 1 then 2.
         let two = text_of(&render("```\na\n```\n\n```\nb\n```", 40));
-        assert_eq!(two[0], "   plate 1", "{two:?}");
-        assert!(two.iter().any(|l| l == "   plate 2"), "{two:?}");
+        assert_eq!(two[0], "       plate 1", "{two:?}");
+        assert!(two.iter().any(|l| l == "       plate 2"), "{two:?}");
     }
 
     #[test]
@@ -1269,12 +1270,12 @@ mod tests {
         }
         // Three solid `─` rules — above the header, under the header, below the
         // last row — each spanning the table width (gutter + 4 + 2 + 3).
-        let rule = "   ─────────";
+        let rule = "       ─────────";
         assert_eq!(text[0], rule, "the top rule");
         assert_eq!(text[2], rule, "the header rule");
         assert_eq!(text[5], rule, "the bottom rule");
         // The header is bold; the columns are separated by whitespace alone.
-        assert_eq!(text[1], "   name  qty");
+        assert_eq!(text[1], "       name  qty");
         assert!(
             lines[1]
                 .spans
@@ -1284,8 +1285,8 @@ mod tests {
             lines[1]
         );
         // Alignment: `a`/`bb` hug the left, the numbers hug the column's right.
-        assert_eq!(text[3], "   a       1");
-        assert_eq!(text[4], "   bb     22");
+        assert_eq!(text[3], "       a       1");
+        assert_eq!(text[4], "       bb     22");
         assert!(
             text[3].ends_with('1') && text[4].ends_with("22"),
             "the qty column is right-aligned: {text:?}"
@@ -1375,9 +1376,9 @@ mod tests {
     fn thematic_break_renders_a_rule() {
         let text = text_of(&render("a\n\n---\n\nb", 40));
         assert_eq!(text.len(), 3, "{text:?}");
-        assert_eq!(text[0], "   a");
-        assert!(text[1].starts_with("   ─"), "{text:?}");
-        assert_eq!(text[2], "   b");
+        assert_eq!(text[0], "       a");
+        assert!(text[1].starts_with("       ─"), "{text:?}");
+        assert_eq!(text[2], "       b");
     }
 
     #[test]
@@ -1385,7 +1386,7 @@ mod tests {
         // The rule must fit `render(text, width)`'s contract, not overflow it.
         let text = text_of(&render("---", 10));
         assert_eq!(disp(&text[0]), 10, "the rule fits the width: {text:?}");
-        assert!(text[0].starts_with("   ─"), "{text:?}");
+        assert!(text[0].starts_with("       ─"), "{text:?}");
     }
 
     #[test]

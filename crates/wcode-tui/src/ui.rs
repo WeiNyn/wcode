@@ -33,11 +33,11 @@ const PANEL_GUTTER: &str = "  ";
 /// The tool block's own gutter before the panel frame (matching the other
 /// blocks' 3-column indent).
 const PANEL_INDENT: &str = "   ";
-/// The three-column gutter the speaker head sits in (` WCODE`), so the content
-/// column (col 6) aligns under a two-space gap after the name.
-const SPEAKER_PREFIX: &str = "   ";
-/// The gap between the speaker name and the content column on the head row.
-const SPEAKER_GAP: &str = "  ";
+/// The **single** content column shared by the user block, the `WCODE` head, the
+/// assistant body (markdown), the thinking body, and the inline tool tree (D010).
+/// One column, so a prompt and its reply line up; the longest speaker label is
+/// `WCODE` (5), plus the 1-col margin and a 1-col gap.
+const CONTENT_COL: usize = 7;
 /// Output lines a collapsed tool shows before a `… +N more` hint.
 const TOOL_PREVIEW_LINES: usize = 4;
 /// Output lines a fully expanded tool shows before the hint returns.
@@ -676,25 +676,24 @@ impl Speaker {
     }
 }
 
-/// The head row's spans for a speaker: a 3-cell gutter holding the reverse-video
-/// name, then a `SPEAKER_GAP` to the content column (col 6), then the first line
-/// of `text`. The name is padded to `SPEAKER_PREFIX` width so the head cell is a
-/// filled run (reverse video over the padded name).
+/// The head row's spans for a speaker: the reverse-video name in the gutter,
+/// padded so the content column lands at [`CONTENT_COL`], then the first line of
+/// `text`. The head cell is a filled run (reverse video over ` <name>`).
 fn speaker_head(speaker: Speaker, text: &str) -> Line<'static> {
     let name = speaker.label();
-    let pad = SPEAKER_PREFIX.chars().count().saturating_sub(name.chars().count());
+    let filled = 1 + name.chars().count(); // the leading space + the name
+    let pad = CONTENT_COL.saturating_sub(filled);
     Line::from(vec![
-        Span::styled(format!(" {}", name), selection_style()),
-        Span::styled(" ".repeat(pad + SPEAKER_GAP.chars().count()), dim()),
+        Span::styled(format!(" {name}"), selection_style()),
+        Span::styled(" ".repeat(pad), dim()),
         Span::styled(text.to_string(), body()),
     ])
 }
 
-/// The continuation row gutter, aligning the body under the content column.
+/// The continuation row gutter, aligning the body under [`CONTENT_COL`].
 fn speaker_cont(text: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(SPEAKER_PREFIX.to_string(), dim()),
-        Span::styled(SPEAKER_GAP.to_string(), dim()),
+        Span::styled(" ".repeat(CONTENT_COL), dim()),
         Span::styled(text.to_string(), body()),
     ])
 }
@@ -702,13 +701,10 @@ fn speaker_cont(text: &str) -> Line<'static> {
 /// A speaker-headed text block: line 0 is the head + the first wrapped line, the
 /// rest the body gutter. An empty `text` renders the bare head.
 fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static>> {
-    let head_w = SPEAKER_PREFIX.chars().count() + SPEAKER_GAP.chars().count();
-    let cont_w = SPEAKER_PREFIX.chars().count() + SPEAKER_GAP.chars().count();
     let mut out = Vec::new();
     let mut first_line = true;
     for raw in text.split('\n') {
-        let prefix_w = if first_line { head_w } else { cont_w };
-        let avail = width.saturating_sub(prefix_w).max(1);
+        let avail = width.saturating_sub(CONTENT_COL).max(1);
         let segments = greedy_wrap(raw, avail);
         let mut iter = segments.into_iter();
         let head = iter.next().unwrap_or_default();
@@ -3138,7 +3134,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert_eq!(barred(&wide).len(), 1, "one row at 60 cols:\n{wide}");
         // A narrower width re-wraps: the ranges are re-measured, not stale.
         let narrow = buffer_text(&render(&mut app, 20, 20));
-        assert_eq!(barred(&narrow).len(), 3, "re-wrapped at 20 cols:\n{narrow}");
+        assert_eq!(barred(&narrow).len(), 4, "re-wrapped at 20 cols:\n{narrow}");
         assert_eq!(app.selected(), Some(2), "the same block stays selected");
     }
 
