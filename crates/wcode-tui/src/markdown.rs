@@ -553,22 +553,25 @@ fn syntax_theme() -> &'static Theme {
 /// still a code block — just unhighlighted.
 struct Fenced {
     hl: Option<HighlightLines<'static>>,
+    mode: ColorMode,
 }
 
 impl Fenced {
-    /// Infallible: build the highlighter only under `Rgb` with a resolved syntax.
+    /// Infallible: build the highlighter under `Rgb` (exact) or `Indexed` (the
+    /// color mapped onto the 256 cube) with a resolved syntax.
     fn new(info: &str, mode: ColorMode) -> Self {
-        let hl = (mode == ColorMode::Rgb)
+        let colorized = matches!(mode, ColorMode::Rgb | ColorMode::Indexed);
+        let hl = colorized
             .then(|| fence_syntax(info))
             .flatten()
             .map(|syn| HighlightLines::new(syn, syntax_theme()));
-        Self { hl }
+        Self { hl, mode }
     }
 
     /// One fenced line: highlighted when possible, else the uniform `code_line`.
     fn line(&mut self, text: &str) -> Line<'static> {
         match self.hl.as_mut() {
-            Some(hl) => highlight_line(hl, text),
+            Some(hl) => highlight_line(hl, text, self.mode),
             None => code_line(text),
         }
     }
@@ -583,15 +586,52 @@ fn fence_syntax(info: &str) -> Option<&'static SyntaxReference> {
         .or_else(|| ss.find_syntax_by_extension(info))
 }
 
-/// syntect token style → ratatui style, honoring wcode's color-mode ladder. Under
-/// `Rgb`: the exact `Color::Rgb` + font modifiers; under `Plain`/`Named`/`Indexed`:
-/// the uniform `code_style()` (256/16-color quantization is a follow-up).
+/// The nearest xterm-256 index for an RGB colour — the 6×6×6 colour cube
+/// (16..=231) or the 24-step gray ramp (232..=255), whichever is closer. Used to
+/// colourise code under the `256color` tier.
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    let cube_index = |v: u8| -> u8 {
+        if v < 48 {
+            0
+        } else if v < 115 {
+            1
+        } else {
+            ((v as u16 - 35) / 40).min(5) as u8
+        }
+    };
+    let cube_level = |i: u8| -> u8 { if i == 0 { 0 } else { 55 + 40 * i } };
+    let (ri, gi, bi) = (cube_index(r), cube_index(g), cube_index(b));
+    let cube = 16 + 36 * ri + 6 * gi + bi;
+    let dist = |x: u8, y: u8| -> u32 {
+        let d = x as i32 - y as i32;
+        (d * d) as u32
+    };
+    let cube_d = dist(r, cube_level(ri)) + dist(g, cube_level(gi)) + dist(b, cube_level(bi));
+    // The gray ramp: 8, 18, …, 238 (24 steps), indices 232..=255.
+    let avg = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+    let gray_i = if avg < 8 {
+        0
+    } else if avg > 238 {
+        23
+    } else {
+        ((avg as u16 - 8 + 5) / 10).min(23) as u8
+    };
+    let gv = 8 + 10 * gray_i;
+    let gray_d = dist(r, gv) + dist(g, gv) + dist(b, gv);
+    if gray_d < cube_d { 232 + gray_i } else { cube }
+}
+
+/// syntect token style → ratatui style, honoring wcode's colour-mode ladder. Under
+/// `Rgb`: the exact `Color::Rgb`; under `Indexed`: the nearest 256 index; under
+/// `Plain`/`Named`: the uniform `code_style()`.
 fn highlight_style(s: SynStyle, mode: ColorMode) -> Style {
-    if mode != ColorMode::Rgb {
-        return code_style();
-    }
     let fg = s.foreground;
-    let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
+    let color = match mode {
+        ColorMode::Rgb => Color::Rgb(fg.r, fg.g, fg.b),
+        ColorMode::Indexed => Color::Indexed(rgb_to_ansi256(fg.r, fg.g, fg.b)),
+        ColorMode::Plain | ColorMode::Named => return code_style(),
+    };
+    let mut style = Style::default().fg(color);
     if s.font_style.contains(FontStyle::BOLD) {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -605,16 +645,13 @@ fn highlight_style(s: SynStyle, mode: ColorMode) -> Style {
 }
 
 /// One highlighted fenced line: the dim `{GUTTER}│ ` gutter + token spans (never
-/// wrapped). `hl` exists only under `ColorMode::Rgb` (see [`Fenced::new`]).
-fn highlight_line(hl: &mut HighlightLines<'static>, text: &str) -> Line<'static> {
+/// wrapped). `hl` exists only under `Rgb`/`Indexed` (see [`Fenced::new`]).
+fn highlight_line(hl: &mut HighlightLines<'static>, text: &str, mode: ColorMode) -> Line<'static> {
     let mut spans = vec![Span::styled(format!("{GUTTER}│ "), dim())];
     match hl.highlight_line(text, syntaxes()) {
         Ok(ranges) => {
             for (style, piece) in ranges {
-                spans.push(Span::styled(
-                    piece.to_string(),
-                    highlight_style(style, ColorMode::Rgb),
-                ));
+                spans.push(Span::styled(piece.to_string(), highlight_style(style, mode)));
             }
         }
         // A highlight failure must never panic in a render path — fall back.
@@ -1198,13 +1235,30 @@ mod tests {
             highlight_style(s, ColorMode::Rgb).fg,
             Some(Color::Rgb(1, 2, 3))
         );
-        for mode in [ColorMode::Plain, ColorMode::Named, ColorMode::Indexed] {
+        for mode in [ColorMode::Plain, ColorMode::Named] {
             assert_eq!(
                 highlight_style(s, mode),
                 code_style(),
                 "under {mode:?} the token falls back to the uniform code style"
             );
         }
+        // The `256color` tier colorises: the RGB token maps to a 256 index.
+        assert!(
+            matches!(
+                highlight_style(s, ColorMode::Indexed).fg,
+                Some(Color::Indexed(_))
+            ),
+            "under Indexed the token maps to a 256-colour index"
+        );
+    }
+
+    #[test]
+    fn rgb_maps_to_the_expected_ansi256_index() {
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16, "black is the cube origin");
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 231, "white is the cube corner");
+        // A near-gray lands on the gray ramp (232..=255), not the cube.
+        let grey = rgb_to_ansi256(128, 128, 128);
+        assert!(grey >= 232, "a mid grey is on the ramp, got {grey}");
     }
     fn text_of(lines: &[Line]) -> Vec<String> {
         lines
