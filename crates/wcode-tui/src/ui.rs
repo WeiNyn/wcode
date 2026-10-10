@@ -719,21 +719,32 @@ fn speaker_head(speaker: Speaker, text: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!(" {name}"), selection_style()),
         Span::styled(" ".repeat(pad), dim()),
-        Span::styled(text.to_string(), body()),
+        Span::styled(text.to_string(), text_style(speaker)),
     ])
 }
 
+/// The text style for a speaker's body: the user's prompt reads in the accent
+/// role, the assistant's prose in the default `body` — so a prompt stands out
+/// from a reply (D011).
+fn text_style(speaker: Speaker) -> Style {
+    match speaker {
+        Speaker::You => user(),
+        Speaker::Wcode => body(),
+    }
+}
+
 /// The continuation row gutter, aligning the body under [`CONTENT_COL`].
-fn speaker_cont(text: &str) -> Line<'static> {
+fn speaker_cont(text: &str, style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(" ".repeat(CONTENT_COL), dim()),
-        Span::styled(text.to_string(), body()),
+        Span::styled(text.to_string(), style),
     ])
 }
 
 /// A speaker-headed text block: line 0 is the head + the first wrapped line, the
 /// rest the body gutter. An empty `text` renders the bare head.
 fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static>> {
+    let style = text_style(speaker);
     let mut out = Vec::new();
     let mut first_line = true;
     for raw in text.split('\n') {
@@ -745,10 +756,10 @@ fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static
             out.push(speaker_head(speaker, &head));
             first_line = false;
         } else {
-            out.push(speaker_cont(&head));
+            out.push(speaker_cont(&head, style));
         }
         for segment in iter {
-            out.push(speaker_cont(&segment));
+            out.push(speaker_cont(&segment, style));
         }
     }
     out
@@ -1871,6 +1882,11 @@ pub(crate) fn dim() -> Style {
 /// Assistant prose — the uncolorized default.
 fn body() -> Style {
     theme::theme().body
+}
+
+/// The user's own prompt — the accent role, so a prompt stands apart from a reply.
+fn user() -> Style {
+    theme::theme().user
 }
 
 /// A quieter grey than [`dim`] where color is available.
@@ -3706,6 +3722,20 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 80, 12));
         assert!(text.contains("WCODE"), "the speaker head:\n{text}");
         assert!(text.contains("no heading"), "the body:\n{text}");
+    }
+
+    #[test]
+    fn the_user_prompt_reads_in_the_user_role_not_body() {
+        let style = |lines: &[Line<'static>]| lines[0].spans.last().unwrap().style;
+        let you = speaker_lines(Speaker::You, "a prompt", 80);
+        let wcode = speaker_lines(Speaker::Wcode, "a reply", 80);
+        assert_eq!(style(&you), theme::theme().user, "the prompt is the accent");
+        assert_eq!(style(&wcode), theme::theme().body, "the reply stays default");
+        assert_ne!(
+            style(&you),
+            style(&wcode),
+            "a prompt and a reply must not share one color"
+        );
     }
 
     #[test]
