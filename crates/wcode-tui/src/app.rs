@@ -197,6 +197,20 @@ pub enum Block {
     /// list under a `── notes ──` rule.
     Tool(Tool),
     Notice(String),
+    /// A `/`-command's CHATTER: its echoed line, its replies, its usage hints and
+    /// its error lines. A RENDERING TWIN of [`Block::Notice`] — the renderer's arm
+    /// is byte-identical — differing only in LIFETIME: it never survives the next
+    /// submit on its surface ([`Surface::retire_transient`]).
+    ///
+    /// Per-surface, like every other block: a retire never crosses surfaces, so
+    /// one surface's `/usage` cannot wipe another's scrollback. Display-only,
+    /// exactly like `Notice` — never committed to ctx/session — and it is NOT the
+    /// D5 empty-state hint (`clear_hint` matches `Block::Notice` on `EMPTY_HINT`,
+    /// so the hint keeps its own retirement and stays in neither of D018's lists).
+    ///
+    /// `String`, like `Notice`/`Error`/`Btw`, so the enum's existing derives
+    /// (`Clone, Debug, PartialEq`) cover it with no lifetime surprises.
+    Transient(String),
     Error(String),
     /// A `/btw` side answer: display-only, never committed to ctx/session.
     /// The renderer styles it distinctly (a `btw:` gutter, dim/italic).
@@ -335,7 +349,7 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
 
 /// The text `y` copies for a block — `None` when there is nothing to copy.
 ///
-/// - `User` / `Notice` / `Error`: the block's text.
+/// - `User` / `Notice` / `Transient` / `Error` / `Btw`: the block's text.
 /// - `Turn`: the text blocks only — **thinking is internal reasoning and is
 ///   never copied** — with code fences preserved.
 /// - `Tool`: the **full `output`**, never the collapsed preview on screen (the
@@ -345,6 +359,7 @@ fn copy_text(block: &Block) -> Option<String> {
     let text = match block {
         Block::User(text)
         | Block::Notice(text)
+        | Block::Transient(text)
         | Block::Error(text)
         | Block::Btw(text) => text.clone(),
         // The exchange copies as its prose only — thinking is internal reasoning
@@ -1439,6 +1454,65 @@ impl Surface {
         }
     }
 
+    /// Retire every transient block (the `/`-command chatter of the PREVIOUS
+    /// generation) from this surface, keeping the three parallel vecs —
+    /// `transcript`, `block_revs`, `cache` (see [`Surface::push_block`]) — in
+    /// LOCKSTEP, and keeping every block-indexed cursor on the SAME block.
+    ///
+    /// # Contract
+    ///
+    /// * Removes EVERY [`Block::Transient`] slot, not just the last: one
+    ///   generation of chatter is `/help`'s echo + its reply + a `usage:` hint,
+    ///   so a single-index splice would leave orphans.
+    /// * ONE descending pass: removals shift later slots, and walking downward
+    ///   means a slot still to be visited is never skipped. Each removal drops
+    ///   the SAME index from all three vecs — never one vec without the others.
+    /// * The browse selection lands on the SAME block: `selected` is decremented
+    ///   once per removed slot below it (as [`Surface::insert_block`] shifts it
+    ///   up on an insert), then clamped into range exactly like
+    ///   [`App::set_block_ranges`] — a splice can empty the list.
+    /// * `open_turn` is a block index too. A transient block is never a
+    ///   [`Block::Turn`], so the open turn's own slot never goes, but its index
+    ///   still shifts.
+    /// * NOT touched: `ranges` (the per-block line ranges), left stale for the
+    ///   same reason `insert_block` leaves it — `set_block_ranges` rewrites it
+    ///   every frame, and a splice happens at submit time, one frame before.
+    ///
+    /// A no-op when the transcript holds no transient block: the common case —
+    /// the first submit after a fresh surface, and every submit on a surface
+    /// that never ran a `/`-command.
+    fn retire_transient(&mut self) {
+        for i in (0..self.transcript.len()).rev() {
+            if !matches!(self.transcript[i], Block::Transient(_)) {
+                continue;
+            }
+            self.transcript.remove(i);
+            self.block_revs.remove(i);
+            self.cache.remove(i);
+            if let Some(n) = self.open_turn
+                && i < n
+            {
+                self.open_turn = Some(n - 1);
+            }
+            if let Some(sel) = self.selected
+                && i < sel
+            {
+                self.selected = Some(sel - 1);
+            }
+        }
+        // A removal below `selected` already shifted it; one AT it leaves the
+        // selection on the block that followed. Clamp, exactly like
+        // `set_block_ranges`, for the slot that was last.
+        if let Some(i) = self.selected {
+            let len = self.transcript.len();
+            if len == 0 {
+                self.selected = None;
+            } else if i >= len {
+                self.selected = Some(len - 1);
+            }
+        }
+    }
+
     /// Insert a committed block mid-transcript, shifting all three parallel vecs
     /// together. A mid-vec insert SHIFTS every later index, so a lazy
     /// length-reconcile would be unsound.
@@ -1797,6 +1871,13 @@ impl Surface {
         self.push_block(Block::Notice(text.into()));
     }
 
+    /// Push a [`Block::Transient`] on this surface — the twin of
+    /// [`Surface::push_notice`], and the door for the sites that are not
+    /// `App` methods (`render_usage` is the one that matters).
+    fn push_transient(&mut self, text: impl Into<String>) {
+        self.push_block(Block::Transient(text.into()));
+    }
+
     /// Render a `GetHistory` reply as a one-line usage summary.
     fn render_usage(&mut self, messages: &[AgentMessage]) {
         let stats = session_stats(messages);
@@ -1810,7 +1891,10 @@ impl Surface {
         if let (Some(used), Some(limit)) = (stats.last_input_tokens, self.status.context_limit) {
             line.push_str(&format!(", context {used}/{limit}"));
         }
-        self.push_notice(line);
+        // `/usage` replies OUTSIDE the command frame (the answer arrives later as
+        // `AgentEvent::History`), so it is transient here rather than at a call
+        // site in `run_command`.
+        self.push_transient(line);
     }
 
     /// The text of the most recent assistant reply, if any.
@@ -3391,7 +3475,7 @@ impl App {
             }
             Key::Esc => self.interrupt(false),
             Key::Ctrl('c') => self.interrupt(true),
-            Key::Ctrl('y') => self.copy_last(),
+            Key::Ctrl('y') => self.copy_last(false),
             // Ctrl-N / Shift-Tab cycle the focused surface (Ctrl-C cancels,
             // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
             Key::Ctrl('n') => self.focus_next(),
@@ -3485,14 +3569,25 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Retire the PREVIOUS generation of `/`-command chatter before this
+        // generation's first block lands, so a transcript holds at most one
+        // generation of it (D018). On the FOCUSED surface only — a retire never
+        // crosses surfaces — and AFTER the empty guard, so a stray `Enter` on an
+        // empty buffer cannot wipe a reply the user is still reading, but BEFORE
+        // the `/` dispatch, so the new echo cannot retire itself and `/usage`
+        // followed by `/help` leaves ONE generation, not two.
+        self.focused_mut().retire_transient();
+        self.dirty = true;
         if text.starts_with('/') {
             self.command(&text);
             return;
         }
         if self.focused().running {
+            // A rejected submit is chatter, not a run event: it dies on the next
+            // submit like the rest. Routed through `push_transient`, so all three
+            // parallel vecs stay in step.
             self.focused_mut()
-                .transcript
-                .push(Block::Notice("a turn is already running — Esc to cancel".into()));
+                .push_transient("a turn is already running — Esc to cancel");
             return;
         }
         self.focused_mut().history.push(text.clone());
@@ -3511,10 +3606,10 @@ impl App {
         let mut parts = line.splitn(2, char::is_whitespace);
         let name = parts.next().unwrap_or("");
         let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
-        self.notice(line);
+        self.transient(line);
         match command_named(name) {
             Some(cmd) => self.run_command(cmd, arg),
-            None => self.notice(format!("unknown command: {name}")),
+            None => self.transient(format!("unknown command: {name}")),
         }
         self.dirty = true;
     }
@@ -3534,9 +3629,9 @@ impl App {
                 Some(name) => {
                     if crate::theme::names().iter().any(|n| n == &name) {
                         let _ = crate::theme::set_preset(name);
-                        self.notice(format!("theme: {name}"));
+                        self.transient(format!("theme: {name}"));
                     } else {
-                        self.notice(format!("unknown theme: {name}"));
+                        self.transient(format!("unknown theme: {name}"));
                     }
                     self.dirty = true; // CLIENT-LOCAL: no Request
                 }
@@ -3550,15 +3645,15 @@ impl App {
                     };
                     self.actions.push(Action::Ask(Request::SetEffort { effort }));
                 }
-                None => self.notice("usage: /effort <level> ('-' clears)"),
+                None => self.transient("usage: /effort <level> ('-' clears)"),
             },
             "width" => match arg.and_then(|a| a.parse::<usize>().ok()) {
                 Some(cols) => {
                     self.set_measure(cols);
-                    self.notice(format!("width: {} cols", self.measure));
+                    self.transient(format!("width: {} cols", self.measure));
                 }
-                None if arg.is_some() => self.notice("usage: /width <cols> (40-200)"),
-                None => self.notice(format!(
+                None if arg.is_some() => self.transient("usage: /width <cols> (40-200)"),
+                None => self.transient(format!(
                     "width: {} cols (usage: /width <cols>)",
                     self.measure
                 )),
@@ -3572,7 +3667,7 @@ impl App {
                     self.actions
                         .push(Action::Ask(Request::SideAsk { text: q.to_string() }));
                 }
-                None => self.notice("usage: /btw <question>"),
+                None => self.transient("usage: /btw <question>"),
             },
             "plan" => {
                 let prev = self.focused().status.plan;
@@ -3581,7 +3676,7 @@ impl App {
                     Some("on") => true,
                     Some("off") => false,
                     Some(_) => {
-                        self.notice("usage: /plan [on|off]");
+                        self.transient("usage: /plan [on|off]");
                         return;
                     }
                 };
@@ -3591,24 +3686,24 @@ impl App {
                 surface.status.plan = on;
                 self.actions.push(Action::Ask(Request::SetPlanMode { on }));
             }
-            "verify" => self.notice(self.verify_text()),
+            "verify" => self.transient(self.verify_text()),
             "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
             "reload" => match arg {
                 None => self.request_reload(false),
                 Some("--no-session") => self.request_reload(true),
-                Some(_) => self.notice("usage: /reload [--no-session]"),
+                Some(_) => self.transient("usage: /reload [--no-session]"),
             },
-            "copy" => self.copy_last(),
+            "copy" => self.copy_last(true),
             "team" => match arg {
                 None => self.open_team_picker(),
-                Some("roster") => self.notice(team_text(&self.member_rows())),
+                Some("roster") => self.transient(team_text(&self.member_rows())),
                 Some(name) => self.request_team(name),
             },
-            "tasks" => self.notice(tasks_text(&self.tasks)),
+            "tasks" => self.transient(tasks_text(&self.tasks)),
             "surface" => self.open_surface_picker(),
-            "help" => self.notice(help_text()),
+            "help" => self.transient(help_text()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
             // assert keeps a table entry from silently shadowing a real arm.
             _ => debug_assert!(
@@ -3751,15 +3846,24 @@ impl App {
     pub(crate) fn completion_selected(&self) -> usize {
         self.completion.as_ref().map_or(0, |c| c.selected)
     }
-    /// Copy the last assistant reply to the terminal clipboard.
-    fn copy_last(&mut self) {
-        match self.focused().last_assistant_text() {
+    /// Copy the last assistant reply to the terminal clipboard. `transient`
+    /// chooses the notice's LIFETIME, not its text: `/copy` is command chatter
+    /// and retires at the next submit (`true`), while the `Ctrl-Y` keystroke is a
+    /// keyboard affordance, not a generation of chatter (`false`). The two share
+    /// this body but not the notice.
+    fn copy_last(&mut self, transient: bool) {
+        let msg = match self.focused().last_assistant_text() {
             Some(text) => {
                 let chars = text.chars().count();
                 self.actions.push(Action::Copy(text));
-                self.notice(format!("copied {chars} chars to the clipboard"));
+                format!("copied {chars} chars to the clipboard")
             }
-            None => self.notice("nothing to copy yet"),
+            None => "nothing to copy yet".to_string(),
+        };
+        if transient {
+            self.transient(msg);
+        } else {
+            self.notice(msg);
         }
     }
 
@@ -3808,6 +3912,14 @@ impl App {
 
     fn notice(&mut self, text: impl Into<String>) {
         self.focused_mut().push_notice(text);
+        self.dirty = true;
+    }
+
+    /// Push a transient block on the FOCUSED surface — the twin of
+    /// [`App::notice`], one word different. Used for `/`-command chatter, which
+    /// [`Surface::retire_transient`] clears at the next submit.
+    fn transient(&mut self, text: impl Into<String>) {
+        self.focused_mut().push_transient(text);
         self.dirty = true;
     }
 
@@ -4006,7 +4118,7 @@ impl App {
     fn open_changes_picker(&mut self) {
         let rows = self.focused().change_tree();
         if rows.is_empty() {
-            self.notice("no changes this run");
+            self.transient("no changes this run");
             return;
         }
         let (files, added, removed) = change_totals(&rows);
@@ -4079,7 +4191,7 @@ impl App {
     /// pre-fills the filter (a quick way to jump to a known id).
     fn open_session_picker(&mut self, filter: Option<&str>) {
         if self.sessions.is_empty() {
-            self.notice("no sessions to resume");
+            self.transient("no sessions to resume");
             return;
         }
         let items = self.sessions.iter().map(|s| s.label.clone()).collect();
@@ -4099,7 +4211,7 @@ impl App {
     /// Open the `/team` picker over the injected project-team names (D017).
     fn open_team_picker(&mut self) {
         if self.teams.is_empty() {
-            self.notice("no project teams found (add ./.wcode/teams/<name>.toml)");
+            self.transient("no project teams found (add ./.wcode/teams/<name>.toml)");
             return;
         }
         self.overlay = Some(Overlay::Pick(Picker::new(
@@ -4114,7 +4226,7 @@ impl App {
     /// re-execs with `--team <name>` — a NEW session with that project team.
     fn request_team(&mut self, name: &str) {
         if self.remote {
-            self.notice("/team (switch team) is unavailable over a socket");
+            self.transient("/team (switch team) is unavailable over a socket");
             return;
         }
         self.pending_team = Some(name.to_string());
@@ -4131,7 +4243,7 @@ impl App {
     /// Open the model picker over the injected model list.
     fn open_model_picker(&mut self) {
         if self.models.is_empty() {
-            self.notice("no models available to pick");
+            self.transient("no models available to pick");
             return;
         }
         self.overlay = Some(Overlay::Pick(Picker::new(
@@ -4203,7 +4315,7 @@ impl App {
             return;
         };
         let Some(selected) = picker.selected_value().map(str::to_string) else {
-            self.notice("no match to select");
+            self.transient("no match to select");
             return;
         };
         // A non-selectable header row (the `/changes` tree's directory line):
@@ -4215,7 +4327,7 @@ impl App {
         match picker.kind {
             PickerKind::Model => {
                 self.focused_mut().status.model.clone_from(&selected);
-                self.notice(format!("model: {selected}"));
+                self.transient(format!("model: {selected}"));
                 self.actions
                     .push(Action::Ask(Request::SetModel { model: selected }));
             }
@@ -4239,7 +4351,7 @@ impl App {
             }
             PickerKind::Theme => {
                 crate::theme::set_preset(&selected).expect("picker rows are catalog names");
-                self.notice(format!("theme: {selected}"));
+                self.transient(format!("theme: {selected}"));
                 self.dirty = true;
             }
         }
@@ -4320,7 +4432,7 @@ impl App {
     /// binary or session to re-exec, so refuse as the REPL does.
     fn request_reload(&mut self, no_session: bool) {
         if self.remote {
-            self.notice("/reload (rebuild + re-exec) is unavailable over a socket");
+            self.transient("/reload (rebuild + re-exec) is unavailable over a socket");
             return;
         }
         self.pending_reload = Some(no_session);
@@ -4332,7 +4444,7 @@ impl App {
     /// with no `--resume`. Over a socket the server owns the session, so refuse.
     fn request_new(&mut self) {
         if self.remote {
-            self.notice("/new (start a fresh session) is unavailable over a socket");
+            self.transient("/new (start a fresh session) is unavailable over a socket");
             return;
         }
         self.pending_new = true;
@@ -4661,8 +4773,228 @@ mod tests {
         submit(&mut app, "first");
         let _ = app.take_actions();
         submit(&mut app, "second");
-        assert!(matches!(app.transcript().last(), Some(Block::Notice(_))));
+        // The guard is CHATTER, not a run event: it is pushed as a transient, so
+        // it dies with the next submit (W014c).
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Transient(t)) if t.contains("already running")
+        ));
         assert!(app.take_actions().is_empty());
+    }
+
+    /// The `/`-command chatter in a transcript, in order — the shape every
+    /// retirement assertion below reads.
+    fn chatter(app: &App) -> Vec<String> {
+        app.transcript()
+            .iter()
+            .filter_map(|b| match b {
+                Block::Transient(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The headline effect (W014c): a `/`-command's chatter is TRANSIENT — it
+    /// survives the submit that produced it, and is gone at the next one, on the
+    /// slash→slash AND slash→prompt orderings — while a run event's notice pushed
+    /// in between is permanent and outlives both.
+    #[test]
+    fn a_command_notice_is_retired_by_the_next_submit() {
+        let mut app = App::new();
+        // `/help` is the synchronous reply: the ECHO then the reply text, so two
+        // transients in one generation.
+        submit(&mut app, "/help");
+        assert_eq!(chatter(&app)[0], "/help", "the echoed command line: {:?}", chatter(&app));
+        assert_eq!(chatter(&app).len(), 2, "echo + reply: {:?}", chatter(&app));
+
+        // A run event pushed the very next way is NOT transient.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Compaction {
+                summarized: 1,
+                kept: 0,
+            },
+        ));
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Notice(t)) if t.contains("compacted")),
+            "the run event is permanent: {:?}",
+            app.transcript().last()
+        );
+
+        // slash → slash: EXACTLY ONE generation survives — the new echo. This is
+        // what fails if the retire runs only just before `Block::User` is pushed.
+        submit(&mut app, "/tasks");
+        assert_eq!(
+            chatter(&app)[0],
+            "/tasks",
+            "only the new generation remains: {:?}",
+            chatter(&app)
+        );
+        assert_eq!(chatter(&app).len(), 2, "echo + '(no tasks yet)': {:?}", chatter(&app));
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Notice(t) if t.contains("compacted"))),
+            "the run event survived the submit: {:?}",
+            app.transcript()
+        );
+
+        // slash → prompt: the same cleanup lands with the next generation.
+        submit(&mut app, "a normal line");
+        assert!(chatter(&app).is_empty(), "all chatter gone: {:?}", chatter(&app));
+        assert!(
+            matches!(app.transcript().last(), Some(Block::User(t)) if t == "a normal line"),
+            "the prompt is the last block: {:?}",
+            app.transcript().last()
+        );
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Notice(t) if t.contains("compacted"))),
+            "the run event survives a prompt too: {:?}",
+            app.transcript()
+        );
+
+        // W014 §7.2's exact script — `/usage` → `/help` → a real prompt — with the
+        // ASYNC `/usage` reply, which `render_usage` emits when
+        // `AgentEvent::History` lands, OUTSIDE the command frame. One generation
+        // of chatter at each step, none at the end.
+        let mut app = App::new();
+        submit(&mut app, "/usage");
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::History {
+                messages: vec![AgentMessage::user_text("q")],
+            },
+        ));
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Transient(t)) if t == "(no usage reported)"),
+            "the async /usage reply is chatter: {:?}",
+            app.transcript().last()
+        );
+        submit(&mut app, "/help");
+        assert!(
+            !chatter(&app).iter().any(|t| t == "(no usage reported)"),
+            "the /usage reply is gone by the /help echo: {:?}",
+            chatter(&app)
+        );
+        submit(&mut app, "a real prompt");
+        assert!(chatter(&app).is_empty(), "no generation survives: {:?}", chatter(&app));
+    }
+
+    /// A retire never crosses surfaces (D018 §3): a transient on surface A
+    /// survives a submit on surface B, and dies at A's OWN next submit.
+    #[test]
+    fn a_transient_survives_a_submit_on_another_surface() {
+        let (mut app, _root, _member) = two_surfaces();
+        app.set_focus(0);
+        submit(&mut app, "/help");
+        assert_eq!(chatter(&app).len(), 2, "A's chatter: {:?}", chatter(&app));
+
+        // A submit on the OTHER surface, which has no chatter of its own.
+        app.set_focus(1);
+        submit(&mut app, "hi");
+        assert!(chatter(&app).is_empty(), "B never had chatter: {:?}", chatter(&app));
+        app.set_focus(0);
+        assert_eq!(
+            chatter(&app).len(),
+            2,
+            "A's chatter is untouched by B's submit: {:?}",
+            chatter(&app)
+        );
+
+        // A's own next submit retires it.
+        submit(&mut app, "hi");
+        assert!(chatter(&app).is_empty(), "A's own submit retires it: {:?}", chatter(&app));
+    }
+
+    /// `retire_transient` is a SPLICE: it keeps `transcript`/`block_revs`/`cache`
+    /// index-aligned, keeps every block-indexed cursor (`selected`, `open_turn`)
+    /// on the same block, and clamps a selection the splice would strand.
+    #[test]
+    fn retire_transient_keeps_the_three_vecs_in_step() {
+        let mut app = App::new();
+        app.focused_mut().push_block(Block::Notice("permanent-0".into()));
+        app.focused_mut().push_block(Block::Transient("/help".into()));
+        app.focused_mut().push_block(Block::Notice("permanent-1".into()));
+        app.focused_mut().push_block(Block::Transient("(no tasks yet)".into()));
+        app.focused_mut().push_block(Block::Notice("permanent-2".into()));
+        // An open turn ABOVE both transients — its index must shift with them.
+        app.focused_mut().push_block(Block::Turn(Turn {
+            n: 1,
+            content: Vec::new(),
+            tools: Vec::new(),
+            thinking_open: false,
+            open: true,
+        }));
+        app.focused_mut().open_turn = Some(5);
+        app.focused_mut().selected = Some(4);
+        app.set_block_ranges((0..6).map(|i| i..i + 1).collect());
+
+        let selected_text = |app: &App| match &app.transcript()[app.selected().unwrap()] {
+            Block::Notice(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        let before = selected_text(&app);
+        assert_eq!(before, "permanent-2");
+
+        app.focused_mut().retire_transient();
+
+        // The invariant: three vecs, one length.
+        assert_eq!(
+            app.focused().transcript.len(),
+            app.focused().block_revs.len(),
+            "transcript/block_revs stayed in step"
+        );
+        assert_eq!(
+            app.focused().transcript.len(),
+            app.focused().cache.len(),
+            "transcript/cache stayed in step"
+        );
+        assert_eq!(app.transcript().len(), 4, "two transients removed: {:?}", app.transcript());
+        assert!(
+            !app.transcript().iter().any(|b| matches!(b, Block::Transient(_))),
+            "no transient survives: {:?}",
+            app.transcript()
+        );
+        for want in ["permanent-0", "permanent-1", "permanent-2"] {
+            assert!(
+                app.transcript()
+                    .iter()
+                    .any(|b| matches!(b, Block::Notice(t) if t == want)),
+                "the permanent {want} remains: {:?}",
+                app.transcript()
+            );
+        }
+        // The cursors followed their blocks: the selection shifted down to 2 and
+        // still addresses the SAME block; the open turn shifted to 3.
+        assert_eq!(app.selected(), Some(2), "the selection shifted, not clamped");
+        assert_eq!(selected_text(&app), before, "the selection landed on the same block");
+        assert_eq!(app.focused().open_turn, Some(3), "the open turn shifted by both removals");
+
+        // Idempotent: a second retire on a transient-free transcript is a no-op.
+        app.focused_mut().retire_transient();
+        assert_eq!(app.transcript().len(), 4);
+        assert_eq!(app.selected(), Some(2));
+        assert_eq!(app.focused().open_turn, Some(3));
+
+        // A selection ON the last block, which IS transient: clamp, do not strand.
+        let mut app = App::new();
+        app.focused_mut().push_block(Block::Notice("kept".into()));
+        app.focused_mut().push_block(Block::Transient("/x".into()));
+        app.focused_mut().selected = Some(1);
+        app.set_block_ranges(vec![0..1, 1..2]);
+        app.focused_mut().retire_transient();
+        assert_eq!(app.transcript().len(), 1);
+        assert_eq!(app.selected(), Some(0), "clamped onto the new last block");
+        assert_eq!(app.focused().transcript.len(), app.focused().cache.len());
+
+        // An empty transcript clears a stale selection (the `len == 0` arm).
+        let mut app = App::new();
+        app.focused_mut().selected = Some(0);
+        app.focused_mut().retire_transient();
+        assert_eq!(app.transcript().len(), 0);
+        assert_eq!(app.selected(), None);
     }
 
     #[test]
@@ -4818,7 +5150,7 @@ mod tests {
             },
         ));
         submit(&mut app, "/verify");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a verify notice");
         };
         assert!(text.contains("[x] step one"), "{text}");
@@ -4840,7 +5172,7 @@ mod tests {
             },
         ));
         submit(&mut app, "/verify");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a verify notice");
         };
         assert!(text.contains("1/1 done"), "{text}");
@@ -4854,7 +5186,7 @@ mod tests {
         submit(&mut app, "/verify");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("no plan/todos recorded")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no plan/todos recorded")
         ));
     }
 
@@ -5299,7 +5631,7 @@ mod tests {
         assert_eq!(app.context_used(), Some(500));
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(text)) if text.contains("1 turn") && text.contains("tools: read×1")
+            Some(Block::Notice(text) | Block::Transient(text)) if text.contains("1 turn") && text.contains("tools: read×1")
         ));
     }
 
@@ -5312,7 +5644,7 @@ mod tests {
         assert_eq!(app.context_used(), None);
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(text)) if text == "(no usage reported)"
+            Some(Block::Notice(text) | Block::Transient(text)) if text == "(no usage reported)"
         ));
     }
 
@@ -5411,7 +5743,7 @@ mod tests {
         assert_eq!(app.take_actions(), vec![Action::Copy("the answer".into())]);
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("copied")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("copied")
         ));
     }
 
@@ -5422,7 +5754,7 @@ mod tests {
         assert!(app.take_actions().is_empty());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("nothing to copy")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("nothing to copy")
         ));
     }
 
@@ -5546,7 +5878,7 @@ mod tests {
         assert!(app.overlay().is_none());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("no models")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no models")
         ));
     }
 
@@ -5759,7 +6091,7 @@ mod tests {
         assert!(app.overlay().is_none());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("no changes")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no changes")
         ));
     }
 
@@ -5889,7 +6221,7 @@ mod tests {
         submit(&mut app, "/team roster");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t == "(no team)"
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "(no team)"
         ));
 
         // Members list one `label · model · state` line each.
@@ -5918,7 +6250,7 @@ mod tests {
         app.handle(AppEvent::Agent(reviewer.clone(), AgentEvent::AgentStart));
         app.handle(AppEvent::Agent(reviewer, AgentEvent::AgentEnd));
         submit(&mut app, "/team roster");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
         // One `{glyph} {label} · {state}` line each — no model (§2).
@@ -5938,7 +6270,7 @@ mod tests {
         submit(&mut app, "/team");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("no project teams")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no project teams")
         ));
         assert!(app.pending_team().is_none());
         assert!(!app.should_quit, "no picker, no quit");
@@ -5974,7 +6306,7 @@ mod tests {
         submit(&mut app, "/tasks");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t == "(no tasks yet)"
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "(no tasks yet)"
         ));
 
         let mut app = App::new();
@@ -5997,7 +6329,7 @@ mod tests {
             },
         ]);
         submit(&mut app, "/tasks");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a tasks notice");
         };
         assert!(text.contains("#1 [todo] explore (unassigned)"), "{text}");
@@ -6114,7 +6446,7 @@ mod tests {
 
         // `/team roster` reads the added surface too.
         submit(&mut app, "/team roster");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
         assert!(text.contains("explorer"), "{text}");
@@ -6733,7 +7065,7 @@ mod tests {
         assert_eq!(app.pending_resume(), None);
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("no sessions")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no sessions")
         ));
     }
 
@@ -6762,7 +7094,7 @@ mod tests {
         assert!(!app.should_quit());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("usage: /reload")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("usage: /reload")
         ));
     }
 
@@ -6775,7 +7107,7 @@ mod tests {
         assert!(!app.should_quit());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("unavailable over a socket")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("unavailable over a socket")
         ));
     }
 
@@ -6802,7 +7134,7 @@ mod tests {
         assert!(!app.should_quit());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t.contains("unavailable over a socket")
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("unavailable over a socket")
         ));
     }
 
@@ -6846,7 +7178,7 @@ mod tests {
     fn help_lists_every_command_and_the_keymap_from_the_tables() {
         let mut app = App::new();
         submit(&mut app, "/help");
-        let Some(Block::Notice(text)) = app.transcript().last() else {
+        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
             panic!("expected a help notice");
         };
         assert!(
@@ -7064,7 +7396,7 @@ mod tests {
         assert_eq!(app.input(), "");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t)) if t == "unknown command: /"
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "unknown command: /"
         ));
     }
 

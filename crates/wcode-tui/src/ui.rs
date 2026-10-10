@@ -690,6 +690,12 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         // orphan with no turn): a single inline tool panel (no `── notes ──` rule).
         Block::Tool(tool) => tool_inline_lines(1, tool, width),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
+        // The transient twin: byte-identical to the `Notice` arm above (same call,
+        // same gutter, same `dim()` role, same `width`, so the block's HEIGHT
+        // matches and the per-`(rev, width)` render cache stays sound). D018: "A
+        // transient row renders exactly like a Notice; retirement removes it, it
+        // is not restyled."
+        Block::Transient(text) => wrap(text, width, "   ", "   ", dim()),
         Block::Btw(text) => wrap(text, width, " btw ", "     ", thinking()),
         Block::Error(text) => wrap(text, width, "   ", "   ", error_style()),
         Block::Diff { path, diff } => diff_block_lines(path, diff),
@@ -3747,6 +3753,28 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                         "a text row's width must not change: {line:?}"
                     );
                 }
+            }
+        }
+    }
+
+    /// A transient row renders EXACTLY like a notice row (D018) — same gutter,
+    /// same style role, same height — so retirement removes it rather than
+    /// restyling it. Pinned here because "renders exactly like" is the whole
+    /// design of [`Block::Transient`], and a stale `Notice` arm would otherwise
+    /// drift from its twin unnoticed.
+    #[test]
+    fn a_transient_row_renders_exactly_like_a_notice_row() {
+        for width in [20usize, 40, 80] {
+            for text in [
+                "/help",
+                "commands: /new /exit /model",
+                "a much longer chatter line that has to wrap onto a second row at the narrower widths",
+            ] {
+                assert_eq!(
+                    block_lines(&Block::Notice(text.into()), width),
+                    block_lines(&Block::Transient(text.into()), width),
+                    "width {width}, text {text:?}"
+                );
             }
         }
     }
