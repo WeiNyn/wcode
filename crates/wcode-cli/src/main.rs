@@ -24,6 +24,7 @@ mod scheduler;
 mod session_groups;
 mod skills;
 mod tasks;
+mod teams;
 mod tools;
 mod verify_gate;
 
@@ -51,6 +52,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --model <id>       override the configured model
    --base-url <url>   override the configured base URL
    --config <path>    overlay config file, deep-merged over the global config (also WCODE_CONFIG)
+   --team <name>      use ./.wcode/teams/<name>.toml as the overlay (a named project team;
+                      mutually exclusive with --config)
    --endpoint <e>     override the configured endpoint (chat|responses)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
@@ -78,7 +81,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
 config: ~/.config/wcode/config.toml
   (project overlays auto-discovered: ./.wcode/config.toml, then
    ./.wcode/team.toml, then agent .md files under ./.wcode/agents/;
-   --config layers on top; --no-project-config opts out)
+   --config or --team layers on top; --no-project-config opts out)
   model = \"...\"      (required)
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
@@ -140,6 +143,9 @@ struct Args {
     base_url: Option<String>,
     /// `--config <path>`: an overlay config file, deep-merged over the global one.
     config: Option<String>,
+    /// `--team <name>`: use `./.wcode/teams/<name>.toml` as the overlay (a named
+    /// project team). Mutually exclusive with `--config`/`WCODE_CONFIG`.
+    team: Option<String>,
     endpoint: Option<String>,
     /// None = flag absent; Some(None) = clear; Some(Some(level)) = set.
     effort: Option<Option<String>>,
@@ -243,6 +249,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             }
             "--config" => {
                 a.config = Some(args.get(i).ok_or("--config requires a path")?.clone());
+                i += 1;
+            }
+            "--team" => {
+                a.team = Some(args.get(i).ok_or("--team requires a name")?.clone());
                 i += 1;
             }
             "--endpoint" => {
@@ -507,7 +517,38 @@ fn load_config_raw(args: &mut Args) -> Config {
     // the global config and any auto-discovered project overlays (flag beats
     // env; an empty env var is ignored). A missing explicit file is fatal.
     let env_overlay = std::env::var("WCODE_CONFIG").ok();
-    let explicit = resolve_overlay(args.config.as_deref(), env_overlay.as_deref());
+    // `--team <name>` and `--config`/`WCODE_CONFIG` are two explicit overlays:
+    // ambiguous, so refuse loudly (D017). `--team` resolves to the project team
+    // file and is STASHED into `args.config`, so the existing overlay + re-exec
+    // plumbing forwards the RESOLVED PATH (not the name) with no signature change.
+    if args.team.is_some() && (args.config.is_some() || env_overlay.is_some()) {
+        eprintln!("error: --team and --config/WCODE_CONFIG are mutually exclusive");
+        std::process::exit(1);
+    }
+    // An explicit named team (`--team <name>`). The flag survives the match below
+    // (only `args.config` is rewritten), so capture it for the discovery fold.
+    let team_overlay = args.team.is_some();
+    let explicit: Option<PathBuf> = match args.team.as_deref() {
+        Some(name) => {
+            let path = teams::overlay_path(name);
+            if !path.exists() {
+                let available: Vec<String> = teams::discover(Path::new("."))
+                    .into_iter()
+                    .map(|team| team.name)
+                    .collect();
+                let hint = if available.is_empty() {
+                    format!("no teams found in ./{}", teams::TEAMS_DIR)
+                } else {
+                    format!("available: {}", available.join(", "))
+                };
+                eprintln!("error: no team `{name}` at {} ({hint})", path.display());
+                std::process::exit(1);
+            }
+            args.config = Some(path.display().to_string());
+            Some(path)
+        }
+        None => resolve_overlay(args.config.as_deref(), env_overlay.as_deref()).map(PathBuf::from),
+    };
     // Auto-discovered project overlays (D-A1/D-A2), working dir only, in
     // order: config.toml then team.toml (team overwrites config). A missing
     // one is skipped silently inside `load_paths` (D-A4) — no `.exists()` here.
@@ -524,11 +565,11 @@ fn load_config_raw(args: &mut Args) -> Config {
     // exactly the single-overlay `load`/`load_with` path.
     let loaded = if auto.is_empty() {
         match explicit.as_deref() {
-            Some(path) => Config::load_with(Some(Path::new(path))),
+            Some(path) => Config::load_with(Some(path)),
             None => Config::load(),
         }
     } else {
-        Config::load_with_overlays(explicit.as_deref().map(Path::new), &auto)
+        Config::load_with_overlays(explicit.as_deref(), &auto)
     };
     let mut cfg = match loaded {
         Ok(c) => c,
@@ -625,9 +666,24 @@ fn load_config_raw(args: &mut Args) -> Config {
     // of the same name wins, so it is never overwritten). `discover` already
     // returns project `.md`s ahead of global ones. `--no-project-config` skips
     // the whole `.wcode/agents/` scan too.
+    //
+    // D017 (amended): an explicit `--team <name>` suppresses the PROJECT scan
+    // as well — the named team is the team for this session ("use this team
+    // instead": the `[[team]]` array is replaced wholesale at merge time, and a
+    // post-merge fold would silently re-append the project pool, defeating
+    // it). A named team that WANTS a project role writes
+    // `[[team]] file = ".wcode/agents/<role>.md"` — resolved by
+    // `resolve_team_files` above, regardless of the scan. The GLOBAL scan
+    // still folds: it is not project config (D005).
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        fold_discovered_members(&mut cfg.team, &cwd, config_dir().as_deref(), project);
+        fold_discovered_members(
+            &mut cfg.team,
+            &cwd,
+            config_dir().as_deref(),
+            project,
+            team_overlay,
+        );
     }
     // Change 1 (F2): membership validation needs the FINAL team — the folded
     // TOML `[team]` plus the `.wcode/agents/*.md` members discovered above (and,
@@ -655,13 +711,20 @@ fn load_config_raw(args: &mut Args) -> Config {
 /// D005: `project = false` (the `--no-project-config` opt-out) governs PROJECT
 /// discovery only — the global `<config-dir>/agents/` scan survives it, exactly
 /// as the global `config.toml` (layer 1) always loads. `home` is the config dir.
+///
+/// D017: `team_overlay = true` (an explicit `--team <name>`) suppresses the
+/// PROJECT scan for the same reason — the named team is the session's team, so
+/// the project `.wcode/agents/` pool must not append underneath it. A named
+/// team reaches a project role through `[[team]] file =` (resolved before this
+/// fold), not through the pool. The GLOBAL scan survives both opt-outs.
 fn fold_discovered_members(
     team: &mut Vec<TeamMember>,
     cwd: &Path,
     home: Option<&Path>,
     project: bool,
+    team_overlay: bool,
 ) {
-    let discovered = if project {
+    let discovered = if project && !team_overlay {
         agent_files::discover(cwd, home)
     } else {
         home.map(agent_files::discover_global).unwrap_or_default()
@@ -897,6 +960,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         // the session dir, so `/resume` has nothing to offer.
                         sessions: Vec::new(),
                         tasks: Vec::new(),
+                        teams: Vec::new(),
                         theme: cfg.theme.clone(),
                         tui: cfg.tui,
                         history: Some(repl::history_path()),
@@ -989,6 +1053,10 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         }
                         Ok(wcode_tui::Outcome::Resume(_)) => {
                             eprintln!("tui: cannot resume over a socket");
+                            std::process::exit(1);
+                        }
+                        Ok(wcode_tui::Outcome::Team(_)) => {
+                            eprintln!("tui: cannot switch team over a socket");
                             std::process::exit(1);
                         }
                         Ok(wcode_tui::Outcome::New) => {
@@ -1700,6 +1768,10 @@ async fn dispatch(
                     .unwrap_or_default(),
                 sessions: session_items(),
                 tasks: task_items(&rt.orchestrator),
+                teams: teams::discover(Path::new("."))
+                    .into_iter()
+                    .map(|team| team.name)
+                    .collect(),
                 theme: cfg.theme.clone(),
                 tui: cfg.tui,
                 history: Some(repl::history_path()),
@@ -1874,6 +1946,24 @@ async fn dispatch(
                         args.owner.as_deref(),
                         args.name.as_deref(),
                     ));
+                    std::process::exit(1); // reached only if the exec failed
+                }
+                Ok(wcode_tui::Outcome::Team(name)) => {
+                    // `/team <name>`: a NEW session with that project team. Drop
+                    // any `--config` (the two are mutually exclusive) and select
+                    // the team by name — the overlay path is the CLI's business.
+                    println!("starting a new session with team `{name}` ...");
+                    let mut argv = repl::new_session_args(
+                        &llm,
+                        args.agents,
+                        args.no_project_config,
+                        None,
+                        args.owner.as_deref(),
+                        args.name.as_deref(),
+                    );
+                    argv.push("--team".to_string());
+                    argv.push(name);
+                    repl::exec_self(&argv);
                     std::process::exit(1); // reached only if the exec failed
                 }
                 Err(e) => {
@@ -2578,7 +2668,7 @@ mod tests {
 
         let mut team = vec![tm_with_file("roles/judge.md")];
         resolve_team_files(&mut team, dir.path()).unwrap();
-        fold_discovered_members(&mut team, dir.path(), None, true);
+        fold_discovered_members(&mut team, dir.path(), None, true, false);
 
         assert_eq!(team.len(), 1, "the discovered same-name member is skipped");
         assert_eq!(team[0].role.as_deref(), Some("From the file entry."));
@@ -2595,14 +2685,23 @@ mod tests {
         );
 
         let mut team = Vec::new();
-        fold_discovered_members(&mut team, dir.path(), None, true);
+        fold_discovered_members(&mut team, dir.path(), None, true, false);
         assert_eq!(team.len(), 1);
         assert_eq!(team[0].name, "scout");
 
         // No `home` and no project discovery: nothing to scan.
         let mut team = Vec::new();
-        fold_discovered_members(&mut team, dir.path(), None, false);
+        fold_discovered_members(&mut team, dir.path(), None, false, false);
         assert!(team.is_empty(), "the opt-out skips the project scan");
+
+        // An explicit `--team` suppresses the project scan the same way
+        // (D017): the named team IS the team, so the pool must not append.
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, dir.path(), None, true, true);
+        assert!(
+            team.is_empty(),
+            "a named-team overlay must not fold the project pool: {team:?}"
+        );
     }
 
     /// D005: `--no-project-config` governs PROJECT discovery only — the global
@@ -2625,14 +2724,21 @@ mod tests {
 
         // Discovery on: both are found.
         let mut team = Vec::new();
-        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true);
+        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true, false);
         let mut names: Vec<_> = team.iter().map(|m| m.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["global-only", "project-only"]);
 
         // Opted out: the project member is gone, the global one remains.
         let mut team = Vec::new();
-        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), false);
+        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), false, false);
+        assert_eq!(team.len(), 1);
+        assert_eq!(team[0].name, "global-only");
+
+        // D017: an explicit `--team` drops the project member but the GLOBAL
+        // scan still folds (it is not project config, D005).
+        let mut team = Vec::new();
+        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true, true);
         assert_eq!(team.len(), 1);
         assert_eq!(team[0].name, "global-only");
     }

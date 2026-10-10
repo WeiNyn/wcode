@@ -204,6 +204,55 @@ fn a_toml_team_member_beats_a_same_named_agent_md() {
     assert!(!stdout.contains("recon body"), "the same-named .md must lose: {stdout}");
 }
 
+/// D017: an explicit `--team <name>` is the session's team — the project
+/// `.wcode/agents/` pool must NOT fold in underneath it. The named team can
+/// still OPT INTO a project role with `[[team]] file =`, so nothing is
+/// unreachable; an inline member stays exactly as written.
+#[test]
+fn an_explicit_team_replaces_the_project_agent_pool() {
+    // The helper ships `.wcode/agents/explorer.md` (discoverable).
+    let dir = project_with_agent_md("");
+    std::fs::create_dir_all(dir.path().join(".wcode/teams")).unwrap();
+    std::fs::write(
+        dir.path().join(".wcode/teams/recon.toml"),
+        "[[team]]\nname = \"scout\"\nrole = \"recon-lead\"\n",
+    )
+    .unwrap();
+
+    let stdout = dump_prompt(&dir, &["--team", "recon"]);
+    assert!(
+        stdout.contains("- scout — recon-lead"),
+        "the named team must render: {stdout}"
+    );
+    assert!(
+        !stdout.contains("- explorer —"),
+        "the project agent pool must not append under --team: {stdout}"
+    );
+}
+
+/// The escape hatch: a named team pulls a project role in via `file =`
+/// (the `full-stack` shape), which resolves regardless of the suppressed scan.
+#[test]
+fn a_named_team_still_resolves_a_file_member() {
+    let dir = project_with_agent_md("");
+    std::fs::create_dir_all(dir.path().join(".wcode/teams")).unwrap();
+    std::fs::write(
+        dir.path().join(".wcode/teams/pull.toml"),
+        "[[team]]\nfile = \".wcode/agents/explorer.md\"\n",
+    )
+    .unwrap();
+
+    let stdout = dump_prompt(&dir, &["--team", "pull"]);
+    assert!(
+        stdout.contains("- explorer — recon body"),
+        "the file member must resolve into the named team: {stdout}"
+    );
+    assert!(
+        !stdout.contains("- scout"),
+        "the helper writes no scout; sanity that only file roles are present: {stdout}"
+    );
+}
+
 #[test]
 fn no_project_config_disables_agent_md_discovery() {
     let dir = project_with_agent_md("");

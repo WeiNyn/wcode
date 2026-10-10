@@ -85,6 +85,7 @@ the boxes as each task completes and keep the status table current.
 
 | 73 | TUI: the transcript **measure is configurable at startup** — `[tui] width` (columns, 40..=200, default 68); `/width` + `Alt-[`/`Alt-]` remain the runtime override ([D016](decisions/D016-tui-width-setting.md)) | ☑ done — `TuiSpec` + `validate_measure` (a bad value fails loudly); `--dump-config` prints it; 1139 tests + clippy clean |
 
+| 74 | **Named project teams**: `./.wcode/teams/<name>.toml` + `--team <name>` + `/team` (a CLI flag; a TUI picker) — [D017](decisions/D017-named-project-teams.md) | ☑ CLI + TUI shipped — `teams.rs` discovery, `Outcome::Team` re-exec, `/team roster` keeps the listing; the `[[team]]` REPLACE was live-verified; **1146 Rust tests + clippy clean**. **The VS Code `/team` half is deferred** with the W010/D013 multi-tab work. **Fix (D017 amended):** an explicit `--team` now also suppresses the `./.wcode/agents/` fold — it re-appended the project pool under the named team (surfaced live: `--team recon` showed 6 members, not 2). A named team still pulls roles via `[[team]] file =`; the global scan still folds. Regression tests + 1146 tests, clippy clean; binary reinstalled |
 
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`

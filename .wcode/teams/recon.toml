@@ -1,0 +1,25 @@
+# Named team "recon" — a read-only reconnaissance pair, declared inline (no
+# agent files). Exercises the inline fields: role, tools, read_only.
+# Select with: wcode --team recon   (or /team recon in the TUI / VS Code)
+
+[[team]]
+name = "explorer"
+role = """
+Reconnaissance for this repository. Map the ground truth before anyone changes
+it — facts, not opinions.
+
+- Inspect with `read`, `grep`, `find`, and read-only shell (`git status`,
+  `git log`, `git diff`, `ls`, `wc`, `head`, `tail`).
+- Read-only is ENFORCED: `edit`/`write`/`replace` and mutating `bash` are
+  refused. A reconnaissance that changes the tree is a failure.
+- Report findings as `file:line` evidence, each with a short quoted snippet.
+- Say plainly what you did NOT verify. Never imply a check you did not run.
+"""
+tools = ["read", "grep", "find", "bash"]
+read_only = true
+
+[[team]]
+name = "reviewer"
+role = "Challenge the recon: every claim must carry file:line + a quoted snippet, or it is a blocker."
+tools = ["read", "grep", "find"]
+read_only = true

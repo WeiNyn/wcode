@@ -1,0 +1,19 @@
+# Named team "pair" — the smallest non-trivial team: one writer with a
+# reader/verifier beside it. Exercises a per-member `effort` override and an
+# explicit tools allow-list. Select with: wcode --team pair
+# (or /team pair in the TUI / VS Code)
+
+[[team]]
+name = "builder"
+role = """
+You are the pair's implementer. Make exactly the dispatched change, no more.
+One logical change per commit; `cargo test --workspace` and
+`cargo clippy --workspace --all-targets` must be clean.
+"""
+effort = "high"
+
+[[team]]
+name = "scribe"
+role = "You keep the team's notes: record decisions as file:line + quoted snippets, and flag anything unverified."
+tools = ["read", "grep", "find", "write"]
+read_only = false

@@ -445,6 +445,8 @@ pub enum PickerKind {
     Change,
     /// A resumable session (`/resume`); selecting hands its path back to re-exec.
     Resume,
+    /// A project team (`/team`); selecting hands its NAME back to re-exec.
+    Team,
     /// A surface (`/surface`); selecting focuses it.
     Surface,
     /// A catalog theme (`/theme`); selecting applies it LIVE (client-local).
@@ -655,8 +657,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "team",
         aliases: &[],
-        args: None,
-        summary: "list the team",
+        args: Some("[name|roster]"),
+        summary: "switch to a project team (picker), or `roster` to list the team",
     },
     Command {
         name: "tasks",
@@ -2150,12 +2152,18 @@ pub struct App {
     /// Resumable sessions for the `/resume` picker — injected by the composition
     /// root, which owns the session dir the TUI cannot see.
     sessions: Vec<SessionItem>,
+    /// Project-team names for the `/team` picker — injected by the composition
+    /// root, which discovers `./.wcode/teams/*.toml`; the TUI holds no fs.
+    teams: Vec<String>,
     /// The orchestrator's plan — injected by the composition root and refreshed
     /// live by the `new_tasks` feed to `run`.
     tasks: Vec<TaskItem>,
     /// Set when the user picks a session to resume; the run returns it so the CLI
     /// can re-exec with `--resume <path>`.
     pending_resume: Option<PathBuf>,
+    /// Set when the user picks a `/team`; the run returns it so the CLI can
+    /// re-exec with `--team <name>` (a fresh session with that project team).
+    pending_team: Option<String>,
     /// Set by `/reload`; the run returns it so the CLI can rebuild + re-exec
     /// into the same session (`no_session` = start fresh with `--no-session`).
     pending_reload: Option<bool>,
@@ -2257,8 +2265,10 @@ impl App {
             paste_id: 0,
             models: Vec::new(),
             sessions: Vec::new(),
+            teams: Vec::new(),
             tasks: Vec::new(),
             pending_resume: None,
+            pending_team: None,
             pending_reload: None,
             pending_new: false,
             remote: false,
@@ -3527,7 +3537,11 @@ impl App {
                 Some(_) => self.notice("usage: /reload [--no-session]"),
             },
             "copy" => self.copy_last(),
-            "team" => self.notice(team_text(&self.member_rows())),
+            "team" => match arg {
+                None => self.open_team_picker(),
+                Some("roster") => self.notice(team_text(&self.member_rows())),
+                Some(name) => self.request_team(name),
+            },
             "tasks" => self.notice(tasks_text(&self.tasks)),
             "surface" => self.open_surface_picker(),
             "help" => self.notice(help_text()),
@@ -4018,6 +4032,31 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open the `/team` picker over the injected project-team names (D017).
+    fn open_team_picker(&mut self) {
+        if self.teams.is_empty() {
+            self.notice("no project teams found (add ./.wcode/teams/<name>.toml)");
+            return;
+        }
+        self.overlay = Some(Overlay::Pick(Picker::new(
+            PickerKind::Team,
+            "team",
+            self.teams.clone(),
+        )));
+        self.dirty = true;
+    }
+
+    /// `/team <name>`: hand the choice back and quit; the composition root
+    /// re-execs with `--team <name>` — a NEW session with that project team.
+    fn request_team(&mut self, name: &str) {
+        if self.remote {
+            self.notice("/team (switch team) is unavailable over a socket");
+            return;
+        }
+        self.pending_team = Some(name.to_string());
+        self.should_quit = true;
+    }
+
     /// Open the `/theme` picker over the catalog names.
     fn open_theme_picker(&mut self) {
         let items = crate::theme::names().iter().map(|n| n.to_string()).collect();
@@ -4128,6 +4167,12 @@ impl App {
                 self.pending_resume = Some(PathBuf::from(selected));
                 self.should_quit = true;
             }
+            PickerKind::Team => {
+                // Same hand-off as `/resume`, but for `--team <name>`: a fresh
+                // session with that project team.
+                self.pending_team = Some(selected);
+                self.should_quit = true;
+            }
             PickerKind::Theme => {
                 crate::theme::set_preset(&selected).expect("picker rows are catalog names");
                 self.notice(format!("theme: {selected}"));
@@ -4172,10 +4217,21 @@ impl App {
         self.dirty = true;
     }
 
+    /// Seed the project-team names the `/team` picker offers.
+    pub fn set_teams(&mut self, teams: Vec<String>) {
+        self.teams = teams;
+    }
+
     /// The session the user chose to resume, if any — read by the event loop
     /// after it exits so the composition root can re-exec with `--resume`.
     pub fn pending_resume(&self) -> Option<&Path> {
         self.pending_resume.as_deref()
+    }
+
+    /// The project team the user chose, if any — read after exit so the
+    /// composition root can re-exec with `--team <name>`.
+    pub fn pending_team(&self) -> Option<&str> {
+        self.pending_team.as_deref()
     }
 
     /// Set by `/reload` when the run should rebuild + re-exec into this session
@@ -5763,9 +5819,10 @@ mod tests {
 
     #[test]
     fn the_team_command_lists_the_member_surfaces() {
-        // No members reads as "(no team)".
+        // No members reads as "(no team)". (`/team roster` — a bare `/team`
+        // opens the project-team picker; D017.)
         let mut app = App::new();
-        submit(&mut app, "/team");
+        submit(&mut app, "/team roster");
         assert!(matches!(
             app.transcript().last(),
             Some(Block::Notice(t)) if t == "(no team)"
@@ -5796,7 +5853,7 @@ mod tests {
         let reviewer = SessionId::agent("reviewer");
         app.handle(AppEvent::Agent(reviewer.clone(), AgentEvent::AgentStart));
         app.handle(AppEvent::Agent(reviewer, AgentEvent::AgentEnd));
-        submit(&mut app, "/team");
+        submit(&mut app, "/team roster");
         let Some(Block::Notice(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
@@ -5807,6 +5864,43 @@ mod tests {
             !text.contains("m1") && !text.contains("m2"),
             "model shown: {text}"
         );
+    }
+
+    /// `/team` opens a project-team picker; a bare name re-execs with `--team` (D017).
+    #[test]
+    fn the_team_command_switches_or_lists() {
+        // No teams injected: a bare `/team` says so — no empty picker.
+        let mut app = App::new();
+        submit(&mut app, "/team");
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("no project teams")
+        ));
+        assert!(app.pending_team().is_none());
+        assert!(!app.should_quit, "no picker, no quit");
+
+        // With teams, a bare `/team` opens the picker.
+        let mut app = App::new();
+        app.set_teams(vec!["review".into(), "scout".into()]);
+        submit(&mut app, "/team");
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Pick(p)) if p.kind == PickerKind::Team),
+            "a team picker is open"
+        );
+
+        // `/team <name>` hands the NAME back and quits, so the CLI re-execs.
+        let mut app = App::new();
+        app.set_teams(vec!["scout".into()]);
+        submit(&mut app, "/team scout");
+        assert_eq!(app.pending_team(), Some("scout"));
+        assert!(app.should_quit);
+
+        // Over a socket, switching is refused (there is no local binary to re-exec).
+        let mut app = App::new();
+        app.set_remote(true);
+        submit(&mut app, "/team scout");
+        assert!(app.pending_team().is_none());
+        assert!(!app.should_quit, "refused — the TUI stays open");
     }
 
     /// `/tasks` reflects the injected plan: `(no tasks yet)`, then one line each.
@@ -5954,8 +6048,8 @@ mod tests {
         assert_eq!(app.member_rows()[0].0, "explorer");
         assert_eq!(app.focus(), 0, "focus stays on the root");
 
-        // `/team` reads the added surface too.
-        submit(&mut app, "/team");
+        // `/team roster` reads the added surface too.
+        submit(&mut app, "/team roster");
         let Some(Block::Notice(text)) = app.transcript().last() else {
             panic!("expected a team notice");
         };
@@ -6663,7 +6757,7 @@ mod tests {
             text.starts_with(
                 "commands: /new /exit /model <id> /theme [name] /effort [level] /compact [text] \
                  /changes /resume /reload [--no-session] /btw <question> /plan [on|off] \
-                 /verify /usage /copy /surface /width <cols> /team /tasks /help"
+                 /verify /usage /copy /surface /width <cols> /team [name|roster] /tasks /help"
             ),
             "the command listing changed: {text}"
         );

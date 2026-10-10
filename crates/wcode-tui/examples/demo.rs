@@ -143,6 +143,7 @@ async fn main() -> std::io::Result<()> {
         models: vec!["demo".to_string(), "demo-mini".to_string()],
         sessions: Vec::new(),
         tasks: Vec::new(),
+        teams: Vec::new(),
         theme: Default::default(),
         tui: Default::default(),
         history: None,

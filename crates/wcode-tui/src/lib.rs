@@ -287,7 +287,9 @@ pub struct Options {
     /// The orchestrator's plan — seeded at startup and refreshed live by the
     /// `new_tasks` feed to `run` (empty for a socket client).
     pub tasks: Vec<TaskItem>,
+    /// Project teams for the `/team` picker (names from `./.wcode/teams/*.toml`;
     /// empty for a socket client, which cannot discover the working dir).
+    pub teams: Vec<String>,
     /// A `[theme]` overlay on palette B (empty = palette B); installed before
     /// the first draw.
     pub theme: ThemeSpec,
@@ -319,6 +321,9 @@ pub enum Outcome {
     /// The user picked a session to resume (`/resume`); the caller should
     /// re-exec with `--resume <path>`.
     Resume(PathBuf),
+    /// The user picked a project team (`/team`); the caller should re-exec with
+    /// `--team <name>` — a NEW session with that team (D017).
+    Team(String),
     /// The user asked to rebuild + re-exec into the current session (`/reload`);
     /// the caller runs the build then re-execs (the REPL's `/reload`).
     /// `no_session` = start fresh with `--no-session`.
@@ -339,8 +344,11 @@ fn outcome_of(app: &App) -> Outcome {
         Some(no_session) => Outcome::Reload { no_session },
         None => match app.pending_resume() {
             Some(path) => Outcome::Resume(path.to_path_buf()),
-            None if app.pending_new() => Outcome::New,
-            None => Outcome::Quit,
+            None => match app.pending_team() {
+                Some(name) => Outcome::Team(name.to_string()),
+                None if app.pending_new() => Outcome::New,
+                None => Outcome::Quit,
+            },
         },
     }
 }
@@ -363,6 +371,7 @@ pub async fn run(
         models,
         sessions,
         tasks,
+        teams,
         history,
         theme,
         tui,
@@ -381,6 +390,7 @@ pub async fn run(
     }
     app.set_models(models);
     app.set_sessions(sessions);
+    app.set_teams(teams);
     app.set_tasks(tasks);
     app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
     // The root's full status line (members derive a reduced one).
@@ -963,6 +973,7 @@ mod tests {
             models: Vec::new(),
             sessions: Vec::new(),
             tasks: Vec::new(),
+            teams: Vec::new(),
             history: None,
             theme: ThemeSpec::default(),
             tui: TuiSpec::default(),

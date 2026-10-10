@@ -1,0 +1,26 @@
+# Named team "full-stack" — the wcode repo's own six roles, loaded from the
+# agent markdown files under .wcode/agents/ (each contributes its name, role,
+# tools, read_only from frontmatter). Select with:
+#   wcode --team full-stack
+#   (VS Code: /team → pick "full-stack"; TUI: /team → pick "full-stack")
+#
+# A `[[team]]` entry of the same name would replace the file wholesale, so
+# these entries only point at the files — nothing is duplicated here.
+
+[[team]]
+file = ".wcode/agents/brainstormer.md"
+
+[[team]]
+file = ".wcode/agents/explorer.md"
+
+[[team]]
+file = ".wcode/agents/sketcher.md"
+
+[[team]]
+file = ".wcode/agents/developer.md"
+
+[[team]]
+file = ".wcode/agents/designer.md"
+
+[[team]]
+file = ".wcode/agents/reviewer.md"
