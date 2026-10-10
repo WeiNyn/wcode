@@ -78,6 +78,7 @@ fn opencode_go(model: &str) -> Option<ModelLimit> {
 /// OpenCode Go (zen) model table, snapshotted from the models.dev `opencode-go`
 /// catalog: `(model id, context window, max output tokens)`.
 static OPENCODE_GO: &[(&str, u64, u64)] = &[
+    ("claude-haiku-5-5", 1_000_000, 128_000),
     ("deepseek-v4-flash", 1_000_000, 384_000),
     ("deepseek-v4-flash-vision-exp", 1_000_000, 384_000),
     ("deepseek-v4-pro", 1_000_000, 384_000),
@@ -88,8 +89,10 @@ static OPENCODE_GO: &[(&str, u64, u64)] = &[
     ("glm-5.3", 1_000_000, 131_072),
     ("glm-5.3-flash", 1_000_000, 131_072),
     ("gpt-5.6-luna", 1_050_000, 128_000),
+    ("gpt-6-luna", 1_050_000, 128_000),
     ("grok-4.5", 500_000, 500_000),
     ("grok-4.6", 500_000, 500_000),
+    ("grok-4.7", 500_000, 500_000),
     ("hy3", 256_000, 128_000),
     ("hy4-preview", 1_024_000, 64_000),
     ("kimi-k2.5", 262_144, 65_536),
@@ -97,10 +100,13 @@ static OPENCODE_GO: &[(&str, u64, u64)] = &[
     ("kimi-k2.7-code", 262_144, 262_144),
     ("kimi-k3", 1_048_576, 131_072),
     ("longcat-2.0", 1_000_000, 131_072),
+    ("longcat-2.5-preview-free", 1_000_000, 131_072),
     ("mimo-v2-omni", 262_144, 128_000),
     ("mimo-v2-pro", 1_048_576, 128_000),
     ("mimo-v2.5", 1_000_000, 128_000),
     ("mimo-v2.5-pro", 1_048_576, 128_000),
+    ("mimo-v2.6-flash", 1_048_576, 131_072),
+    ("mimo-v2.6-pro", 1_048_576, 131_072),
     ("minimax-m2.5", 204_800, 65_536),
     ("minimax-m2.7", 204_800, 131_072),
     ("minimax-m3", 1_000_000, 131_072),
@@ -114,11 +120,15 @@ static OPENCODE_GO: &[(&str, u64, u64)] = &[
     ("qwen3.7-plus", 1_000_000, 65_536),
     ("qwen3.8-flash", 1_000_000, 131_072),
     ("qwen3.8-max", 1_000_000, 131_072),
+    ("space-bunny", 1_048_576, 524_288),
+    ("space-bunny-free", 1_048_576, 524_288),
+    ("step-5-preview-free", 1_000_000, 65_536),
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction::CompactionPolicy;
 
     const ZEN: Option<&str> = Some("https://opencode.ai/zen/go/v1");
 
@@ -145,6 +155,49 @@ mod tests {
         // A known OpenCode id behind a non-opencode endpoint is not assumed.
         assert_eq!(model_limit(Some("https://api.openai.com/v1"), "kimi-k3"), None);
         assert_eq!(model_limit(None, "kimi-k3"), None);
+    }
+
+    #[test]
+    fn step_5_preview_free_is_a_1m_window() {
+        // Verified against the models.dev `opencode-go` catalog
+        // (api = https://opencode.ai/zen/go/v1). Missing here, the model fell
+        // back to DEFAULT_CONTEXT_WINDOW and compacted at ~11% of its window.
+        assert_eq!(
+            model_limit(ZEN, "step-5-preview-free"),
+            Some(ModelLimit {
+                context: 1_000_000,
+                output: 65_536,
+            })
+        );
+    }
+
+    #[test]
+    fn catalog_window_beats_the_default_in_compaction() {
+        // The trigger is the window less the reply reserve, so the catalog row
+        // is what moves it from the 128k default's 111,616 to 983,616.
+        let p = CompactionPolicy::default();
+        let window = p.context_window(ZEN, "step-5-preview-free");
+        assert_eq!(window, 1_000_000);
+        assert!(
+            !p.should_compact(window, 111_616),
+            "the old 128k trigger must not fire on a 1M model"
+        );
+        assert!(
+            p.should_compact(window, 983_616),
+            "1M window - 16_384 reserved = 983,616"
+        );
+    }
+
+    #[test]
+    fn configured_window_still_wins_only_when_the_catalog_misses() {
+        let p = CompactionPolicy {
+            window: Some(200_000),
+            ..Default::default()
+        };
+        // Catalog miss: the configured override is the window.
+        assert_eq!(p.context_window(ZEN, "not-a-real-model"), 200_000);
+        // Catalog hit: it wins, and the override is ignored.
+        assert_eq!(p.context_window(ZEN, "step-5-preview-free"), 1_000_000);
     }
 
     #[test]
