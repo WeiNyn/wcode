@@ -3905,6 +3905,32 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
+    fn the_committed_turn_marks_the_reference_at_the_call_site() {
+        let mut app = App::new();
+        push_assistant(&mut app, "Some prose.");
+        push_tool(&mut app, "bash", "out", false, None);
+        let text = buffer_text(&render(&mut app, 70, 30));
+        // The `¹` rides the prose, at the call site, above its inline tool.
+        let mark = text.find('¹').expect("the reference mark");
+        let tool = text.find("» bash").expect("the inline tool");
+        assert!(mark < tool, "the mark precedes its tool:\n{text}");
+    }
+
+    #[test]
+    fn a_text_less_round_marks_no_prose_but_still_renders_its_tool() {
+        let mut app = App::new();
+        // Two tool calls with no prose between them: no `¹`, but both render.
+        push_tool(&mut app, "bash", "one", false, None);
+        push_tool(&mut app, "bash", "two", false, None);
+        let text = buffer_text(&render(&mut app, 70, 30));
+        assert!(!text.contains('¹'), "no mark on a text-less round:\n{text}");
+        assert!(
+            text.contains("1 » bash") && text.contains("2 » bash"),
+            "both tools still render:\n{text}"
+        );
+    }
+
+    #[test]
     fn the_foot_line_run_state_is_dim_idle_and_accent_running() {
         let mut app = App::new();
         app.set_cwd(Some("wcode".into()));
