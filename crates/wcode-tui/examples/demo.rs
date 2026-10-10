@@ -144,6 +144,7 @@ async fn main() -> std::io::Result<()> {
         sessions: Vec::new(),
         tasks: Vec::new(),
         theme: Default::default(),
+        tui: Default::default(),
         history: None,
         remote: false,
         cwd: None,

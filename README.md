@@ -118,6 +118,14 @@ name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
 link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
 
+[tui]
+# TUI presentation (nothing here changes the agent's behavior). `width` is the
+# transcript's initial measure (content width) in columns — the reading column
+# centers when the band is wider than it; default 68, range 40..=200. An
+# out-of-range value fails the load loudly. Adjust it live with `/width <cols>`
+# or `Alt-[` / `Alt-]` (the runtime value is not persisted).
+width = 96                 # optional; 40..=200 (default: 68)
+
 # A preset team the orchestrator starts with (a non-empty [team] auto-enables
 # agents — no --agents needed). One [[team]]
 # entry per member; names are unique (a duplicate fails the load loudly). Keys:

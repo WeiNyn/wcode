@@ -459,6 +459,13 @@ fn config_dump(cfg: &Config) -> String {
         cfg.provenance.api_key
     );
     let _ = writeln!(out, "effort: {}", cfg.effort.as_deref().unwrap_or("(none)"));
+    let _ = writeln!(
+        out,
+        "tui.width: {}",
+        cfg.tui
+            .width
+            .map_or_else(|| format!("(default {})", wcode_tui::DEFAULT_MEASURE), |w| w.to_string())
+    );
     for (id, profile) in &cfg.models {
         let endpoint = profile.endpoint.map(endpoint_label).unwrap_or("(inherit)");
         let _ = writeln!(
@@ -891,6 +898,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         sessions: Vec::new(),
                         tasks: Vec::new(),
                         theme: cfg.theme.clone(),
+                        tui: cfg.tui,
                         history: Some(repl::history_path()),
                         remote: true,
                         cwd,
@@ -1693,6 +1701,7 @@ async fn dispatch(
                 sessions: session_items(),
                 tasks: task_items(&rt.orchestrator),
                 theme: cfg.theme.clone(),
+                tui: cfg.tui,
                 history: Some(repl::history_path()),
                 remote: false,
                 cwd,

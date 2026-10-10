@@ -296,6 +296,15 @@ impl Workflow {
     }
 }
 
+/// `[tui]`: presentation only — the initial transcript measure. Resolved into
+/// [`wcode_tui::TuiSpec`]; `/width` and `Alt-[`/`Alt-]` still adjust it live.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct TuiConfig {
+    /// The transcript measure (content width) in columns. Validated against the
+    /// TUI's `MEASURE_MIN..=MEASURE_LIMIT`; absent = the TUI default (68).
+    pub width: Option<usize>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -336,6 +345,9 @@ pub struct FileConfig {
     /// (`wcode_tui::parse_theme`); absent roles keep the default palette.
     #[serde(default)]
     pub theme: std::collections::BTreeMap<String, String>,
+    /// `[tui]`: presentation only (the initial transcript measure). No env var.
+    #[serde(default)]
+    pub tui: TuiConfig,
     /// `[workflow]`: a plan template instantiated at boot (P5). `None` = no
     /// template (the model authors the DAG at runtime, as today).
     #[serde(default)]
@@ -487,6 +499,8 @@ pub struct Config {
     pub orchestrator: OrchestratorConfig,
     /// Resolved `[theme]`: a validated overlay on the default TUI palette.
     pub theme: wcode_tui::ThemeSpec,
+    /// Resolved `[tui]` (D016): the presentation spec (the initial measure).
+    pub tui: wcode_tui::TuiSpec,
     /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
     /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
     pub workflow: Option<Workflow>,
@@ -563,6 +577,8 @@ pub enum ConfigError {
     TeamMemberFile(String),
     /// An invalid `[theme]` overlay: an unknown role or an unparseable color.
     Theme(String),
+    /// An invalid `[tui]` value: a `width` outside the TUI's allowed range.
+    Tui(String),
     /// An invalid `[workflow]`: an unknown member, a cycle, missing-or-both of
     /// `member`|`script`, a duplicate/unknown id, or an empty script.
     Workflow(String),
@@ -581,6 +597,7 @@ impl std::fmt::Display for ConfigError {
                 "duplicate [team] member `{name}`: names must be unique"
             ),
             ConfigError::Theme(msg) => write!(f, "invalid [theme]: {msg}"),
+            ConfigError::Tui(msg) => write!(f, "invalid [tui]: {msg}"),
             ConfigError::Workflow(msg) => write!(f, "invalid [workflow]: {msg}"),
             ConfigError::TeamMemberFile(msg) => write!(f, "invalid [[team]] file: {msg}"),
         }
@@ -771,6 +788,16 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     // `[theme]` is presentation-only, but a bad role or color is a hard error —
     // the "unparseable overlay fails loudly" style (§4 T3b).
     let theme = wcode_tui::parse_theme_table(&file.theme).map_err(ConfigError::Theme)?;
+    // `[tui] width` is presentation, but an out-of-range value is a LOUD error —
+    // the same "unparseable overlay fails loudly" rule as `[theme]`.
+    let tui = wcode_tui::TuiSpec {
+        width: file
+            .tui
+            .width
+            .map(wcode_tui::validate_measure)
+            .transpose()
+            .map_err(ConfigError::Tui)?,
+    };
     // `[models.<id>]`: resolve each entry into an `LlmProfile`, validating the
     // endpoint value loudly (the same rule as the global `endpoint`). An absent
     // or empty endpoint means INHERIT (`None`), not `parse_endpoint(None)`'s
@@ -810,6 +837,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         team: file.team,
         orchestrator: file.orchestrator,
         theme,
+        tui,
         workflow: file.workflow,
         models,
         provenance,
@@ -2208,6 +2236,31 @@ mod compaction_cfg_tests {
         let file: FileConfig = toml::from_str("model = \"m\"\n").unwrap();
         let cfg = merge(EnvLike::default(), file).unwrap();
         assert_eq!(cfg.theme, wcode_tui::ThemeSpec::default());
+    }
+
+    #[test]
+    fn tui_width_parses_and_resolves() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nwidth = 100\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.tui.width, Some(100));
+    }
+
+    #[test]
+    fn an_absent_tui_table_leaves_the_default_measure() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.tui.width, None, "None ⇒ the TUI's DEFAULT_MEASURE (68)");
+    }
+
+    #[test]
+    fn an_out_of_range_tui_width_is_a_loud_config_error() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nwidth = 5\n").unwrap();
+        let err = merge(EnvLike::default(), file).unwrap_err();
+        assert!(matches!(err, ConfigError::Tui(_)), "got: {err:?}");
+        // The message names the value and the range.
+        let msg = err.to_string();
+        assert!(msg.contains('5'), "names the value: {msg}");
+        assert!(msg.contains(&wcode_tui::MEASURE_MIN.to_string()), "names the floor: {msg}");
     }
 
     #[test]

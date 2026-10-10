@@ -35,8 +35,29 @@ use wcode_protocol::{AskError, Backend};
 
 pub use crate::app::{
     Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool,
+    DEFAULT_MEASURE, MEASURE_LIMIT, MEASURE_MIN,
 };
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
+
+/// The `[tui]` presentation spec (D016), resolved from `config.toml` by the CLI.
+/// Held here so the composition root names no presentation constant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TuiSpec {
+    /// The initial transcript measure in columns. `None` = [`DEFAULT_MEASURE`].
+    pub width: Option<usize>,
+}
+
+/// Validate a `[tui] width` from config, or `Err` outside the allowed range.
+/// The CLI maps the error into a loud startup failure (like a bad `[theme]`).
+pub fn validate_measure(cols: usize) -> Result<usize, String> {
+    if (MEASURE_MIN..=MEASURE_LIMIT).contains(&cols) {
+        Ok(cols)
+    } else {
+        Err(format!(
+            "width {cols} is out of range {MEASURE_MIN}..={MEASURE_LIMIT} columns"
+        ))
+    }
+}
 
 /// The catalog's theme names (for `--list-themes`, the `/theme` picker).
 pub fn theme_names() -> Vec<&'static str> {
@@ -266,9 +287,12 @@ pub struct Options {
     /// The orchestrator's plan — seeded at startup and refreshed live by the
     /// `new_tasks` feed to `run` (empty for a socket client).
     pub tasks: Vec<TaskItem>,
+    /// empty for a socket client, which cannot discover the working dir).
     /// A `[theme]` overlay on palette B (empty = palette B); installed before
     /// the first draw.
     pub theme: ThemeSpec,
+    /// The `[tui]` presentation spec (D016): the initial transcript measure.
+    pub tui: TuiSpec,
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
     pub history: Option<PathBuf>,
@@ -341,6 +365,7 @@ pub async fn run(
         tasks,
         history,
         theme,
+        tui,
         remote,
         cwd,
         git,
@@ -350,6 +375,10 @@ pub async fn run(
     let (guard, mut terminal) = terminal::enter()?;
 
     let mut app = App::new();
+    // The configured initial measure (`[tui] width`, D016) — clamped by `set_measure`.
+    if let Some(cols) = tui.width {
+        app.set_measure(cols);
+    }
     app.set_models(models);
     app.set_sessions(sessions);
     app.set_tasks(tasks);
@@ -701,6 +730,17 @@ mod tests {
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 
     #[test]
+    fn validate_measure_accepts_the_range_and_rejects_outside_it() {
+        assert_eq!(validate_measure(DEFAULT_MEASURE).unwrap(), DEFAULT_MEASURE);
+        assert_eq!(validate_measure(MEASURE_MIN).unwrap(), MEASURE_MIN);
+        assert_eq!(validate_measure(MEASURE_LIMIT).unwrap(), MEASURE_LIMIT);
+        assert!(validate_measure(MEASURE_MIN - 1).is_err(), "below the floor");
+        assert!(validate_measure(MEASURE_LIMIT + 1).is_err(), "above the ceiling");
+        let msg = validate_measure(MEASURE_LIMIT + 1).unwrap_err();
+        assert!(msg.contains(&MEASURE_MIN.to_string()), "names the range: {msg}");
+    }
+
+    #[test]
     fn ask_budget_is_long_only_for_model_call_asks() {
         // `/btw` and `/compact` are themselves model calls; everything else is
         // an instant command.
@@ -925,6 +965,7 @@ mod tests {
             tasks: Vec::new(),
             history: None,
             theme: ThemeSpec::default(),
+            tui: TuiSpec::default(),
             remote: false,
             cwd: None,
             git: None,

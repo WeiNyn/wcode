@@ -28,7 +28,7 @@
   --wc-accent: var(--vscode-charts-blue); /* the one wcode accent: "active now" */
 
   /* the local knobs, DERIVED from shipped steps, NOT new tokens */
-  --ed-measure: 64ch; /* the text block's width (A6) */
+  --ed-measure: 100%; /* the text block FILLS the editor width (D014; was a fixed 64ch) */
   --ed-indent: 1.5em; /* the first-line indent that replaces inter-paragraph space (A5) */
   --ed-read: "Iowan Old Style", "Charter", "Palatino Linotype", "Book Antiqua", Georgia,
     "Times New Roman", serif; /* A1: a LOCAL stack — zero requests */
@@ -188,8 +188,9 @@ body {
 
 /* ----------------------------------------------------- transcript + turns */
 
-/* The transcript is a reading column, centered, capped at --ed-measure. There is no
-   rail, no spine, no fill: your turn and mine are told apart by a byline and the air. */
+/* The transcript is a reading column, centered, and ADAPTIVE: it fills the editor
+   width (D014). There is no rail, no spine, no fill: your turn and mine are told
+   apart by a byline and the air. The side gutters come from `.col`'s own padding. */
 .stream {
   flex: 1 1 auto;
   overflow: auto;

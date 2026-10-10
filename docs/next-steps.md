@@ -83,6 +83,9 @@ the boxes as each task completes and keep the status table current.
 
 | 72 | TUI: the **assistant turn carries no speaker head** — it opened on a bare `WCODE` row while the user was inline; the user keeps ` YOU`, the assistant is the page ([D012](decisions/D012-tui-assistant-has-no-speaker-head.md)) | ☑ done — one row saved per turn; `Speaker` retired; 1135 tests + clippy clean; review pending |
 
+| 73 | TUI: the transcript **measure is configurable at startup** — `[tui] width` (columns, 40..=200, default 68); `/width` + `Alt-[`/`Alt-]` remain the runtime override ([D016](decisions/D016-tui-width-setting.md)) | ☑ done — `TuiSpec` + `validate_measure` (a bad value fails loudly); `--dump-config` prints it; 1139 tests + clippy clean |
+
+
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`
 `Err` alike (a session-append I/O failure, `session.append` → `LoopError::Session`,

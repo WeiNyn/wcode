@@ -2228,10 +2228,13 @@ pub struct App {
 
 /// The default transcript measure (content width) in columns. Adjustable at
 /// runtime via `/width` and `Alt-[` / `Alt-]`.
-pub(crate) const DEFAULT_MEASURE: usize = 68;
-/// The measure's allowed range (columns) for `/width` and the `Alt-[` / `Alt-]` keys.
-const MEASURE_MIN: usize = 40;
-const MEASURE_LIMIT: usize = 200;
+/// The default transcript measure (content width) in columns. Adjustable at
+/// startup via `[tui] width` and at runtime via `/width` and `Alt-[` / `Alt-]`.
+pub const DEFAULT_MEASURE: usize = 68;
+/// The measure's allowed range (columns) for `[tui] width`, `/width` and the
+/// `Alt-[` / `Alt-]` keys.
+pub const MEASURE_MIN: usize = 40;
+pub const MEASURE_LIMIT: usize = 200;
 /// Columns an `Alt-[` / `Alt-]` key press moves the measure.
 const MEASURE_STEP: usize = 8;
 
@@ -2290,7 +2293,7 @@ impl App {
     }
 
     /// Set the measure, clamped to `MEASURE_MIN..=MEASURE_LIMIT`; marks the frame dirty.
-    fn set_measure(&mut self, cols: usize) {
+    pub(crate) fn set_measure(&mut self, cols: usize) {
         let clamped = cols.clamp(MEASURE_MIN, MEASURE_LIMIT);
         if clamped != self.measure {
             self.measure = clamped;
