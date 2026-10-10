@@ -647,6 +647,12 @@ const COMMANDS: &[Command] = &[
         summary: "switch surface",
     },
     Command {
+        name: "width",
+        aliases: &[],
+        args: Some("<cols>"),
+        summary: "set the transcript width (40-200; also Alt-[ / Alt-])",
+    },
+    Command {
         name: "team",
         aliases: &[],
         args: None,
@@ -861,6 +867,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Alt-1..9", "focus sidebar row N"),
     ("Ctrl-G", "browse the transcript"),
     ("Ctrl-B", "toggle the sidebar"),
+    ("Alt-[ / Alt-]", "narrow / widen the transcript"),
     ("j / k · g / G", "browse: next / previous · first / last"),
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
     ("Enter / Space (browse)", "expand / collapse the selected block"),
@@ -2196,6 +2203,9 @@ pub struct App {
     /// flips this bit and marks dirty, never touching a surface. The renderer
     /// keys its horizontal split on `App::sidebar()` (see `ui::draw`).
     sidebar: bool,
+    /// The transcript's measure (content width) in columns, adjustable at runtime
+    /// via `/width` and `Alt-[` / `Alt-]`; clamped to the band at draw time (D011).
+    measure: usize,
     /// Screen geometry the last `ui::draw` published for hit-testing. Cleared at
     /// the top of each frame; read by `on_mouse`.
     pub(crate) hit: HitMap,
@@ -2215,6 +2225,15 @@ pub struct App {
     /// in the transcript; read by the renderer's highlight pass.
     text_sel: Option<(SelPos, SelPos)>,
 }
+
+/// The default transcript measure (content width) in columns. Adjustable at
+/// runtime via `/width` and `Alt-[` / `Alt-]`.
+pub(crate) const DEFAULT_MEASURE: usize = 68;
+/// The measure's allowed range (columns) for `/width` and the `Alt-[` / `Alt-]` keys.
+const MEASURE_MIN: usize = 40;
+const MEASURE_LIMIT: usize = 200;
+/// Columns an `Alt-[` / `Alt-]` key press moves the measure.
+const MEASURE_STEP: usize = 8;
 
 impl Default for App {
     /// Same as [`App::new`] — a `Default` app still has its (root) surface, so
@@ -2261,7 +2280,28 @@ impl App {
             mouse_focus: (0, 0),
             mouse_affordance: None,
             text_sel: None,
+            measure: DEFAULT_MEASURE,
         }
+    }
+
+    /// The current transcript measure (content width) in columns.
+    pub(crate) fn measure(&self) -> usize {
+        self.measure
+    }
+
+    /// Set the measure, clamped to `MEASURE_MIN..=MEASURE_LIMIT`; marks the frame dirty.
+    fn set_measure(&mut self, cols: usize) {
+        let clamped = cols.clamp(MEASURE_MIN, MEASURE_LIMIT);
+        if clamped != self.measure {
+            self.measure = clamped;
+            self.dirty = true;
+        }
+    }
+
+    /// Nudge the measure by `delta` columns (negative narrows), for `Alt-[`/`Alt-]`.
+    fn bump_measure(&mut self, delta: isize) {
+        let cols = (self.measure as isize + delta).max(0) as usize;
+        self.set_measure(cols);
     }
 
     /// Replace the surface list (index 0 is the root) and focus the root. The
@@ -3279,6 +3319,8 @@ impl App {
             // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
             Key::Ctrl('n') => self.focus_next(),
             Key::BackTab => self.focus_prev(),
+            Key::Alt('[') => self.bump_measure(-(MEASURE_STEP as isize)),
+            Key::Alt(']') => self.bump_measure(MEASURE_STEP as isize),
             Key::Alt(c) => self.focus_digit(c),
             Key::F(1) => self.open_help(),
             Key::Ctrl('g') => self.enter_browse(),
@@ -3432,6 +3474,17 @@ impl App {
                     self.actions.push(Action::Ask(Request::SetEffort { effort }));
                 }
                 None => self.notice("usage: /effort <level> ('-' clears)"),
+            },
+            "width" => match arg.and_then(|a| a.parse::<usize>().ok()) {
+                Some(cols) => {
+                    self.set_measure(cols);
+                    self.notice(format!("width: {} cols", self.measure));
+                }
+                None if arg.is_some() => self.notice("usage: /width <cols> (40-200)"),
+                None => self.notice(format!(
+                    "width: {} cols (usage: /width <cols>)",
+                    self.measure
+                )),
             },
             "compact" => self.actions.push(Action::Ask(Request::Compact {
                 instructions: arg.map(str::to_string),
@@ -6607,13 +6660,13 @@ mod tests {
             text.starts_with(
                 "commands: /new /exit /model <id> /theme [name] /effort [level] /compact [text] \
                  /changes /resume /reload [--no-session] /btw <question> /plan [on|off] \
-                 /verify /usage /copy /surface /team /tasks /help"
+                 /verify /usage /copy /surface /width <cols> /team /tasks /help"
             ),
             "the command listing changed: {text}"
         );
         for name in [
             "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload",
-            "btw", "plan", "verify", "usage", "copy", "surface", "team", "tasks", "help",
+            "btw", "plan", "verify", "usage", "copy", "surface", "width", "team", "tasks", "help",
         ] {
             assert!(
                 text.contains(&format!("/{name}")),
@@ -6658,6 +6711,22 @@ mod tests {
         assert_eq!(labels.len(), COMMANDS.len());
         assert!(labels.contains(&"/exit".to_string()));
         assert!(labels.contains(&"/help".to_string()));
+    }
+
+    #[test]
+    fn the_width_command_and_keys_adjust_the_measure() {
+        let mut app = App::new();
+        assert_eq!(app.measure(), DEFAULT_MEASURE, "the default measure");
+        submit(&mut app, "/width 100");
+        assert_eq!(app.measure(), 100, "the command sets it");
+        app.handle(AppEvent::Key(Key::Alt('[')));
+        assert_eq!(app.measure(), 100 - MEASURE_STEP, "Alt-[ narrows");
+        app.handle(AppEvent::Key(Key::Alt(']')));
+        assert_eq!(app.measure(), 100, "Alt-] widens back");
+        submit(&mut app, "/width 9999");
+        assert_eq!(app.measure(), MEASURE_LIMIT, "clamped at the limit");
+        submit(&mut app, "/width 1");
+        assert_eq!(app.measure(), MEASURE_MIN, "clamped at the floor");
     }
 
     #[test]

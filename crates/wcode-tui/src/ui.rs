@@ -57,10 +57,9 @@ const SIDEBAR_WIDTH: u16 = 30;
 /// below it there is not enough room for a 30-col panel AND a usable bands
 /// column, so `draw` leaves the layout completely untouched.
 const SIDEBAR_MIN_WIDTH: u16 = 80;
-/// The transcript's **measure**: the content column is at most this many columns
-/// wide, centered in its band (the "printed page"). It governs the transcript
-/// only — the composer band stays edge-to-edge.
-const MEASURE_MAX: usize = 68;
+/// Wide, centered in its band (the "printed page"), and **runtime-adjustable**
+/// (`App::measure`, set by `/width` and `Alt-[` / `Alt-]`). It governs the
+/// transcript only — the composer band stays edge-to-edge.
 /// The band width at (or above) which the measure centers, leaving a real margin
 /// on each side. Below it the content uses the full band width (so an 80-col
 /// terminal keeps its `❯` at the gutter).
@@ -413,7 +412,7 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
 
 /// Draw the transcript into its band: the committed blocks (cached per width)
 /// plus the in-flight message. `area` is the plain transcript band; the content
-/// renders in a centered **measure** (at most [`MEASURE_MAX`] cols, when the band
+/// renders in a centered **measure** (at most `App::measure()` cols, when the band
 /// is at least [`MEASURE_MIN_BAND`] wide), so the wrap width is the measure and
 /// the viewport height is `area.height`, feeding `sync_scroll`; the selection bar
 /// paints the measure's column 0 in a second pass.
@@ -455,7 +454,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // The measure: a centered content column when the band leaves a real margin,
     // else the full band width. The composer band is NOT centered.
     let band = area.width as usize;
-    let measure = if band >= MEASURE_MIN_BAND { MEASURE_MAX } else { band };
+    // The band's own width caps the measure; below the centering threshold the
+    // band is used whole. The measure itself is runtime-adjustable (D011).
+    let measure = if band >= MEASURE_MIN_BAND {
+        app.measure().min(band)
+    } else {
+        band
+    };
     let pad = (band - measure) / 2;
     let width = measure;
     // The centered measure column: the content renders here, and hit-testing
