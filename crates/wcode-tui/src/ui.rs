@@ -902,9 +902,10 @@ fn tree_end_row() -> Line<'static> {
 /// the `note · ms` (or `+a −r · ms`) stats and the `▸`/`▣` affordances
 /// right-aligned — then the body rows under `│   ` (params + output/diff/preview
 /// plus the `… +N more` hint), closed by a `└` terminator when there is a body.
-/// name prints ONCE; there is no `N` ordinal and no separate `✓ name · note` row.
-/// `n` is the tool's 1-based call order (kept for the render walk). # Contracts:
-/// ≥1 line; row 0 is the D32 toggle row; `Block::Tool` also uses it with `n = 1`.
+///
+/// The name prints ONCE; there is no `N` ordinal and no separate `✓ name · note`
+/// row. `n` is the tool's 1-based call order (kept for the render walk); row 0 is
+/// the D32 toggle row, and `Block::Tool` also uses it with `n = 1`.
 fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     let mut body: Vec<Line<'static>> = Vec::new();
