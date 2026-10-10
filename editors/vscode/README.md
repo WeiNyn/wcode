@@ -8,10 +8,32 @@ A second **client** of the wcode kernel, never a second kernel: it spawns
 per-session reducer, host-side markdown rendering, native diffs, and the team
 surface — all rendered **inside one webview**: a dockable `WebviewView`
 (`wcode.surface`, in the Activity Bar) plus an editor-tab `WebviewPanel`
-(`wcode: Open in Editor`), both fed by the one `SurfaceController`. The masthead
+(`wcode: Open in Editor`), both fed by the one `SurfaceController`. **Multi-tab
+(D013, W010):** a workspace can hold several editor tabs, each an **independent
+wcode session** — its own `serve --stdio` child, its own conversation and team —
+so parallel work runs side by side; the docked `WebviewView` follows the active
+tab and carries a session switcher. The masthead
 (identity + status + a dim team caption), the transcript, the composer and the live
 type-line are webview DOM
 (`src/webview/chat.ts`) — rendered in-webview, not by a VS Code `TreeView`.
+
+## Install
+
+The extension is a **thin client** — it spawns the `wcode` binary — so install
+that first (Homebrew, `cargo install wcode-cli`, or a prebuilt tarball; see the
+[repo README](../../README.md#install)).
+
+Then install the `.vsix` from a release:
+
+```sh
+# grab wcode-vscode-X.Y.Z.vsix from the tag's GitHub release, then:
+code --install-extension wcode-vscode-X.Y.Z.vsix
+```
+
+The `.vsix` is attached to the tag's release by
+[`.github/workflows/extension.yml`](../../.github/workflows/extension.yml) on an
+`ext-v*` tag. The extension **versions independently** of the crates (its own
+`0.0.x` line).
 
 ## Layout
 
@@ -30,6 +52,11 @@ type-line are webview DOM
 | `src/markdown.ts` | `markdown-it` with `html: false` |
 | `src/commands.ts` | the `/`-command registry (pure) — the ONE list the menu and the host share |
 | `src/sessions.ts` | the `/resume` picker's data (session files: groups + legacy) |
+| `src/teams.ts` | the `/team` picker's data (`.wcode/teams/<name>.toml`) |
+| `src/teams.ts` | the `/team` picker's data (`.wcode/teams/<name>.toml`) |
+| `src/tabs.ts` | pure multi-tab helpers: `commandAction` routing, sticky `tabLabel`, `nextActiveTab` |
+| `src/tab.ts` | `SessionTab` — one session's bundle (child + controller + state + handlers) |
+| `src/manager.ts` | `Manager` — the multi-tab registry, the shared OutputChannel/status, command routing |
 | `src/startup.ts` | the pure "the child died at startup" classifier |
 | `src/cancel.ts` | the pure Cancel-target decision (Focus = the focused member; All = the root + every running member) |
 | `src/review.ts` | the pure change-review model (a hunk + per-call verdicts) |

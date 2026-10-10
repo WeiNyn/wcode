@@ -138,10 +138,13 @@ ti.command = { command: "wcode.member.focus", title: "Focus", arguments: [item.i
 
 ## 2. The per-member surface
 
-**Recommendation: ONE panel that re-targets** (the `ChatPanel` is already a singleton,
-`panel.ts:2NpqG`), not one panel per member. N members = N webviews = heavy, and the
-repo's minimalism points at a single surface whose `target` the sidebar steers. (The
-`WebviewPanel` API *can* hold many; keep that as the alternative — `TODO`.)
+**Settled (D013): a panel PER TAB.** The recommendation that stood here — ONE panel
+that re-targets (`panel.ts:2NpqG`) — is superseded: one workspace hosts several editor
+tabs, each an independent wcode session with its own `WcodeSession` +
+`SurfaceController` + `ViewState`. Within a tab the surface still re-targets its
+**members** (the target stays visible in the status strip); what multiplies now is the
+**tab**, not the panel's target. See
+`docs/decisions/D013-multi-tab-sessions-vscode.md`.
 
 - **Binding.** `ChatPanel` gains `private target: string`. Every send from the composer is
   addressed there — which needs `WcodeSession` to stop hard-coding the root
@@ -162,9 +165,12 @@ repo's minimalism points at a single surface whose `target` the sidebar steers. 
   so the reducer keys blocks by `frame.session`, and a retarget only changes *which*
   key the panel renders. With a single shared `transcript` the retarget would drop the
   old member's live block — the reason `transcript` must become per-session.
-- **Two panels at once?** No, by default. If wanted later, `ChatPanel` is
-  `Disposable`-per-instance already (`panel.ts` `dispose`); the singleton is just the
-  current policy. <!-- SKETCH: TODO(prose) — pin one-panel-retargets vs a panel per member. -->
+- **Two panels at once?** **Yes — settled (D013): a panel per TAB.** `ChatPanel` becomes
+  one instance per tab (its `static current` singleton goes); within a single tab the
+  surface still re-targets its members. Cross-tab visibility is **not** shared — a tab
+  is its own `serve --stdio` child, so a worker spawned in one tab is invisible to
+  another. A VS Code window reload does not yet restore tabs (a `WebviewPanelSerializer`
+  is a named follow-up).
 
 ## 3. Actions — the exact request each sends
 
@@ -334,7 +340,8 @@ it("memberViews/memberIcon map each MemberState (idle|running|done|failed)", () 
   **deferral** (`actor.rs:8SGyA`/`:Dk3Bl`/`:BvAaE`).
 - The five `TODO(prose)` decisions: sidebar container placement (§1, SETTLED: a
   dedicated activity-bar container); one-panel-retargets vs a panel-per-member (§2,
-  SETTLED: one panel that re-targets, with the target always visible); the plan-mode
+  SETTLED (D013): a panel **per tab**, each an independent session; within a tab, ONE
+  panel that re-targets, with the target always visible); the plan-mode
   chip's home (§3, SETTLED: the panel's status strip); the Todos home (§4, SETTLED:
   the sidebar is authoritative — the transcript notice is REMOVED); whether
   `liveAction` lands (§5, SETTLED: yes, cleared on `agent_end`).

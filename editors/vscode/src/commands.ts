@@ -44,6 +44,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "btw", arg: "<question>", help: "Side question: no turn, not recorded", requiresArg: true },
   { name: "compact", arg: "[focus]", help: "Summarize older messages now" },
   { name: "sessions", help: "List the sessions in this connection" },
+  { name: "team", arg: "[name]", help: "Start a new session with a project team: pick one, or pass a name" },
   { name: "status", help: "Show the target's last work" },
 ];
 

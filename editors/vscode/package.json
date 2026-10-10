@@ -2,10 +2,14 @@
   "name": "wcode-vscode",
   "displayName": "wcode",
   "description": "wcode team surface: chat panel, native diffs, and a live member sidebar",
-  "version": "0.0.6",
-  "private": true,
+  "version": "0.0.7",
   "publisher": "wcode",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WeiNyn/wcode",
+    "directory": "editors/vscode"
+  },
   "engines": {
     "vscode": "^1.85.0",
     "node": ">=22.18"
@@ -19,6 +23,7 @@
     "onCommand:wcode.start",
     "onCommand:wcode.stop",
     "onCommand:wcode.restart",
+    "onCommand:wcode.newSession",
     "onCommand:wcode.openDiff",
     "onCommand:wcode.member.focus",
     "onCommand:wcode.plan.toggle",
@@ -55,6 +60,10 @@
       {
         "command": "wcode.restart",
         "title": "wcode: Restart"
+      },
+      {
+        "command": "wcode.newSession",
+        "title": "wcode: New Session"
       },
       {
         "command": "wcode.openDiff",

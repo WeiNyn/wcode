@@ -21,6 +21,7 @@ for (const file of [
   "render.ts",
   "webview.ts",
   "commands.ts",
+  "tabs.ts",
   "diff.ts",
   "review.ts",
   "startup.ts",
