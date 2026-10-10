@@ -81,6 +81,8 @@ the boxes as each task completes and keep the status table current.
 
 | 71 | TUI colour + width + sidebar: **user prompt in the accent** (`Theme.user` had no call site; it shared `body` with the reply), **an adjustable measure** (`/width <cols>` + `Alt-[` / `Alt-]`; was a 68-col const), **256-tier code highlighting** (map syntect RGB → xterm-256), **tool input/output highlighting** (a file tool's body/params by extension, `bash`'s `command` as shell), and a **book-outline sidebar** (ruled `── label ──` headers) — W013 (see [work/W013-tui-color-width-sidebar.md](work/W013-tui-color-width-sidebar.md), [D011](decisions/D011-tui-width-color-sidebar.md)) | ☑ implemented — `e9b0f63`/`f43a118`/`805bd44`/`219cabc`/`f6519ae` + D011; 1135 tests + clippy clean; second-layer review pending |
 
+| 72 | TUI: the **assistant turn carries no speaker head** — it opened on a bare `WCODE` row while the user was inline; the user keeps ` YOU`, the assistant is the page ([D012](decisions/D012-tui-assistant-has-no-speaker-head.md)) | ☑ done — one row saved per turn; `Speaker` retired; 1135 tests + clippy clean; review pending |
+
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`
 `Err` alike (a session-append I/O failure, `session.append` → `LoopError::Session`,

@@ -201,10 +201,12 @@ blank pane.
   `project · ⎇ branch` reads left-to-right and `model · effort` is a **far-right
   group** on the same row (option A). It is **chrome** — never a browse target.
   At 48 cols the ladder sheds `session` first, then the branch.
-- **Speaker head** — each message opens with a **speaker** head: `YOU` for the
-  user block (replacing the transcript's `❯`) and `WCODE` for the assistant turn —
-  a **reverse-video** run (`Modifier::REVERSED`; no glyph, no role). It replaces
-  the retired `§N` section head (`§` is no longer in the glyph table, §2). It is
+- **Speaker head** — the **user block** opens with a `YOU` head (replacing the
+  transcript's `❯`) — a **reverse-video** run (`Modifier::REVERSED`; no glyph, no
+  role). The **assistant turn carries no head** (D012): it opens directly on its
+  body (the `··· thinking` row or the prose), so a turn does not spend a row on a
+  bare `WCODE` marker — the assistant is the page itself. The head replaces the
+  retired `§N` section head (`§` is no longer in the glyph table, §2). It is
   **chrome** — never a browse selection target, never copied.
 - **Code plate** — a fenced code block renders a **caption line** above it,
   `plate N — <info>` (the fence's info string verbatim; just `plate N` when

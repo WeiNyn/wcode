@@ -547,13 +547,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             let row0 = range.start.checked_sub(start)?;
             match &app.transcript()[i] {
                 Block::Turn(turn) => {
-                    // A `Turn` is: the `WCODE` head (1 row), then the prose and the
-                    // tools interleaved INLINE in call order. Publish the thinking
-                    // affordance (on the prose's first row) and one hit per inline
+                    // A `Turn` is its body (no head, D012): the prose and the tools
+                    // interleaved INLINE in call order. Publish the thinking
+                    // affordance (on the block's first row) and one hit per inline
                     // tool's head row.
                     let mut hits = Vec::new();
                     if matches!(turn.content.first(), Some(ContentBlock::Thinking { .. })) {
-                        let r = row0 + 1;
+                        let r = row0;
                         if r < window.len() {
                             let y = area.y + r as u16;
                             hits.push(AffordanceHit {
@@ -682,7 +682,7 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     match block {
         // The transcript's user block: a `YOU` speaker head + the wrapped prompt
         // (the `❯` glyph stays the composer's, not the transcript's).
-        Block::User(text) => speaker_lines(Speaker::You, text, width),
+        Block::User(text) => speaker_lines(text, width),
         // One exchange: the `WCODE` head, the run's prose (with `¹` marks), and
         // the ledger (its foot).
         Block::Turn(turn) => turn_lines(turn, width),
@@ -697,59 +697,30 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     }
 }
 
-/// A transcript speaker head (`YOU` / `WCODE`) — a reverse-video run of the name
-/// in the gutter, one row (`§15 (b)`). No glyph, no role.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Speaker {
-    You,
-    Wcode,
-}
-
-impl Speaker {
-    fn label(self) -> &'static str {
-        match self {
-            Speaker::You => "YOU",
-            Speaker::Wcode => "WCODE",
-        }
-    }
-}
-
-/// The head row's spans for a speaker: the reverse-video name in the gutter,
-/// padded so the content column lands at [`CONTENT_COL`], then the first line of
-/// `text`. The head cell is a filled run (reverse video over ` <name>`).
-fn speaker_head(speaker: Speaker, text: &str) -> Line<'static> {
-    let name = speaker.label();
-    let filled = 1 + name.chars().count(); // the leading space + the name
+/// The user block's head row: a reverse-video ` YOU` run in the gutter, padded so
+/// the prompt lands at [`CONTENT_COL`], then the first wrapped line of `text`. The
+/// assistant carries **no** head — it is the page itself (D012).
+fn user_head(text: &str) -> Line<'static> {
+    let filled = 1 + "YOU".chars().count(); // the leading space + the name
     let pad = CONTENT_COL.saturating_sub(filled);
     Line::from(vec![
-        Span::styled(format!(" {name}"), selection_style()),
+        Span::styled(" YOU".to_string(), selection_style()),
         Span::styled(" ".repeat(pad), dim()),
-        Span::styled(text.to_string(), text_style(speaker)),
+        Span::styled(text.to_string(), user()),
     ])
 }
 
-/// The text style for a speaker's body: the user's prompt reads in the accent
-/// role, the assistant's prose in the default `body` — so a prompt stands out
-/// from a reply (D011).
-fn text_style(speaker: Speaker) -> Style {
-    match speaker {
-        Speaker::You => user(),
-        Speaker::Wcode => body(),
-    }
-}
-
-/// The continuation row gutter, aligning the body under [`CONTENT_COL`].
-fn speaker_cont(text: &str, style: Style) -> Line<'static> {
+/// The user block's continuation gutter, aligning the prompt under [`CONTENT_COL`].
+fn user_cont(text: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(" ".repeat(CONTENT_COL), dim()),
-        Span::styled(text.to_string(), style),
+        Span::styled(text.to_string(), user()),
     ])
 }
 
-/// A speaker-headed text block: line 0 is the head + the first wrapped line, the
-/// rest the body gutter. An empty `text` renders the bare head.
-fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static>> {
-    let style = text_style(speaker);
+/// The user block: line 0 is the ` YOU` head + the first wrapped line, the rest
+/// the continuation gutter. The prompt reads in the accent role (D011).
+fn speaker_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut first_line = true;
     for raw in text.split('\n') {
@@ -758,13 +729,13 @@ fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static
         let mut iter = segments.into_iter();
         let head = iter.next().unwrap_or_default();
         if first_line {
-            out.push(speaker_head(speaker, &head));
+            out.push(user_head(&head));
             first_line = false;
         } else {
-            out.push(speaker_cont(&head, style));
+            out.push(user_cont(&head));
         }
         for segment in iter {
-            out.push(speaker_cont(&segment, style));
+            out.push(user_cont(&segment));
         }
     }
     out
@@ -824,12 +795,10 @@ fn session_head_row(head: &SessionHead, width: usize) -> Line<'static> {
     padded_row(&l, &r, "─", dim(), width as u16)
 }
 
-/// One exchange (`Block::Turn`): the `WCODE` head over the run's body (prose +
-/// tools, inline).
+/// One exchange (`Block::Turn`): the run's body (prose + tools, inline). There is
+/// no `WCODE` head — the assistant is the page itself (D012).
 fn turn_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
-    let mut out = speaker_lines(Speaker::Wcode, "", width);
-    out.extend(turn_inline_lines(turn, width));
-    out
+    turn_inline_lines(turn, width)
 }
 
 /// The turn's body: the prose/thinking interleaved with each tool's panel, in
@@ -840,7 +809,7 @@ fn turn_inline_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
     turn_inline(turn, width).0
 }
 
-/// The turn-relative row offset (line 0 = the `WCODE` head) of each inline tool's
+/// The turn-relative row offset (from the turn's first body line) of each inline tool's
 /// head row, in call order — the D32 mirror of `turn_inline_lines`. # Contracts:
 /// one `(k, off)` per tool ACTUALLY emitted (a `ToolCall` with no result is
 /// skipped); `off` accounts for every prose/thinking/tool row above it. A drift
@@ -851,12 +820,12 @@ fn inline_tool_offsets(turn: &Turn, width: usize) -> Vec<(usize, usize)> {
 
 /// The single walk behind [`turn_inline_lines`] and [`inline_tool_offsets`], so
 /// the render and the D32 hit map can never drift: it returns the turn's body
-/// lines and the head-relative row offset of each emitted tool's head row.
+/// lines and the turn-relative row offset of each emitted tool's head row.
 fn turn_inline(turn: &Turn, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut offsets: Vec<(usize, usize)> = Vec::new();
-    // Line 0 is the `WCODE` head; the body starts at line 1.
-    let mut off = 1usize;
+    // The body starts at line 0 (there is no `WCODE` head).
+    let mut off = 0usize;
     // The `¹` ordinal: the count of `ToolCall`s seen (one per-turn series).
     let mut refn = 0usize;
     // Whether the line just emitted is prose (a `¹` may attach) or a tool row —
@@ -1961,11 +1930,6 @@ fn split_at_char(text: &str, n: usize) -> (String, String) {
 /// The workhorse: secondary chrome and quiet prose.
 pub(crate) fn dim() -> Style {
     theme::theme().dim
-}
-
-/// Assistant prose — the uncolorized default.
-fn body() -> Style {
-    theme::theme().body
 }
 
 /// The user's own prompt — the accent role, so a prompt stands apart from a reply.
@@ -3865,41 +3829,47 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn the_turn_opens_with_a_wcode_speaker_head() {
+    fn a_turn_opens_on_its_body_with_no_head() {
         let mut app = App::new();
         push_assistant(
             &mut app,
             "# the anchor is the text\n\nAn anchor is the text you quote.",
         );
         let text = buffer_text(&render(&mut app, 80, 12));
-        // The turn opens with the `WCODE` speaker head (the `§N` head is gone).
-        assert!(text.contains("WCODE"), "the speaker head:\n{text}");
+        // Only the pinned header carries `WCODE`; the turn itself has no head
+        // (D012 — the assistant is the page).
+        assert_eq!(
+            text.matches("WCODE").count(),
+            1,
+            "no `WCODE` speaker head:\n{text}"
+        );
         assert!(
             text.contains("An anchor is the text you quote."),
-            "the body follows:\n{text}"
+            "the body:\n{text}"
         );
     }
 
     #[test]
-    fn a_headingless_turn_still_renders_the_speaker_head() {
+    fn a_headingless_turn_renders_its_body() {
         let mut app = App::new();
         push_assistant(&mut app, "no heading");
         let text = buffer_text(&render(&mut app, 80, 12));
-        assert!(text.contains("WCODE"), "the speaker head:\n{text}");
         assert!(text.contains("no heading"), "the body:\n{text}");
+        assert_eq!(text.matches("WCODE").count(), 1, "no speaker head:\n{text}");
     }
 
     #[test]
-    fn the_user_prompt_reads_in_the_user_role_not_body() {
-        let style = |lines: &[Line<'static>]| lines[0].spans.last().unwrap().style;
-        let you = speaker_lines(Speaker::You, "a prompt", 80);
-        let wcode = speaker_lines(Speaker::Wcode, "a reply", 80);
-        assert_eq!(style(&you), theme::theme().user, "the prompt is the accent");
-        assert_eq!(style(&wcode), theme::theme().body, "the reply stays default");
+    fn the_user_prompt_reads_in_the_user_role() {
+        let you = speaker_lines("a prompt", 80);
+        assert_eq!(
+            you[0].spans.last().unwrap().style,
+            theme::theme().user,
+            "the prompt reads in the accent role"
+        );
         assert_ne!(
-            style(&you),
-            style(&wcode),
-            "a prompt and a reply must not share one color"
+            theme::theme().user,
+            theme::theme().body,
+            "the accent must differ from the assistant's default body"
         );
     }
 
