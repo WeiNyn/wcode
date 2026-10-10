@@ -155,4 +155,8 @@ glyphs (`⚙ ✓ ✗ ···`) and modifiers carry the meaning, so the TUI stays 
 Not behavior config beyond the theme selector; not a change to the kernel — the
 palette lives entirely in `crates/wcode-tui`. (The "not a theme registry or built-in
 theme catalog" non-goal was deliberately overridden — see items 30/35/36/37/38 and
-[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5.)
+[`markdown-pulldown-plan.md`](markdown-pulldown-plan.md) §5.) **W016 amendment:** the
+`omarchy` source resolves the desktop's live palette by reading
+`~/.local/state/omarchy/current/theme/colors.toml` — the one place the palette is
+sourced outside the crate. It is still presentation-only and adds no dependency (a
+~25-line flat `key = "value"` parser); no kernel change.

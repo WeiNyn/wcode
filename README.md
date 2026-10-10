@@ -104,7 +104,8 @@ digest_cas = true          # optional; true|false — default ON
 
 [theme]
 # TUI theme, presentation-only. `name` selects a built-in preset —
-# default | dark | light | gruvbox-dark | nord | solarized-dark | solarized-light.
+# default | dark | light | gruvbox-dark | nord | solarized-dark | solarized-light,
+# or `omarchy` for the live desktop theme (see below).
 # `default` is named-16 (safe on any terminal); the others are truecolor, so they
 # are a no-op on a non-truecolor terminal (a `light` preset also needs a light
 # terminal). A role value is a named ANSI color (`cyan`, `light-yellow`,
@@ -115,6 +116,10 @@ digest_cas = true          # optional; true|false — default ON
 # TUI's `/theme [name]` (bare `/theme` opens a picker) or start with `--theme <name>`;
 # `--list-themes` prints the catalog. Explicit role keys survive a preset switch.
 name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
+# `name = "omarchy"` loads the current Omarchy desktop theme — the palette at
+# ~/.local/state/omarchy/current/theme/colors.toml — and re-reads it on
+# `/theme omarchy`, so an `omarchy theme set` shows up at the next switch. It is
+# listed by `--list-themes` only where that file exists.
 link = "light-cyan"        # optional; role = color (overrides the preset)
 muted = "#5f5f5f"          # optional; hex is truecolor (opt-in)
 
@@ -308,8 +313,8 @@ wcode --agents --task "fix bug 123" --timeout 600   # headless [workflow] run
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
-wcode --list-themes          # print the built-in theme names, exit
-wcode --theme nord           # select a theme preset (or `[theme] name` in config)
+wcode --list-themes          # print the theme names (built-ins + `omarchy`), exit
+wcode --theme nord           # select a preset or `omarchy` (or `[theme] name` in config)
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --detect-endpoint      # when base_url is unset, probe common local endpoints

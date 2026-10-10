@@ -3652,11 +3652,12 @@ impl App {
             },
             "theme" => match arg {
                 Some(name) => {
-                    if crate::theme::names().iter().any(|n| n == &name) {
-                        let _ = crate::theme::set_preset(name);
-                        self.transient(format!("theme: {name}"));
-                    } else {
-                        self.transient(format!("unknown theme: {name}"));
+                    // One resolution path (catalog or `omarchy`); its error is
+                    // the user-facing message — e.g. the omarchy file can vanish
+                    // between the `names()` check and here.
+                    match crate::theme::set_preset(name) {
+                        Ok(()) => self.transient(format!("theme: {name}")),
+                        Err(e) => self.transient(e),
                     }
                     self.dirty = true; // CLIENT-LOCAL: no Request
                 }
@@ -4383,8 +4384,13 @@ impl App {
                 self.should_quit = true;
             }
             PickerKind::Theme => {
-                crate::theme::set_preset(&selected).expect("picker rows are catalog names");
-                self.transient(format!("theme: {selected}"));
+                // The file can vanish between the picker opening (rows from
+                // `names()`) and this selection, so a `set_preset` error is a
+                // transient, not a panic.
+                match crate::theme::set_preset(&selected) {
+                    Ok(()) => self.transient(format!("theme: {selected}")),
+                    Err(e) => self.transient(e),
+                }
                 self.dirty = true;
             }
         }

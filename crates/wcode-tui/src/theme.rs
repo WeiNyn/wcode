@@ -11,6 +11,7 @@
 //! 256-color) remains open (`tui-plan.md` P2).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, PoisonError, RwLock};
 
@@ -136,9 +137,10 @@ pub(crate) fn theme() -> Theme {
 /// `install`. Rewrites the UI lock, swaps the syntect theme, and bumps the
 /// generation so caches invalidate.
 pub(crate) fn set(spec: ThemeSpec) {
-    let palette = spec.preset.as_deref().and_then(preset);
+    let palette = spec.palette();
     *THEME.write().unwrap_or_else(PoisonError::into_inner) = resolve(spec, no_color());
     let syntax = palette
+        .as_ref()
         .and_then(syntect_theme)
         .unwrap_or_else(crate::markdown::default_syntect_theme);
     crate::markdown::install_syntax_theme(syntax);
@@ -230,7 +232,7 @@ pub fn color_mode() -> ColorMode {
 /// - A `light` preset is meaningful only on a **light** terminal: the UI has no
 ///   `bg` role (prose background is the terminal's), and the palette's `fg`/`bg`
 ///   reach **only** the syntect theme.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     /// Default code foreground (syntect `settings.foreground`); the UI `body`
     /// stays `None` (prose = the terminal default).
@@ -389,7 +391,138 @@ pub fn preset(name: &str) -> Option<&'static Palette> {
 
 /// The catalog's preset names, in order (for an error message / `--list-themes`).
 pub fn names() -> Vec<&'static str> {
-    CATALOG.iter().map(|(n, _)| *n).collect()
+    let mut names: Vec<&'static str> = CATALOG.iter().map(|(n, _)| *n).collect();
+    if omarchy_available() {
+        names.push(OMARCHY);
+    }
+    names
+}
+
+/// The Omarchy sentinel preset name — recognized wherever a preset name is.
+const OMARCHY: &str = "omarchy";
+
+/// Resolve a source NAME to a [`Source`]: a catalog preset, the `omarchy`
+/// sentinel (the live desktop palette), or an `Err` naming the known presets.
+fn resolve_source(name: &str) -> Result<Source, String> {
+    if preset(name).is_some() {
+        return Ok(Source::Named(name.into()));
+    }
+    if name == OMARCHY {
+        return omarchy_source();
+    }
+    Err(format!(
+        "unknown theme `{name}`; known: {}",
+        names().join(", ")
+    ))
+}
+
+/// The live Omarchy palette path:
+/// `$HOME/.local/state/omarchy/current/theme/colors.toml`. Omarchy writes this
+/// literal (it ignores `XDG_STATE_HOME`), so we match it.
+fn omarchy_colors_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".local/state/omarchy/current/theme/colors.toml"))
+}
+
+/// Whether a live Omarchy palette is present — gates `omarchy` in [`names`].
+fn omarchy_available() -> bool {
+    omarchy_colors_path().is_some_and(|p| p.is_file())
+}
+
+/// Read and parse the live Omarchy `colors.toml` into a flat key→value map.
+fn read_omarchy_colors() -> Result<BTreeMap<String, String>, String> {
+    let path = omarchy_colors_path().ok_or("no `HOME` to locate the Omarchy theme")?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no Omarchy theme at {} ({e})", path.display()))?;
+    Ok(parse_colors_toml(&text))
+}
+
+/// Parse the flat `key = "value"` shape of an Omarchy `colors.toml`: one pair
+/// per line, `#` comment lines and blanks skipped, quotes stripped. Omarchy
+/// writes a flat map (its own `omarchy-theme-color` reads it the same way), so
+/// no TOML parser is needed.
+fn parse_colors_toml(text: &str) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        let value = match value.chars().next() {
+            // A quoted value ends at its closing quote (a trailing comment drops).
+            Some('"' | '\'') => value[1..].split(['"', '\'']).next().unwrap_or(""),
+            // An unquoted value is its first whitespace-delimited token.
+            _ => value.split_whitespace().next().unwrap_or(""),
+        };
+        if !key.is_empty() && !value.is_empty() {
+            map.insert(key.to_string(), value.to_string());
+        }
+    }
+    map
+}
+
+/// Omarchy's window border, `rgba(6e6f69ee)` — the RGB, alpha dropped. `None`
+/// when absent or not an `rgba(rrggbb[aa])` string.
+fn omarchy_border(c: &BTreeMap<String, String>) -> Option<Color> {
+    let inner = c
+        .get("hyprland_active_border")?
+        .trim()
+        .strip_prefix("rgba(")?
+        .strip_suffix(')')?;
+    if inner.len() < 6 {
+        return None;
+    }
+    hex_to_rgb(&inner[..6])
+}
+
+/// Map a resolved Omarchy palette (key → hex/rgba) to a wcode [`Palette`]. Every
+/// field is RGB, so the result also yields a matching syntect theme. A missing
+/// key, or a value `parse_color` rejects, is an `Err`.
+fn omarchy_palette(c: &BTreeMap<String, String>) -> Result<Palette, String> {
+    let color = |key: &str| -> Result<Color, String> {
+        c.get(key)
+            .ok_or_else(|| format!("no `{key}` in the Omarchy palette"))
+            .and_then(|v| parse_color(v))
+    };
+    Ok(Palette {
+        fg: color("foreground")?,
+        bg: color("background")?,
+        accent: color("accent")?,
+        muted: color("muted")?,
+        // Borders are `rgba(...)`, not hex; fall back to `muted` when absent.
+        border: match omarchy_border(c) {
+            Some(border) => border,
+            None => color("muted")?,
+        },
+        red: color("red")?,
+        green: color("green")?,
+        yellow: color("yellow")?,
+        // Documented collapse: Omarchy has no distinct `code`; palette B already
+        // shares its Rgb `code`/`warn` step (`palette_b`).
+        code: color("yellow")?,
+        blue: color("blue")?,
+        magenta: color("magenta")?,
+        cyan: color("cyan")?,
+    })
+}
+
+/// Resolve the `omarchy` sentinel: read the live palette into an inline source.
+/// `dim` is not a [`Palette`] field, so it rides in the source's `roles` from
+/// Omarchy's `dark_foreground`.
+fn omarchy_source() -> Result<Source, String> {
+    let colors = read_omarchy_colors().map_err(|e| format!("theme `{OMARCHY}`: {e}"))?;
+    let palette = omarchy_palette(&colors).map_err(|e| format!("theme `{OMARCHY}`: {e}"))?;
+    let mut roles = BTreeMap::new();
+    if let Some(dim) = colors.get("dark_foreground")
+        && parse_color(dim).is_ok()
+    {
+        roles.insert("dim".to_string(), dim.clone());
+    }
+    Ok(Source::Inline { palette, roles })
 }
 
 impl Theme {
@@ -572,27 +705,55 @@ fn syntect_theme(p: &Palette) -> Option<syntect::highlighting::Theme> {
     })
 }
 
-/// A preset selector plus a role→color overlay. `Default` (empty) is palette B;
-/// a `preset` name (D10) selects a catalog palette and the `roles` overlay sits
-/// on top. Built only through [`parse_theme_table`]/[`parse_theme`], which
+/// A theme's color source (D10): palette B, a catalog preset, or a resolved
+/// inline palette. `Default` is palette B.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Source {
+    /// Palette B — no preset.
+    #[default]
+    PaletteB,
+    /// A catalog preset name; resolved to a `&'static Palette` in `into_theme`.
+    Named(Box<str>),
+    /// A resolved inline palette (currently `omarchy`), plus role additions a
+    /// [`Palette`] cannot carry — only `dim`, which palette B derives from the
+    /// grey ramp instead of a palette field.
+    Inline {
+        palette: Palette,
+        roles: BTreeMap<String, String>,
+    },
+}
+
+/// A theme source plus a role→color overlay. `Default` (empty) is palette B; a
+/// named source selects a palette (or an inline one) and the `roles` overlay
+/// sits on top. Built only through [`parse_theme_table`]/[`parse_theme`], which
 /// validate every name, role, and color.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSpec {
-    /// A catalog preset name (D10); `None` = palette B. Resolved in `into_theme`.
-    preset: Option<String>,
+    /// The color source (D10). Resolved in `into_theme`.
+    source: Source,
     roles: BTreeMap<String, String>,
 }
 
 impl ThemeSpec {
-    /// This spec with its preset replaced by `name`; the role overrides are KEPT.
-    /// An unknown name is an `Err` — never a silent palette B (B2).
+    /// This spec with its source replaced by `name` (a catalog preset or the
+    /// `omarchy` sentinel); the role overrides are KEPT. An unknown name, or an
+    /// unavailable `omarchy`, is an `Err` — never a silent palette B (B2).
     pub fn with_preset(mut self, name: &str) -> Result<ThemeSpec, String> {
-        if preset(name).is_none() {
-            return Err(format!("unknown theme `{name}`; known: {}", names().join(", ")));
-        }
-        self.preset = Some(name.to_string());
+        self.source = resolve_source(name)?;
         Ok(self)
     }
+
+    /// The palette this spec resolves to, if it has one — a catalog preset or a
+    /// resolved inline palette. Palette B (`None`) has none. Used by [`set`] to
+    /// pick a matching syntect theme.
+    fn palette(&self) -> Option<Palette> {
+        match &self.source {
+            Source::PaletteB => None,
+            Source::Named(name) => preset(name).copied(),
+            Source::Inline { palette, .. } => Some(*palette),
+        }
+    }
+
     /// The theme for this spec: the preset palette (if any) with the role
     /// overrides applied. A preset seeds ALL 17 roles ([`Theme::from_palette`]);
     /// then each named role changes only its `fg` — its modifiers stay (`link`
@@ -604,42 +765,59 @@ impl ThemeSpec {
     /// color mode. [`parse_theme_table`] validated the values; a stray one
     /// cannot reach here.
     fn into_theme(self, mode: ColorMode) -> Theme {
-        let mut theme = match self.preset.as_deref().and_then(preset) {
-            // Palette B resolves through its D30 tiers; a hex preset degrades
+        let ThemeSpec { source, roles } = self;
+        let mut theme = match source {
+            // Palette B resolves through its D30 tiers; a hex palette degrades
             // per-role under a non-`Rgb` mode (see `from_palette`).
-            Some(p) => Theme::from_palette(p, mode),
-            None => palette_b(mode),
-        };
-        for (role, value) in &self.roles {
-            let Ok(color) = parse_color(value) else {
-                continue;
-            };
-            if matches!(color, Color::Rgb(..)) && mode != ColorMode::Rgb {
-                continue;
+            Source::PaletteB => palette_b(mode),
+            Source::Named(name) => preset(&name)
+                .map_or_else(|| palette_b(mode), |p| Theme::from_palette(p, mode)),
+            Source::Inline { palette, roles } => {
+                let mut theme = Theme::from_palette(&palette, mode);
+                apply_roles(&mut theme, &roles, mode);
+                theme
             }
-            let slot = match role.as_str() {
-                "accent" => &mut theme.accent,
-                "dim" => &mut theme.dim,
-                "muted" => &mut theme.muted,
-                "border" => &mut theme.border,
-                "user" => &mut theme.user,
-                "body" => &mut theme.body,
-                "error" => &mut theme.error,
-                "success" => &mut theme.success,
-                "warn" => &mut theme.warn,
-                "code" => &mut theme.code,
-                "heading" => &mut theme.heading,
-                "heading_sub" => &mut theme.heading_sub,
-                "link" => &mut theme.link,
-                "tool_name" => &mut theme.tool_name,
-                "thinking" => &mut theme.thinking,
-                "diff_add" => &mut theme.diff_add,
-                "diff_del" => &mut theme.diff_del,
-                _ => continue,
-            };
-            slot.fg = Some(color);
-        }
+        };
+        apply_roles(&mut theme, &roles, mode);
         theme
+    }
+}
+
+/// Apply a role→color overlay to `theme`. Each named role changes only its `fg`
+/// — its modifiers stay (`link` underlined, `tool_name` and `accent` bold,
+/// `thinking` dim+italic). A hex (`#rrggbb` → [`Color::Rgb`]) value is honored
+/// only when the terminal is truecolor ([`ColorMode::Rgb`]); under Plain / Named
+/// / Indexed it is skipped, keeping the role's base color. [`parse_theme_table`]
+/// validated the values; a stray one cannot reach here.
+fn apply_roles(theme: &mut Theme, roles: &BTreeMap<String, String>, mode: ColorMode) {
+    for (role, value) in roles {
+        let Ok(color) = parse_color(value) else {
+            continue;
+        };
+        if matches!(color, Color::Rgb(..)) && mode != ColorMode::Rgb {
+            continue;
+        }
+        let slot = match role.as_str() {
+            "accent" => &mut theme.accent,
+            "dim" => &mut theme.dim,
+            "muted" => &mut theme.muted,
+            "border" => &mut theme.border,
+            "user" => &mut theme.user,
+            "body" => &mut theme.body,
+            "error" => &mut theme.error,
+            "success" => &mut theme.success,
+            "warn" => &mut theme.warn,
+            "code" => &mut theme.code,
+            "heading" => &mut theme.heading,
+            "heading_sub" => &mut theme.heading_sub,
+            "link" => &mut theme.link,
+            "tool_name" => &mut theme.tool_name,
+            "thinking" => &mut theme.thinking,
+            "diff_add" => &mut theme.diff_add,
+            "diff_del" => &mut theme.diff_del,
+            _ => continue,
+        };
+        slot.fg = Some(color);
     }
 }
 
@@ -669,14 +847,12 @@ const ROLE_NAMES: [&str; 17] = [
 pub fn parse_theme_table(table: &BTreeMap<String, String>) -> Result<ThemeSpec, String> {
     let mut roles = table.clone();
     let name = roles.remove("name");
-    if let Some(n) = &name
-        && preset(n).is_none()
-    {
-        return Err(format!("unknown theme `{n}`; known: {}", names().join(", ")));
+    let spec = parse_theme(&roles)?; // role/color validation, unchanged
+    match name {
+        // One resolution path for every source (catalog preset or `omarchy`).
+        Some(n) => spec.with_preset(&n),
+        None => Ok(spec),
     }
-    let mut spec = parse_theme(&roles)?; // role/color validation, unchanged
-    spec.preset = name;
-    Ok(spec)
 }
 
 /// Validate a `[theme]` table (role → color) into a [`ThemeSpec`]. An unknown
@@ -1104,7 +1280,7 @@ mod tests {
     fn parse_theme_table_resolves_a_preset_and_rejects_an_unknown_name() {
         let table = BTreeMap::from([("name".to_string(), "nord".to_string())]);
         let spec = parse_theme_table(&table).expect("a known preset");
-        assert_eq!(spec.preset.as_deref(), Some("nord"));
+        assert_eq!(spec.source, Source::Named("nord".into()));
 
         let bad = BTreeMap::from([("name".to_string(), "chartreuse".to_string())]);
         let err = parse_theme_table(&bad).unwrap_err();
@@ -1203,7 +1379,7 @@ mod tests {
         let base =
             parse_theme(&BTreeMap::from([("warn".to_string(), "light-cyan".to_string())])).unwrap();
         let switched = base.with_preset("nord").expect("a known preset");
-        assert_eq!(switched.preset.as_deref(), Some("nord"));
+        assert_eq!(switched.source, Source::Named("nord".into()));
         let theme = switched.into_theme(ColorMode::Rgb);
         assert_eq!(theme.warn.fg, Some(Color::LightCyan), "the override survived");
         assert_eq!(
@@ -1211,5 +1387,167 @@ mod tests {
             Some(Color::Rgb(0x88, 0xc0, 0xd0)),
             "the preset applied"
         );
+    }
+
+    // ---- Omarchy: the flat colors.toml, the palette mapping, the source ----
+
+    #[test]
+    fn parse_colors_toml_reads_a_flat_map() {
+        let text = "\
+# a comment
+mode = \"dark\"
+
+accent = \"#7fa66e\"
+background = '#161716'
+hyprland_active_border = \"rgba(6e6f69ee)\"
+unquoted = dark
+";
+        let map = parse_colors_toml(text);
+        assert_eq!(map.get("mode").map(String::as_str), Some("dark"));
+        assert_eq!(map.get("accent").map(String::as_str), Some("#7fa66e"));
+        // A single-quoted value — the `#` inside is not a comment.
+        assert_eq!(map.get("background").map(String::as_str), Some("#161716"));
+        assert_eq!(
+            map.get("hyprland_active_border").map(String::as_str),
+            Some("rgba(6e6f69ee)")
+        );
+        assert_eq!(map.get("unquoted").map(String::as_str), Some("dark"));
+        assert_eq!(map.len(), 5, "comments and blanks are skipped");
+    }
+
+    #[test]
+    fn omarchy_border_takes_the_rgb_and_drops_the_alpha() {
+        let c = BTreeMap::from([(
+            "hyprland_active_border".to_string(),
+            "rgba(6e6f69ee)".to_string(),
+        )]);
+        assert_eq!(omarchy_border(&c), Some(Color::Rgb(0x6e, 0x6f, 0x69)));
+        // Absent, or a non-hex rgba → no border (the caller falls back to muted).
+        assert_eq!(omarchy_border(&BTreeMap::new()), None);
+        let decimal = BTreeMap::from([(
+            "hyprland_active_border".to_string(),
+            "rgba(110,111,105,0.9)".to_string(),
+        )]);
+        assert_eq!(omarchy_border(&decimal), None);
+    }
+
+    /// A full Omarchy palette, as its `colors.toml` defines it (this machine's).
+    fn omarchy_fixture() -> BTreeMap<String, String> {
+        [
+            ("accent", "#7fa66e"),
+            ("foreground", "#cfcdc4"),
+            ("background", "#161716"),
+            ("muted", "#62635e"),
+            ("dark_foreground", "#7c7d77"),
+            ("red", "#c98378"),
+            ("green", "#7fa66e"),
+            ("yellow", "#d6bd8a"),
+            ("blue", "#869fae"),
+            ("magenta", "#a798b0"),
+            ("cyan", "#88aea7"),
+            ("hyprland_active_border", "rgba(6e6f69ee)"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn omarchy_palette_maps_every_field() {
+        let p = omarchy_palette(&omarchy_fixture()).expect("a full palette");
+        assert_eq!(p.fg, Color::Rgb(0xcf, 0xcd, 0xc4));
+        assert_eq!(p.bg, Color::Rgb(0x16, 0x17, 0x16));
+        assert_eq!(p.accent, Color::Rgb(0x7f, 0xa6, 0x6e));
+        assert_eq!(p.muted, Color::Rgb(0x62, 0x63, 0x5e));
+        assert_eq!(p.border, Color::Rgb(0x6e, 0x6f, 0x69), "the hyprland border RGB");
+        assert_eq!(p.red, Color::Rgb(0xc9, 0x83, 0x78));
+        assert_eq!(p.green, Color::Rgb(0x7f, 0xa6, 0x6e));
+        assert_eq!(p.yellow, Color::Rgb(0xd6, 0xbd, 0x8a));
+        assert_eq!(p.code, p.yellow, "the documented code/warn collapse");
+        assert_eq!(p.blue, Color::Rgb(0x86, 0x9f, 0xae));
+        assert_eq!(p.magenta, Color::Rgb(0xa7, 0x98, 0xb0));
+        assert_eq!(p.cyan, Color::Rgb(0x88, 0xae, 0xa7));
+    }
+
+    #[test]
+    fn omarchy_palette_falls_back_to_muted_without_a_border() {
+        let mut c = omarchy_fixture();
+        c.remove("hyprland_active_border");
+        let p = omarchy_palette(&c).expect("a palette");
+        assert_eq!(p.border, p.muted, "no rgba border → muted");
+    }
+
+    #[test]
+    fn an_incomplete_omarchy_palette_is_an_err() {
+        let mut c = omarchy_fixture();
+        c.remove("accent");
+        assert!(omarchy_palette(&c).is_err(), "a missing key is an error");
+        // A full palette with one unreadable color: errors on `parse_color`
+        // (not on a missing key — every key is present).
+        let mut bad = omarchy_fixture();
+        bad.insert("accent".to_string(), "chartreuse".to_string());
+        assert!(
+            omarchy_palette(&bad).is_err(),
+            "an unreadable color is an error"
+        );
+    }
+
+    #[test]
+    fn an_inline_source_seeds_the_palette_and_the_dim_role() {
+        // The `omarchy` shape: a resolved palette plus the one role a Palette can
+        // not carry (`dim`). Built directly — reading the live file is
+        // machine-dependent and is exercised by the live check, not here.
+        let spec = ThemeSpec {
+            source: Source::Inline {
+                palette: *preset("nord").unwrap(),
+                roles: BTreeMap::from([("dim".to_string(), "#123456".to_string())]),
+            },
+            roles: BTreeMap::new(),
+        };
+        let theme = spec.into_theme(ColorMode::Rgb);
+        assert_eq!(
+            theme.accent.fg,
+            Some(Color::Rgb(0x88, 0xc0, 0xd0)),
+            "nord seeds accent"
+        );
+        assert_eq!(
+            theme.dim.fg,
+            Some(Color::Rgb(0x12, 0x34, 0x56)),
+            "the inline dim wins over the grey ramp"
+        );
+    }
+
+    #[test]
+    fn a_user_role_overrides_an_inline_source() {
+        let mut base = ThemeSpec {
+            source: Source::Inline {
+                palette: *preset("nord").unwrap(),
+                roles: BTreeMap::new(),
+            },
+            roles: BTreeMap::new(),
+        };
+        base.roles.insert("accent".to_string(), "red".to_string());
+        let theme = base.into_theme(ColorMode::Rgb);
+        assert_eq!(theme.accent.fg, Some(Color::Red), "the user's role wins");
+        assert_eq!(
+            theme.error.fg,
+            Some(Color::Rgb(0xbf, 0x61, 0x6a)),
+            "the inline palette seeds the rest"
+        );
+    }
+
+    #[test]
+    fn an_inline_hex_degrades_under_a_non_rgb_mode() {
+        // The inline `dim` is a hex string, so below truecolor it is skipped and
+        // the palette's grey ramp stands (from_palette / apply_dim_ramp).
+        let spec = ThemeSpec {
+            source: Source::Inline {
+                palette: *preset("nord").unwrap(),
+                roles: BTreeMap::from([("dim".to_string(), "#123456".to_string())]),
+            },
+            roles: BTreeMap::new(),
+        };
+        let named = spec.into_theme(ColorMode::Named);
+        assert_eq!(named.dim.fg, Some(Color::Gray), "dim degrades to the D29 grey");
     }
 }
