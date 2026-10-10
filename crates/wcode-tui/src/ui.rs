@@ -1008,7 +1008,14 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
         "▸"
     };
     let stats = tool_stats(tool);
-    let prefix = format!("{}{TREE_BRANCH}", tree_indent());
+    // An errored tool's head carries the `✗` mark (red) in place of the tree
+    // branch, so a failure reads at a glance; a success stays quiet.
+    let (mark, mark_style, name_style) = if tool.is_error {
+        ("✗ ", error_style(), error_style())
+    } else {
+        (TREE_BRANCH, dim(), tool_name())
+    };
+    let prefix = format!("{}{mark}", tree_indent());
     let label = match tool.target.as_ref().or(tool.path.as_ref()) {
         Some(target) if tool.params.is_empty() => format!("{}  {target}", tool.name),
         _ => tool.name.clone(),
@@ -1024,8 +1031,8 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
     };
     let pad = width.saturating_sub(left_len + tail_len).max(1);
     let mut spans = vec![
-        Span::styled(prefix, dim()),
-        Span::styled(label, tool_name()),
+        Span::styled(prefix, mark_style),
+        Span::styled(label, name_style),
         Span::styled(" ".repeat(pad), dim()),
     ];
     if !stats.is_empty() {
@@ -3026,6 +3033,17 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(
             !text.contains("more lines"),
             "an errored tool is expanded, so no hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn an_errored_tool_head_shows_the_error_mark() {
+        let mut app = App::new();
+        push_tool(&mut app, "bash", "boom: command not found", true, None);
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(
+            text.contains("✗ bash"),
+            "an errored tool head carries the `✗` mark:\n{text}"
         );
     }
 

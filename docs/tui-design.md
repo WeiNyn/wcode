@@ -24,9 +24,8 @@ TUI reads as the same product, given a full screen.
    reflow of the base.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
-   glance; wrapped continuation lines align under it. A **tool panel** adds its
-   own gutter: the 3-col block indent (`PANEL_INDENT`), so the frame's content
-   sits at **col 6** (`╭─ name`) and the body two columns past the frame's `│`.
+   glance; wrapped continuation lines align under it. A **tool** hangs a tree in
+   the gutter (`├`/`│`/`└`), its body on the content column (D010).
 3. **A small palette, dim is the workhorse.** The 17 roles live in one place —
    `theme.rs` (`accent, dim, muted, border, user, body, error, success, warn,
    code, heading, heading_sub, link, tool_name, thinking, diff_add, diff_del`). Accent (cyan)
@@ -42,11 +41,12 @@ TUI reads as the same product, given a full screen.
    (`resolve_color_mode_from`, `theme.rs`); a hex is honoured only under `Rgb`.
    **`NO_COLOR`** still yields `Theme::plain` — no `fg`, and there `dim` falls
    back to the `DIM` modifier, the only lever without colour (best-effort; D29).
-4. **Blocks are separated by a blank line between roles** (tools cluster tight
-   under their `»`). Noise is dim; only the model's prose and *your* prompt are
-   full-strength. A **tool** is a framed **panel** (params rows + body) and
-   **thinking** is a collapsed `··· thinking · N chars` affordance row — richer
-   than a blank-line-only block (§4), not a reflow of the base.
+4. **Blocks are separated by a blank line between roles** (a tool's tree clusters
+   tight under its `├`). Noise is dim; only the model's prose and *your* prompt
+   are full-strength. A **tool** is a `├` tree row (name + stats, its params/body
+   under `│`, `└`-terminated) and **thinking** is a collapsed `··· thinking`
+   affordance row — richer than a blank-line-only block (§4), not a reflow of the
+   base.
 
 ## 2. Vocabulary
 
@@ -58,10 +58,10 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | assistant prose | — | default fg |
 | footnote reference | `¹²³` (`[n]` for n ≥ 10) | link |
 | thinking (in flight) | `···` | dim, italic |
-| thinking (collapsed row) | `··· thinking · N chars` | dim |
-| tool start | `» name  args` | dim |
-| tool done | `✓ name · note` | dim |
-| tool error | `✗ name · note` | red |
+| thinking (collapsed row) | `··· thinking` | dim |
+| tool head | `├ name  target  stats` | dim; name `tool_name` |
+| tool body / end | `│   …` / `└` | dim |
+| tool error head | `✗ name  stats` | red |
 | compaction / retry | `⋯` | dim |
 | live cursor | `▌` | accent, steady |
 | selection bar (browse) | `▌` | accent |
@@ -233,7 +233,7 @@ blank pane.
 - **Diff / changes** (D36) — a `/changes` selection re-shows the file's diff;
   the run's changeset renders as a directory **tree** (`├─`/`└─`, stats
   right-aligned) in the sidebar and the `/changes` modal.
-- **Affordances** (D32) — every **expandable** block (a tool panel, or an
+- **Affordances** (D32) — every **expandable** block (a tool's head row, or an
   assistant block whose first content is thinking) carries a `▸`/`▾` disclosure
   and a `▣` copy cell on its first row, right-aligned at the panel's columns;
   click toggles/copies, and browse `Enter`/`Space` and `y` are the keyboard
@@ -241,9 +241,9 @@ blank pane.
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
 continuation lines align under the text, as in draft B's `···` block). The
-gutter is also the natural home for a `▌` selection bar. A **tool panel**'s
-content sits at **col 6** (the 3-col `PANEL_INDENT` + the `╭─ ` frame); a
-thinking row keeps the plain `···` marker column.
+gutter is also the natural home for a `▌` selection bar. A **tool**'s tree
+(`├`/`│`/`└`) rides the gutter on the content column; a thinking row keeps the
+plain `···` marker column (D010).
 
 **Browse mode** — `Ctrl-G` moves a `▌` selection over the committed transcript.
 The bar occupies the gutter's first column (the 1-col margin), *replacing* the
@@ -358,7 +358,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 ## 6. Open questions
 
-- **Thinking** — **resolved (D33)**: in flight it streams **expanded** inline; on commit it collapses to a one-line `··· thinking · N chars` row, expandable. Tool *output* is a panel (D31), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
+- **Thinking** — **resolved (D33/D010)**: in flight it streams **expanded** inline; on commit it collapses to a quiet one-line `··· thinking` row (no char count), expandable. Tool output is a tree row (D009/T1), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
 - **Timestamps** on turns: lean no.
 - **Header/title bar**: **amended by D010** — the header IS a pinned top band now
   (the running head over a full-width rule); the composer keeps its **foot line**,
