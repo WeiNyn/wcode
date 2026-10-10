@@ -926,7 +926,7 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
     let expanded = tool.expanded || tool.is_error;
     let mut body: Vec<Line<'static>> = Vec::new();
     if !tool.done || expanded {
-        body.extend(panel_param_lines(&tool.params, width));
+        body.extend(panel_param_lines(tool, width));
     }
     body.extend(tool_panel_body(tool, width, expanded));
     let mut out = vec![tool_head_row(tool, width)];
@@ -1139,47 +1139,72 @@ fn thinking_header_line(
     ])
 }
 
+/// The fence info for a param VALUE — the file extension for a file tool, `sh`
+/// for a `bash` command, else `None` (the value renders in `body`).
+fn param_syntax(tool: &Tool, key: &str) -> Option<String> {
+    match tool.name.as_str() {
+        "bash" if key == "command" => Some("sh".to_string()),
+        "read" | "write" | "replace" | "edit" | "edits" => {
+            code_extension(tool.path.as_deref().or(tool.target.as_deref()))
+        }
+        _ => None,
+    }
+}
+
 /// One `key  value` row: the key in `dim()` padded to `key_col`, the value in
-/// body strength, continuations aligned under the value column. A value with no
-/// spaces hard-breaks (`wrap_line`). Returns ≥1 line. `width` is the band width;
-/// the tree body prefix and the value column are subtracted from it.
-fn param_row(key: &str, value: &str, key_col: usize, width: usize) -> Vec<Line<'static>> {
+/// body strength (or syntax-highlighted when `info` resolves), continuations
+/// aligned under the value column. Returns ≥1 line.
+fn param_row(
+    key: &str,
+    value: &str,
+    key_col: usize,
+    width: usize,
+    info: Option<&str>,
+) -> Vec<Line<'static>> {
     let prefix = tree_body_prefix();
     let indent = prefix.chars().count();
     let value_col = indent + key_col + 2;
     let avail = width.saturating_sub(value_col).max(1);
-    let chars: Vec<char> = value.chars().collect();
-    let body = theme::theme().body;
-    let mut out = Vec::new();
-    for (i, seg) in wrap_line(&chars, avail).into_iter().enumerate() {
-        let lead = if i == 0 {
-            let pad = value_col.saturating_sub(indent + key.chars().count());
-            format!("{prefix}{key}{}", " ".repeat(pad))
-        } else {
-            " ".repeat(value_col)
-        };
-        out.push(Line::from(vec![
-            Span::styled(lead, dim()),
-            Span::styled(seg, body),
-        ]));
-    }
-    out
+    let lead0 = {
+        let pad = value_col.saturating_sub(indent + key.chars().count());
+        format!("{prefix}{key}{}", " ".repeat(pad))
+    };
+    let cont = " ".repeat(value_col);
+    let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
+    let rows = match hl.as_mut() {
+        Some(h) if h.is_active() => wrap_styled(&h.spans(value), avail),
+        _ => wrap_styled(&[Span::styled(value.to_string(), theme::theme().body)], avail),
+    };
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let lead = if i == 0 { lead0.clone() } else { cont.clone() };
+            let mut spans = vec![Span::styled(lead, dim())];
+            spans.extend(row.iter().cloned());
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// The params block: one [`param_row`] per `(key, value)`, keys aligned to the
-/// longest. Empty `params` → no rows.
-fn panel_param_lines(params: &[(String, String)], width: usize) -> Vec<Line<'static>> {
-    if params.is_empty() {
+/// longest; the value is syntax-highlighted when its key names code. Empty
+/// `params` → no rows.
+fn panel_param_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+    if tool.params.is_empty() {
         return Vec::new();
     }
-    let key_col = params
+    let key_col = tool
+        .params
         .iter()
         .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0);
-    params
+    tool.params
         .iter()
-        .flat_map(|(key, value)| param_row(key, value, key_col, width))
+        .flat_map(|(key, value)| {
+            let info = param_syntax(tool, key);
+            param_row(key, value, key_col, width, info.as_deref())
+        })
         .collect()
 }
 
@@ -1187,13 +1212,15 @@ fn panel_param_lines(params: &[(String, String)], width: usize) -> Vec<Line<'sta
 /// the `note · ms` (or `+a −r · ms`) stats ride the head row ([`tool_stats`]). No
 /// `── notes ──` rule, no `✓` summary row.
 fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'static>> {
+    let info_owned = tool_body_syntax(tool);
+    let info = info_owned.as_deref();
     let mut out = Vec::new();
 
     // 1. LIVE — the growing tail; no stats yet.
     if !tool.done {
         if expanded {
             let all: Vec<&str> = tool.output.lines().collect();
-            out.extend(tool_body(&all, width, TOOL_EXPANDED_LINES, dim(), true));
+            out.extend(tool_body(&all, width, TOOL_EXPANDED_LINES, info, true));
             if let Some(hint) = more_hint(all.len().saturating_sub(TOOL_EXPANDED_LINES), false) {
                 out.push(hint);
             }
@@ -1230,10 +1257,10 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
     let (_, wide) = summary_line(&tool.output);
     if expanded {
         let all: Vec<&str> = tool.output.lines().collect();
-        out.extend(tool_body(&all, width, all.len(), dim(), false));
+        out.extend(tool_body(&all, width, all.len(), info, false));
     } else {
         let body = body_after_summary(&tool.output);
-        out.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, dim(), false));
+        out.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, info, false));
         let more = body.len().saturating_sub(TOOL_PREVIEW_LINES);
         if let Some(hint) = more_hint(more, wide) {
             out.push(hint);
@@ -1291,13 +1318,55 @@ fn diff_block_lines(path: &str, diff: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// The fence info string for a tool's body — the file extension for a file tool
+/// (`read`/`write`/`replace`/`edit`), so its content colorizes; `None` otherwise.
+fn tool_body_syntax(tool: &Tool) -> Option<String> {
+    match tool.name.as_str() {
+        "read" | "write" | "replace" | "edit" | "edits" => {
+            code_extension(tool.path.as_deref().or(tool.target.as_deref()))
+        }
+        _ => None,
+    }
+}
+
+/// The extension of a path's file name (`a/b/foo.rs` → `rs`), if any.
+fn code_extension(path: Option<&str>) -> Option<String> {
+    let ext = path?.rsplit('/').next()?.rsplit_once('.')?.1;
+    (!ext.is_empty()).then(|| ext.to_string())
+}
+
+/// Wrap a styled line into rows of at most `width` columns, coalescing runs of one
+/// style and hard-breaking an over-long token (char-exact; spaces kept).
+fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let chars: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+    if chars.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut rows = Vec::new();
+    for chunk in chars.chunks(width) {
+        let mut row: Vec<Span<'static>> = Vec::new();
+        for (c, style) in chunk {
+            match row.last_mut() {
+                Some(last) if last.style == *style => last.content.to_mut().push(*c),
+                _ => row.push(Span::styled(c.to_string(), *style)),
+            }
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// The tool body: `lines` sliced to `limit` (the head, or the tail when `tail`)
 /// and wrapped char-exact under the gutter. The caller adds any hint.
 fn tool_body(
     lines: &[&str],
     width: usize,
     limit: usize,
-    style: Style,
+    info: Option<&str>,
     tail: bool,
 ) -> Vec<Line<'static>> {
     let total = lines.len();
@@ -1313,22 +1382,32 @@ fn tool_body(
     } else {
         (0, total)
     };
-    body_rows(&lines[start..end], width, style)
+    body_rows(&lines[start..end], width, info)
 }
 
 /// Wrap a tool body to `width`, one physical row per wrapped segment, char-exact
 /// (`wrap_input`: spaces kept, an over-long token hard-broken) so a long line is
 /// reachable rather than clipped at the pane edge.
-fn body_rows(lines: &[&str], width: usize, style: Style) -> Vec<Line<'static>> {
+fn body_rows(lines: &[&str], width: usize, info: Option<&str>) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return Vec::new();
     }
     let prefix = tree_body_prefix();
     let avail = width.saturating_sub(prefix.chars().count()).max(1);
-    wrap_input(&lines.join("\n"), avail)
-        .into_iter()
-        .map(|row| prefixed(&prefix, &row, style))
-        .collect()
+    let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
+    let mut out = Vec::new();
+    for line in lines {
+        let spans = match hl.as_mut() {
+            Some(h) if h.is_active() => h.spans(line),
+            _ => vec![Span::styled((*line).to_string(), dim())],
+        };
+        for row in wrap_styled(&spans, avail) {
+            let mut spans = vec![Span::styled(prefix.clone(), dim())];
+            spans.extend(row);
+            out.push(Line::from(spans));
+        }
+    }
+    out
 }
 
 /// The dim hint under an elided tool body: `… +N more line(s)` when the preview
@@ -3066,6 +3145,51 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             text.contains("✗ bash"),
             "an errored tool head carries the `✗` mark:\n{text}"
         );
+    }
+
+    #[test]
+    fn param_syntax_picks_shell_or_the_file_extension() {
+        let base = || Tool {
+            name: "bash".into(),
+            target: None,
+            output: String::new(),
+            done: true,
+            is_error: false,
+            expanded: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+            params: Vec::new(),
+        };
+        let mut bash = base();
+        bash.name = "bash".into();
+        assert_eq!(param_syntax(&bash, "command").as_deref(), Some("sh"));
+        assert_eq!(param_syntax(&bash, "timeout"), None);
+        let mut read = base();
+        read.name = "read".into();
+        read.path = Some("src/ui.rs".into());
+        assert_eq!(param_syntax(&read, "path").as_deref(), Some("rs"));
+    }
+
+    #[test]
+    fn code_extension_reads_the_suffix() {
+        assert_eq!(code_extension(Some("src/ui.rs")).as_deref(), Some("rs"));
+        assert_eq!(code_extension(Some("a/b/foo.py")).as_deref(), Some("py"));
+        assert_eq!(code_extension(Some("Makefile")), None);
+        assert_eq!(code_extension(Some("dir.d/file")), None);
+        assert_eq!(code_extension(None), None);
+    }
+
+    #[test]
+    fn wrap_styled_breaks_a_long_span_into_rows() {
+        let spans = vec![Span::styled("abcdefghij".to_string(), Style::default())];
+        let rows = wrap_styled(&spans, 4);
+        assert_eq!(rows.len(), 3, "10 chars at width 4 → three rows");
+        let text: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(text, ["abcd", "efgh", "ij"]);
     }
 
     #[test]

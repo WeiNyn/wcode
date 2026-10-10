@@ -577,6 +577,46 @@ impl Fenced {
     }
 }
 
+/// A per-line code highlighter for a tool body: `None` when the colour mode is
+/// flat or the syntax is unknown. Unlike [`Fenced`], the caller supplies the
+/// prefix and wraps the returned spans itself (a tool line wraps to the band).
+pub(crate) struct CodeHighlight {
+    hl: Option<HighlightLines<'static>>,
+    mode: ColorMode,
+}
+
+impl CodeHighlight {
+    /// Infallible: a highlighter under `Rgb`/`Indexed` with a resolved syntax.
+    pub(crate) fn new(info: &str, mode: ColorMode) -> Self {
+        let colorized = matches!(mode, ColorMode::Rgb | ColorMode::Indexed);
+        let hl = colorized
+            .then(|| fence_syntax(info))
+            .flatten()
+            .map(|syn| HighlightLines::new(syn, syntax_theme()));
+        Self { hl, mode }
+    }
+
+    /// Whether a syntax resolved (the caller can skip the highlight path).
+    pub(crate) fn is_active(&self) -> bool {
+        self.hl.is_some()
+    }
+
+    /// The styled token spans for one line; an absent highlighter returns one
+    /// `code_style()` span.
+    pub(crate) fn spans(&mut self, text: &str) -> Vec<Span<'static>> {
+        match self.hl.as_mut() {
+            Some(hl) => match hl.highlight_line(text, syntaxes()) {
+                Ok(ranges) => ranges
+                    .into_iter()
+                    .map(|(s, p)| Span::styled(p.to_string(), highlight_style(s, self.mode)))
+                    .collect(),
+                Err(_) => vec![Span::styled(text.to_string(), code_style())],
+            },
+            None => vec![Span::styled(text.to_string(), code_style())],
+        }
+    }
+}
+
 /// B3: TOTAL. `find_syntax_by_token` then `find_syntax_by_extension`; `None` for a
 /// bare or unknown info string (the caller renders uniformly).
 /// bare or unknown info string (the caller renders uniformly).
@@ -1260,6 +1300,22 @@ mod tests {
         let grey = rgb_to_ansi256(128, 128, 128);
         assert!(grey >= 232, "a mid grey is on the ramp, got {grey}");
     }
+    #[test]
+    fn a_tool_highlight_resolves_a_known_extension() {
+        assert!(
+            CodeHighlight::new("rs", ColorMode::Rgb).is_active(),
+            "a `.rs` info string resolves a Rust syntax"
+        );
+        assert!(
+            !CodeHighlight::new("nope-not-a-syntax", ColorMode::Rgb).is_active(),
+            "an unknown info string yields no highlighter"
+        );
+        assert!(
+            !CodeHighlight::new("rs", ColorMode::Named).is_active(),
+            "a flat colour mode disables the highlighter"
+        );
+    }
+
     fn text_of(lines: &[Line]) -> Vec<String> {
         lines
             .iter()
