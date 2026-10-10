@@ -148,10 +148,9 @@ pub struct Turn {
     pub open: bool,
 }
 
-/// The scroll-away book header (D009 §1): `WCODE · session <id> ──── project · ⎇
-/// branch` (+ `model · effort` far right) over a `─` rule on the measure. The
-/// transcript's FIRST committed block; **chrome** — never a browse selection
-/// target, never copied.
+/// The **pinned** book header (D010, superseding D009 §1): `WCODE · session <id>
+/// ──── project · ⎇ branch` (+ `model · effort` far right) over a `─` rule, a
+/// fixed top band — **chrome** — never a browse selection target, never copied.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionHead {
     /// The **RAW** session id (matching `Status.session`); `session_head_row`
@@ -190,8 +189,6 @@ impl SessionHead {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     User(String),
-    /// The scroll-away book header (D009) — the transcript's first block.
-    SessionHead(SessionHead),
     /// One exchange — the whole run's prose + a ledger of its tools. Rendered as
     /// the `WCODE` speaker head, the prose, then the ledger (its foot).
     Turn(Turn),
@@ -346,8 +343,6 @@ pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> Stri
 /// - `Diff`: the diff body.
 fn copy_text(block: &Block) -> Option<String> {
     let text = match block {
-        // The session head is chrome — nothing to copy.
-        Block::SessionHead(_) => return None,
         Block::User(text)
         | Block::Notice(text)
         | Block::Error(text)
@@ -1385,10 +1380,10 @@ impl Surface {
 
     /// Whether block `i` is a browse **selection target**. Every committed block
     /// is selectable — the `Turn`'s speaker head shares its range, and the
-    /// selection bar just paints its column 0 — except the session head, which is
-    /// chrome (a click on it selects nothing).
+    /// selection bar just paints its column 0. (The pinned session head is chrome
+    /// and lives in a band, not the transcript, so it is not a target.)
     fn selectable(&self, i: usize) -> bool {
-        !matches!(self.transcript.get(i), Some(Block::SessionHead(_)))
+        i < self.transcript.len()
     }
 
     /// The first / last selectable block index, if any.
@@ -1414,8 +1409,7 @@ impl Surface {
     /// committed block beyond the session head, no live message). The renderer
     /// calls this once per frame; it is a no-op after the first block lands.
     fn seed_hint_if_empty(&mut self) {
-        let empty = self.transcript.is_empty()
-            || matches!(self.transcript.as_slice(), [Block::SessionHead(_)]);
+        let empty = self.transcript.is_empty();
         if empty && self.live.is_none() {
             self.transcript.push(Block::Notice(EMPTY_HINT.into()));
             self.block_revs.push(0);
@@ -1423,9 +1417,8 @@ impl Surface {
         }
     }
 
-    /// Drop the D5 empty-state hint, if present. The session head (block 0) sits
-    /// above it, so the hint lands at index 1 once the head exists; scan the
-    /// leading two slots to find it either way.
+    /// Drop the D5 empty-state hint, if present. It is the first block of an
+    /// otherwise-empty transcript; scan the leading slots to find it either way.
     fn clear_hint(&mut self) {
         let idx = self.transcript.iter().take(2).position(
             |b| matches!(b, Block::Notice(t) if t.as_str() == EMPTY_HINT),
@@ -1445,7 +1438,7 @@ impl Surface {
         self.block_revs.insert(at, 0);
         self.cache.insert(at, CacheEntry::never());
         // An insert shifts every later index: keep the open-turn pointer in step
-        // (the `SessionHead` seats at 0 mid-run), or `seal_turn` misses the turn.
+        // (a mid-run divider insert), or `seal_turn` misses the turn.
         if let Some(i) = self.open_turn
             && at <= i
         {
@@ -4175,30 +4168,6 @@ impl App {
     /// summing). Empty when nothing changed this run.
     pub fn changes(&self) -> &[Change] {
         &self.focused().changes
-    }
-
-    /// Ensure the focused surface's leading block is a `SessionHead` carrying the
-    /// current `SessionHead::of(self)`, refreshing its text (and bumping its rev)
-    /// when the inputs changed; creates the head as block 0 when absent. Called by
-    /// `ui::draw` BEFORE `seed_empty_hint` (so the head is block 0 and the D5 hint
-    /// lands at index 1). # Contracts: idempotent; a cheap `String` compare on a
-    /// steady frame (a no-op, not a re-render). Uses `insert_block` (NOT
-    /// `push_block`, which would `clear_hint` before the hint is seeded).
-    pub(crate) fn sync_session_head(&mut self) {
-        let head = SessionHead::of(self);
-        let s = self.focused_mut();
-        if matches!(s.transcript.first(), Some(Block::SessionHead(cur)) if *cur == head) {
-            return; // steady — a no-op
-        }
-        match s.transcript.first() {
-            Some(Block::SessionHead(_)) => {
-                if let Some(Block::SessionHead(cur)) = s.transcript.first_mut() {
-                    *cur = head;
-                }
-                s.bump_rev(0);
-            }
-            _ => s.insert_block(0, Block::SessionHead(head)),
-        }
     }
 
     /// Seed the focused surface's D5 empty-state hint if it is empty (called by

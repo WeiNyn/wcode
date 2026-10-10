@@ -65,6 +65,9 @@ const MEASURE_MAX: usize = 68;
 /// on each side. Below it the content uses the full band width (so an 80-col
 /// terminal keeps its `❯` at the gutter).
 const MEASURE_MIN_BAND: usize = 84;
+/// The pinned book header band's height in rows — the head row over its `─` rule
+/// (D010). A fixed top band; it never scrolls with the transcript.
+const HEADER_H: u16 = 2;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 ///
@@ -87,10 +90,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // so every geometry below — and every popup/overlay anchor — is
     // byte-identical.
     // D5: a fresh, empty transcript carries a dim `type a message …` hint.
-    // Seat/refresh the session-head block FIRST (D009): it is block 0, so the D5
-    // hint lands below it (index 1).
-    app.sync_session_head();
     app.seed_empty_hint();
+    // The PINNED book header (D010): a fixed top band, chrome above the bands.
+    let head = SessionHead::of(app);
     let (sidebar, area) = if app.sidebar() && full.width >= SIDEBAR_MIN_WIDTH {
         let [sb, bands] = Layout::horizontal([
             Constraint::Length(SIDEBAR_WIDTH),
@@ -130,25 +132,28 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         working_count as u16
     };
 
-    // At least one transcript row is reserved; the composer band (the rule, the
+    // The pinned header (head row + `─` rule) is a fixed top band [D010]. Below
+    // it: at least one transcript row is reserved; the composer band (the rule, the
     // input, and the foot line) then has priority over the team region, so a short
-    // terminal degrades gracefully instead of overflowing. There is no session
-    // band and no composer head row — the id folds into the transcript's
-    // session-head block (D009).
-    let spare = area.height.saturating_sub(1);
+    // terminal degrades gracefully instead of overflowing.
+    let header_h = if area.height > HEADER_H + 1 { HEADER_H } else { 0 };
+    let spare = area.height.saturating_sub(header_h + 1);
     let box_h = (input_height + 2).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
     let areas = Layout::vertical([
-        Constraint::Min(1),         // transcript (flexes)
-        Constraint::Length(team_h), // working-team region (a rider, 0..=3)
-        Constraint::Length(box_h),  // composer band (rule · input · foot)
+        Constraint::Length(header_h), // pinned book header (head row + rule)
+        Constraint::Min(1),           // transcript (flexes)
+        Constraint::Length(team_h),   // working-team region (a rider, 0..=3)
+        Constraint::Length(box_h),    // composer band (rule · input · foot)
     ])
     .split(area);
-    let body = areas[0];
-    let team = areas[1];
-    let editor = areas[2];
+    let header = areas[0];
+    let body = areas[1];
+    let team = areas[2];
+    let editor = areas[3];
 
+    draw_header(frame, header, &head);
     draw_transcript(frame, body, app);
     if team_h > 0 {
         let working = app.working_team_rows();
@@ -416,6 +421,36 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
 /// `Surface::cache` keys on width, so a reflow (e.g. toggling the sidebar,
 /// which changes the bands width by `SIDEBAR_WIDTH`) invalidates every cached
 /// block.
+/// The pinned book header (D010): the head row over a full-width `─` rule, drawn
+/// as a fixed top band (byte-identical to the old transcript block's two rows,
+/// but it never scrolls). Chrome — no affordances, never a browse/click target.
+fn draw_header(frame: &mut Frame, area: Rect, head: &SessionHead) {
+    if area.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    frame.render_widget(
+        Paragraph::new(session_head_row(head, width)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+    if area.height >= 2 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("─".repeat(width), dim()))),
+            Rect {
+                x: area.x,
+                y: area.y + 1,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+}
+
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // The measure: a centered content column when the band leaves a real margin,
     // else the full band width. The composer band is NOT centered.
@@ -643,8 +678,6 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         // The transcript's user block: a `YOU` speaker head + the wrapped prompt
         // (the `❯` glyph stays the composer's, not the transcript's).
         Block::User(text) => speaker_lines(Speaker::You, text, width),
-        // The book header (D009): the running head + its `─` rule, on the measure.
-        Block::SessionHead(head) => session_head_lines(head, width),
         // One exchange: the `WCODE` head, the run's prose (with `¹` marks), and
         // the ledger (its foot).
         Block::Turn(turn) => turn_lines(turn, width),
@@ -721,21 +754,9 @@ fn speaker_lines(speaker: Speaker, text: &str, width: usize) -> Vec<Line<'static
     out
 }
 
-/// The session-head block's lines (D009 §1; tui-design §4): row 0 is the running
-/// head, row 1 a full-width `─` rule **on the measure**. Blocks render at
-/// `width == measure`, so "on the measure" is automatic — at ≥84 cols the head
-/// sits in the centered 68-col column, not full-bleed. # Contracts: EXACTLY 2
-/// lines (row 0 + the rule). No `¹`, no affordance — the head is chrome.
-fn session_head_lines(head: &SessionHead, width: usize) -> Vec<Line<'static>> {
-    vec![
-        session_head_row(head, width),
-        Line::from(Span::styled("─".repeat(width), dim())),
-    ]
-}
-
-/// Row 0 of the session head: `padded_row(left, right, "─", dim(), width)`, where
-/// `left` = `[ WCODE reversed ] · session <short_id>` and `right` =
-/// `"project · ⎇ branch   model · effort"` — the **3-space gap sits INSIDE the
+/// Row 0 of the pinned book header (D010): `padded_row(left, right, "─", dim(),
+/// width)`, where `left` = `[ WCODE reversed ] · session <short_id>` and `right`
+/// = `"project · ⎇ branch   model · effort"` — the **3-space gap sits INSIDE the
 /// right run** (D009 §3 option A), and `padded_row` supplies the ONE `─` fill
 /// between `left` and `right`. The ladder (fed to `pick_titles`): full → drop
 /// `session` → drop the branch → drop `effort` → truncate with `…`. The raw
@@ -2324,7 +2345,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         for c in "two".chars() {
             app.handle(AppEvent::Key(Key::Char(c)));
         }
-        let text = buffer_text(&render(&mut app, 40, 6));
+        let text = buffer_text(&render(&mut app, 40, 8));
         assert!(text.contains("one"), "first line missing: {text}");
         assert!(text.contains("two"), "second line missing: {text}");
     }
@@ -3135,7 +3156,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         // A narrower width re-wraps: the ranges are re-measured, not stale.
         let narrow = buffer_text(&render(&mut app, 20, 20));
         assert_eq!(barred(&narrow).len(), 4, "re-wrapped at 20 cols:\n{narrow}");
-        assert_eq!(app.selected(), Some(2), "the same block stays selected");
+        assert_eq!(app.selected(), Some(1), "the same block stays selected");
     }
 
     #[test]
@@ -3157,7 +3178,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         }
 
         let text = buffer_text(&render(&mut app, 40, 10));
-        assert_eq!(app.selected(), Some(2), "the selection names the same block");
+        assert_eq!(app.selected(), Some(1), "the selection names the same block");
         assert!(
             text.contains("KEEP"),
             "the selected block must stay in view:\n{text}"
@@ -3624,14 +3645,15 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
 
     #[test]
     fn the_session_head_is_not_a_browse_selection_target() {
-        // The session head is chrome: Ctrl-G selects the turn, not the head.
+        // The pinned header is chrome in a band, not a block: Ctrl-G selects the
+        // turn (block 0), and there is nothing above it to skip to.
         let mut app = App::new();
         push_assistant(&mut app, "hello");
-        let _ = render(&mut app, 80, 12); // seats the `SessionHead` at block 0
+        let _ = render(&mut app, 80, 12);
         app.handle(AppEvent::Key(Key::Ctrl('g')));
-        assert_eq!(app.selected(), Some(1), "the turn, not the session head");
-        app.handle(AppEvent::Key(Key::Char('k'))); // the head above is skipped
-        assert_eq!(app.selected(), Some(1), "the head is skipped");
+        assert_eq!(app.selected(), Some(0), "the turn");
+        app.handle(AppEvent::Key(Key::Char('k'))); // nothing above the turn
+        assert_eq!(app.selected(), Some(0), "the header is not a target");
     }
 
     #[test]
@@ -4413,10 +4435,10 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             let rows: Vec<_> = hit.affordances.iter().map(|a| a.toggle.y).collect();
             (hits, rows)
         };
-        // The `SessionHead` seats at block 0, so the turn is block 1.
+        // The pinned header is a band, not a block, so the turn is block 0.
         assert_eq!(
             hits,
-            [(1, Some(0)), (1, Some(1))],
+            [(0, Some(0)), (0, Some(1))],
             "same block, one hit per row"
         );
         assert_ne!(rows[0], rows[1], "the two hits sit on distinct rows");
@@ -4431,8 +4453,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             }));
         }
         {
-            // The `SessionHead` seats at block 0, so the turn is block 1.
-            let Block::Turn(t) = &app.transcript()[1] else {
+            // The pinned header is a band, not a block, so the turn is block 0.
+            let Block::Turn(t) = &app.transcript()[0] else {
                 panic!("a turn, got {:?}", app.transcript());
             };
             assert!(t.tools[1].expanded, "the second row expands");
@@ -4536,19 +4558,26 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 120, 40));
         let hit = app.hit.transcript.as_ref().expect("a transcript hit");
         assert_eq!((hit.rect.x, hit.rect.width), (26, 68), "a centered measure");
-        // The content is indented by the pad: the `❯` gutter moves from col 3
-        // to col 29; the margin to its left is blank.
-        let first = text.lines().next().unwrap_or_default();
-        // The transcript's first block is the session head, centered on the measure.
+        // The transcript content is indented by the pad; the margin to its left is
+        // blank. (The pinned header above is full-bleed, so read a transcript row.)
+        let body = text
+            .lines()
+            .nth(hit.rect.y as usize)
+            .unwrap_or_default();
         assert_eq!(
-            first.chars().take(26).collect::<String>().trim(),
+            body.chars().take(26).collect::<String>().trim(),
             "",
             "the margin is blank:\n{text}"
         );
+        assert!(
+            body.contains("type a message"),
+            "the transcript body rides the measure:\n{text}"
+        );
+        // The pinned header itself is full-bleed: `WCODE` starts at column 0.
         assert_eq!(
-            first.chars().nth(26),
+            text.lines().next().unwrap_or_default().chars().next(),
             Some('W'),
-            "the head starts at the measure:\n{text}"
+            "the pinned header is full-bleed:\n{text}"
         );
 
         // 80 cols: below the threshold — the content rides the gutter.
