@@ -43,8 +43,8 @@ pub enum LoadError {
 
 Rationale and edge cases are in the [design note](https://example.com/config).";
 
-/// The assistant's reasoning — committed collapsed to a `··· thinking · N chars`
-/// row (D33), so the dump shows the one-liner.
+/// The assistant's reasoning — committed collapsed to a `··· thinking` row
+/// (D33), so the dump shows the one-liner.
 const THINKING: &str = "\
 I should confirm how anchors hash indentation, then read edit.rs before \
 answering; the rule is that the hash covers the raw line, so reindenting moves it.";
