@@ -897,12 +897,15 @@ fn tree_end_row() -> Line<'static> {
 /// The name prints ONCE; there is no `N` ordinal and no separate `✓ name · note`
 /// row. `n` is the tool's 1-based call order (kept for the render walk); row 0 is
 /// the D32 toggle row, and `Block::Tool` also uses it with `n = 1`.
+///
+/// A tool's **params always render** — running or done, collapsed or expanded.
+/// The `▸`/`▾` disclosure and `Ctrl-T` govern only the **output body** (the
+/// output/diff preview and the `… +N more` hint), never the params (W015):
+/// params are the call's identity.
 fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     let mut body: Vec<Line<'static>> = Vec::new();
-    if !tool.done || expanded {
-        body.extend(panel_param_lines(tool, width));
-    }
+    body.extend(panel_param_lines(tool, width));
     body.extend(tool_panel_body(tool, width, expanded));
     let mut out = vec![tool_head_row(tool, width)];
     if !body.is_empty() {
@@ -1020,6 +1023,9 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
         (TREE_BRANCH, dim(), tool_name())
     };
     let prefix = format!("{}{mark}", tree_indent());
+    // The target inlines on the head ONLY as a fallback for a call whose args
+    // miss its per-tool key list, so `params` is empty (W015) — otherwise the
+    // value rides the always-visible params rows.
     let label = match tool.target.as_ref().or(tool.path.as_ref()) {
         Some(target) if tool.params.is_empty() => format!("{}  {target}", tool.name),
         _ => tool.name.clone(),
@@ -4601,8 +4607,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
 
     // ---- slice 3 (D31): the tool panel — params, the mid rule, affordances ----
 
-    /// Commit the assistant block carrying a `bash` call's `cmd`/`cwd` args, so
-    /// the `Tool` block gets a populated `params` (D31). One call id: `"t"`.
+    /// Commit the assistant block carrying a `bash` call's `command`/`cwd` args,
+    /// so the `Tool` block gets a populated `params` (D31). One call id: `"t"`.
     fn push_bash_call(app: &mut App, cmd: &str, cwd: &str) {
         app.handle(AppEvent::Agent(
             root(),
@@ -4611,7 +4617,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                     content: vec![ContentBlock::ToolCall {
                         id: "t".into(),
                         name: "bash".into(),
-                        arguments: serde_json::json!({ "cmd": cmd, "cwd": cwd }),
+                        arguments: serde_json::json!({ "command": cmd, "cwd": cwd }),
                     }],
                     stop_reason: wcode_harness::message::StopReason::ToolUse,
                     usage: None,
@@ -4662,10 +4668,12 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand: the params carry the command
         // At 80 cols the band is below the centering threshold, so the tool gets
         // the full width and the whole command is reachable (no 60-char clip) —
-        // the params may wrap across rows, but its tail is present.
+        // the params may wrap across rows, so reassemble the tokens to read the
+        // whole value (its tail is present, never clipped).
         let text = buffer_text(&render(&mut app, 80, 20));
+        let joined: String = text.split_whitespace().collect();
         assert!(
-            text.contains("--color=always"),
+            joined.contains("--color=always"),
             "the tail of the command must render (no 60-char clip):\n{text}"
         );
     }
@@ -4674,24 +4682,162 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn a_note_shows_its_params_when_expanded() {
         let mut app = App::new();
         push_bash_panel(&mut app, "cargo test", "/Users/wei/Workspace/wcode", "ok");
-        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand the note
+        // `Ctrl-T` is kept as an idempotency check: it now toggles only the
+        // output body, so the params stay put (W015).
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
         let text = buffer_text(&render(&mut app, 100, 20));
         let cmd_row = text
             .lines()
-            .find(|l| l.contains("cmd"))
-            .expect("a cmd key row");
+            .find(|l| l.contains("command"))
+            .expect("a command key row");
         assert!(
             cmd_row.contains("cargo test"),
-            "the cmd value rides its key row:\n{text}"
+            "the command value rides its key row:\n{text}"
         );
-        let cwd_row = text
-            .lines()
-            .find(|l| l.contains("cwd"))
-            .expect("a cwd key row");
+    }
+
+    /// Commit an assistant block carrying a named tool call's `args`, so the
+    /// `Tool` block gets populated `params` from the per-tool key list (D31/W015).
+    /// One call id: `"t"`.
+    fn push_call(app: &mut App, name: &str, args: serde_json::Value) {
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: vec![ContentBlock::ToolCall {
+                        id: "t".into(),
+                        name: name.into(),
+                        arguments: args,
+                    }],
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+    }
+
+    /// Push a finished named tool (start → end) whose call carried `args`, so its
+    /// panel has real `params` (W015).
+    fn push_panel(app: &mut App, name: &str, args: serde_json::Value, output: &str) {
+        push_call(app, name, args);
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: name.into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: name.into(),
+                output: output.into(),
+                is_error: false,
+                diff: None,
+                path: None,
+                duration_ms: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn a_done_collapsed_bash_shows_its_command() {
+        // W015: a finished, collapsed, non-error tool renders its params — the
+        // `▸`/`Ctrl-T` toggle governs only the output body.
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "cargo test -p wcode-cli" }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(text.contains("├ bash"), "the head row:\n{text}");
         assert!(
-            cwd_row.contains("/Users/wei/Workspace/wcode"),
-            "the cwd value rides its key row:\n{text}"
+            text.contains("cargo test -p wcode-cli"),
+            "a collapsed bash must show its command:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_done_collapsed_tool_shows_no_target_on_the_head_when_params_render() {
+        // W015/§4: once params carry the value, the head is the bare name — the
+        // target inlines only as the params-empty fallback.
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "cargo test -p wcode-cli" }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        let head = text
+            .lines()
+            .find(|l| l.contains("├ bash"))
+            .expect("the head row");
+        assert!(
+            !head.contains("cargo test -p wcode-cli"),
+            "the target must not inline once params render: {head:?}\n{text}"
+        );
+        assert!(
+            text.contains("cargo test -p wcode-cli"),
+            "the value rides the params rows:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_done_collapsed_read_shows_its_path_and_offset() {
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "read",
+            serde_json::json!({ "path": "crates/wcode-tui/src/ui.rs", "offset": 40 }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(
+            text.contains("crates/wcode-tui/src/ui.rs"),
+            "a read path renders collapsed:\n{text}"
+        );
+        assert!(text.contains("offset"), "the offset key renders:\n{text}");
+        assert!(
+            text.contains("40"),
+            "a read offset renders collapsed:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_done_collapsed_write_shows_its_path() {
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "write",
+            serde_json::json!({ "path": "x.rs", "content": "SECRET_BODY" }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(text.contains("x.rs"), "a write path renders:\n{text}");
+        assert!(
+            !text.contains("SECRET_BODY"),
+            "the payload is the body, not a param:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_done_collapsed_find_shows_path_and_glob() {
+        // Regression for the dead `find` key list (W015 defect #2).
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "find",
+            serde_json::json!({ "path": "crates", "glob": "**/*.rs" }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        assert!(text.contains("crates"), "a find path renders:\n{text}");
+        assert!(text.contains("**/*.rs"), "a find glob renders:\n{text}");
     }
 
     #[test]
@@ -4709,7 +4855,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         // content lands at the shared content column (7), like the prose.
         let col = |row: &str, needle: char| row.chars().position(|c| c == needle);
         assert_eq!(col(row("├ bash"), '├'), Some(3), "the head");
-        assert_eq!(col(row("│   cmd"), '│'), Some(3), "the body shares the gutter");
+        assert_eq!(col(row("│   command"), '│'), Some(3), "the body shares the gutter");
     }
 
     #[test]

@@ -241,7 +241,10 @@ blank pane.
   stats and the `▸`/`▣` affordance right-aligned — over its body (`│   ` params +
   output/diff/preview + a `… +N more` hint), closed by a `└` terminator when it has
   a body. The name prints **once** — no ordinal, no separate `✓ name · note` row.
-  The **`bash` command is shown in full** (it wraps, never clips). A tool error is
+  The **`bash` command is shown in full** (it wraps, never clips). A tool's
+  **params rows always render** — running or done, collapsed or expanded. The
+  `▸`/`▾` disclosure and `Ctrl-T` govern the tool's **output body** only
+  (params are the call's identity and never hide). A tool error is
   forced expanded. `Ctrl-T` toggles every tool's output; browse
   `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
 - **Thinking** (D33/D010; **amended by D018**) — **in flight** it is ONE dim
@@ -377,8 +380,8 @@ atom buffer; a paste chip is one unit, never split) ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` on the composer's foot line while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
-reply (OSC-52) · `Ctrl-T` expands/collapses every tool's output (a collapsed tool
-shows a 4-line preview, a failed tool always shows its error) ·
+reply (OSC-52) · `Ctrl-T` expands/collapses every tool's **output** (params stay
+visible; a collapsed tool shows a 4-line preview, a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**

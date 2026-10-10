@@ -766,17 +766,17 @@ fn tasks_text(tasks: &[TaskItem]) -> String {
         .join("\n")
 }
 
-/// The panel's param keys for a named tool, in display order. `bash` →
-/// `command`, `cmd`, `cwd` (the real arg is `command`; `cmd` is the design's
-/// alias); `read` → `path`, `offset`, `limit`; `edit`/`write` → `path`; `grep` →
-/// `pattern`, `path`; `find` → `pattern`. Falls back to [`ACTION_KEYS`].
+/// The panel's param keys for a named tool, in display order — the **literal
+/// JSON keys** a real call carries. `bash` → `command`; `read` → `path`,
+/// `offset`, `limit`; `edit`/`write` → `path`; `grep` → `pattern`, `path`;
+/// `find` → `path`, `glob`, `kind`. Falls back to [`ACTION_KEYS`].
 fn tool_param_keys(name: &str) -> &'static [&'static str] {
     match name {
-        "bash" => &["command", "cmd", "cwd"],
+        "bash" => &["command"],
         "read" => &["path", "offset", "limit"],
         "edit" | "write" => &["path"],
         "grep" => &["pattern", "path"],
-        "find" => &["pattern"],
+        "find" => &["path", "glob", "kind"],
         _ => &ACTION_KEYS,
     }
 }
@@ -8770,15 +8770,12 @@ mod live_cache_tests {
     }
 
     #[test]
-    fn call_params_returns_cmd_and_cwd_for_bash() {
+    fn call_params_returns_command_for_bash() {
         let mut app = App::new();
-        with_tool_call(&mut app, "t1", "bash", r#"{"cmd":"ls -la","cwd":"/x","n":3}"#);
+        with_tool_call(&mut app, "t1", "bash", r#"{"command":"ls -la","n":3}"#);
         assert_eq!(
             call_params(app.transcript(), "t1", "bash"),
-            vec![
-                ("cmd".to_string(), "ls -la".to_string()),
-                ("cwd".to_string(), "/x".to_string()),
-            ],
+            vec![("command".to_string(), "ls -la".to_string())],
             "order from tool_param_keys; the unknown `n` is dropped"
         );
     }
