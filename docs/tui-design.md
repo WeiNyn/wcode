@@ -1,6 +1,6 @@
 # wcode TUI — design (visual spec)
 
-Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4). Companion to [`tui-plan.md`](tui-plan.md) (the
+Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -57,7 +57,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | user prompt | `❯` | accent, bold |
 | assistant prose | — | default fg |
 | footnote reference | `¹²³` (`[n]` for n ≥ 10) | link |
-| thinking (in flight) | `···` | dim, italic |
+| thinking (in-flight annotation) | `···` | dim row `··· thinking <t>` + live cursor `▌` (D018) |
 | thinking (collapsed row) | `··· thinking` | dim |
 | tool head | `├ name  target  stats` | dim; name `tool_name` |
 | tool body / end | `│   …` / `└` | dim |
@@ -89,7 +89,8 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 > shipped screen carries the chrome in a pinned **header** band (D010) and
 > the composer's **foot line**, and has no status row or session row. Read **§4**
 > for the shipped layout; the drafts are kept for the reasoning, not as current
-> targets.
+> targets. Draft B's in-flight thinking streams expanded — **retired by D018**: the
+> live thinking row is now the one-row `··· thinking <t>` annotation of §4.
 
 ### A — idle, a completed exchange (78 cols)
 
@@ -183,7 +184,9 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 ## 4. Component specs
 
 **Transcript** — a `Vec<Block>` of committed blocks plus one live block. Block
-kinds: `User`, `Turn`, `Tool`, `Notice`, `Error`, `Btw`, `Diff`, `Todos`.
+kinds: `User`, `Turn`, `Tool`, `Notice`, `Error`, `Btw`, `Diff`, `Todos`
+(a command notice is a rendering twin of `Notice` with a shorter life — see
+**Notices** below).
 Each block computes its own height at draw time. A wrapped-line cache keyed by
 `(revision, width)` is the P2 optimization (do not re-wrap static history every
 frame). Follow-tail while streaming; scroll-lock when the user scrolls up (P1).
@@ -193,6 +196,22 @@ on its earlier turns instead of an empty pane — a dim `⋯ N earlier message(s
 divider marks the replayed prefix. With **no** history the transcript opens on a
 dim seeded hint (`❯ type a message · /help for commands · F1 for keys`), not a
 blank pane.
+
+- **Notices** (D018) — a dim row in the content column, no glyph of its own (the
+  `⏹` of `⏹ aborted` and the `⋯` prefixes are table glyphs). The **lifetime
+  depends on the origin**: **command chatter is transient** — the echoed
+  `/<command>` line and every reply, usage-hint, and error line the
+  `/`-command path emits (`/help`, `/usage`, `/copy`, `/verify`, `/tasks`,
+  `/team roster`, …), plus the submit-time `a turn is already running` guard —
+  all retired at the **next submit on that surface** (notices are per-surface;
+  a retire never crosses surfaces). A transient row renders **exactly** like a
+  `Notice`; retirement removes it, it is not restyled, and the browse selection
+  lands on the same block. **Run events are permanent** —
+  `⋯ compacted N messages`, `⋯ compaction skipped: <reason>`,
+  `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, and the
+  `⋯ N earlier message(s)` divider stay for the session: they are the record of
+  what the run did. The seeded hint has its own retirement (`clear_hint` at the
+  first block) and is in neither list.
 
 - **Header** (D010) — a **pinned top band**, not a transcript block: the running
   head `WCODE · session <id> ──── project · ⎇ branch`, over a **full-width**
@@ -225,10 +244,24 @@ blank pane.
   The **`bash` command is shown in full** (it wraps, never clips). A tool error is
   forced expanded. `Ctrl-T` toggles every tool's output; browse
   `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
-- **Thinking** (D33/D010) — **in flight** it streams expanded inline (the `···`
-  gutter plus the `thinking` italic body); on **commit** it collapses to a quiet
-  one-line `··· thinking` row (no char count) with the same `▸`/`▾`/`▣`
-  affordances, expandable. Its `···` marker shares the tool tree's gutter column.
+- **Thinking** (D33/D010; **amended by D018**) — **in flight** it is ONE dim
+  annotation row, not an expansion: `   ··· thinking 1.2s▌` — the `···` gutter
+  marker, `thinking`, the live elapsed, and the live cursor `▌` closing the
+  row. **No reasoning body, no affordance** — the live block is never a
+  selection target (see **Browse mode**), so nothing expands while the model
+  reasons. The elapsed is the run's own clock: `Surface::run_elapsed`
+  (`App::run_elapsed`), injected every 120 ms by the run loop — the same
+  injection as the running chip and the sidebar's focused row, so the renderer
+  never reads a clock. While the live message's **last content block is
+  thinking** the foot chip reads `⠹ thinking <t>` instead of `⠹ running <t>`
+  (a word change, not a new glyph) and reverts to `running` at the first text
+  or tool delta — "thinking is active" is exactly `content.last()` is
+  `Thinking`, which the kernel already maintains by opening a fresh thinking
+  block per reasoning stretch. On **commit** it collapses to the unchanged
+  quiet one-line `··· thinking` row (no char count, no timer) with the same
+  `▸`/`▾`/`▣` affordances, expandable with `Enter` — the reasoning text is
+  reachable only after the turn commits. Its `···` marker shares the tool
+  tree's gutter column.
 - **Todos** (D35) — the `todo` tool's checklist is ONE block that updates in
   place (`── todos  d/t ──` header, `☑`/`☐` rows), in the transcript — removed
   from the sidebar.
@@ -278,8 +311,9 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    (a real margin each side); below 84 the content uses the full band width (so
    an 80-col terminal keeps its `❯` at the gutter). The **composer band is never
    centered** — it is the one piece of furniture that stays edge-to-edge. A
-   **tool** is a tree row (params + body); a **thinking** block is a collapsed row
-   until expanded;
+   **tool** is a tree row (params + body); a **thinking** block is a one-row
+   annotation while live and a collapsed row until expanded once committed
+   (D018);
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
    a band: it collapses to nothing when no teammate runs;
@@ -288,8 +322,9 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    (D009): the chrome it carried (`project`/`branch`/`session`, `model`/`effort`)
    now rides the pinned **header** band (above), and the composer keeps
    only the **foot line** — the context gauge left and
-   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ btw…` · `[↑ N]` `<N>/<M>` right
-   (the `btw…` state while a `/btw` side ask is in flight; the **folio**
+   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ thinking 3.1s`/`⠹ btw…` · `[↑ N]` `<N>/<M>` right
+   (the `btw…` state while a `/btw` side ask is in flight; `⠹ thinking <t>`
+   replaces `running` while the live message reasons — D018; the **folio**
    `<N>/<M>` is the surface's turn count, `N == M`, so a first turn reads
    `1/1`). There is **no box and no corners**, and **no session row, no status
    row, and no head row**.
@@ -305,17 +340,34 @@ layout stays byte-identical while it is closed. It stacks **two** sections, each
 headed by a **ruled `── label ─────…` line** (D011 — the book-outline style; the
 `─` fill reaches the panel edge), a blank line setting the second off from the
 first:
-1. **`agents`** — each member's **numbered** row (`1 ● explorer · read a.rs`,
-   `2 ○ developer`, …): a `muted` number badge (so `Alt-N` is visible), the state
-   glyph, the label, the live action, and a `*` on the focused surface. Rows are
-   in the **canonical order** (D34: root first, then members in creation order —
-   stable; `●` marks activity, it does not reorder).
+1. **`agents`** — the **root/wcode session is the FIRST row** (D018): its label
+   (`wcode` — the header's reverse-video `WCODE` run, lowercased), its state
+   glyph, its live action, the `*` when focused, and the run elapsed on the
+   focused row — but **no number badge**. Below it the members' **numbered**
+   rows (`1 ● explorer · read a.rs`, `2 ○ developer`, …): a `muted` number
+   badge (so `Alt-N` is visible), the state glyph, the label, the live action,
+   and a `*` on the focused surface. The badge counts **members, not drawn
+   rows**, so `Alt-N` still means member N. The root row is **clickable to
+   focus the root** — every drawn row publishes its index for hit-testing, so
+   no new hit geometry — and its keyboard parity is the existing
+   `Ctrl-N`/`Shift-Tab` surface cycle (the root is the first surface in the
+   canonical order); `Alt-N` never targets the root. Rows are in the
+   **canonical order** (D34: root first, then members in creation order —
+   stable; `●` marks activity, it does not reorder), which the sidebar now
+   draws in full. The **`/team` roster and the composer's working-team strip
+   stay member-only**: both answer "which teammate is doing what" under a
+   three-row budget, while the root is the orchestrator — the surface the user
+   is typing into, whose head already rides the pinned header band on every
+   frame.
 2. **`changes`** — the run's changeset as a directory **tree** (D36):
    `crates/wcode-tui/src/` then `├─ ui.rs  +8 −0` …; `+a` added, `−r` removed,
    stats right-aligned.
-An empty section keeps its header with a dim `—`; rows clip to the panel and
-never wrap. The modal overlay floats over the whole terminal so it covers the
-panel. *(No `Todos` section — todos are a transcript block, D35 — and no
+An empty section keeps its header with a dim `—`. With the root row the
+`agents` section is never empty in a live app, but the placeholder is **kept
+as a defensive branch** (D018): `draw_sidebar` stays total over whatever row
+list it is handed, and the `changes` section keeps the identical shape — one
+rule for both sections. Rows clip to the panel and never wrap. The modal
+overlay floats over the whole terminal so it covers the panel. *(No `Todos` section — todos are a transcript block, D35 — and no
 `Context` section — the gauge lives on the composer's foot line.)*
 
 **Keys** — `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Del` forward-delete · `Up`/`Down` history ·
@@ -327,7 +379,7 @@ transcript, `↑ N` on the composer's foot line while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52) · `Ctrl-T` expands/collapses every tool's output (a collapsed tool
 shows a 4-line preview, a failed tool always shows its error) ·
-`Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **sidebar row N** (the numbered order, not the raw index) · `Ctrl-B`
+`Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
 (a `▌` selection over the committed blocks — `j`/`k` next/prev, `g`/`G` first/last,
@@ -363,7 +415,7 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 ## 6. Open questions
 
-- **Thinking** — **resolved (D33/D010)**: in flight it streams **expanded** inline; on commit it collapses to a quiet one-line `··· thinking` row (no char count), expandable. Tool output is a tree row (D009/T1), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
+- **Thinking** — **resolved (D33/D010); amended by D018**: in flight it is ONE dim `··· thinking <t>` annotation row with the live cursor (no body — the reasoning text is reachable only after the turn commits); on commit it collapses to a quiet one-line `··· thinking` row (no char count), expandable. Tool output is a tree row (D009/T1), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
 - **Timestamps** on turns: lean no.
 - **Header/title bar**: **amended by D010** — the header IS a pinned top band now
   (the running head over a full-width rule); the composer keeps its **foot line**,
