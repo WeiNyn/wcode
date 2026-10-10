@@ -915,22 +915,30 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
 /// Render the live (streaming) assistant message for `width` — the same body
 /// `draw_transcript` used inline, with the streaming cursor (`live = true`).
 /// Empty for a non-assistant message.
-pub(crate) fn live_lines(message: &AgentMessage, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn live_lines(
+    message: &AgentMessage,
+    width: usize,
+    elapsed: Option<std::time::Duration>,
+) -> Vec<Line<'static>> {
     match message {
-        AgentMessage::Assistant { content, .. } => content_lines(content, width, true, false),
+        AgentMessage::Assistant { content, .. } => {
+            content_lines(content, width, true, false, elapsed)
+        }
         _ => Vec::new(),
     }
 }
 
 /// Render an assistant message's blocks in order, dropping tool calls (their
-/// own line carries them). `live` renders thinking inline (in-flight) and
-/// appends a cursor to the last line; a committed block draws thinking as the
-/// collapsed row unless `thinking_open` (D33).
+/// own line carries them). `live` renders thinking as ONE dim annotation row
+/// (the in-flight form, D018) and appends a cursor to the last line; a committed
+/// block draws thinking as the collapsed row unless `thinking_open` (D33).
+/// `elapsed` is the live row's timer — injected, never read here.
 fn content_lines(
     content: &[ContentBlock],
     width: usize,
     live: bool,
     thinking_open: bool,
+    elapsed: Option<std::time::Duration>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     // The `¹` reference ordinal, PER MESSAGE (reset each `content_lines` call).
@@ -945,8 +953,13 @@ fn content_lines(
             }
             ContentBlock::Thinking { text } => {
                 if live {
-                    // In-flight: stream inline, expanded — as before D33.
-                    lines.extend(wrap(text, width, THINK_FIRST, THINK_CONT, thinking()));
+                    // D018 §1: ONE dim annotation row — no body, no affordance.
+                    // The rule is PER BLOCK, so a live message with several
+                    // reasoning stretches (`[Thinking, Text, Thinking]` — the
+                    // kernel opens a fresh trailing block after any text/tool
+                    // block) draws one row each; an earlier stretch stays hidden
+                    // until commit lands it in the collapsed row below.
+                    lines.push(live_thinking_line(width, elapsed));
                 } else {
                     // The affordance belongs to the block's FIRST line only (the
                     // publish requires `content.first()` to be `Thinking`), so
@@ -1063,6 +1076,34 @@ fn tool_stats(tool: &Tool) -> String {
 /// `▸ ▣` run flush right).
 fn note_affordance_cols(width: usize) -> (usize, usize) {
     (width.saturating_sub(3), width.saturating_sub(1))
+}
+
+/// The IN-FLIGHT thinking row (D018 §1): `   ··· thinking 1.2s` — the committed
+/// collapsed header's head (same [`THINK_FIRST`] gutter, same word, same `dim()`
+/// role) plus the live elapsed. Reuses [`thinking_header_line`]'s no-affordance
+/// path, so with `elapsed == None` the row is BYTE-IDENTICAL to the committed
+/// collapsed header — one rule, two lifetimes.
+///
+/// NO body: the reasoning text is reachable only after the turn commits
+/// (D018 §1). NO `▸`/`▣` affordance: the live block is never a selection target —
+/// it trails the committed transcript and publishes nothing.
+///
+/// The trailing live cursor `▌` is NOT drawn here: `content_lines`'s tail
+/// appends it to the LAST line, which is this row whenever the model is still
+/// reasoning.
+///
+/// `elapsed == None` prints NO timer (before the first tick); the caller injects
+/// it. `width` is threaded for symmetry with its committed sibling and is unused
+/// on this path (no affordance geometry, no wrapping) — a deliberate no-op.
+fn live_thinking_line(width: usize, elapsed: Option<std::time::Duration>) -> Line<'static> {
+    let mut line = thinking_header_line(width, false, false);
+    if let Some(d) = elapsed {
+        line.spans.push(Span::styled(
+            format!(" {}", format_ms(d.as_millis() as u64)),
+            dim(),
+        ));
+    }
+    line
 }
 
 /// A committed thinking block (D33): the collapsed `··· thinking ▸ ▣` row,
@@ -1751,12 +1792,17 @@ fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
     let avail = (area.width as usize).saturating_sub(1);
 
     // --- foot row: the gauge   ·   `⏻ plan · ▤ browse · {state} · ↑ N` --------
+    // D018 §1: while the live message's last content block is Thinking the chip
+    // says `thinking`; it reverts to `running` at the first text/tool delta by
+    // itself (the predicate reads `content.last()`). ONE word, no new glyph —
+    // `⠹` is already the running glyph and `accent()` its style.
+    let word = if app.live_thinking() { "thinking" } else { "running" };
     let (state, state_style) = match (app.running(), app.run_elapsed()) {
         (true, Some(d)) => (
-            format!("⠹ running {}", format_ms(d.as_millis() as u64)),
+            format!("⠹ {word} {}", format_ms(d.as_millis() as u64)),
             accent(),
         ),
-        (true, None) => ("⠹ running".to_string(), accent()),
+        (true, None) => (format!("⠹ {word}"), accent()),
         // A pending `/btw` is the other in-flight state — accent, like running.
         (false, _) if app.asking() => ("⠹ btw…".to_string(), accent()),
         (false, _) => ("⏸ idle".to_string(), dim()),
@@ -4720,6 +4766,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             40,
             false,
             false,
+            None,
         );
         let text: String = with
             .iter()
@@ -4737,6 +4784,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             40,
             false,
             false,
+            None,
         );
         assert!(without.is_empty(), "a text-less round renders nothing: {without:?}");
     }
@@ -5095,44 +5143,162 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(!rows[1].contains('▸'), "the second row does not:\n{text}");
     }
 
+    /// A live assistant message whose content is a single thinking block — the
+    /// shape the stream carries while the model reasons.
+    fn thinking_message(text: &str) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::Thinking { text: text.into() }],
+            stop_reason: wcode_harness::message::StopReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    /// D018 §1: in flight, thinking is ONE dim annotation row — the elapsed and
+    /// nothing else. No reasoning body (it is reachable only after the turn
+    /// commits), and no affordance (the live block is never a selection target).
     #[test]
-    fn thinking_auto_collapses_on_turn_end() {
+    fn in_flight_thinking_is_one_annotation_row() {
         let mut app = App::new();
         let reasoning = "reasoning that is visible only while the turn streams";
-        // In-flight: a `MessageStart` (uncommitted) renders thinking inline.
+        // The run must be LIVE: `AgentStart` sets `running`, which both the chip
+        // and the elapsed clock key on.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
         app.handle(AppEvent::Agent(
             root(),
             wcode_harness::event::AgentEvent::MessageStart {
-                message: AgentMessage::Assistant {
-                    content: vec![ContentBlock::Thinking {
-                        text: reasoning.into(),
-                    }],
-                    stop_reason: wcode_harness::message::StopReason::Stop,
-                    usage: None,
-                    model: None,
-                },
+                message: thinking_message(reasoning),
             },
         ));
-        let live = buffer_text(&render(&mut app, 80, 24));
-        assert!(
-            live.contains("visible only while the turn streams"),
-            "in-flight thinking streams inline:\n{live}"
-        );
-        assert!(
-            !live.contains("··· thinking"),
-            "no collapsed row while in-flight:\n{live}"
-        );
+        app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
 
-        // The turn ends: the block commits collapsed to the one-liner.
+        let live = buffer_text(&render(&mut app, 80, 24));
+        let rows: Vec<&str> = live
+            .lines()
+            .filter(|l| l.contains("··· thinking"))
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one annotation row:\n{live}");
+        assert!(
+            rows[0].contains("1.2s"),
+            "the run's elapsed rides THE ROW (not just the foot chip):\n{live}"
+        );
+        assert!(
+            !live.contains(reasoning),
+            "no reasoning body in flight:\n{live}"
+        );
+        assert!(live.contains('▌'), "the live cursor closes the row:\n{live}");
+        assert!(!live.contains('▸'), "no toggle glyph in flight:\n{live}");
+        assert!(!live.contains('▣'), "no copy glyph in flight:\n{live}");
+
+        // The turn ends: the block commits COLLAPSED to the one-liner, and the
+        // body is still hidden until that committed row is expanded.
         push_thinking(&mut app, reasoning);
         let done = buffer_text(&render(&mut app, 80, 24));
         assert!(
             !done.contains("visible only while the turn streams"),
             "the body hides once committed:\n{done}"
         );
+        let done_rows: Vec<&str> = done
+            .lines()
+            .filter(|l| l.contains("··· thinking"))
+            .collect();
+        assert_eq!(done_rows.len(), 1, "one committed row, no live one:\n{done}");
         assert!(
-            done.contains("··· thinking"),
-            "the committed block shows the one-liner:\n{done}"
+            !done_rows[0].chars().any(|c| c.is_ascii_digit()),
+            "the committed header IS the same head with no timer:\n{done}"
+        );
+
+        // The rule is PER STRETCH (settled at review): the kernel opens a fresh
+        // trailing `Thinking` block after any text block, so `[Thinking, Text,
+        // Thinking]` draws TWO annotation rows — an earlier stretch's body must
+        // not leak — and both carry the RUN's elapsed, never a per-stretch timer.
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageStart {
+                message: AgentMessage::Assistant {
+                    content: vec![
+                        ContentBlock::Thinking {
+                            text: "first stretch".into(),
+                        },
+                        ContentBlock::Text {
+                            text: "prose between the stretches".into(),
+                        },
+                        ContentBlock::Thinking {
+                            text: "second stretch".into(),
+                        },
+                    ],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
+        let two = buffer_text(&render(&mut app, 80, 24));
+        let row_count = two.lines().filter(|l| l.contains("··· thinking")).count();
+        assert_eq!(row_count, 2, "one row per stretch:\n{two}");
+        assert!(
+            !two.contains("first stretch") && !two.contains("second stretch"),
+            "neither stretch's body is in flight:\n{two}"
+        );
+    }
+
+    /// D018 §1's second half: the composer-foot chip reads `⠹ thinking <t>` while
+    /// the last live block is `Thinking`, and reverts to `⠹ running <t>` at the
+    /// first text delta — while the annotation ROW survives (it is per block).
+    #[test]
+    fn the_foot_chip_reads_thinking_while_reasoning_then_reverts() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::AgentStart,
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageStart {
+                message: thinking_message("hmm"),
+            },
+        ));
+        app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("⠹ thinking 1.2s"), "the chip reads thinking:\n{text}");
+        assert!(!text.contains("⠹ running"), "and never both words:\n{text}");
+
+        // A text delta: the kernel pushes a NEW trailing `Text` block after the
+        // `Thinking` one (`append_text`, loop_.rs:857-864), so `content.last()` is
+        // no longer `Thinking` and the chip reverts by itself.
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageUpdate {
+                message: AgentMessage::Assistant {
+                    content: vec![
+                        ContentBlock::Thinking { text: "hmm".into() },
+                        ContentBlock::Text {
+                            text: "the answer".into(),
+                        },
+                    ],
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains("⠹ running 1.2s"), "the chip reverts:\n{text}");
+        assert!(!text.contains("⠹ thinking"), "no thinking chip now:\n{text}");
+        // The ROW is per block, so it survives the revert — the two halves must
+        // not drift apart.
+        assert!(
+            text.contains("··· thinking"),
+            "the live annotation row survives the chip's revert:\n{text}"
         );
     }
 

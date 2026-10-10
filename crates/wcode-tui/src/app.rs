@@ -1349,6 +1349,26 @@ impl Surface {
         self.live_rev = self.live_rev.wrapping_add(1);
     }
 
+    /// True while the model is REASONING: the live (in-flight) assistant
+    /// message's LAST content block is `Thinking`.
+    ///
+    /// The kernel opens a FRESH trailing `Thinking` block after any text/tool
+    /// block (`wcode-harness` `loop_.rs:866-873` `fn append_thinking`, mirroring
+    /// `append_text` at `:857-864`), so `content.last()` is `Thinking` exactly
+    /// while reasoning and flips to `Text`/`ToolCall` at the first text/tool
+    /// delta — the revert the composer chip promises.
+    ///
+    /// `false` when there is no live message (idle, and between `MessageEnd` and
+    /// the next `MessageStart`), and `false` for a live non-assistant message
+    /// (only an assistant message is ever live).
+    fn live_is_thinking(&self) -> bool {
+        matches!(
+            self.live.as_ref(),
+            Some(AgentMessage::Assistant { content, .. })
+                if matches!(content.last(), Some(ContentBlock::Thinking { .. }))
+        )
+    }
+
     /// Ensure the live (streaming) message is rendered for `width`, then append
     /// the inter-block blank separator (when `out` is non-empty and the render is
     /// non-empty) and the cached lines. Returns the range of the block's OWN
@@ -1361,9 +1381,14 @@ impl Surface {
         width: usize,
         out: &mut Vec<Line<'static>>,
     ) -> Option<Range<usize>> {
+        // `Duration` is `Copy`, so this local borrows nothing and the immutable
+        // borrow of `self.live` below cannot collide with the `live_cache` write.
+        // The live row's timer is part of the cached render, so it must reach the
+        // renderer (see `App::set_run_elapsed` for its invalidation).
+        let elapsed = self.run_elapsed;
         let message = self.live.as_ref()?;
         let stale = self.live_cache.rev != self.live_rev || self.live_cache.width != width;
-        let rendered = stale.then(|| crate::ui::live_lines(message, width));
+        let rendered = stale.then(|| crate::ui::live_lines(message, width, elapsed));
         if let Some(lines) = rendered {
             self.live_cache = CacheEntry {
                 rev: self.live_rev,
@@ -4045,6 +4070,14 @@ impl App {
         self.focused().live.as_ref()
     }
 
+    /// The focused surface's [`Surface::live_is_thinking`] — the composer chip's
+    /// read (`corner_titles`). Focused-scoped so it agrees with `running()` and
+    /// `run_elapsed()`, which the chip matches on: one surface's reasoning must
+    /// never be reported against another's clock.
+    pub(crate) fn live_thinking(&self) -> bool {
+        self.focused().live_is_thinking()
+    }
+
     /// The buffer expanded to plain text (paste blocks inlined) — what is sent.
     pub fn input(&self) -> String {
         self.expanded()
@@ -4488,6 +4521,16 @@ impl App {
     pub fn set_run_elapsed(&mut self, id: &SessionId, elapsed: std::time::Duration) {
         if let Some(i) = self.surface_index(id) {
             self.surfaces[i].run_elapsed = Some(elapsed);
+            // R1 (D018): the timer is PART of the cached live row, so a tick that
+            // moves it must re-render — but only while a THINKING row is on
+            // screen. Unguarded, every 120 ms tick would re-render a prose-only
+            // live block for no visible gain, forfeiting the
+            // `a_frame_with_no_delta_does_zero_live_renders` invariant. The chip
+            // needs no bump: `corner_titles` rebuilds from `run_elapsed` each
+            // frame. No focus test — only the focused surface's row is drawn.
+            if self.surfaces[i].live_is_thinking() {
+                self.surfaces[i].bump_live();
+            }
             self.dirty = true;
         }
     }
@@ -8481,6 +8524,51 @@ mod live_cache_tests {
         ));
     }
 
+    fn thinking(text: &str) -> ContentBlock {
+        ContentBlock::Thinking { text: text.into() }
+    }
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text { text: text.into() }
+    }
+
+    fn tool_call(id: &str) -> ContentBlock {
+        ContentBlock::ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: Default::default(),
+        }
+    }
+
+    /// An assistant message from `blocks`, the shape the stream carries.
+    fn assistant_blocks(blocks: Vec<ContentBlock>) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: blocks,
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    /// `MessageStart` with a single thinking block — a model that has begun to
+    /// reason and emitted no prose yet.
+    fn start_thinking(app: &mut App, text: &str) {
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageStart {
+                message: assistant_blocks(vec![thinking(text)]),
+            },
+        ));
+    }
+
+    /// The drawn lines flattened to their text.
+    fn text_of(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
+    }
+
     /// One "frame": append the live block at `width`. Returns the lines drawn
     /// and the running `live_renders` count.
     fn frame(app: &mut App, width: usize) -> (Vec<Line<'static>>, usize) {
@@ -8498,6 +8586,92 @@ mod live_cache_tests {
         let (second, r2) = frame(&mut app, 60);
         assert_eq!(r2, r1, "a second frame with no delta renders ZERO times");
         assert_eq!(first, second, "and is byte-identical");
+    }
+
+    /// The seam itself (D018 §1): the predicate is `content.last()`, which is what
+    /// the kernel's `append_thinking`/`append_text` make it — a FRESH trailing
+    /// block per stretch, so a second reasoning stretch after prose is `Thinking`
+    /// again.
+    #[test]
+    fn live_thinking_tracks_the_last_content_block() {
+        let mut app = App::new();
+        assert!(!app.live_thinking(), "no live message");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageStart {
+                message: assistant_blocks(vec![thinking("a")]),
+            },
+        ));
+        assert!(app.live_thinking(), "[Thinking]");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageUpdate {
+                message: assistant_blocks(vec![thinking("a"), text_block("b")]),
+            },
+        ));
+        assert!(!app.live_thinking(), "[Thinking, Text] — the first text delta");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageUpdate {
+                message: assistant_blocks(vec![thinking("a"), text_block("b"), thinking("c")]),
+            },
+        ));
+        assert!(app.live_thinking(), "[Thinking, Text, Thinking] — a fresh stretch");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageUpdate {
+                message: assistant_blocks(vec![thinking("a"), tool_call("t")]),
+            },
+        ));
+        assert!(!app.live_thinking(), "[Thinking, ToolCall]");
+
+        // The turn commits: `MessageEnd` drops the live message.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageEnd {
+                message: assistant_blocks(vec![thinking("a")]),
+            },
+        ));
+        assert!(!app.live_thinking(), "no live message once committed");
+    }
+
+    /// R1 (D018): the elapsed is PART of the cached live row, so a tick must
+    /// re-render it — and ONLY while a thinking row is on screen.
+    #[test]
+    fn set_run_elapsed_rerenders_the_live_thinking_row() {
+        // POSITIVE: a tick advances the drawn timer.
+        let mut app = App::new();
+        start_thinking(&mut app, "reasoning");
+        let (before, r1) = frame(&mut app, 60);
+        assert!(r1 >= 1, "the first frame renders the live block");
+        assert!(
+            !text_of(&before).contains("1.2s"),
+            "no timer before the first tick: {:?}",
+            text_of(&before)
+        );
+        app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
+        let (after, r2) = frame(&mut app, 60);
+        assert_eq!(r2, r1 + 1, "the tick re-rendered the row exactly once");
+        assert!(
+            text_of(&after).contains("1.2s"),
+            "the drawn timer advanced: {:?}",
+            text_of(&after)
+        );
+        // ... and the row is still one line, not a streamed body.
+        assert_eq!(after.len(), 1, "one annotation row: {after:?}");
+
+        // NEGATIVE — why the bump is GUARDED: with a PROSE-only live message a
+        // tick moves nothing on screen, so the frame must stay a cache hit.
+        let mut app = App::new();
+        start(&mut app, "prose only");
+        let (_, p1) = frame(&mut app, 60);
+        app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
+        let (_, p2) = frame(&mut app, 60);
+        assert_eq!(p2, p1, "a prose-only tick renders ZERO times");
     }
 
     #[test]
