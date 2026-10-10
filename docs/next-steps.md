@@ -79,6 +79,8 @@ the boxes as each task completes and keep the status table current.
 
 | 70 | TUI transcript-render redesign: **pin the header** (band 0, reversing D009's scroll-away head + the "no title bar" decision), **one tree row per tool** (T1: `├ name  target … stats ▸ ▣`, retiring the `1` ordinal + duplicate `✓` row), **one content column** (fix the col-3/6/8 gutter drift), and a quiet `···` thinking row — W012 (see [work/W012-tui-pinned-header-transcript-render.md](work/W012-tui-pinned-header-transcript-render.md), [D010](decisions/D010-tui-pinned-header-and-tree-tools.md)) | ☑ implemented — `2d9e501`/`fa20066`/`903dbdd` + D010; 1126 tests + clippy clean; second-layer review pending |
 
+| 71 | TUI colour + width + sidebar: **user prompt in the accent** (`Theme.user` had no call site; it shared `body` with the reply), **an adjustable measure** (`/width <cols>` + `Alt-[` / `Alt-]`; was a 68-col const), **256-tier code highlighting** (map syntect RGB → xterm-256), **tool input/output highlighting** (a file tool's body/params by extension, `bash`'s `command` as shell), and a **book-outline sidebar** (ruled `── label ──` headers) — W013 (see [work/W013-tui-color-width-sidebar.md](work/W013-tui-color-width-sidebar.md), [D011](decisions/D011-tui-width-color-sidebar.md)) | ☑ implemented — `e9b0f63`/`f43a118`/`805bd44`/`219cabc`/`f6519ae` + D011; 1135 tests + clippy clean; second-layer review pending |
+
 **Resolved (item 50 residual).** `ReportBack::after_run` is now also invoked on
 `Agent::run`'s error exits — the initial user-message append and the `run_loop`
 `Err` alike (a session-append I/O failure, `session.append` → `LoopError::Session`,
