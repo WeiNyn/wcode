@@ -2086,7 +2086,7 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // ---- agents ---------------------------------------------------------
-    lines.push(Line::from(Span::styled("agents", dim())));
+    lines.push(section_rule("agents", None, w));
     // Publish each drawn member row for hit-testing. `member_rows_indexed`
     // borrows `app` immutably; that borrow ends before `set_sidebar_hit` needs
     // `&mut app`, so iterate the owned rows BY VALUE and collect `(index, y)`.
@@ -2126,16 +2126,15 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     app.set_sidebar_hit(area, members);
 
     // ---- changes --------------------------------------------------------
+    // A blank line sets the changes section off from the roster (an outline).
+    lines.push(Line::from(""));
     let tree = app.change_tree();
     if tree.is_empty() {
-        lines.push(Line::from(Span::styled("changes", dim())));
+        lines.push(section_rule("changes", None, w));
         lines.push(Line::from(Span::styled("  —", dim())));
     } else {
         let (files, added, removed) = change_totals(&tree);
-        lines.push(Line::from(Span::styled(
-            changes_header(files, added, removed),
-            dim(),
-        )));
+        lines.push(section_rule(&changes_header(files, added, removed), None, w));
         lines.extend(change_tree_lines(&tree, w));
     }
 
@@ -2143,6 +2142,21 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App) {
     // bands' own left padding separates the two columns. `Paragraph` clips
     // the row list to `area` — a short panel just loses the bottom sections.
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// A sidebar section header in the book-outline style: `── label  right ────…`,
+/// the `─` fill reaching the panel's edge (D011). An empty `right` is dropped.
+fn section_rule(label: &str, right: Option<&str>, width: usize) -> Line<'static> {
+    let mut head = format!("── {label}");
+    if let Some(r) = right.filter(|r| !r.is_empty()) {
+        head.push_str(&format!("  {r}"));
+    }
+    head.push(' ');
+    let used = head.chars().count();
+    Line::from(vec![
+        Span::styled(head, dim()),
+        Span::styled("─".repeat(width.saturating_sub(used)), dim()),
+    ])
 }
 
 /// One clipped sidebar row: concatenate the styled segments, and when the row
@@ -3826,6 +3840,28 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         // stray blank between the `WCODE` head and the tool row.
         assert!(text.contains("├ read"), "the inline tool:\n{text}");
         assert!(!text.contains("── notes"), "no foot rule:\n{text}");
+    }
+
+    #[test]
+    fn the_sidebar_heads_its_sections_with_a_rule() {
+        use wcode_harness::protocol::SessionId;
+        let mut app = App::new();
+        let surf = |id: &str, label: &str, is_root: bool| crate::SurfaceInfo {
+            id: SessionId::agent(id),
+            label: label.into(),
+            model: "m".into(),
+            is_root,
+        };
+        app.set_surfaces(vec![
+            surf("root", "wcode", true),
+            surf("explorer", "explorer", false),
+            surf("developer", "developer", false),
+        ]);
+        app.handle(AppEvent::Key(Key::Ctrl('b'))); // open the sidebar
+        let text = buffer_text(&render(&mut app, 120, 24));
+        assert!(text.contains("── agents"), "the agents section rule:\n{text}");
+        assert!(text.contains("explorer"), "a member row:\n{text}");
+        assert!(text.contains("── changes"), "the changes section rule:\n{text}");
     }
 
     #[test]

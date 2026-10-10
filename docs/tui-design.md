@@ -15,8 +15,8 @@ TUI reads as the same product, given a full screen.
    **header band** (the top row over a full-width `─` rule) carries the running
    head `WCODE · session <id> ──── project · ⎇ branch` with `model · effort` far
    right (D010); below it the transcript (flex) renders in a **measure** (a
-   ≤68-col content column, centered once the band reaches 84 cols), while the
-   composer stays full-width. The composer keeps its **foot line** (the context
+   content column, default 68 and adjustable via `/width`, centered once the
+   band reaches 84 cols), while the composer stays full-width. The composer keeps its **foot line** (the context
    gauge left and `⏻ plan`/`▤ browse`/state/`↑ N`/folio right). There is **no
    session row, no status row, and no composer head row**. A **0–3-row team strip
    rides above the composer** only while a member is running; it is a rider, not a
@@ -270,12 +270,13 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    `─` rule, always visible;
 1. the **transcript** (flex, plain, scrollable). Committed assistant messages render as
    markdown — headings, bullets, fenced code, aligned tables, inline
-   `code`/`**bold**`. It renders in a **measure** — a content column at most
-   **68 cols** wide, **centered** in its band once the band reaches **84 cols**
+   `code`/`**bold**`. It renders in a **measure** — a content column, **default
+   **68 cols** and **runtime-adjustable** (`/width <cols>`, or `Alt-[` / `Alt-]`;
+   clamped to the band), **centered** in its band once the band reaches **84 cols**
    (a real margin each side); below 84 the content uses the full band width (so
    an 80-col terminal keeps its `❯` at the gutter). The **composer band is never
    centered** — it is the one piece of furniture that stays edge-to-edge. A
-   **tool** is a panel (params + body); a **thinking** block is a collapsed row
+   **tool** is a tree row (params + body); a **thinking** block is a collapsed row
    until expanded;
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
@@ -298,8 +299,10 @@ id, then branch; foot: the `[↑ N]` scroll, then the gauge, then
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
 ≥ 80 cols; below that the layout is untouched), **off by default** so the base
-layout stays byte-identical while it is closed. It stacks **two** dim-headed
-sections:
+layout stays byte-identical while it is closed. It stacks **two** sections, each
+headed by a **ruled `── label ─────…` line** (D011 — the book-outline style; the
+`─` fill reaches the panel edge), a blank line setting the second off from the
+first:
 1. **`agents`** — each member's **numbered** row (`1 ● explorer · read a.rs`,
    `2 ○ developer`, …): a `muted` number badge (so `Alt-N` is visible), the state
    glyph, the label, the live action, and a `*` on the focused surface. Rows are
