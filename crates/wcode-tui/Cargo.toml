@@ -9,7 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 readme.workspace = true
 keywords = ["wcode", "tui", "terminal", "ratatui", "agent"]
-categories = ["command-line-interface", "development-tools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 wcode-harness = { workspace = true }
