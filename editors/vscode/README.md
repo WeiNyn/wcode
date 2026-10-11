@@ -50,9 +50,9 @@ The `.vsix` is attached to the tag's release by
 | `src/diffProvider.ts` | the `wcode-diff:` provider + the click handler (**the only diff `vscode`**) |
 | `src/webview.ts` | the `ToWebview`/`FromWebview` unions, the payload parsers, the throttle |
 | `src/markdown.ts` | `markdown-it` with `html: false` |
+| `src/highlight.ts` | host-side Prism highlighting (a curated grammar set), pure; returns HTML or `null` |
 | `src/commands.ts` | the `/`-command registry (pure) — the ONE list the menu and the host share |
 | `src/sessions.ts` | the `/resume` picker's data (session files: groups + legacy) |
-| `src/teams.ts` | the `/team` picker's data (`.wcode/teams/<name>.toml`) |
 | `src/teams.ts` | the `/team` picker's data (`.wcode/teams/<name>.toml`) |
 | `src/tabs.ts` | pure multi-tab helpers: `commandAction` routing, sticky `tabLabel`, `nextActiveTab` |
 | `src/tab.ts` | `SessionTab` — one session's bundle (child + controller + state + handlers) |
