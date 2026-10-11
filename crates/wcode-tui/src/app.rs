@@ -123,10 +123,9 @@ pub enum Action {
 }
 
 /// One **exchange**: a user prompt → the assistant's answer, as ONE block.
-/// Replaces the `TurnHead` + `Assistant` + `Notes` trio. Its head is the
-/// speaker (`WCODE`), its body is the whole run's prose, its foot is the
-/// **ledger** (the run's tools, in call order). Placement, order and the
-/// `¹`↔`N` numbering are correct **by construction** — no retrospective fold.
+/// Its body is the whole run's prose interleaved with its inline tools, in call
+/// order (D009). Placement and order are correct **by construction** — no
+/// retrospective fold.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
     /// The exchange number, per surface, monotonic (`1`, `2`, …). The rendered
@@ -134,11 +133,10 @@ pub struct Turn {
     pub n: usize,
     /// The run's prose + thinking, in order — every assistant message's
     /// `Text`/`Thinking` blocks concatenated, each message's `ToolCall` kept
-    /// **in place**. The `¹` is emitted at each `ToolCall`; its ordinal IS the
-    /// ledger's `N` (one per-turn series).
+    /// **in place** (the tool renders inline there; no reference mark, D021).
     pub content: Vec<ContentBlock>,
-    /// The run's apparatus, in CALL order — the ledger. `tools[k]` renders as
-    /// ledger row `k + 1`; its `¹` is the `(k+1)`-th `ToolCall` in `content`.
+    /// The run's tools, in CALL order. `tools[k]` renders at the `(k+1)`-th
+    /// `ToolCall` in `content`.
     pub tools: Vec<Tool>,
     /// The turn's thinking expanded (D33). Set by the `▸` affordance / `Ctrl-T`;
     /// the affordance attaches to the leading `Thinking` block only.

@@ -683,8 +683,7 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         // The transcript's user block: a `YOU` speaker head + the wrapped prompt
         // (the `❯` glyph stays the composer's, not the transcript's).
         Block::User(text) => speaker_lines(text, width),
-        // One exchange: the `WCODE` head, the run's prose (with `¹` marks), and
-        // the ledger (its foot).
+        // One exchange: the run's prose interleaved with its inline tools.
         Block::Turn(turn) => turn_lines(turn, width),
         // A standalone tool (a live/running tool before its answer commits, or an
         // orphan with no turn): a single inline tool panel (no `── notes ──` rule).
@@ -809,8 +808,8 @@ fn turn_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 
 /// The turn's body: the prose/thinking interleaved with each tool's panel, in
 /// call order. # Contracts: exactly one panel per tool (a `ToolCall` whose result
-/// is not yet in `turn.tools` emits the mark but no panel); the `¹` is SUPPRESSED
-/// when no prose landed since the previous tool (a text-less round, D009 §4).
+/// is not yet in `turn.tools` emits nothing); the tool itself, inline at the call
+/// site, is the locator (D021 — there is no reference mark).
 fn turn_inline_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
     turn_inline(turn, width).0
 }
@@ -832,41 +831,33 @@ fn turn_inline(turn: &Turn, width: usize) -> (Vec<Line<'static>>, Vec<(usize, us
     let mut offsets: Vec<(usize, usize)> = Vec::new();
     // The body starts at line 0 (there is no `WCODE` head).
     let mut off = 0usize;
-    // The `¹` ordinal: the count of `ToolCall`s seen (one per-turn series).
+    // The `ToolCall` ordinal: the count seen (one per-turn series). It selects the
+    // tool (`turn.tools.get(refn - 1)`); it is NEVER printed (D021).
     let mut refn = 0usize;
-    // Whether the line just emitted is prose (a `¹` may attach) or a tool row —
-    // the structural "suppressed on a text-less round" rule (D009 §4).
-    let mut tail_is_prose = false;
     for (i, block) in turn.content.iter().enumerate() {
         match block {
             ContentBlock::Text { text } => {
                 let lines = markdown::render(text, width);
-                tail_is_prose |= !lines.is_empty();
                 off += lines.len();
                 out.extend(lines);
             }
             ContentBlock::Thinking { text } => {
                 // The affordance belongs to the leading `Thinking` only.
                 let lines = thinking_block_lines(text, width, turn.thinking_open, i == 0);
-                tail_is_prose = true;
                 off += lines.len();
                 out.extend(lines);
             }
             ContentBlock::ToolCall { .. } => {
                 refn += 1;
-                if tail_is_prose && let Some(last) = out.last_mut() {
-                    last.spans.push(Span::styled(footnote_mark(refn), link()));
-                }
                 // Mid-run: the assistant message commits BEFORE
                 // `ToolExecutionStart`, so the result may not be in `tools` yet —
-                // emit the mark, but no panel.
+                // no panel is emitted for it.
                 if let Some(tool) = turn.tools.get(refn - 1) {
                     offsets.push((refn - 1, off));
                     let lines = tool_inline_lines(refn, tool, width);
                     off += lines.len();
                     out.extend(lines);
                 }
-                tail_is_prose = false;
             }
         }
     }
@@ -1123,11 +1114,6 @@ fn content_lines(
     elapsed: Option<std::time::Duration>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    // The `¹` reference ordinal, PER MESSAGE (reset each `content_lines` call).
-    // The foot's note number is per TURN, so the two coincide whenever the
-    // non-final rounds carry no prose (the usual `A(tc) → T → … → A(answer)`
-    // shape, where the text-less rounds emit no reference at all).
-    let mut refn = 0usize;
     for (i, block) in content.iter().enumerate() {
         match block {
             ContentBlock::Text { text } => {
@@ -1149,16 +1135,9 @@ fn content_lines(
                     lines.extend(thinking_block_lines(text, width, thinking_open, i == 0));
                 }
             }
-            ContentBlock::ToolCall { .. } => {
-                // A printed superscript reference to the turn's foot (the note
-                // list). SUPPRESSED when the block has emitted no prose yet: a
-                // text-less tool-call round has no sentence to mark, and a
-                // replayed/orphan tool is still numbered in the foot, unmarked.
-                refn += 1;
-                if let Some(last) = lines.last_mut() {
-                    last.spans.push(Span::styled(footnote_mark(refn), link()));
-                }
-            }
+            // A tool call in a committed message renders as its own inline tree
+            // (D009); it emits nothing here (no reference mark, D021).
+            ContentBlock::ToolCall { .. } => {}
         }
     }
     if live {
@@ -1171,16 +1150,6 @@ fn content_lines(
         }
     }
     lines
-}
-
-/// The superscript footnote mark for the n-th note of a turn: `¹²³…` for 1..=9,
-/// the ASCII-clean `[n]` for n >= 10.
-fn footnote_mark(n: usize) -> String {
-    const MARKS: [char; 9] = ['¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-    match n.checked_sub(1).and_then(|i| MARKS.get(i)) {
-        Some(c) => c.to_string(),
-        None => format!("[{n}]"),
-    }
 }
 
 /// One tool's head row (D010/T1): `├ name  target`, the `note · ms` stats and
@@ -2298,11 +2267,6 @@ fn user() -> Style {
 /// A quieter grey than [`dim`] where color is available.
 fn muted() -> Style {
     theme::theme().muted
-}
-
-/// A markdown link — the turn's `¹` footnote reference shares it.
-fn link() -> Style {
-    theme::theme().link
 }
 
 /// The overlay / popup border and its title.
@@ -4647,25 +4611,14 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn the_committed_turn_marks_the_reference_at_the_call_site() {
+    fn two_text_less_tool_calls_render_once_each() {
         let mut app = App::new();
-        push_assistant(&mut app, "Some prose.");
-        push_tool(&mut app, "bash", "out", false, None);
-        let text = buffer_text(&render(&mut app, 70, 30));
-        // The `¹` rides the prose, at the call site, above its inline tool.
-        let mark = text.find('¹').expect("the reference mark");
-        let tool = text.find("├ bash").expect("the inline tool");
-        assert!(mark < tool, "the mark precedes its tool:\n{text}");
-    }
-
-    #[test]
-    fn a_text_less_round_marks_no_prose_but_still_renders_its_tool() {
-        let mut app = App::new();
-        // Two tool calls with no prose between them: no `¹`, but both render.
+        // Two tool calls with no prose between them: no reference mark (there
+        // never is now, D021), and both render.
         push_tool(&mut app, "bash", "one", false, None);
         push_tool(&mut app, "bash", "two", false, None);
         let text = buffer_text(&render(&mut app, 70, 30));
-        assert!(!text.contains('¹'), "no mark on a text-less round:\n{text}");
+        assert!(!text.contains('¹'), "no reference mark:\n{text}");
         assert!(
             text.matches("├ bash").count() == 2,
             "both tools still render (once each):\n{text}"
@@ -5393,15 +5346,6 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn footnote_mark_maps_1_to_9_then_falls_back_to_ascii() {
-        assert_eq!(footnote_mark(1), "¹");
-        assert_eq!(footnote_mark(3), "³");
-        assert_eq!(footnote_mark(9), "⁹");
-        assert_eq!(footnote_mark(10), "[10]");
-        assert_eq!(footnote_mark(12), "[12]");
-    }
-
-    #[test]
     fn a_rendered_turn_shows_its_tool_inline() {
         let mut app = App::new();
         push_bash_panel(&mut app, "ls", "/w", "ok");
@@ -5415,8 +5359,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn the_superscript_is_present_with_prose_and_absent_when_textless() {
-        // A reply with prose + a tool call emits a `¹` at the call position.
+    fn no_reference_mark_is_emitted_for_a_tool_call() {
+        // A reply with prose + a tool call emits NO reference mark (D021).
         let with = content_lines(
             &[
                 ContentBlock::Text {
@@ -5437,9 +5381,9 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text.contains('¹'), "the reference is present: {text:?}");
+        assert!(!text.contains('¹'), "no reference mark: {text:?}");
 
-        // A text-less tool-call round emits no reference (and no line at all).
+        // A text-less tool-call round emits no line at all.
         let without = content_lines(
             &[ContentBlock::ToolCall {
                 id: "c".into(),
