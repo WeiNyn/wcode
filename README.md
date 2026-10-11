@@ -295,10 +295,18 @@ auto-discovery only — the `./.wcode/{config,team}.toml` overlays and the
 `./.wcode/agents/` scan. The global `config.toml` and the global
 `~/.config/wcode/agents/` scan are not project config and still load.
 
+Named project teams are one file per team under `./.wcode/teams/<name>.toml`,
+selected with `--team <name>` (mutually exclusive with `--config`); its
+`[[team]]` replaces the project `team.toml`'s wholesale and suppresses the
+project `./.wcode/agents/` scan ("use this team instead"). The directory is the
+name list the TUI/VS Code `/team` picker walks.
+
 The repo ships `.wcode/team.toml` as exactly this — the `[orchestrator]` guidelines
 and `[tools] grep/find = true`, with the members in `.wcode/agents/*.md` and the
 provider/model left in the global config — so here `wcode` (or `wcode --agents`)
-starts the full team with no flags.
+starts the full team with no flags. It also ships the named teams
+`.wcode/teams/{recon,pair,full-stack}.toml` and `.wcode/workflow.toml`, a
+`[workflow]` plan template for `--config .wcode/workflow.toml --task "…"`.
 
 Keyless local OpenAI-compatible endpoints (Ollama, llama.cpp, vLLM, ... over
 `localhost` / `127.0.0.1` / `[::1]`) work without a key — wcode sends a
@@ -332,6 +340,10 @@ The interactive path: with no `-p`, `wcode` starts a full-screen TUI when stdin
 and stdout are a terminal, and the line REPL otherwise. `--tui`/`--no-tui` force
 either; `-p`, `serve`, and piped input always take the non-TUI path. The TUI
 renders the same `AgentEvent` stream, over a local session or a `--socket` one.
+
+The [`editors/vscode/`](editors/vscode) extension is a second **client** of the
+same kernel: it spawns `wcode serve --stdio` and speaks the same frame protocol
+as the TUI.
 
 TUI keys: `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Up`/`Down` recall
 prompts · `PgUp`/`PgDn` (or the wheel) scroll · `Esc`/`Ctrl-C` cancel a run or
@@ -424,6 +436,7 @@ Output: text streams to stdout, thinking and tool output are dimmed
 | `spawn` | spawn a worker agent for a task — it runs its own session and reports its result back. Returns the worker's address (use it with `message`). Optional `model`/`role`/`tools`/`base_url`/`api_key`/`read_only`/`effort`; `to` defines the worker on a served peer (`--peer`/`[peers]` name or `agent:<id>`) instead of in-process. Root-only |
 | `message` | send a message to another agent session: `to` is the recipient's address (omit → your orchestrator); `mode` is `wake` (default), `notify`, `interrupt`, or `ask` |
 | `peers` | list the peers you can message, as `name -> address [state]` |
+| `member` | inspect or stop a teammate without waiting for its turn: `op` is `status` (its last completed work, no model call), `ask` (a tool-free question to the member's own model; needs `text`), or `cancel` (stop its in-flight run). `to` is the member's name or address. Root-only |
 | `task` | plan and track the team's tasks: `op` is `create` (optional `deps`/`gate`), `assign`, `depends`, `complete`, `reject`, `reset`, or `list`. Root-only |
 
 `edit`/`edits`/`write` share a mutation lock and write via a temp file +

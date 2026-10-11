@@ -45,6 +45,10 @@ palette (`theme.rs`), tool-output expand/collapse, and a transcript browse mode.
   edit, edits, write.
 - `rtk.rs` — optional rtk hook (bash-output proxy).
 
+`editors/vscode/` — a second client (a VS Code extension): it spawns
+`wcode serve --stdio` and speaks the same frame protocol as the TUI, never a
+second kernel.
+
 ## Commands
 
 - Build: `cargo build` (or `cargo build --bin wcode`)
