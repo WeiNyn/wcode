@@ -1,4 +1,7 @@
-/* Dark terminal, always. Zero external requests: system font stack only. */
+/* Dark terminal by default, with an opt-in e-ink (paper) reading — the header
+   toggle swaps the token set below for a zero-hue, zero-motion paper theme that
+   reuses every existing class and SVG hook. Zero external requests: system font
+   stack only. */
 :root {
   --bg: #0a0e14;
   --panel: #11161e;
@@ -44,7 +47,7 @@ h2 { font-size: 1.35rem; border-bottom: 1px solid var(--border); padding-bottom:
 h3 { font-size: 1.02rem; margin: 0 0 0.35rem; }
 
 /* Hero */
-.hero { padding: 2.5rem 0 0.5rem; }
+.hero { padding: 2.5rem 0 0.5rem; position: relative; }
 .prompt { color: var(--muted); margin: 0 0 1.4rem; }
 .prompt .p { color: var(--prompt); }
 .cursor {
@@ -70,6 +73,25 @@ h3 { font-size: 1.02rem; margin: 0 0 0.35rem; }
 }
 .btn.ghost { background: transparent; color: var(--accent); }
 .btn:hover { text-decoration: none; opacity: 0.85; }
+
+/* Theme toggle (header). A real button; aria-pressed carries the state. */
+.theme-toggle {
+  position: absolute;
+  top: 2.5rem;
+  right: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0.4rem 0.7rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--fg); border-color: var(--accent); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.theme-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 
 /* Terminal mock */
 .term {
@@ -151,3 +173,31 @@ pre code { background: none; padding: 0; color: var(--fg); }
 /* Footer */
 footer { max-width: 62rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; border-top: 1px solid var(--border); color: var(--muted); }
 footer .c { font-size: 0.9rem; }
+
+/* E-ink (paper) theme — opt-in, via the header toggle. It re-reads the SAME
+   token set as paper + ink and reuses every existing class and SVG hook, so
+   nothing is forked: zero hue, zero motion, crisp 1px rules. Dark stays the
+   default; this block is inert until html[data-theme="eink"] is set. */
+html[data-theme="eink"] {
+  color-scheme: light;
+  --bg: #f6f4ed;
+  --panel: #ece9df;
+  --panel-2: #fbf9f4;
+  --fg: #16150f;
+  --muted: #444239;   /* still 8.3:1 on --panel: legible, not a washed-out gray */
+  --border: #2b2921;
+  --accent: #16150f;  /* no hue: accent, prompt, code, warn all read as ink */
+  --prompt: #16150f;
+  --code: #16150f;
+  --warn: #16150f;
+  --glow: transparent; /* kills the radial glow */
+}
+
+html[data-theme="eink"] body { background: var(--bg); }           /* no gradient */
+html[data-theme="eink"] a { text-decoration: underline; }          /* links = ink + rule */
+html[data-theme="eink"] .btn { text-decoration: none; }            /* ...except buttons */
+html[data-theme="eink"] .cursor { animation: none; }               /* no motion */
+html[data-theme="eink"] .term { box-shadow: none; }                /* no shadow */
+html[data-theme="eink"] code { border: 1px solid var(--border); }  /* inline code = framed box */
+html[data-theme="eink"] pre code { border: none; }                 /* pre is already framed */
+html[data-theme="eink"] .theme-toggle:hover { background: var(--panel); }

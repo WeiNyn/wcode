@@ -26,11 +26,40 @@
     <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
+    <script>
+      /* Theme: dark by default. The header toggle opts into the e-ink reading
+         and is remembered in localStorage. Set before first paint (no flash). */
+      (function () {
+        var KEY = "wcode-theme";
+        try {
+          if (localStorage.getItem(KEY) === "eink") {
+            document.documentElement.setAttribute("data-theme", "eink");
+          }
+        } catch (e) {}
+        function wire() {
+          var root = document.documentElement;
+          var btn = document.getElementById("theme-toggle");
+          if (!btn) return;
+          var on = root.getAttribute("data-theme") === "eink";
+          btn.setAttribute("aria-pressed", on ? "true" : "false");
+          btn.addEventListener("click", function () {
+            on = !on;
+            if (on) root.setAttribute("data-theme", "eink");
+            else root.removeAttribute("data-theme");
+            btn.setAttribute("aria-pressed", on ? "true" : "false");
+            try { localStorage.setItem(KEY, on ? "eink" : "dark"); } catch (e) {}
+          });
+        }
+        if (document.readyState !== "loading") wire();
+        else document.addEventListener("DOMContentLoaded", wire);
+      })();
+    </script>
   </head>
   <body>
     <main>
       <!-- Hero: teams & workflows, up front -->
       <header class="hero">
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false">E-ink</button>
         <p class="prompt"><span class="p">$</span> wcode --agents<span class="cursor"></span></p>
         <h1>wcode</h1>
         <p class="pitch">
