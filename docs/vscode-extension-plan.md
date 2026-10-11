@@ -1,6 +1,8 @@
 # VS Code extension — plan
 
-**Status:** design locked; P0 not started.
+**Status:** shipped — `editors/vscode/` is a second client of the kernel, released
+as a `.vsix` (`ext-v0.0.x`); this page is the design record (see
+[`next-steps.md`](next-steps.md) items 53–56).
 **Companion docs:** the surface model this slots into is
 [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md) (§surface);
 the client it must not drift from is `crates/wcode-tui`.
