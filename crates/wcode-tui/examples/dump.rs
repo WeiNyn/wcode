@@ -196,7 +196,7 @@ fn fixture() -> App {
                     ContentBlock::ToolCall {
                         id: "b1".into(),
                         name: "bash".into(),
-                        arguments: json!({ "command": "cargo test --workspace 2>&1 | tail -40" }),
+                        arguments: json!({ "command": "cargo test --workspace" }),
                     },
                     ContentBlock::ToolCall {
                         id: "r1".into(),
@@ -267,23 +267,27 @@ fn usage_msg(input_tokens: u64) -> AgentMessage {
     }
 }
 
-/// 30 lines — long enough that the collapsed `bash` preview elides the tail.
+/// 30 lines — long enough that the collapsed `bash` elides the tail; a trailing
+/// `exit code: 0` so the collapsed head's outcome note reads `exit 0 · …`.
 fn bash_output() -> String {
-    (1..=30)
+    let mut out = (1..=30)
         .map(|i| format!("test result_{i:02} ... ok    {} passed; 0 failed", i * 7 % 53))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    out.push_str("\nexit code: 0");
+    out
 }
 
-/// A short file excerpt, shown expanded.
+/// A short file excerpt, shown expanded. The `read` form (`{n}\t{line}`), so the
+/// collapsed head's outcome note reads `<N> lines · …`.
 const READ_OUTPUT: &str = "\
-  1  pub struct Config {
-  2      pub model: String,
-  3      pub base_url: Option<String>,
-  4  }
-  5  impl Config {
-  6      pub fn load(path: &Path) -> Result<Self, LoadError> {
-  7          let raw = std::fs::read_to_string(path)?;
-  8          toml::from_str(&raw).map_err(Into::into)
-  9      }
- 10  }";
+1\tpub struct Config {
+2\t    pub model: String,
+3\t    pub base_url: Option<String>,
+4\t}
+5\timpl Config {
+6\t    pub fn load(path: &Path) -> Result<Self, LoadError> {
+7\t        let raw = std::fs::read_to_string(path)?;
+8\t        toml::from_str(&raw).map_err(Into::into)
+9\t    }
+10\t}";

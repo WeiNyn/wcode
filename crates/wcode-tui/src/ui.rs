@@ -889,32 +889,211 @@ fn tree_end_row() -> Line<'static> {
     Line::from(Span::styled(format!("{}{TREE_END}", tree_indent()), dim()))
 }
 
-/// One tool's inline tree (D010/T1): a single head row — `├ name  target` with
-/// the `note · ms` (or `+a −r · ms`) stats and the `▸`/`▣` affordances
-/// right-aligned — then the body rows under `│   ` (params + output/diff/preview
-/// plus the `… +N more` hint), closed by a `└` terminator when there is a body.
+/// One tool's inline tree (D010/T1). The state map (W016 §5.1 / A1):
+///
+/// - **Collapsed, done** (`done && !expanded`) → [`collapsed_head_row`]: ONE
+///   logical row (the head, with the params inlined and the outcome note). No
+///   `│   ` body, no `└`.
+/// - **Collapsed, running** (`!done && !expanded`) → [`collapsed_head_row`] plus
+///   exactly ONE `│   ` live-tail row (`last_line`); no note, no `└` (O2).
+/// - **Expanded** (`expanded`, incl. `is_error`) → the UNCHANGED shape: the
+///   name-only head ([`tool_head_row`]) + the `│   key  value` params block
+///   ([`panel_param_lines`]) + the output/diff body ([`tool_panel_body`]) + a `└`
+///   terminator when there is a body.
 ///
 /// The name prints ONCE; there is no `N` ordinal and no separate `✓ name · note`
 /// row. `n` is the tool's 1-based call order (kept for the render walk); row 0 is
 /// the D32 toggle row, and `Block::Tool` also uses it with `n = 1`.
 ///
-/// A tool's **params always render** — running or done, collapsed or expanded.
-/// The `▸`/`▾` disclosure and `Ctrl-T` govern only the **output body** (the
-/// output/diff preview and the `… +N more` hint), never the params (W015):
-/// params are the call's identity.
+/// A tool's **params are never hidden** (D019/W016): collapsed, the first value
+/// rides the head; expanded, they re-draw as the `│   key  value` rows.
 fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
-    let mut body: Vec<Line<'static>> = Vec::new();
-    body.extend(panel_param_lines(tool, width));
-    body.extend(tool_panel_body(tool, width, expanded));
-    let mut out = vec![tool_head_row(tool, width)];
-    if !body.is_empty() {
-        out.extend(body);
-        out.push(tree_end_row());
+    if expanded {
+        let mut out = vec![tool_head_row(tool, width)];
+        let mut body = panel_param_lines(tool, width);
+        body.extend(tool_panel_body(tool, width, true));
+        if !body.is_empty() {
+            out.extend(body);
+            out.push(tree_end_row());
+        }
+        return out;
+    }
+    // Collapsed (done OR running): the one head row, params inlined.
+    let mut out = collapsed_head_row(tool, width);
+    // A running tool keeps exactly ONE live-tail row under `│   ` (O1); no note,
+    // no `└`.
+    if !tool.done
+        && let Some(tail) = last_line(&tool.output)
+    {
+        out.push(prefixed(&tree_body_prefix(), &tail, dim()));
     }
     out
 }
 
+/// The collapsed tool's ONE logical row (W016 §5.1):
+///
+/// ```text
+///   ├ <name>  <first-param value (bare)>  <key=value …>  …fill…  <note · ms>  ▸ ▣
+/// ```
+///
+/// The `▸`/`▣` are pinned at [`note_affordance_cols`] on row 0, so the D32 hit map
+/// is unchanged. The FIRST param's value prints BARE (its key dropped) in the
+/// [`param_syntax`] highlight; the rest print `key=value`, the value quoted iff it
+/// contains a space. When `tool.params` is empty (a reseeded/replayed tool) the head
+/// inlines `tool.target.or(tool.path)` — the same fallback as [`tool_head_row`]
+/// (B2), so the target never drops off a collapsed tool.
+///
+/// The note ([`completion_note`], else the `summary_line` fallback) is capped at 40
+/// chars and dropped when crowded — the note, then the ms, then both (A4; the ONLY
+/// place the cap is applied). A too-long head WRAPS char-exact onto a `│   `-aligned
+/// continuation (never a `…` clip), so a long `bash` command shows in FULL
+/// (D31/D019). Returns ≥1 row; row 0 is the D32 toggle/copy row.
+fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+    let prefix = format!("{}{TREE_BRANCH}", tree_indent());
+    let name_style = if tool.is_error { error_style() } else { tool_name() };
+    // The head run: the prefix, the name, then the inlined params.
+    let mut content: Vec<Span<'static>> = vec![
+        Span::styled(prefix.clone(), dim()),
+        Span::styled(tool.name.clone(), name_style),
+    ];
+    let mut len = prefix.chars().count() + tool.name.chars().count();
+    if tool.params.is_empty() {
+        // B2: a reseeded tool whose target came from `ToolExecutionEnd`.
+        if let Some(target) = tool.target.as_ref().or(tool.path.as_ref()) {
+            content.push(Span::styled("  ".to_string(), dim()));
+            content.push(Span::styled(target.clone(), theme::theme().body));
+            len += 2 + target.chars().count();
+        }
+    } else {
+        // The FIRST param's value prints bare (its key dropped), highlighted.
+        let (first_key, first_value) = &tool.params[0];
+        let value = inline_param_value(tool, first_key, first_value);
+        content.push(Span::styled("  ".to_string(), dim()));
+        len += 2 + span_width(&value);
+        content.extend(value);
+        // The rest print `key=value`, the value quoted iff it contains a space.
+        for (key, value) in &tool.params[1..] {
+            let shown = if value.contains(' ') {
+                format!("\"{value}\"")
+            } else {
+                value.clone()
+            };
+            content.push(Span::styled("  ".to_string(), dim()));
+            content.push(Span::styled(format!("{key}="), dim()));
+            content.push(Span::styled(shown.clone(), theme::theme().body));
+            len += 2 + key.chars().count() + 1 + shown.chars().count();
+        }
+    }
+    // The right run: the `▸ ▣` affix (pinned) carrying the `note · ms` stats,
+    // selected by the 40-cap drop-when-crowded rule (A4).
+    let aff = "▸ ▣";
+    let note = if tool.done {
+        let raw = completion_note(tool).unwrap_or_else(|| summary_line(&tool.output).0);
+        (!raw.is_empty()).then(|| truncate(&raw, 40))
+    } else {
+        None
+    };
+    let ms = tool.done.then(|| tool.duration_ms.map(format_ms)).flatten();
+    let tail_len = |stats: &str| {
+        if stats.is_empty() {
+            aff.chars().count()
+        } else {
+            stats.chars().count() + 3 + aff.chars().count()
+        }
+    };
+    let note_ms = join_stats(note.as_deref(), ms.as_deref());
+    let ms_only = join_stats(None, ms.as_deref());
+    // Keep ≥1 fill column, else drop the note (keep ms), else drop both.
+    let stats = if len + tail_len(&note_ms) < width {
+        note_ms
+    } else if len + tail_len(&ms_only) < width {
+        ms_only
+    } else {
+        String::new()
+    };
+    let mut tail: Vec<Span<'static>> = Vec::new();
+    if !stats.is_empty() {
+        tail.push(Span::styled(stats, dim()));
+        tail.push(Span::styled("   ".to_string(), dim()));
+    }
+    tail.push(Span::styled(aff.to_string(), dim()));
+    let tail_w = span_width(&tail);
+
+    // Row 0 keeps the affix; an over-long head wraps onto `│   `-aligned rows.
+    let first_avail = width.saturating_sub(tail_w);
+    if len <= first_avail {
+        let fill = width.saturating_sub(len + tail_w);
+        let mut spans = content;
+        spans.push(Span::styled(" ".repeat(fill), dim()));
+        spans.extend(tail);
+        return vec![Line::from(spans)];
+    }
+    let chars: Vec<(char, Style)> = content
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+    let take = first_avail.min(chars.len());
+    let mut head = spans_from_chars(&chars[..take]);
+    head.extend(tail);
+    let mut rows = vec![Line::from(head)];
+    let cont = tree_body_prefix();
+    let cont_avail = width.saturating_sub(cont.chars().count()).max(1);
+    for chunk in chars[take..].chunks(cont_avail) {
+        let mut spans = vec![Span::styled(cont.clone(), dim())];
+        spans.extend(spans_from_chars(chunk));
+        rows.push(Line::from(spans));
+    }
+    rows
+}
+
+/// The styled spans of a collapsed head's first-param VALUE — syntax-highlighted
+/// via [`param_syntax`] (a `bash` command as `sh`, a file tool by its extension),
+/// else `body` strength.
+fn inline_param_value(tool: &Tool, key: &str, value: &str) -> Vec<Span<'static>> {
+    match param_syntax(tool, key) {
+        Some(info) => {
+            let mut hl = markdown::CodeHighlight::new(&info, theme::color_mode());
+            if hl.is_active() {
+                hl.spans(value)
+            } else {
+                vec![Span::styled(value.to_string(), theme::theme().body)]
+            }
+        }
+        None => vec![Span::styled(value.to_string(), theme::theme().body)],
+    }
+}
+
+/// The display width of a span run (sum of the char counts).
+fn span_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Join a note and an ms into `note · ms`, dropping either when absent/empty — the
+/// collapsed head's stat string (`tool_stats`'s join, parameterized for the
+/// drop-when-crowded retry).
+fn join_stats(note: Option<&str>, ms: Option<&str>) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(n) = note.filter(|n| !n.is_empty()) {
+        parts.push(n);
+    }
+    if let Some(m) = ms {
+        parts.push(m);
+    }
+    parts.join(" · ")
+}
+
+/// Coalesce a `(char, style)` run into spans — the wrap's continuation builder.
+fn spans_from_chars(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for (c, style) in chars {
+        match out.last_mut() {
+            Some(last) if last.style == *style => last.content.to_mut().push(*c),
+            _ => out.push(Span::styled(c.to_string(), *style)),
+        }
+    }
+    out
+}
 /// Render the live (streaming) assistant message for `width` — the same body
 /// `draw_transcript` used inline, with the streaming cursor (`live = true`).
 /// Empty for a non-assistant message.
@@ -1053,30 +1232,151 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A tool's head-row stats: the summary line (or the diff's `+a −r`) joined with
-/// the wall-clock ms by ` · `. Empty while the tool is still running (no note, no
-/// timing yet), so the head row carries no stats.
+/// The collapsed head's outcome note (W016 §5.2): derived purely from
+/// `tool.output`/`tool.diff` — no kernel/wire/`ToolOutput` change. `Some(note)`
+/// only when `tool.done && !tool.is_error`; `None` when nothing is derivable, so
+/// the caller keeps the [`summary_line`] fallback.
+///
+/// Dispatch is by `tool.name` FIRST, before any `tool.diff` read (A2):
+///
+/// | `tool.name` | note |
+/// |---|---|
+/// | `read` | `N line(s)` ([`count_read_lines`]) |
+/// | `write` | `N line(s)` ([`parse_wrote_lines`] — NOT the diff, A2) |
+/// | `edit`/`edits` | `+a −r` ([`crate::app::diff_counts`]) only when `diff.is_some()` (B1) |
+/// | `bash` | `exit N` ([`parse_exit_code`]) |
+/// | `grep` | `N hit(s)` ([`count_grep_hits`]) |
+/// | `find` | `N file(s)` ([`count_find_paths`]) |
+/// | else (incl. `ast_edit`) | `None` → the `summary_line` fallback |
+///
+/// `ast_edit` NEVER sets `diff` (B1) and so is NOT in the `+a −r` branch. The note
+/// is returned UNCAPPED — [`collapsed_head_row`] applies the 40-cap (A4).
+fn completion_note(tool: &Tool) -> Option<String> {
+    if !tool.done || tool.is_error {
+        return None;
+    }
+    match tool.name.as_str() {
+        "read" => count_read_lines(&tool.output).map(|n| plural(n, "line")),
+        "write" => parse_wrote_lines(&tool.output).map(|n| plural(n, "line")),
+        "edit" | "edits" => tool.diff.as_deref().map(|diff| {
+            let (added, removed) = crate::app::diff_counts(diff);
+            format!("+{added} −{removed}")
+        }),
+        "bash" => parse_exit_code(&tool.output).map(|code| format!("exit {code}")),
+        "grep" => count_grep_hits(&tool.output).map(|n| plural(n, "hit")),
+        "find" => count_find_paths(&tool.output).map(|n| plural(n, "file")),
+        _ => None,
+    }
+}
+
+/// `N word` — singular only at `1` (`1 line` / `2 lines`).
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+/// A tool's head-row stats (the EXPANDED path): the [`completion_note`] — else the
+/// [`summary_line`] fallback — joined with the wall-clock ms by ` · `. Empty while
+/// the tool is still running (no note, no timing yet), so the head carries no stats.
 fn tool_stats(tool: &Tool) -> String {
     if !tool.done {
         return String::new();
     }
-    let note = match &tool.diff {
-        Some(diff) => {
-            let (added, removed) = crate::app::diff_counts(diff);
-            format!("+{added} −{removed}")
-        }
-        None => summary_line(&tool.output).0,
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if !note.is_empty() {
-        parts.push(note);
-    }
-    if let Some(ms) = tool.duration_ms {
-        parts.push(format_ms(ms));
-    }
-    parts.join(" · ")
+    let note = completion_note(tool).unwrap_or_else(|| summary_line(&tool.output).0);
+    let ms = tool.duration_ms.map(format_ms);
+    join_stats((!note.is_empty()).then_some(note.as_str()), ms.as_deref())
 }
 
+/// Count a `read` page's rows: lines matching `^\d+\t` (the `{n}\t{line}` form,
+/// read.rs:93). The page note `… (M more lines — re-read with offset/limit to
+/// continue)` (read.rs:98) and `(empty file)` (read.rs:88) are NOT rows;
+/// `(empty file)` → `Some(0)` (A5). `Some(n)` when the text carries ≥1 numbered
+/// row; `None` otherwise. Reports the SHOWN page, not the file total (O4).
+fn count_read_lines(output: &str) -> Option<usize> {
+    let mut rows = 0;
+    let mut seen = false;
+    for line in output.lines() {
+        if line == "(empty file)" {
+            return Some(0);
+        }
+        if is_read_row(line) {
+            rows += 1;
+            seen = true;
+        }
+    }
+    seen.then_some(rows)
+}
+
+/// Whether `line` is a `read` row: `^\d+\t` (a run of ASCII digits, then a tab).
+fn is_read_row(line: &str) -> bool {
+    let mut digits = false;
+    for c in line.chars() {
+        if c.is_ascii_digit() {
+            digits = true;
+        } else {
+            return digits && c == '\t';
+        }
+    }
+    false
+}
+
+/// Parse `wrote N line(s) (B bytes) to P` (write.rs:59, §5.3) → `Some(N)`. `None`
+/// when absent (e.g. a `write …: <err>` line).
+fn parse_wrote_lines(output: &str) -> Option<usize> {
+    let rest = output.lines().next()?.strip_prefix("wrote ")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with(" line") {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Parse the LAST line matching `^exit code: (\d+)$` (bash.rs:477) → `Some(code)`.
+/// `terminated by signal` (bash.rs:481) → `None`. Only the trailing line counts.
+fn parse_exit_code(output: &str) -> Option<u32> {
+    output.lines().last()?.strip_prefix("exit code: ")?.parse().ok()
+}
+
+/// Count `grep` hit rows: lines ENDING `  <--` (grep.rs:152); context rows do NOT
+/// count. A5: `grep: no matches for /…/ in …` (grep.rs:159) → `Some(0)`; the
+/// truncation sentinel `[grep: truncated at N …]` (grep.rs:143) does NOT suppress
+/// the count — the shown hit rows count. `None` when the text is not a `grep`
+/// result.
+fn count_grep_hits(output: &str) -> Option<usize> {
+    let mut hits = 0;
+    let mut recognized = false;
+    for line in output.lines() {
+        if line.ends_with("  <--") {
+            hits += 1;
+            recognized = true;
+        } else if line.starts_with("[grep: truncated") || line.starts_with("grep: no matches") {
+            recognized = true;
+        }
+    }
+    recognized.then_some(hits)
+}
+
+/// Count `find` path rows (one path per line, find.rs:102). A5: `find: nothing
+/// matched under …` (find.rs:107) → `Some(0)`; the truncation sentinel
+/// `[find: truncated at N entries]` (find.rs:91) does NOT suppress the count — the
+/// shown path rows count. `None` when not a `find` result. A `kind=dir` call counts
+/// dirs as files (O3 — flagged, not fixed).
+fn count_find_paths(output: &str) -> Option<usize> {
+    let mut paths = 0;
+    let mut recognized = false;
+    for line in output.lines() {
+        if line.starts_with("[find: truncated") || line.starts_with("find: nothing matched") {
+            recognized = true;
+        } else if !line.trim().is_empty() {
+            paths += 1;
+            recognized = true;
+        }
+    }
+    recognized.then_some(paths)
+}
 /// The note head's affordance cells (0-based from the row's left edge): the
 /// `▸`/`▾` toggle glyph at `width - 3` and the `▣` copy at `width - 1` (the
 /// `▸ ▣` run flush right).
@@ -2939,19 +3239,26 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             .collect::<Vec<_>>()
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
-        let text = buffer_text(&render(&mut app, 70, 20));
-        // One tree row carries the head: the name ONCE, the `line-1` stats, and
-        // the `▸`/`▣` affordances; a collapsed tool shows a dim preview + hint.
-        assert!(!text.contains("── notes"), "no foot rule:\n{text}");
-        assert!(text.contains("├ bash"), "the inline tool head:\n{text}");
+        // W016: collapsed, the tool is ONE head row — the name ONCE, the `line-1`
+        // stats, the `▸`/`▣` affordances; no preview body, no hint.
+        let collapsed = buffer_text(&render(&mut app, 70, 20));
+        assert!(!collapsed.contains("── notes"), "no foot rule:\n{collapsed}");
+        assert!(collapsed.contains("├ bash"), "the inline tool head:\n{collapsed}");
         assert_eq!(
-            text.matches("bash").count(),
+            collapsed.matches("bash").count(),
             1,
-            "the name prints once — no separate `✓` row:\n{text}"
+            "the name prints once — no separate `✓` row:\n{collapsed}"
         );
-        assert!(text.contains("line-1"), "the stats summary:\n{text}");
-        assert!(text.contains("line-2"), "the preview:\n{text}");
-        assert!(text.contains("… +15 more lines"), "the hint:\n{text}");
+        assert!(collapsed.contains("line-1"), "the stats summary:\n{collapsed}");
+        assert!(!collapsed.contains("line-2"), "the body is collapsed:\n{collapsed}");
+        assert!(!collapsed.contains("more lines"), "no hint while collapsed:\n{collapsed}");
+
+        // Expanded: the full body (the preview and the `… +N more` hint are the
+        // collapsed-only path, retired by W016).
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        let expanded = buffer_text(&render(&mut app, 70, 25));
+        assert!(expanded.contains("line-2"), "the body:\n{expanded}");
+        assert!(expanded.contains("line-20"), "the full body:\n{expanded}");
     }
 
     #[test]
@@ -4742,6 +5049,38 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         ));
     }
 
+    /// Push a finished named tool (start → end) with a `diff` and a `duration_ms`,
+    /// so the outcome note is derivable (W016).
+    fn push_panel_full(
+        app: &mut App,
+        name: &str,
+        args: serde_json::Value,
+        output: &str,
+        diff: Option<&str>,
+        duration_ms: Option<u64>,
+    ) {
+        push_call(app, name, args);
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionStart {
+                call_id: "t".into(),
+                name: name.into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                call_id: "t".into(),
+                name: name.into(),
+                output: output.into(),
+                is_error: false,
+                diff: diff.map(str::to_string),
+                path: None,
+                duration_ms,
+            },
+        ));
+    }
+
     #[test]
     fn a_done_collapsed_bash_shows_its_command() {
         // W015: a finished, collapsed, non-error tool renders its params — the
@@ -4762,29 +5101,209 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn a_done_collapsed_tool_shows_no_target_on_the_head_when_params_render() {
-        // W015/§4: once params carry the value, the head is the bare name — the
-        // target inlines only as the params-empty fallback.
+    fn a_collapsed_tool_is_one_row() {
+        // A finished, collapsed tool is ONE row: the head (params inlined), no
+        // `│   ` body, no `└`.
         let mut app = App::new();
         push_panel(
             &mut app,
             "bash",
-            serde_json::json!({ "command": "cargo test -p wcode-cli" }),
-            "ok",
+            serde_json::json!({ "command": "make" }),
+            "built the world",
         );
         let text = buffer_text(&render(&mut app, 80, 20));
-        let head = text
-            .lines()
-            .find(|l| l.contains("├ bash"))
+        let lines: Vec<&str> = text.lines().collect();
+        let head = lines
+            .iter()
+            .position(|l| l.contains("├ bash"))
             .expect("the head row");
+        assert!(lines[head].contains("make"), "the command inlines: {text}");
         assert!(
-            !head.contains("cargo test -p wcode-cli"),
-            "the target must not inline once params render: {head:?}\n{text}"
+            lines
+                .get(head + 1)
+                .is_none_or(|l| !l.trim_start().starts_with('│')),
+            "the row after the head must not be a body row:\n{text}"
+        );
+        assert!(!text.contains('└'), "no terminator while collapsed:\n{text}");
+    }
+
+    #[test]
+    fn a_collapsed_tool_shows_its_outcome_note() {
+        // read: three `N\t` rows → `3 lines · 12ms`.
+        let mut app = App::new();
+        push_panel_full(
+            &mut app,
+            "read",
+            serde_json::json!({ "path": "x.rs" }),
+            "1\tone\n2\ttwo\n3\tthree\n",
+            None,
+            Some(12),
+        );
+        let text = buffer_text(&render(&mut app, 90, 20));
+        assert!(text.contains("3 lines · 12ms"), "read note:\n{text}");
+
+        // write: the amended output → `2 lines · 5ms`.
+        let mut app = App::new();
+        push_panel_full(
+            &mut app,
+            "write",
+            serde_json::json!({ "path": "x.rs" }),
+            "wrote 2 lines (10 bytes) to x.rs",
+            None,
+            Some(5),
+        );
+        let text = buffer_text(&render(&mut app, 90, 20));
+        assert!(text.contains("2 lines · 5ms"), "write note:\n{text}");
+
+        // bash: a trailing `exit code: 0` → `exit 0 · 1.2s`.
+        let mut app = App::new();
+        push_panel_full(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "make" }),
+            "building…\nbuilt\nexit code: 0",
+            None,
+            Some(1200),
+        );
+        let text = buffer_text(&render(&mut app, 90, 20));
+        assert!(text.contains("exit 0 · 1.2s"), "bash note:\n{text}");
+
+        // edit: a diff → `+1 −1 · 4ms`.
+        let mut app = App::new();
+        push_panel_full(
+            &mut app,
+            "edit",
+            serde_json::json!({ "path": "x.rs" }),
+            "edited",
+            Some("@@ -1 +1 @@\n-old\n+new"),
+            Some(4),
+        );
+        let text = buffer_text(&render(&mut app, 90, 20));
+        assert!(text.contains("+1 −1 · 4ms"), "edit note:\n{text}");
+    }
+
+    #[test]
+    fn a_long_bash_command_wraps_on_the_collapsed_head() {
+        let mut app = App::new();
+        let cmd = "cargo test -p wcode-cli --all-targets -- --nocapture --color=always --test-threads=1";
+        push_panel(&mut app, "bash", serde_json::json!({ "command": cmd }), "ok");
+        let text = buffer_text(&render(&mut app, 60, 20));
+        // The command wraps onto a `│   `-aligned continuation; the tail is
+        // reachable (no `…` clip).
+        assert!(text.contains("│"), "the wrap rides a `│` continuation:\n{text}");
+        let joined: String = text.split_whitespace().collect();
+        assert!(
+            joined.contains("--test-threads=1"),
+            "the tail must render in full:\n{text}"
         );
         assert!(
-            text.contains("cargo test -p wcode-cli"),
-            "the value rides the params rows:\n{text}"
+            !text.contains("--color=always…"),
+            "the wrapped command must not clip:\n{text}"
         );
+    }
+
+    #[test]
+    fn a_collapsed_tool_inlines_params_key_dropped() {
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "read",
+            serde_json::json!({ "path": "crates/wcode-tui/src/ui.rs", "offset": 40 }),
+            "ok",
+        );
+        let text = buffer_text(&render(&mut app, 90, 20));
+        // The FIRST param's key is dropped: the path prints bare.
+        assert!(
+            !text.contains("path=crates"),
+            "the first key must be dropped:\n{text}"
+        );
+        assert!(
+            text.contains("crates/wcode-tui/src/ui.rs"),
+            "the bare path value:\n{text}"
+        );
+        // The remaining params print `key=value`.
+        assert!(text.contains("offset=40"), "the rest print key=value:\n{text}");
+    }
+
+    // ---- W016 §5.2: the per-tool outcome counters (pure over literal strings) ----
+
+    #[test]
+    fn counts_read_lines_counts_numbered_rows() {
+        assert_eq!(count_read_lines("1\tone\n2\ttwo\n"), Some(2));
+        assert_eq!(count_read_lines("no tab here"), None);
+    }
+
+    #[test]
+    fn counts_read_lines_reads_the_empty_file_as_zero() {
+        assert_eq!(count_read_lines("(empty file)\n"), Some(0)); // A5
+    }
+
+    #[test]
+    fn counts_read_lines_excludes_the_page_note() {
+        let out = "1\tone\n2\ttwo\n\n… (3 more lines — re-read with offset/limit to continue)\n";
+        assert_eq!(count_read_lines(out), Some(2));
+    }
+
+    #[test]
+    fn counts_wrote_lines_parses_the_amended_string() {
+        assert_eq!(
+            parse_wrote_lines("wrote 12 lines (30 bytes) to a.rs"),
+            Some(12)
+        );
+        assert_eq!(parse_wrote_lines("wrote 1 line (5 bytes) to a.rs"), Some(1));
+        assert_eq!(parse_wrote_lines("write a.rs: boom"), None);
+    }
+
+    #[test]
+    fn counts_wrote_lines_reads_the_empty_write_as_zero() {
+        assert_eq!(parse_wrote_lines("wrote 0 lines (0 bytes) to a.rs"), Some(0));
+    }
+
+    #[test]
+    fn counts_exit_code_parses_the_trailing_exit_code() {
+        assert_eq!(parse_exit_code("built\nexit code: 0"), Some(0));
+        assert_eq!(parse_exit_code("exit code: 2"), Some(2));
+        // Only the trailing line counts (stdout may echo the text).
+        assert_eq!(parse_exit_code("exit code: 0\nsome trailing noise"), None);
+    }
+
+    #[test]
+    fn counts_exit_code_rejects_terminated_by_signal() {
+        assert_eq!(
+            parse_exit_code("out\nexit code: terminated by signal"),
+            None
+        );
+    }
+
+    #[test]
+    fn counts_grep_hits_counts_only_the_marker_rows() {
+        let out = "a.rs:1:fn main()  <--\na.rs:2:let x = 1;\n";
+        assert_eq!(count_grep_hits(out), Some(1));
+    }
+
+    #[test]
+    fn counts_grep_hits_reads_no_match_as_zero() {
+        assert_eq!(count_grep_hits("grep: no matches for /x/ in .\n"), Some(0)); // A5
+        assert_eq!(count_grep_hits("plain\n"), None);
+    }
+
+    #[test]
+    fn counts_grep_hits_counts_past_a_truncation_sentinel() {
+        let out = "a.rs:1:x  <--\nb.rs:2:y  <--\n[grep: truncated at 2 lines]\n";
+        assert_eq!(count_grep_hits(out), Some(2)); // A5
+        assert_eq!(count_grep_hits("[grep: truncated at 2 lines]\n"), Some(0));
+    }
+
+    #[test]
+    fn counts_find_paths_reads_nothing_matched_as_zero() {
+        assert_eq!(count_find_paths("find: nothing matched under .\n"), Some(0)); // A5
+    }
+
+    #[test]
+    fn counts_find_paths_counts_past_a_truncation_sentinel() {
+        let out = "a.rs\nb.rs\n[find: truncated at 2 entries]\n";
+        assert_eq!(count_find_paths(out), Some(2)); // A5
+        assert_eq!(count_find_paths("[find: truncated at 2 entries]\n"), Some(0));
     }
 
     #[test]
