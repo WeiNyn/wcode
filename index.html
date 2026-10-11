@@ -8,6 +8,21 @@
       name="description"
       content="wcode is a terminal coding agent built around teams and workflows: declare a team and a task DAG, then peek at, ask, or stop any member live — instead of firing off an opaque subagent and waiting for one answer. A ~10k-line Rust kernel over any OpenAI-compatible endpoint."
     />
+    <link rel="canonical" href="https://weinyn.github.io/wcode/" />
+    <meta property="og:title" content="wcode — a team- and workflow-first coding agent for the terminal" />
+    <meta
+      property="og:description"
+      content="wcode is a terminal coding agent built around teams and workflows: declare a team and a task DAG, then peek at, ask, or stop any member live — instead of firing off an opaque subagent and waiting for one answer. A ~10k-line Rust kernel over any OpenAI-compatible endpoint."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://weinyn.github.io/wcode/" />
+    <meta property="og:site_name" content="wcode" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="wcode — a team- and workflow-first coding agent for the terminal" />
+    <meta
+      name="twitter:description"
+      content="wcode is a terminal coding agent built around teams and workflows: declare a team and a task DAG, then peek at, ask, or stop any member live — instead of firing off an opaque subagent and waiting for one answer. A ~10k-line Rust kernel over any OpenAI-compatible endpoint."
+    />
     <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="stylesheet" href="style.css" />
@@ -45,7 +60,7 @@
       <section class="stats" aria-label="by the numbers">
         <div><b>4</b><span>crates</span></div>
         <div><b>~52k</b><span>lines of Rust</span></div>
-        <div><b>19</b><span>tools</span></div>
+        <div><b>18</b><span>tools</span></div>
         <div><b>1,000+</b><span>tests</span></div>
         <div><b>4</b><span>prebuilt targets</span></div>
         <div><b>MIT</b><span>licensed</span></div>
@@ -147,7 +162,7 @@
               <code>model</code>, <code>role</code>, <code>tools</code>,
               <code>read_only</code>, <code>effort</code>, and even its own
               provider. Address a member by name with <code>message</code>;
-              <code>peers</code> lists the roster with live state.
+              <code>peers</code> lists the messageable peers with live state.
             </p>
           </li>
           <li>
@@ -252,7 +267,7 @@
 <span class="dim">⚙ task(create) #1 explore → #2 implement → #3 verify</span>
 <span class="dim">⚙ message(builder)  → "#2 implement"                ● running</span>
 <span class="dim">⚙ member(builder)   → "what are you on?"            ✓ 1 line</span>
-<span class="dim">⚙ message(reviewer) → "#3 review the diff"          ○ queued</span>
+<span class="dim">⚙ message(reviewer) → "#3 review the diff"          ○ idle</span>
 
 <span class="dim">read · grep/find · bash · edit — content-addressed, token-lean</span></code></pre>
         </div>
@@ -284,8 +299,10 @@
           <li>
             <h3>Token-minimal by design</h3>
             <p>
-              Content-addressed <code>read</code>/<code>edit</code> — a line's
-              5-char anchor is its address, so old code is never re-typed.
+              Content-addressed <code>read</code>/<code>edit</code> — <code>read</code>
+              prints <code>&lt;line number&gt;\t&lt;content&gt;</code> (the number
+              locates, never addresses), and <code>edit</code> replaces an exact literal
+              <code>old_string</code>.
               <code>bash</code> spills large output to a file and returns a
               bounded preview. Auto-compaction keeps the window lean.
             </p>
@@ -323,17 +340,16 @@
 
       <!-- The tool set -->
       <section class="tools">
-        <h2>19 tools, one small kernel</h2>
+        <h2>18 tools, one small kernel</h2>
         <table>
           <thead>
             <tr><th>tool</th><th>what it does</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>read</code></td><td>file contents as <code>ANCHOR│line</code> — the 5-char anchor is a line's address and the <code>edit</code> target</td></tr>
-            <tr><td><code>edit</code> · <code>edits</code></td><td>replace an anchor range; or a whole batch of ranges, atomically, in one file</td></tr>
-            <tr><td><code>replace</code></td><td>exact-string substitution for quick unique edits</td></tr>
+            <tr><td><code>read</code></td><td>file contents as <code>&lt;line number&gt;\t&lt;content&gt;</code> — the number locates a line for the <code>edit</code> target; it is never an address</td></tr>
+            <tr><td><code>edit</code> · <code>edits</code></td><td>replace an exact literal <code>old_string</code> (byte-exact, unique unless <code>replace_all</code>); or a batch of ops, atomically, in one file</td></tr>
             <tr><td><code>write</code></td><td>create or overwrite a file, byte-for-byte</td></tr>
-            <tr><td><code>grep</code> · <code>find</code></td><td>regex search and glob listing; hits carry anchors, straight into <code>edit</code> (both respect <code>.gitignore</code>)</td></tr>
+            <tr><td><code>grep</code> · <code>find</code></td><td>regex search and glob listing; hits read <code>path:lineno:content</code> and feed <code>edit</code>'s <code>old_string</code> (both respect <code>.gitignore</code>)</td></tr>
             <tr><td><code>ast_search</code> · <code>ast_edit</code></td><td>structural search and rewrite via ast-grep</td></tr>
             <tr><td><code>session_search</code></td><td>search this session, or across every session on disk</td></tr>
             <tr><td><code>bash</code> · <code>bg</code></td><td><code>sh -c</code> with a timeout and Ctrl-C kill; big output spills to a file. Background a long command and <code>list</code>/<code>wait</code>/<code>kill</code> it</td></tr>
