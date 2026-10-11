@@ -64,7 +64,7 @@ Rust edition 2024, resolver 3.
   proves nothing about behavior.
 - **Track multi-step work in `docs/next-steps.md`.** Larger efforts get their
   own doc (e.g. `docs/tui-plan.md`); the tracker keeps a pointer + status.
-- **Minimalism is the point.** Absent by design: MCP, subagents, permission
+- **Minimalism is the point.** Absent by design: MCP, permission
   prompts, approval flows, config files for behavior. That logic belongs in
   code, via `Hooks` — build the variant you want instead of configuring one.
 - Keep the kernel free of presentation concerns; the CLI is a thin client.
