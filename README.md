@@ -2,7 +2,7 @@
 
 A minimal, pi-like coding agent for the terminal. It streams an LLM conversation
 and gives it content-addressed tools — read (numbered lines), grep/find, bash,
-edit/edits/replace, write, and ast-grep search/rewrite — and stays out of the way.
+edit/edits, write, and ast-grep search/rewrite — and stays out of the way.
 Built on a small kernel
 ([`wcode-harness`](crates/wcode-harness)) that speaks to any OpenAI-compatible
 chat-completions endpoint.
@@ -115,7 +115,7 @@ digest_cas = true          # optional; true|false — default ON
 # under truecolor; NO_COLOR wins over everything. Select a preset live with the
 # TUI's `/theme [name]` (bare `/theme` opens a picker) or start with `--theme <name>`;
 # `--list-themes` prints the catalog. Explicit role keys survive a preset switch.
-name = "gruvbox-dark"      # optional; a catalog preset (default: palette B)
+name = "gruvbox-dark"      # optional; a catalog preset (default: the `default` named-16 palette)
 # `name = "omarchy"` loads the current Omarchy desktop theme — the palette at
 # ~/.local/state/omarchy/current/theme/colors.toml — and re-reads it on
 # `/theme omarchy`, so an `omarchy theme set` shows up at the next switch. It is
@@ -307,7 +307,7 @@ placeholder bearer token so `--base-url http://localhost:11434/v1` just works.
 ## Use
 
 ```
-wcode                        # REPL
+wcode                        # interactive TUI (REPL when piped)
 wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --agents --task "fix bug 123" --timeout 600   # headless [workflow] run
 wcode --resume               # continue the latest session
@@ -358,7 +358,7 @@ subset that maps to a `Request` under the current session — plus `/changes` (l
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
 group for a team — by re-exec'ing with no `--resume`; refused over a socket), and
-[--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
+`/reload [--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
 refused over a socket). The remaining session-lifecycle commands below stay in
 the REPL.
 `--agents` and a team, each member runs as its own **surface** (the root, plus one
@@ -366,8 +366,8 @@ per member): input and `/`-commands go to the **focused** surface — switch wit
 `/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a
 **left-docked** sidebar (30 columns wide, shown only when the terminal is ≥ 80
 columns; `Ctrl-B` toggles it) with **Team / Todos / Changes** sections, the
-focused row marked by a `*`. `/team`
-prints the roster.
+focused row marked by a `*`. Bare `/team` opens a picker to switch team;
+`/team roster` prints the listing and `/team <name>` switches directly.
 
 REPL commands (unknown `/...` lines go to the LLM as prompt text):
 
@@ -522,9 +522,10 @@ Legacy flat `<millis>_<id>.jsonl` files still list and resume as bare roots.
 
 pi-like, deliberately small. One kernel — event loop, tool dispatch, hooks,
 JSONL sessions — and a thin CLI on top. The kernel crate (`wcode-harness`) is
-about 10k lines and the whole workspace about 52k, a fraction of a
+about 11k lines and the whole workspace about 58k source lines (≈64k including
+tests), a fraction of a
 batteries-included agent. Absent by
-design: MCP, subagents, permission prompts, approval flows, config files for
+design: MCP, permission prompts, approval flows, config files for
 behavior. That logic belongs in code, via `Hooks`: block or rewrite tool calls
 (`before_tool_call`), transform context per turn, force stops. Build the
 variant you want instead of configuring one.

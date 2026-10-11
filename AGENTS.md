@@ -9,25 +9,28 @@ Presentation code streams and styles `AgentEvent`s; the kernel owns the loop.
 
 `crates/wcode-harness` — the kernel (no CLI/presentation concerns):
 
-- `agent.rs` — `Agent`: `run`, `cancel`/`cancel_token`, `messages`, `compact`,
-  `steer`/`follow_up`, `set_model`, `set_effort`, `session_path`.
+- `agent.rs` — `Agent` (e.g.): `run`, `cancel`/`cancel_token`, `messages`,
+  `compact`, `steer`/`follow_up`, `set_model`, `set_effort`, `set_plan_mode`,
+  `notify`, `side_ask`, `session_id`, `history`, `session_path`.
 - `loop_.rs` — the tool-calling loop (`run_loop`, `LoopConfig`, `RunResult`)
   that emits `AgentEvent`s.
 - `streamfn.rs` — `StreamFn` trait + the `rig` OpenAI-compatible adapter
   (`rig_stream_fn`) with retry/backoff.
 - `tool.rs` — `Tool` / `TypedTool` + `erased()`.
-- `hooks.rs` — `Hooks`: `transform_tool_input`, `before_tool_call`,
-  `after_tool_call`, `transform_context`, `should_stop_after_turn`.
+- `hooks.rs` — `Hooks` (e.g.): `transform_tool_input`, `before_tool_call`,
+  `after_tool_call`, `before_inbound`, `transform_context`,
+  `should_stop_after_turn`, `after_run`.
 - `event.rs` — `AgentEvent` / `LlmStreamEvent` (the UI seam).
-- `compaction.rs`, `session.rs`, `message.rs`, `limits.rs`.
+- `compaction.rs`, `session.rs`, `message.rs`, `limits.rs`, `actor.rs`,
+  `protocol.rs`, `stats.rs`.
 
 `crates/wcode-protocol` — transport above the kernel: the `Backend` seam
 (`Local`/`Remote`), NDJSON `Frame`s, a socket `serve`/`Client`, so a client speaks
 `Request` → `AgentEvent` the same way locally or across a socket.
 
 `crates/wcode-tui` — the full-screen TUI (`ratatui`/`crossterm`), a
-`wcode-protocol` client: `run(surfaces, options, new_surfaces)`, a pure reducer
-over `AgentEvent`, three bands (transcript · input · status), markdown +
+`wcode-protocol` client: `run(surfaces, options, new_surfaces, new_tasks)`, a pure
+reducer over `AgentEvent`, three bands (transcript · input · status), markdown +
 `/`-commands, a team sidebar, overlays (pickers + `F1` help), a named-role
 palette (`theme.rs`), tool-output expand/collapse, and a transcript browse mode.
 
@@ -39,7 +42,7 @@ palette (`theme.rs`), tool-output expand/collapse, and a transcript browse mode.
   project-instruction file.
 - `config.rs` — `config.toml` + env resolution.
 - `tools/` — concrete tools: read, grep, find, bash, ast_search, ast_edit,
-  edit, edits, replace, write.
+  edit, edits, write.
 - `rtk.rs` — optional rtk hook (bash-output proxy).
 
 ## Commands
