@@ -37,7 +37,8 @@ partly implemented in the working tree). Its head is a **speaker** (`WCODE`, §1
 4. **Tools render inline, in call order** (overriding the foot ledger, R2). Each
    tool sits **at the position it was called**, flowed with the prose. Render:
    walk the turn's `content`; at the `k`-th `ToolCall`, emit the tool whose result
-   is `tools[k]`. The **`¹²³` reference marks stay**.
+   is `tools[k]`. The **`¹²³` reference marks** this record kept were later
+   **removed** — see [D021](D021-tui-no-tool-reference-marks.md).
 5. **Tool marks: System A** (`docs/design/tui-tool-glyphs.md` §3, `:315`) — `»`
    (retires `⚙`), `✓`/`✗` kept; the shared `⧉`→`▣` fix (`:333`).
 6. **No new glyph, no new `theme.rs` role.**

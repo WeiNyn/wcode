@@ -56,7 +56,6 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 |---|---|---|
 | user prompt | `❯` | accent, bold |
 | assistant prose | — | default fg |
-| footnote reference | `¹²³` (`[n]` for n ≥ 10) | link |
 | thinking (in-flight annotation) | `···` | dim row `··· thinking <t>` + live cursor `▌` (D018) |
 | thinking (collapsed row) | `··· thinking` | dim |
 | tool head | `├ name  target  stats` | dim; name `tool_name` |
@@ -235,8 +234,8 @@ blank pane.
   `─` is declared).
 - **Tools (inline, tree)** (D009/T1) — a tool renders **inline, in call order**:
   at the **position it was called**, flowed with the prose. The render walks the
-  turn's `content` and emits tool `k` at the `k`-th `ToolCall`; the prose keeps a
-  `¹²³` mark where the call was (suppressed on a text-less tool-call round). A tool
+  turn's `content` and emits tool `k` at the `k`-th `ToolCall`; the inline tool at
+  the call site is the locator (no reference mark — D021). A tool
   renders as **one tree row** — `├ name  <params inlined>  …  <note · ms>  ▸ ▣`,
   the outcome `note · ms` and the `▸`/`▣` affordance right-aligned — when
   **collapsed**; **expanded**, that head sits over its body (`│   key  value`
