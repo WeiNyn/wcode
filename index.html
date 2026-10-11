@@ -422,7 +422,13 @@ base_url = "https://api.openai.com/v1"     # optional; any OpenAI-compatible end
 api_key = "sk-..."                         # optional</code></pre>
         <pre><code>wcode -p "explain this repo"   # one-shot
 wcode                          # start the TUI
-wcode --agents                 # start with a team + workflow</code></pre>
+wcode --agents                 # start with a team + workflow
+wcode --agents --task "fix bug 123" --timeout 600   # headless [workflow]: run to done, then exit</code></pre>
+        <p>
+          In VS Code, the
+          <a href="https://github.com/WeiNyn/wcode/tree/main/editors/vscode">wcode extension</a>
+          is a second client of the same kernel, over <code>wcode serve --stdio</code>.
+        </p>
       </section>
     </main>
 
