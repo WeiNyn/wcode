@@ -55,12 +55,20 @@ impl TypedTool for Write {
         // ponytail: tmp+rename so a crash mid-write can't truncate the original (same-fs rename).
         let tmp = super::temp_path(&path);
         match std::fs::write(&tmp, &args.content).and_then(|_| std::fs::rename(&tmp, &path)) {
-            Ok(_) => ToolOutput {
-                output: format!("wrote {} bytes to {}", args.content.len(), args.path),
-                is_error: false,
-                diff,
-                path: Some(args.path.clone()),
-            },
+            Ok(_) => {
+                let lines = super::diff::split_lines(&args.content).len();
+                let line_word = if lines == 1 { "line" } else { "lines" };
+                ToolOutput {
+                    output: format!(
+                        "wrote {lines} {line_word} ({} bytes) to {}",
+                        args.content.len(),
+                        args.path,
+                    ),
+                    is_error: false,
+                    diff,
+                    path: Some(args.path.clone()),
+                }
+            }
             Err(e) => ToolOutput {
                 output: format!("write {}: {e}", args.path),
                 is_error: true,
@@ -94,6 +102,33 @@ mod tests {
             "hello"
         );
         assert!(out.output.contains("5 bytes"));
+        assert!(
+            out.output.starts_with("wrote 1 line (5 bytes) to a/b/c.txt"),
+            "the line count rides the output: {}",
+            out.output
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_a_zero_line_empty_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _rx) = super::super::test_ctx(dir.path());
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let out = Write::new(lock)
+            .execute(
+                WriteArgs {
+                    path: "empty.txt".into(),
+                    content: String::new(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error);
+        assert_eq!(
+            out.output,
+            "wrote 0 lines (0 bytes) to empty.txt",
+            "an empty write reports 0 lines"
+        );
     }
 }
 
