@@ -489,34 +489,45 @@ fn omarchy_border(c: &BTreeMap<String, String>) -> Option<Color> {
     hex_to_rgb(&inner[..6])
 }
 
-/// Map a resolved Omarchy palette (key → hex/rgba) to a wcode [`Palette`]. Every
-/// field is RGB, so the result also yields a matching syntect theme. A missing
-/// key, or a value `parse_color` rejects, is an `Err`.
+/// Map a resolved Omarchy palette (key → hex/rgba) to a wcode [`Palette`]. Omarchy
+/// `colors.toml` ships in **two schemas**: the built-in **semantic** themes carry
+/// `muted`/`red`/`green`/…; third-party **ANSI** themes carry `color0`…`color15`
+/// and no semantic keys. `foreground`/`background`/`accent` are required in both;
+/// the semantic-only fields fall back to their ANSI slot (`muted`→`color8`,
+/// `red`→`color1`, … `cyan`→`color6`). Every field is RGB, so the result also
+/// yields a matching syntect theme. A missing required key, or a value
+/// `parse_color` rejects, is an `Err`.
 fn omarchy_palette(c: &BTreeMap<String, String>) -> Result<Palette, String> {
-    let color = |key: &str| -> Result<Color, String> {
-        c.get(key)
-            .ok_or_else(|| format!("no `{key}` in the Omarchy palette"))
-            .and_then(|v| parse_color(v))
+    // The first present key wins (semantic, else its ANSI fallback); all absent
+    // is an error naming every candidate.
+    let color_or = |keys: &[&str]| -> Result<Color, String> {
+        for key in keys {
+            if let Some(v) = c.get(*key) {
+                return parse_color(v);
+            }
+        }
+        Err(format!("no `{}` in the Omarchy palette", keys.join("`/`")))
     };
     Ok(Palette {
-        fg: color("foreground")?,
-        bg: color("background")?,
-        accent: color("accent")?,
-        muted: color("muted")?,
+        fg: color_or(&["foreground"])?,
+        bg: color_or(&["background"])?,
+        accent: color_or(&["accent"])?,
+        // semantic `muted`, else the ANSI bright-black `color8`.
+        muted: color_or(&["muted", "color8"])?,
         // Borders are `rgba(...)`, not hex; fall back to `muted` when absent.
         border: match omarchy_border(c) {
             Some(border) => border,
-            None => color("muted")?,
+            None => color_or(&["muted", "color8"])?,
         },
-        red: color("red")?,
-        green: color("green")?,
-        yellow: color("yellow")?,
+        red: color_or(&["red", "color1"])?,
+        green: color_or(&["green", "color2"])?,
+        yellow: color_or(&["yellow", "color3"])?,
         // Documented collapse: Omarchy has no distinct `code`; palette B already
         // shares its Rgb `code`/`warn` step (`palette_b`).
-        code: color("yellow")?,
-        blue: color("blue")?,
-        magenta: color("magenta")?,
-        cyan: color("cyan")?,
+        code: color_or(&["yellow", "color3"])?,
+        blue: color_or(&["blue", "color4"])?,
+        magenta: color_or(&["magenta", "color5"])?,
+        cyan: color_or(&["cyan", "color6"])?,
     })
 }
 
@@ -1497,6 +1508,36 @@ unquoted = dark
         .collect()
     }
 
+    /// A third-party Omarchy theme in the **ANSI** schema — the `kanso` keys
+    /// (`color0`…`color15`, `foreground`/`background`/`accent`), with NO semantic
+    /// `muted`/`red`/… — so the semantic-only fields must fall back to their ANSI slot.
+    fn omarchy_ansi_fixture() -> BTreeMap<String, String> {
+        [
+            ("accent", "#8ba4b0"),
+            ("foreground", "#C5C9C7"),
+            ("background", "#090E13"),
+            ("color0", "#090E13"),
+            ("color1", "#c4746e"),
+            ("color2", "#8a9a7b"),
+            ("color3", "#c4b28a"),
+            ("color4", "#8ba4b0"),
+            ("color5", "#a292a3"),
+            ("color6", "#8ea4a2"),
+            ("color7", "#c8c093"),
+            ("color8", "#393B44"),
+            ("color9", "#e46876"),
+            ("color10", "#87a987"),
+            ("color11", "#e6c384"),
+            ("color12", "#7fb4ca"),
+            ("color13", "#938aa9"),
+            ("color14", "#7aa89f"),
+            ("color15", "#A4A7A4"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
     #[test]
     fn omarchy_palette_maps_every_field() {
         let p = omarchy_palette(&omarchy_fixture()).expect("a full palette");
@@ -1520,6 +1561,26 @@ unquoted = dark
         c.remove("hyprland_active_border");
         let p = omarchy_palette(&c).expect("a palette");
         assert_eq!(p.border, p.muted, "no rgba border → muted");
+    }
+
+    #[test]
+    fn omarchy_palette_resolves_the_ansi_schema() {
+        // W019: a third-party theme (kanso) uses the ANSI schema, so the semantic-only
+        // fields fall back to their `colorN` slot; `border` (no
+        // `hyprland_active_border`) falls back to `muted` (= `color8`).
+        let p = omarchy_palette(&omarchy_ansi_fixture()).expect("a full ANSI palette");
+        assert_eq!(p.fg, Color::Rgb(0xc5, 0xc9, 0xc7), "foreground");
+        assert_eq!(p.bg, Color::Rgb(0x09, 0x0e, 0x13), "background");
+        assert_eq!(p.accent, Color::Rgb(0x8b, 0xa4, 0xb0), "accent");
+        assert_eq!(p.muted, Color::Rgb(0x39, 0x3b, 0x44), "muted <- color8");
+        assert_eq!(p.border, p.muted, "no rgba border -> muted");
+        assert_eq!(p.red, Color::Rgb(0xc4, 0x74, 0x6e), "red <- color1");
+        assert_eq!(p.green, Color::Rgb(0x8a, 0x9a, 0x7b), "green <- color2");
+        assert_eq!(p.yellow, Color::Rgb(0xc4, 0xb2, 0x8a), "yellow <- color3");
+        assert_eq!(p.code, p.yellow, "the documented code/warn collapse");
+        assert_eq!(p.blue, Color::Rgb(0x8b, 0xa4, 0xb0), "blue <- color4");
+        assert_eq!(p.magenta, Color::Rgb(0xa2, 0x92, 0xa3), "magenta <- color5");
+        assert_eq!(p.cyan, Color::Rgb(0x8e, 0xa4, 0xa2), "cyan <- color6");
     }
 
     #[test]
