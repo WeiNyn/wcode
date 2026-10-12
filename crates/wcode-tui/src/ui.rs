@@ -22,10 +22,10 @@ use crate::app::{ChangeRow, change_totals, changes_header};
 use crate::markdown;
 use crate::theme;
 
-/// The **single** content column shared by the user block, the `WCODE` head, the
-/// assistant body (markdown), the thinking body, and the inline tool row (D010).
-/// One column, so a prompt and its reply line up; the longest speaker label is
-/// `WCODE` (5), plus the 1-col margin and a 1-col gap.
+/// The **single** content column shared by the user block, the `WCODE` head, and
+/// the assistant body (markdown) (D010). One column, so a prompt and its reply
+/// line up; the longest speaker label is `WCODE` (5), plus the 1-col margin and
+/// a 1-col gap.
 const CONTENT_COL: usize = 7;
 /// The flat tool-cluster gutter (W018): three columns — the same column the
 /// thinking row's word sits in — so a tool's head, its params, its body, and the
