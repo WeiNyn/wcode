@@ -17,27 +17,20 @@ use wcode_harness::event::{TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{AffordanceHit, App, Block, InputView, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
+use crate::app::{App, Block, InputView, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::app::{ChangeRow, change_totals, changes_header};
 use crate::markdown;
 use crate::theme;
 
-/// First/continuation prefixes for a thinking block (`···` then an aligned
-/// continuation column).
-const THINK_FIRST: &str = "   ··· ";
-const THINK_CONT: &str = "       ";
-
 /// The **single** content column shared by the user block, the `WCODE` head, the
-/// assistant body (markdown), the thinking body, and the inline tool tree (D010).
+/// assistant body (markdown), the thinking body, and the inline tool row (D010).
 /// One column, so a prompt and its reply line up; the longest speaker label is
 /// `WCODE` (5), plus the 1-col margin and a 1-col gap.
 const CONTENT_COL: usize = 7;
-/// The tool tree's branch glyph + its trailing space on a tool's head row.
-const TREE_BRANCH: &str = "├ ";
-/// The tool tree's continuation glyph + the 3-space gap the body/params/hint ride.
-const TREE_PIPE: &str = "│   ";
-/// The tool tree's terminator glyph — one row, drawn only when the tool has a body.
-const TREE_END: &str = "└";
+/// The flat tool-cluster gutter (W018): three columns — the same column the
+/// thinking row's word sits in — so a tool's head, its params, its body, and the
+/// thinking body all line up at col 3. Replaces the retired `├`/`│`/`└` tree.
+const TOOL_INDENT: &str = "   ";
 /// Output lines a collapsed tool shows before a `… +N more` hint.
 const TOOL_PREVIEW_LINES: usize = 4;
 /// Output lines a fully expanded tool shows before the hint returns.
@@ -523,77 +516,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    // D32 — publish the affordance cells. A thinking block's collapsed `▸`/`▣`
-    // row is the block's FIRST line; a `Block::Turn` publishes one hit PER INLINE
-    // TOOL (each tool's head row is its toggle row). The rects are pure functions
-    // of (kind, width, range) — recomputed every frame, never cached (the
-    // (rev, width) cache stores `Line`s, not geometry).
-    let (_, note_copy) = note_affordance_cols(measure);
-    let affordances: Vec<AffordanceHit> = ranges
-        .iter()
-        .enumerate()
-        .filter_map(|(i, range)| {
-            let row0 = range.start.checked_sub(start)?;
-            match &app.transcript()[i] {
-                Block::Turn(turn) => {
-                    // A `Turn` is its body (no head, D012): the prose and the tools
-                    // interleaved INLINE in call order. Publish the thinking
-                    // affordance (on the block's first row) and one hit per inline
-                    // tool's head row.
-                    let mut hits = Vec::new();
-                    if matches!(turn.content.first(), Some(ContentBlock::Thinking { .. })) {
-                        let r = row0;
-                        if r < window.len() {
-                            let y = area.y + r as u16;
-                            hits.push(AffordanceHit {
-                                block: i,
-                                item: None,
-                                toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
-                                copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
-                            });
-                        }
-                    }
-                    // The inline tool offsets MIRROR the render walk exactly (both
-                    // come from `turn_inline`), so a hit can never drift.
-                    for (k, off) in inline_tool_offsets(turn, measure) {
-                        let r = row0 + off;
-                        if r < window.len() {
-                            let y = area.y + r as u16;
-                            hits.push(AffordanceHit {
-                                block: i,
-                                item: Some(k),
-                                // The whole head row through the `▸`; the `▣` cell
-                                // stays disjoint (`kind_at` checks toggle first).
-                                toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
-                                copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
-                            });
-                        }
-                    }
-                    Some(hits)
-                }
-                Block::Tool(tool) => {
-                    // A standalone tool (a live/running tool, before its answer
-                    // commits) is a single inline panel; with NO `── notes ──` rule
-                    // its head row is block-relative line 0.
-                    let _ = tool;
-                    let r = row0;
-                    if r >= window.len() {
-                        return None;
-                    }
-                    let y = area.y + r as u16;
-                    Some(vec![AffordanceHit {
-                        block: i,
-                        item: Some(0),
-                        toggle: Rect::new(col.x, y, measure.saturating_sub(2) as u16, 1),
-                        copy: Rect::new(col.x + note_copy as u16, y, 1, 1),
-                    }])
-                }
-                _ => None,
-            }
-        })
-        .flatten()
-        .collect();
-    app.set_transcript_hit(col, start, rows_text, affordances);
+    app.set_transcript_hit(col, start, rows_text);
     frame.render_widget(Paragraph::new(window), col);
 }
 
@@ -800,41 +723,25 @@ fn turn_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 /// is not yet in `turn.tools` emits nothing); the tool itself, inline at the call
 /// site, is the locator (D021 — there is no reference mark).
 fn turn_inline_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
-    turn_inline(turn, width).0
+    turn_inline(turn, width)
 }
 
-/// The turn-relative row offset (from the turn's first body line) of each inline tool's
-/// head row, in call order — the D32 mirror of `turn_inline_lines`. # Contracts:
-/// one `(k, off)` per tool ACTUALLY emitted (a `ToolCall` with no result is
-/// skipped); `off` accounts for every prose/thinking/tool row above it. A drift
-/// from the render misaligns EVERY hit below it.
-fn inline_tool_offsets(turn: &Turn, width: usize) -> Vec<(usize, usize)> {
-    turn_inline(turn, width).1
-}
-
-/// The single walk behind [`turn_inline_lines`] and [`inline_tool_offsets`], so
-/// the render and the D32 hit map can never drift: it returns the turn's body
-/// lines and the turn-relative row offset of each emitted tool's head row.
-fn turn_inline(turn: &Turn, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+/// The turn's body: the prose/thinking interleaved with each tool's panel, in
+/// call order. # Contracts: exactly one panel per tool (a `ToolCall` whose result
+/// is not yet in `turn.tools` emits nothing); the tool itself, inline at the call
+/// site, is the locator (D021 — there is no reference mark).
+fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
-    let mut offsets: Vec<(usize, usize)> = Vec::new();
-    // The body starts at line 0 (there is no `WCODE` head).
-    let mut off = 0usize;
     // The `ToolCall` ordinal: the count seen (one per-turn series). It selects the
     // tool (`turn.tools.get(refn - 1)`); it is NEVER printed (D021).
     let mut refn = 0usize;
-    for (i, block) in turn.content.iter().enumerate() {
+    for block in &turn.content {
         match block {
             ContentBlock::Text { text } => {
-                let lines = markdown::render(text, width);
-                off += lines.len();
-                out.extend(lines);
+                out.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
-                // The affordance belongs to the leading `Thinking` only.
-                let lines = thinking_block_lines(text, width, turn.thinking_open, i == 0);
-                off += lines.len();
-                out.extend(lines);
+                out.extend(thinking_block_lines(text, width, turn.thinking_open));
             }
             ContentBlock::ToolCall { .. } => {
                 refn += 1;
@@ -842,51 +749,30 @@ fn turn_inline(turn: &Turn, width: usize) -> (Vec<Line<'static>>, Vec<(usize, us
                 // `ToolExecutionStart`, so the result may not be in `tools` yet —
                 // no panel is emitted for it.
                 if let Some(tool) = turn.tools.get(refn - 1) {
-                    offsets.push((refn - 1, off));
-                    let lines = tool_inline_lines(refn, tool, width);
-                    off += lines.len();
-                    out.extend(lines);
+                    out.extend(tool_inline_lines(refn, tool, width));
                 }
             }
         }
     }
-    (out, offsets)
+    out
 }
 
-/// The tool tree's base indent (D010): three columns, the same marker column the
-/// thinking row's `···` sits in, so every block's lead glyph lines up.
-fn tree_indent() -> String {
-    "   ".to_string()
-}
-
-/// The prefix a tool's body/params/hint rows ride: the tree indent + `│   `.
-fn tree_body_prefix() -> String {
-    format!("{}{TREE_PIPE}", tree_indent())
-}
-
-/// The tool tree's terminator row: the indent + `└`, drawn when a tool has a body.
-fn tree_end_row() -> Line<'static> {
-    Line::from(Span::styled(format!("{}{TREE_END}", tree_indent()), dim()))
-}
-
-/// One tool's inline tree (D010/T1). The state map (W016 §5.1 / A1):
+/// One tool's inline flat rows (D010/T1). The state map (W016 §5.1 / A1):
 ///
 /// - **Collapsed, done** (`done && !expanded`) → [`collapsed_head_row`]: ONE
-///   logical row (the head, with the params inlined and the outcome note). No
-///   `│   ` body, no `└`.
+///   logical row (the head, with the params inlined and the outcome note). No body.
 /// - **Collapsed, running** (`!done && !expanded`) → [`collapsed_head_row`] plus
-///   exactly ONE `│   ` live-tail row (`last_line`); no note, no `└` (O2).
-/// - **Expanded** (`expanded`, incl. `is_error`) → the UNCHANGED shape: the
-///   name-only head ([`tool_head_row`]) + the `│   key  value` params block
-///   ([`panel_param_lines`]) + the output/diff body ([`tool_panel_body`]) + a `└`
-///   terminator when there is a body.
+///   exactly ONE live-tail row (`last_line`); no note (O2).
+/// - **Expanded** (`expanded`, incl. `is_error`) → the head ([`tool_head_row`]) +
+///   the `key  value` params block ([`panel_param_lines`]) + the output/diff body
+///   ([`tool_panel_body`]).
 ///
 /// The name prints ONCE; there is no `N` ordinal and no separate `✓ name · note`
 /// row. `n` is the tool's 1-based call order (kept for the render walk); row 0 is
-/// the D32 toggle row, and `Block::Tool` also uses it with `n = 1`.
+/// the tool's head row, and `Block::Tool` also uses it with `n = 1`.
 ///
 /// A tool's **params are never hidden** (D019/W016): collapsed, the first value
-/// rides the head; expanded, they re-draw as the `│   key  value` rows.
+/// rides the head; expanded, they re-draw as the `key  value` rows.
 fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     if expanded {
@@ -895,18 +781,16 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
         body.extend(tool_panel_body(tool, width, true));
         if !body.is_empty() {
             out.extend(body);
-            out.push(tree_end_row());
         }
         return out;
     }
     // Collapsed (done OR running): the one head row, params inlined.
     let mut out = collapsed_head_row(tool, width);
-    // A running tool keeps exactly ONE live-tail row under `│   ` (O1); no note,
-    // no `└`.
+    // A running tool keeps exactly ONE live-tail row under the gutter (O1); no note.
     if !tool.done
         && let Some(tail) = last_line(&tool.output)
     {
-        out.push(prefixed(&tree_body_prefix(), &tail, dim()));
+        out.push(prefixed(TOOL_INDENT, &tail, dim()));
     }
     out
 }
@@ -914,11 +798,10 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
 /// The collapsed tool's ONE logical row (W016 §5.1):
 ///
 /// ```text
-///   ├ <name>  <first-param value (bare)>  <key=value …>  …fill…  <note · ms>  ▸ ▣
+///    <name>  <first-param value (bare)>  <key=value …>  …fill…  <note · ms>
 /// ```
 ///
-/// The `▸`/`▣` are pinned at [`note_affordance_cols`] on row 0, so the D32 hit map
-/// is unchanged. The FIRST param's value prints BARE (its key dropped) in the
+/// The FIRST param's value prints BARE (its key dropped) in the
 /// [`param_syntax`] highlight; the rest print `key=value`, the value quoted iff it
 /// contains a space. When `tool.params` is empty (a reseeded/replayed tool) the head
 /// inlines `tool.target.or(tool.path)` — the same fallback as [`tool_head_row`]
@@ -926,11 +809,11 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
 ///
 /// The note ([`completion_note`], else the `summary_line` fallback) is capped at 40
 /// chars and dropped when crowded — the note, then the ms, then both (A4; the ONLY
-/// place the cap is applied). A too-long head WRAPS char-exact onto a `│   `-aligned
+/// place the cap is applied). A too-long head WRAPS char-exact onto a gutter-aligned
 /// continuation (never a `…` clip), so a long `bash` command shows in FULL
-/// (D31/D019). Returns ≥1 row; row 0 is the D32 toggle/copy row.
+/// (D31/D019). Returns ≥1 row; row 0 is the head row.
 fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
-    let prefix = format!("{}{TREE_BRANCH}", tree_indent());
+    let prefix = TOOL_INDENT.to_string();
     let name_style = if tool.is_error { error_style() } else { tool_name() };
     // The head run: the prefix, the name, then the inlined params.
     let mut content: Vec<Span<'static>> = vec![
@@ -965,9 +848,8 @@ fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
             len += 2 + key.chars().count() + 1 + shown.chars().count();
         }
     }
-    // The right run: the `▸ ▣` affix (pinned) carrying the `note · ms` stats,
-    // selected by the 40-cap drop-when-crowded rule (A4).
-    let aff = "▸ ▣";
+    // The right run: the `note · ms` stats, selected by the 40-cap
+    // drop-when-crowded rule (A4).
     let note = if tool.done {
         let raw = completion_note(tool).unwrap_or_else(|| summary_line(&tool.output).0);
         (!raw.is_empty()).then(|| truncate(&raw, 40))
@@ -975,13 +857,7 @@ fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         None
     };
     let ms = tool.done.then(|| tool.duration_ms.map(format_ms)).flatten();
-    let tail_len = |stats: &str| {
-        if stats.is_empty() {
-            aff.chars().count()
-        } else {
-            stats.chars().count() + 3 + aff.chars().count()
-        }
-    };
+    let tail_len = |stats: &str| stats.chars().count();
     let note_ms = join_stats(note.as_deref(), ms.as_deref());
     let ms_only = join_stats(None, ms.as_deref());
     // Keep ≥1 fill column, else drop the note (keep ms), else drop both.
@@ -995,12 +871,10 @@ fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let mut tail: Vec<Span<'static>> = Vec::new();
     if !stats.is_empty() {
         tail.push(Span::styled(stats, dim()));
-        tail.push(Span::styled("   ".to_string(), dim()));
     }
-    tail.push(Span::styled(aff.to_string(), dim()));
     let tail_w = span_width(&tail);
 
-    // Row 0 keeps the affix; an over-long head wraps onto `│   `-aligned rows.
+    // Row 0 keeps the stats; an over-long head wraps onto gutter-aligned rows.
     let first_avail = width.saturating_sub(tail_w);
     if len <= first_avail {
         let fill = width.saturating_sub(len + tail_w);
@@ -1017,7 +891,7 @@ fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let mut head = spans_from_chars(&chars[..take]);
     head.extend(tail);
     let mut rows = vec![Line::from(head)];
-    let cont = tree_body_prefix();
+    let cont = TOOL_INDENT.to_string();
     let cont_avail = width.saturating_sub(cont.chars().count()).max(1);
     for chunk in chars[take..].chunks(cont_avail) {
         let mut spans = vec![Span::styled(cont.clone(), dim())];
@@ -1103,28 +977,25 @@ fn content_lines(
     elapsed: Option<std::time::Duration>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (i, block) in content.iter().enumerate() {
+    for block in content {
         match block {
             ContentBlock::Text { text } => {
                 lines.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
                 if live {
-                    // D018 §1: ONE dim annotation row — no body, no affordance.
+                    // D018 §1: ONE dim annotation row — no body.
                     // The rule is PER BLOCK, so a live message with several
                     // reasoning stretches (`[Thinking, Text, Thinking]` — the
                     // kernel opens a fresh trailing block after any text/tool
                     // block) draws one row each; an earlier stretch stays hidden
-                    // until commit lands it in the collapsed row below.
-                    lines.push(live_thinking_line(width, elapsed));
+                    // until commit lands it in the row below.
+                    lines.push(live_thinking_line(elapsed));
                 } else {
-                    // The affordance belongs to the block's FIRST line only (the
-                    // publish requires `content.first()` to be `Thinking`), so
-                    // only the leading thinking row draws `▸`/`▾`/`▣`.
-                    lines.extend(thinking_block_lines(text, width, thinking_open, i == 0));
+                    lines.extend(thinking_block_lines(text, width, thinking_open));
                 }
             }
-            // A tool call in a committed message renders as its own inline tree
+            // A tool call in a committed message renders as its own inline rows
             // (D009); it emits nothing here (no reference mark, D021).
             ContentBlock::ToolCall { .. } => {}
         }
@@ -1141,25 +1012,20 @@ fn content_lines(
     lines
 }
 
-/// One tool's head row (D010/T1): `├ name  target`, the `note · ms` stats and
-/// the `▸`/`▣` affordances right-aligned at the D32 columns — the name prints
-/// ONCE and this row is the tool's toggle/copy row. The target is inlined on the
+/// One tool's head row (D010/T1): ` name  target` with the `note · ms` stats
+/// right-aligned to the row's edge — the name prints ONCE. On success the name
+/// sits at col 3; an error prepends the red `✗ ` mark. The target is inlined on the
 /// head only when the params block is empty (otherwise it rides the params rows).
 fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
-    let glyph = if tool.expanded || tool.is_error {
-        "▾"
-    } else {
-        "▸"
-    };
     let stats = tool_stats(tool);
-    // An errored tool's head carries the `✗` mark (red) in place of the tree
-    // branch, so a failure reads at a glance; a success stays quiet.
+    // An errored tool's head carries the `✗` mark (red) in place of the retired
+    // tree branch, so a failure reads at a glance; a success stays quiet (col 3).
     let (mark, mark_style, name_style) = if tool.is_error {
         ("✗ ", error_style(), error_style())
     } else {
-        (TREE_BRANCH, dim(), tool_name())
+        ("", dim(), tool_name())
     };
-    let prefix = format!("{}{mark}", tree_indent());
+    let prefix = format!("{TOOL_INDENT}{mark}");
     // The target inlines on the head ONLY as a fallback for a call whose args
     // miss its per-tool key list, so `params` is empty (W015) — otherwise the
     // value rides the always-visible params rows.
@@ -1167,15 +1033,9 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
         Some(target) if tool.params.is_empty() => format!("{}  {target}", tool.name),
         _ => tool.name.clone(),
     };
-    let aff = format!("{glyph} ▣");
-    // The fill sits between the left run and the right run (`stats   ▸ ▣`), so
-    // the `▸`/`▣` stay pinned at their published D32 columns.
+    // The stats run to the row's right edge (`fill + stats`), no glyph cells.
     let left_len = prefix.chars().count() + label.chars().count();
-    let tail_len = if stats.is_empty() {
-        aff.chars().count()
-    } else {
-        stats.chars().count() + 3 + aff.chars().count()
-    };
+    let tail_len = stats.chars().count();
     let pad = width.saturating_sub(left_len + tail_len).max(1);
     let mut spans = vec![
         Span::styled(prefix, mark_style),
@@ -1184,9 +1044,7 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
     ];
     if !stats.is_empty() {
         spans.push(Span::styled(stats, dim()));
-        spans.push(Span::styled("   ", dim()));
     }
-    spans.push(Span::styled(aff, dim()));
     Line::from(spans)
 }
 
@@ -1335,32 +1193,21 @@ fn count_find_paths(output: &str) -> Option<usize> {
     }
     recognized.then_some(paths)
 }
-/// The note head's affordance cells (0-based from the row's left edge): the
-/// `▸`/`▾` toggle glyph at `width - 3` and the `▣` copy at `width - 1` (the
-/// `▸ ▣` run flush right).
-fn note_affordance_cols(width: usize) -> (usize, usize) {
-    (width.saturating_sub(3), width.saturating_sub(1))
-}
-
-/// The IN-FLIGHT thinking row (D018 §1): `   ··· thinking 1.2s` — the committed
-/// collapsed header's head (same [`THINK_FIRST`] gutter, same word, same `dim()`
-/// role) plus the live elapsed. Reuses [`thinking_header_line`]'s no-affordance
-/// path, so with `elapsed == None` the row is BYTE-IDENTICAL to the committed
-/// collapsed header — one rule, two lifetimes.
+/// The IN-FLIGHT thinking row (D018 §1): `   thinking 1.2s` — the committed
+/// header's head (same gutter, same word, same `dim()` role) plus the live
+/// elapsed. With `elapsed == None` the row is BYTE-IDENTICAL to the committed
+/// header — one rule, two lifetimes.
 ///
-/// NO body: the reasoning text is reachable only after the turn commits
-/// (D018 §1). NO `▸`/`▣` affordance: the live block is never a selection target —
-/// it trails the committed transcript and publishes nothing.
+/// NO body: the reasoning text is reachable only after the turn commits (D018 §1).
 ///
 /// The trailing live cursor `▌` is NOT drawn here: `content_lines`'s tail
 /// appends it to the LAST line, which is this row whenever the model is still
 /// reasoning.
 ///
 /// `elapsed == None` prints NO timer (before the first tick); the caller injects
-/// it. `width` is threaded for symmetry with its committed sibling and is unused
-/// on this path (no affordance geometry, no wrapping) — a deliberate no-op.
-fn live_thinking_line(width: usize, elapsed: Option<std::time::Duration>) -> Line<'static> {
-    let mut line = thinking_header_line(width, false, false);
+/// it.
+fn live_thinking_line(elapsed: Option<std::time::Duration>) -> Line<'static> {
+    let mut line = thinking_header_line();
     if let Some(d) = elapsed {
         line.spans.push(Span::styled(
             format!(" {}", format_ms(d.as_millis() as u64)),
@@ -1370,52 +1217,22 @@ fn live_thinking_line(width: usize, elapsed: Option<std::time::Duration>) -> Lin
     line
 }
 
-/// A committed thinking block (D33): the collapsed `··· thinking ▸ ▣` row,
-/// plus the `thinking`-styled body when expanded. No panel frame —
-/// thinking is lighter than a tool, so a bare affordance row keeps it cheap.
-fn thinking_block_lines(
-    text: &str,
-    width: usize,
-    open: bool,
-    affordance: bool,
-) -> Vec<Line<'static>> {
-    let mut out = vec![thinking_header_line(width, open, affordance)];
+/// A committed thinking block (D33): a plain dim `thinking` row, plus the
+/// `thinking`-styled body when expanded. No panel frame — thinking is lighter
+/// than a tool, so a bare row keeps it cheap.
+fn thinking_block_lines(text: &str, width: usize, open: bool) -> Vec<Line<'static>> {
+    let mut out = vec![thinking_header_line()];
     if open {
-        out.extend(wrap(text, width, THINK_CONT, THINK_CONT, thinking()));
+        out.extend(wrap(text, width, TOOL_INDENT, TOOL_INDENT, thinking()));
     }
     out
 }
 
-/// The thinking block's header row: `··· thinking` (dim) with the
-/// `▸`/`▾`/`▣` affordance run right-aligned at the SAME columns a note head uses
-/// (`note_affordance_cols`), so one publish geometry serves both.
-/// Without a published region the glyphs are SUPPRESSED — a drawn affordance
-/// must always route a click (the D32 invariant).
-fn thinking_header_line(
-    width: usize,
-    open: bool,
-    affordance: bool,
-) -> Line<'static> {
-    let head = "thinking";
-    if !affordance {
-        return Line::from(vec![
-            Span::styled(THINK_FIRST.to_string(), dim()),
-            Span::styled(head, dim()),
-        ]);
-    }
-    let (toggle_col, _) = note_affordance_cols(width);
-    let used = THINK_FIRST.chars().count() + head.chars().count();
-    // The `▸` sits at the SAME screen column as a note's (`note_affordance_cols`
-    // is row-local and absolute; THINK_FIRST already carries the indent).
-    let fill = toggle_col.saturating_sub(used);
-    let glyph = if open { "▾" } else { "▸" };
+/// The thinking block's header row: a plain dim `   thinking` (indent col 3).
+fn thinking_header_line() -> Line<'static> {
     Line::from(vec![
-        Span::styled(THINK_FIRST.to_string(), dim()),
-        Span::styled(head, dim()),
-        Span::styled(" ".repeat(fill), dim()),
-        Span::styled(glyph.to_string(), dim()),
-        Span::styled(" ".to_string(), dim()),
-        Span::styled("▣".to_string(), dim()),
+        Span::styled(TOOL_INDENT.to_string(), dim()),
+        Span::styled("thinking", dim()),
     ])
 }
 
@@ -1441,7 +1258,7 @@ fn param_row(
     width: usize,
     info: Option<&str>,
 ) -> Vec<Line<'static>> {
-    let prefix = tree_body_prefix();
+    let prefix = TOOL_INDENT.to_string();
     let indent = prefix.chars().count();
     let value_col = indent + key_col + 2;
     let avail = width.saturating_sub(value_col).max(1);
@@ -1488,7 +1305,7 @@ fn panel_param_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The tool's body rows under the tree's `│`: the params block precedes it, and
+/// The tool's body rows under the flat gutter: the params block precedes it, and
 /// the `note · ms` (or `+a −r · ms`) stats ride the head row ([`tool_stats`]). No
 /// `── notes ──` rule, no `✓` summary row.
 fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'static>> {
@@ -1505,7 +1322,7 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
                 out.push(hint);
             }
         } else if let Some(tail) = last_line(&tool.output) {
-            out.push(prefixed(&tree_body_prefix(), &tail, dim()));
+            out.push(prefixed(TOOL_INDENT, &tail, dim()));
         }
         return out;
     }
@@ -1525,7 +1342,7 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
                 Some('-') => removed_style(),
                 _ => dim(),
             };
-            out.push(prefixed(&tree_body_prefix(), raw, style));
+            out.push(prefixed(TOOL_INDENT, raw, style));
         }
         if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
             out.push(hint);
@@ -1672,7 +1489,7 @@ fn body_rows(lines: &[&str], width: usize, info: Option<&str>) -> Vec<Line<'stat
     if lines.is_empty() {
         return Vec::new();
     }
-    let prefix = tree_body_prefix();
+    let prefix = TOOL_INDENT.to_string();
     let avail = width.saturating_sub(prefix.chars().count()).max(1);
     let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
     let mut out = Vec::new();
@@ -1696,7 +1513,7 @@ fn body_rows(lines: &[&str], width: usize, info: Option<&str>) -> Vec<Line<'stat
 /// expansion would reveal nothing more. Informational only — the per-block
 /// toggle is browse mode's `Enter`.
 fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
-    let prefix = tree_body_prefix();
+    let prefix = TOOL_INDENT.to_string();
     let text = if more_lines > 0 {
         let line = if more_lines == 1 { "line" } else { "lines" };
         format!("{prefix}… +{more_lines} more {line}")
@@ -3011,7 +2828,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("1 file changed"), "summary missing: {text}");
         // The `»` row names the tool; the changed path rides its params.
-        assert!(text.contains("├ edit"), "tool head missing: {text}");
+        assert!(text.contains("   edit"), "tool head missing: {text}");
         app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand to reveal the path
         let text = buffer_text(&render(&mut app, 60, 20));
         assert!(text.contains("src/a.rs"), "tool path missing: {text}");
@@ -3235,6 +3052,65 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
+    fn a_collapsed_tool_has_no_tree_and_no_affix() {
+        // W018 Phase B: the tool head is a flat col-3 run — no tree glyphs, no
+        // `▸`/`▾`/`▣` affix (its D32 click geometry is gone).
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "read",
+            serde_json::json!({ "path": "crates/wcode-cli/src/config.rs" }),
+            "1\tpub struct Config {\n",
+        );
+        let text = buffer_text(&render(&mut app, 80, 20));
+        let head = text
+            .lines()
+            .find(|l| l.contains("read"))
+            .expect("the tool head row");
+        assert_eq!(head.find("read"), Some(3), "the name sits at col 3:\n{text}");
+        // Scope the glyph absence to the tool head row (A5): the sidebar's changes
+        // tree and markdown fences legitimately keep `│`/`├`/`└` elsewhere.
+        for bad in ['├', '│', '└', '▸', '▾', '▣'] {
+            assert!(!head.contains(bad), "a retired tool glyph {bad} survives:\n{text}");
+        }
+    }
+
+    #[test]
+    fn browse_enter_expands_and_y_copies_a_tool_without_affordances() {
+        // Keyboard parity survives the geometry removal: browse `Enter` expands
+        // and `y` copies the selected tool, with NO published affinity cell.
+        let mut app = App::new();
+        // A replayed tool result with no preceding turn becomes a standalone
+        // `Block::Tool` (the shape browse toggles with `Enter`).
+        app.seed_history(
+            &root(),
+            &[AgentMessage::ToolResult {
+                tool_call_id: "t".into(),
+                name: "bash".into(),
+                output: "the output".into(),
+                is_error: false,
+            }],
+        );
+        app.handle(AppEvent::Key(Key::Ctrl('g'))); // browse selects the last block
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Tool(_))),
+            "the selected block is the tool: {:?}",
+            app.transcript()
+        );
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Tool(t)) if t.expanded),
+            "browse `Enter` expands the tool"
+        );
+        app.handle(AppEvent::Key(Key::Char('y')));
+        assert!(
+            app.take_actions()
+                .iter()
+                .any(|a| matches!(a, Action::Copy(t) if t == "the output")),
+            "browse `y` copies the tool's output"
+        );
+    }
+    #[test]
     fn a_done_tool_shows_its_head_rows_and_a_preview() {
         let mut app = App::new();
         let output = (1..=20)
@@ -3242,11 +3118,15 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             .collect::<Vec<_>>()
             .join("\n");
         push_tool(&mut app, "bash", &output, false, None);
-        // W016: collapsed, the tool is ONE head row — the name ONCE, the `line-1`
-        // stats, the `▸`/`▣` affordances; no preview body, no hint.
+        // W016/W018: collapsed, the tool is ONE flat head row — the name ONCE,
+        // the `line-1` stats; no preview body, no hint, no tree glyph.
         let collapsed = buffer_text(&render(&mut app, 70, 20));
         assert!(!collapsed.contains("── notes"), "no foot rule:\n{collapsed}");
-        assert!(collapsed.contains("├ bash"), "the inline tool head:\n{collapsed}");
+        assert!(collapsed.contains("   bash"), "the flat tool head:\n{collapsed}");
+        assert!(
+            !collapsed.contains('├') && !collapsed.contains('│') && !collapsed.contains('└'),
+            "no tree glyphs:\n{collapsed}"
+        );
         assert_eq!(
             collapsed.matches("bash").count(),
             1,
@@ -3312,7 +3192,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
 
         // Collapsed: the head row (with the `+a −r` stats) + a capped preview.
         let collapsed = buffer_text(&render(&mut app, 70, 24));
-        assert!(collapsed.contains("├ edit"), "{collapsed}");
+        assert!(collapsed.contains("   edit"), "{collapsed}");
         assert!(collapsed.contains("+30 −0"), "the diff stats ride the head:\n{collapsed}");
         assert!(
             !collapsed.contains("+add-30"),
@@ -3340,11 +3220,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         app.handle(AppEvent::Key(Key::Ctrl('t')));
         let expanded = buffer_text(&render(&mut app, 80, 20));
         // Char-exact wrap may split the tail across rows, so join the body
-        // (drop whitespace and the tree `│`) before checking reachability.
-        let joined: String = expanded
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != '│')
-            .collect();
+        // (dropping whitespace) before checking reachability.
+        let joined: String = expanded.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
             joined.contains("TAIL-REACHABLE"),
             "the whole line must be reachable when expanded:\n{expanded}"
@@ -3387,9 +3264,9 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn the_more_hint_pluralizes_one_hidden_line() {
         // The hint is a unit of the (expanded) body: 1 is singular, 2+ plural.
         let one = more_hint(1, false).expect("a hint");
-        assert_eq!(one.spans[0].content.as_ref(), "   │   … +1 more line");
+        assert_eq!(one.spans[0].content.as_ref(), "   … +1 more line");
         let two = more_hint(2, false).expect("a hint");
-        assert_eq!(two.spans[0].content.as_ref(), "   │   … +2 more lines");
+        assert_eq!(two.spans[0].content.as_ref(), "   … +2 more lines");
         // `wide` adds the single-line-elision hint; 0 with no `wide` → none.
         assert!(more_hint(0, false).is_none());
         assert!(more_hint(0, true).is_some());
@@ -3435,38 +3312,6 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             text.contains("+line-20"),
             "the re-shown diff must not be capped:\n{text}"
         );
-    }
-
-    #[test]
-    fn a_tool_row_toggles_independently() {
-        let mut app = App::new();
-        let first = (1..=20)
-            .map(|i| format!("FIRST-{i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let last = (1..=20)
-            .map(|i| format!("LAST-{i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        push_tool(&mut app, "bash", &first, false, None);
-        push_tool(&mut app, "bash", &last, false, None);
-
-        // A click on the LAST tool row's toggle expands only it.
-        let _ = render(&mut app, 70, 50); // publish the hit map
-        let toggle = {
-            let hit = app.hit.transcript.as_ref().expect("a hit");
-            hit.affordances.last().expect("a tool hit").toggle
-        };
-        for kind in [MouseKind::Down, MouseKind::Up] {
-            app.handle(AppEvent::Mouse(MouseEvent {
-                kind,
-                col: toggle.x + 3,
-                row: toggle.y,
-            }));
-        }
-        let text = buffer_text(&render(&mut app, 70, 50));
-        assert!(text.contains("LAST-20"), "the clicked tool expands:\n{text}");
-        assert!(!text.contains("FIRST-20"), "only the clicked tool expands:\n{text}");
     }
 
     #[test]
@@ -4208,7 +4053,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 80, 12));
         // A tool-call-only round renders the tool INLINE — no foot rule, and no
         // stray blank between the `WCODE` head and the tool row.
-        assert!(text.contains("├ read"), "the inline tool:\n{text}");
+        assert!(text.contains("   read"), "the inline tool:\n{text}");
         assert!(!text.contains("── notes"), "no foot rule:\n{text}");
     }
 
@@ -4652,11 +4497,11 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 70, 30));
         assert!(!text.contains("── notes"), "no foot ledger rule:\n{text}");
         // The tools sit at their call sites, in call order, around the prose.
-        let one = text.find("├ bash").expect("the first tool");
+        let one = text.find("   bash").expect("the first tool");
         let mid = text.find("between").expect("the prose");
-        let two = text[one + "├ bash".len()..]
-            .find("├ bash")
-            .map(|i| i + one + "├ bash".len())
+        let two = text[one + "   bash".len()..]
+            .find("   bash")
+            .map(|i| i + one + "   bash".len())
             .expect("the second tool");
         assert!(one < mid && mid < two, "tools inline in call order:\n{text}");
     }
@@ -4667,7 +4512,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         push_tool(&mut app, "bash", "ok", false, None);
         let text = buffer_text(&render(&mut app, 70, 20));
         assert!(!text.contains("── notes"), "the `── notes ──` rule is gone:\n{text}");
-        assert!(text.contains("├ bash"), "the tool is inline:\n{text}");
+        assert!(text.contains("   bash"), "the tool is inline:\n{text}");
     }
 
     #[test]
@@ -4680,7 +4525,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 70, 30));
         assert!(!text.contains('¹'), "no reference mark:\n{text}");
         assert!(
-            text.matches("├ bash").count() == 2,
+            text.matches("   bash").count() == 2,
             "both tools still render (once each):\n{text}"
         );
     }
@@ -4919,7 +4764,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let mut app = App::new();
         push_tool(&mut app, "bash", "hello", false, None);
         let text = buffer_text(&render(&mut app, 80, 12));
-        assert!(text.contains("├ bash"), "the tree head row is missing:\n{text}");
+        assert!(text.contains("   bash"), "the flat head row is missing:\n{text}");
         assert!(text.contains("hello"), "the stats summary is missing:\n{text}");
         assert_eq!(
             text.matches("bash").count(),
@@ -4928,7 +4773,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
     }
 
-    // ---- slice 3 (D31): the tool panel — params, the mid rule, affordances ----
+    // ---- slice 3 (D31): the tool panel — params and the body ----
 
     /// Commit the assistant block carrying a `bash` call's `command`/`cwd` args,
     /// so the `Tool` block gets a populated `params` (D31). One call id: `"t"`.
@@ -5100,7 +4945,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     #[test]
     fn a_done_collapsed_bash_shows_its_command() {
         // W015: a finished, collapsed, non-error tool renders its params — the
-        // `▸`/`Ctrl-T` toggle governs only the output body.
+        // `Ctrl-T` toggle governs only the output body.
         let mut app = App::new();
         push_panel(
             &mut app,
@@ -5109,7 +4954,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             "ok",
         );
         let text = buffer_text(&render(&mut app, 80, 20));
-        assert!(text.contains("├ bash"), "the head row:\n{text}");
+        assert!(text.contains("   bash"), "the head row:\n{text}");
         assert!(
             text.contains("cargo test -p wcode-cli"),
             "a collapsed bash must show its command:\n{text}"
@@ -5118,8 +4963,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
 
     #[test]
     fn a_collapsed_tool_is_one_row() {
-        // A finished, collapsed tool is ONE row: the head (params inlined), no
-        // `│   ` body, no `└`.
+        // A finished, collapsed tool is ONE flat row: the head (params inlined),
+        // no body, no terminator.
         let mut app = App::new();
         push_panel(
             &mut app,
@@ -5131,14 +4976,12 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let lines: Vec<&str> = text.lines().collect();
         let head = lines
             .iter()
-            .position(|l| l.contains("├ bash"))
+            .position(|l| l.contains("   bash"))
             .expect("the head row");
         assert!(lines[head].contains("make"), "the command inlines: {text}");
         assert!(
-            lines
-                .get(head + 1)
-                .is_none_or(|l| !l.trim_start().starts_with('│')),
-            "the row after the head must not be a body row:\n{text}"
+            lines.get(head + 1).is_none_or(|l| l.trim().is_empty()),
+            "the tool is a single row:\n{text}"
         );
         assert!(!text.contains('└'), "no terminator while collapsed:\n{text}");
     }
@@ -5204,9 +5047,15 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let cmd = "cargo test -p wcode-cli --all-targets -- --nocapture --color=always --test-threads=1";
         push_panel(&mut app, "bash", serde_json::json!({ "command": cmd }), "ok");
         let text = buffer_text(&render(&mut app, 60, 20));
-        // The command wraps onto a `│   `-aligned continuation; the tail is
-        // reachable (no `…` clip).
-        assert!(text.contains("│"), "the wrap rides a `│` continuation:\n{text}");
+        // The command wraps onto a col-3 continuation; the tail is reachable.
+        let head_row = text
+            .lines()
+            .find(|l| l.contains("cargo test"))
+            .expect("the head row");
+        assert!(
+            !head_row.contains("--test-threads=1"),
+            "the command wraps onto a continuation:\n{text}"
+        );
         let joined: String = text.split_whitespace().collect();
         assert!(
             joined.contains("--test-threads=1"),
@@ -5386,11 +5235,10 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                 .find(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("no {needle} row:\n{text}"))
         };
-        // The `├` head and the `│` body share the gutter column (3); their
-        // content lands at the shared content column (7), like the prose.
+        // The tool head, its params and its body all share the flat gutter (col 3).
         let col = |row: &str, needle: char| row.chars().position(|c| c == needle);
-        assert_eq!(col(row("├ bash"), '├'), Some(3), "the head");
-        assert_eq!(col(row("│   command"), '│'), Some(3), "the body shares the gutter");
+        assert_eq!(col(row("bash"), 'b'), Some(3), "the head");
+        assert_eq!(col(row("command"), 'c'), Some(3), "the params share the gutter");
     }
 
     #[test]
@@ -5399,12 +5247,12 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         push_bash_panel(&mut app, "ls", "/w", "line one\nline two");
         app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand: params + body show
         let text = buffer_text(&render(&mut app, 80, 20));
-        // The tree glyphs (`├ │ └`) are declared; only BOX frame glyphs are banned.
+        // Only BOX frame glyphs are banned (the composer is frameless).
         for bad in ['╭', '╮', '╰', '╯', '┤'] {
             assert!(!text.contains(bad), "a frame glyph {bad} survives:\n{text}");
         }
         // The tool renders inline; there is no `── notes ──` foot rule.
-        assert!(text.contains("├ bash"), "the inline tool:\n{text}");
+        assert!(text.contains("   bash"), "the inline tool:\n{text}");
         assert!(!text.contains("── notes"), "no foot rule:\n{text}");
     }
 
@@ -5414,7 +5262,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         push_bash_panel(&mut app, "ls", "/w", "ok");
         push_assistant(&mut app, "# the head\n\nSome prose.");
         let text = buffer_text(&render(&mut app, 80, 16));
-        assert!(text.contains("├ bash"), "the inline tool:\n{text}");
+        assert!(text.contains("   bash"), "the inline tool:\n{text}");
         assert!(!text.contains("── notes"), "no foot rule:\n{text}");
         for bad in ['╭', '╮', '╰', '╯'] {
             assert!(!text.contains(bad), "frameless — no {bad}:\n{text}");
@@ -5459,189 +5307,6 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             None,
         );
         assert!(without.is_empty(), "a text-less round renders nothing: {without:?}");
-    }
-
-    #[test]
-    fn a_note_toggle_and_copy_target_the_note() {
-        let mut app = App::new();
-        push_bash_panel(&mut app, "ls", "/w", "the output");
-        let _ = render(&mut app, 80, 20); // publish the hit map
-        let (block, toggle) = {
-            let hit = app.hit.transcript.as_ref().expect("a hit");
-            let a = &hit.affordances[0];
-            assert_eq!(a.item, Some(0), "the hit names note 0");
-            (a.block, a.toggle)
-        };
-        // A click on the toggle region expands the note.
-        for kind in [MouseKind::Down, MouseKind::Up] {
-            app.handle(AppEvent::Mouse(MouseEvent {
-                kind,
-                col: toggle.x + 3,
-                row: toggle.y,
-            }));
-        }
-        assert!(
-            matches!(&app.transcript()[block], Block::Turn(t) if t.tools[0].expanded),
-            "the click expands the tool"
-        );
-
-        // The `▣` cell on the tool row copies that tool's output.
-        let _ = render(&mut app, 80, 20); // republish the hit map
-        let copy = {
-            let hit = app.hit.transcript.as_ref().expect("a hit");
-            hit.affordances[0].copy
-        };
-        for kind in [MouseKind::Down, MouseKind::Up] {
-            app.handle(AppEvent::Mouse(MouseEvent {
-                kind,
-                col: copy.x,
-                row: copy.y,
-            }));
-        }
-        assert!(
-            app.take_actions()
-                .iter()
-                .any(|a| matches!(a, Action::Copy(t) if t == "the output")),
-            "the copy yields the tool's output"
-        );
-    }
-
-    #[test]
-    fn a_multi_note_foot_publishes_a_hit_per_note() {
-        let mut app = App::new();
-        // A two-round turn: two tool calls, then the answer folds both into ONE foot.
-        push_bash_panel(&mut app, "ls", "/w", "first output");
-        push_bash_panel(&mut app, "pwd", "/w", "second output");
-        push_assistant(&mut app, "the answer");
-        {
-            let Block::Turn(t) = &app.transcript()[0] else {
-                panic!("a turn, got {:?}", app.transcript());
-            };
-            assert_eq!(t.tools.len(), 2, "both tools in the ledger");
-        }
-
-        let _ = render(&mut app, 80, 24);
-        let (hits, rows) = {
-            let hit = app.hit.transcript.as_ref().expect("a hit");
-            assert_eq!(hit.affordances.len(), 2, "one hit per row");
-            let hits: Vec<_> = hit.affordances.iter().map(|a| (a.block, a.item)).collect();
-            let rows: Vec<_> = hit.affordances.iter().map(|a| a.toggle.y).collect();
-            (hits, rows)
-        };
-        // The pinned header is a band, not a block, so the turn is block 0.
-        assert_eq!(
-            hits,
-            [(0, Some(0)), (0, Some(1))],
-            "same block, one hit per row"
-        );
-        assert_ne!(rows[0], rows[1], "the two hits sit on distinct rows");
-
-        // Toggling the SECOND row expands only it.
-        let toggle2 = app.hit.transcript.as_ref().unwrap().affordances[1].toggle;
-        for kind in [MouseKind::Down, MouseKind::Up] {
-            app.handle(AppEvent::Mouse(MouseEvent {
-                kind,
-                col: toggle2.x + 3,
-                row: toggle2.y,
-            }));
-        }
-        {
-            // The pinned header is a band, not a block, so the turn is block 0.
-            let Block::Turn(t) = &app.transcript()[0] else {
-                panic!("a turn, got {:?}", app.transcript());
-            };
-            assert!(t.tools[1].expanded, "the second row expands");
-            assert!(!t.tools[0].expanded, "the first row stays collapsed");
-        }
-
-        // Copying the SECOND note yields its output (re-read the freshly drawn cells).
-        let _ = render(&mut app, 80, 24);
-        let copy2 = app.hit.transcript.as_ref().unwrap().affordances[1].copy;
-        for kind in [MouseKind::Down, MouseKind::Up] {
-            app.handle(AppEvent::Mouse(MouseEvent {
-                kind,
-                col: copy2.x,
-                row: copy2.y,
-            }));
-        }
-        assert!(
-            app.take_actions()
-                .iter()
-                .any(|a| matches!(a, Action::Copy(t) if t == "second output")),
-            "the copy yields the second note's output"
-        );
-    }
-
-    #[test]
-    fn note_affordances_are_right_aligned() {
-        let mut app = App::new();
-        push_bash_panel(&mut app, "ls", "/w", "ok");
-        let width = 80usize;
-        let text = buffer_text(&render(&mut app, width as u16, 20));
-        let header = text
-            .lines()
-            .find(|l| l.contains("├ bash"))
-            .expect("the tool head row");
-        let col = header
-            .chars()
-            .position(|c| c == '▸')
-            .expect("the collapse affordance");
-        assert_eq!(
-            col,
-            width - 3,
-            "the `▸` is flush right at width - 3:\n{header}"
-        );
-    }
-
-    #[test]
-    fn a_rendered_note_publishes_cells_on_the_drawn_glyphs() {
-        let mut app = App::new();
-        push_bash_panel(&mut app, "ls", "/w", "ok");
-        let mut terminal = render(&mut app, 80, 20);
-
-        // The published cells line up with the drawn glyphs.
-        let (block, item, toggle, copy) = {
-            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
-            assert_eq!(hit.affordances.len(), 1, "one note → one affordance record");
-            let a = &hit.affordances[0];
-            (a.block, a.item, a.toggle, a.copy)
-        };
-        assert_eq!(item, Some(0), "the hit names note 0");
-        assert!(
-            matches!(&app.transcript()[block], Block::Turn(t) if !t.tools.is_empty()),
-            "the affordance names the turn block"
-        );
-
-        let buf = terminal.backend().buffer();
-        // The wide toggle ENDS on the `▸`; `copy` is exactly the `▣` glyph.
-        let glyph_col = toggle.x + toggle.width - 1;
-        assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▸", "the ▸ glyph");
-        assert_eq!(buf[(copy.x, copy.y)].symbol(), "▣", "the copy cell");
-        assert_eq!(copy.y, toggle.y, "both affordances share the head row");
-        assert!(
-            !toggle.contains((copy.x, copy.y).into()),
-            "the wide toggle and the copy cell are disjoint"
-        );
-
-        // End to end: a click on the note's head (the toggle region) expands it.
-        let click_col = toggle.x + 3;
-        app.handle(AppEvent::Mouse(MouseEvent {
-            kind: MouseKind::Down,
-            col: click_col,
-            row: toggle.y,
-        }));
-        app.handle(AppEvent::Mouse(MouseEvent {
-            kind: MouseKind::Up,
-            col: click_col,
-            row: toggle.y,
-        }));
-        let expanded = matches!(&app.transcript()[block], Block::Turn(t) if t.tools[0].expanded);
-        assert!(expanded, "clicking the tool head expands it");
-
-        // The freshly toggled frame draws `▾` in the same cell.
-        terminal = render(&mut app, 80, 20);
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf[(glyph_col, toggle.y)].symbol(), "▾", "the toggle flips");
     }
 
     #[test]
@@ -5710,33 +5375,6 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert_eq!((hit.rect.x, hit.rect.width), (8, 68), "84 → centered");
     }
 
-    #[test]
-    fn a_wide_band_publishes_the_note_cells_on_the_centered_column() {
-        // The affordance rects must follow the measure column (`col.x`), not the
-        // band's left edge — else clicks land off by `pad`.
-        let mut app = App::new();
-        push_bash_panel(&mut app, "ls", "/w", "ok");
-        let terminal = render(&mut app, 120, 20);
-        let (toggle, copy) = {
-            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
-            assert_eq!(hit.rect.x, 26, "the measure is centered");
-            let a = &hit.affordances[0];
-            (a.toggle, a.copy)
-        };
-        let buf = terminal.backend().buffer();
-        let glyph_col = toggle.x + toggle.width - 1;
-        assert_eq!(
-            buf[(glyph_col, toggle.y)].symbol(),
-            "▸",
-            "the ▸ glyph lands on the published cell"
-        );
-        assert_eq!(
-            buf[(copy.x, copy.y)].symbol(),
-            "▣",
-            "the ▣ cell lands on the published cell"
-        );
-    }
-
     // ---- slice 5 (D33): thinking collapses on commit, expands on toggle ----
 
     /// Commit an assistant block whose content is a single thinking block.
@@ -5764,7 +5402,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let collapsed = buffer_text(&render(&mut app, 80, 24));
         let rows: Vec<&str> = collapsed
             .lines()
-            .filter(|l| l.contains("··· thinking"))
+            .filter(|l| l.trim_start().starts_with("thinking"))
             .collect();
         assert_eq!(rows.len(), 1, "exactly one thinking row:\n{collapsed}");
         assert!(
@@ -5784,41 +5422,6 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             expanded.contains("long enough to wrap"),
             "the body shows when expanded:\n{expanded}"
         );
-        assert!(expanded.contains('▾'), "the toggle glyph flips:\n{expanded}");
-    }
-
-    #[test]
-    fn only_the_first_thinking_row_draws_the_affordance() {
-        let mut app = App::new();
-        // Two thinking contents in ONE committed block. Only the first is the
-        // block's first line, so only it has a published hit region (the publish
-        // requires `content.first()` to be `Thinking`); the second must not draw a
-        // dead `▸ ▣`.
-        app.handle(AppEvent::Agent(
-            root(),
-            wcode_harness::event::AgentEvent::MessageEnd {
-                message: AgentMessage::Assistant {
-                    content: vec![
-                        ContentBlock::Thinking {
-                            text: "first thought".into(),
-                        },
-                        ContentBlock::Thinking {
-                            text: "second thought".into(),
-                        },
-                    ],
-                    stop_reason: wcode_harness::message::StopReason::Stop,
-                    usage: None,
-                    model: None,
-                },
-            },
-        ));
-        let text = buffer_text(&render(&mut app, 80, 24));
-        let rows: Vec<&str> = text.lines().filter(|l| l.contains("··· thinking")).collect();
-        assert_eq!(rows.len(), 2, "two thinking rows:\n{text}");
-        assert_eq!(text.matches('▸').count(), 1, "exactly one toggle glyph:\n{text}");
-        assert_eq!(text.matches('▣').count(), 1, "exactly one copy glyph:\n{text}");
-        assert!(rows[0].contains('▸'), "the first row draws it:\n{text}");
-        assert!(!rows[1].contains('▸'), "the second row does not:\n{text}");
     }
 
     /// A live assistant message whose content is a single thinking block — the
@@ -5833,8 +5436,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     /// D018 §1: in flight, thinking is ONE dim annotation row — the elapsed and
-    /// nothing else. No reasoning body (it is reachable only after the turn
-    /// commits), and no affordance (the live block is never a selection target).
+    /// nothing else. No reasoning body (it is reachable only after the turn commits),
+    /// and no toggle geometry (the live block is never a selection target).
     #[test]
     fn in_flight_thinking_is_one_annotation_row() {
         let mut app = App::new();
@@ -5856,7 +5459,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let live = buffer_text(&render(&mut app, 80, 24));
         let rows: Vec<&str> = live
             .lines()
-            .filter(|l| l.contains("··· thinking"))
+            .filter(|l| l.trim_start().starts_with("thinking"))
             .collect();
         assert_eq!(rows.len(), 1, "exactly one annotation row:\n{live}");
         assert!(
@@ -5881,7 +5484,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
         let done_rows: Vec<&str> = done
             .lines()
-            .filter(|l| l.contains("··· thinking"))
+            .filter(|l| l.trim_start().starts_with("thinking"))
             .collect();
         assert_eq!(done_rows.len(), 1, "one committed row, no live one:\n{done}");
         assert!(
@@ -5921,7 +5524,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         ));
         app.set_run_elapsed(&root(), std::time::Duration::from_millis(1200));
         let two = buffer_text(&render(&mut app, 80, 24));
-        let row_count = two.lines().filter(|l| l.contains("··· thinking")).count();
+        let row_count = two.lines().filter(|l| l.trim_start().starts_with("thinking")).count();
         assert_eq!(row_count, 2, "one row per stretch:\n{two}");
         assert!(
             !two.contains("first stretch") && !two.contains("second stretch"),
@@ -5975,46 +5578,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         // The ROW is per block, so it survives the revert — the two halves must
         // not drift apart.
         assert!(
-            text.contains("··· thinking"),
+            text.lines().any(|l| l.trim_start().starts_with("thinking")),
             "the live annotation row survives the chip's revert:\n{text}"
-        );
-    }
-
-    #[test]
-    fn a_rendered_thinking_row_publishes_a_clickable_toggle() {
-        let mut app = App::new();
-        let reasoning = "reasoning that should appear once the row is clicked";
-        push_thinking(&mut app, reasoning);
-        let _ = render(&mut app, 80, 24);
-
-        // The committed thinking row publishes exactly one affordance record.
-        let (block, toggle) = {
-            let hit = app.hit.transcript.as_ref().expect("a transcript hit");
-            assert_eq!(
-                hit.affordances.len(),
-                1,
-                "the thinking row publishes its affordance"
-            );
-            let a = &hit.affordances[0];
-            (a.block, a.toggle)
-        };
-        assert!(matches!(&app.transcript()[block], Block::Turn(_)));
-
-        // A click on the published toggle cell expands the row.
-        app.handle(AppEvent::Mouse(MouseEvent {
-            kind: MouseKind::Down,
-            col: toggle.x + 1,
-            row: toggle.y,
-        }));
-        app.handle(AppEvent::Mouse(MouseEvent {
-            kind: MouseKind::Up,
-            col: toggle.x + 1,
-            row: toggle.y,
-        }));
-        let text = buffer_text(&render(&mut app, 80, 24));
-        assert!(
-            text.contains("should appear once the row is clicked"),
-            "the click expands the thinking:\n{text}"
         );
     }
 
