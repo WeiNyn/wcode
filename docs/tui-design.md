@@ -1,65 +1,77 @@
 # wcode TUI — design (visual spec)
 
-Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices). Companion to [`tui-plan.md`](tui-plan.md) (the
+Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices) **and by D023** (W018: P5 "prose only, fully bare" — no band rules, plain head labels, treeless tools, a text gauge, a grey default with red the only hue). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
 
 The REPL already has a vocabulary worth keeping — `❯` user, `⚙` tool start,
-`✓`/`✗` tool end, `···` thinking, `⋯` compaction/retry, "dim = secondary". The
+`✓`/`✗` tool end, `⋯` compaction/retry, "dim = secondary" (the TUI renders
+thinking as a plain `thinking` row, D023). The
 TUI reads as the same product, given a full screen.
 
 ## 1. Principles
 
 1. **The base is the header over the transcript over the composer.** A pinned
-   **header band** (the top row over a full-width `─` rule) carries the running
+   **header band** — ONE bare row, no rule (D023) — carries the running
    head `WCODE · session <id> ──── project · ⎇ branch` with `model · effort` far
-   right (D010); below it the transcript (flex) renders in a **measure** (a
+   right (D010); the head row's only `─` is the **leader** between its own runs.
+   Below it the transcript (flex) renders in a **measure** (a
    content column, default 68 and adjustable via `/width`, centered once the
-   band reaches 84 cols), while the composer stays full-width. The composer keeps its **foot line** (the context
-   gauge left and `⏻ plan`/`▤ browse`/state/`↑ N`/folio right). There is **no
+   band reaches 84 cols), while the composer stays full-width. The composer keeps its **foot line** (the plain `used/limit` text left and `⏻ plan`/`▤ browse`/state/`↑ N`/folio right). There is **no
    session row, no status row, and no composer head row**. A **0–3-row team strip
    rides above the composer** only while a member is running; it is a rider, not a
    band. A palette, side panel, or diff is an *overlay* or an addition — never a
    reflow of the base.
 2. **Role lives in the left gutter.** A 1-col margin, a marker column, content
    at a fixed column. The gutter is what makes a scrollback readable at a
-   glance; wrapped continuation lines align under it. A **tool** hangs a tree in
-   the gutter (`├`/`│`/`└`), its body on the content column (D010).
+   glance; wrapped continuation lines align under it. A **tool** is a **flat**
+   row at the gutter column (col 3) — no tree (D023); its body sits at the same
+   column.
 3. **A small palette, dim is the workhorse.** The 17 roles live in one place —
    `theme.rs` (`accent, dim, muted, border, user, body, error, success, warn,
-   code, heading, heading_sub, link, tool_name, thinking, diff_add, diff_del`). Accent (cyan)
-   for the user prompt and running state; red for errors; green for success;
-   yellow for inline code; a green→yellow→red gauge for context fill. Assistant
-   prose stays default and `dim` stays the workhorse.
+   code, heading, heading_sub, link, tool_name, thinking, diff_add, diff_del`).
+   The **default (palette B) is bare (D023)**: `body`/`user` are default weight,
+   **`error` red is the ONLY hue**, and every other role is the grey ramp.
+   "One colour" means **no hue but red** — grey is the achromatic ramp, not a
+   colour. The markdown structure roles keep only their non-colour modifiers
+   (`heading` bold, `heading_sub`/`link` underlined, `code` plain), and the code
+   fence is monochrome (a grey syntax theme). Assistant prose stays default and
+   `dim` stays the workhorse.
    **`dim` is a legible grey, not a `DIM` modifier (D29).** It carries an
    explicit `fg` (a mid-grey) so the quiet half of the screen reads at ~7:1
    instead of the ~3:1 a `DIM` modifier lands on. The grey ramp is three steps —
    `dim` (secondary text) → `muted` (quietest) → `border` (frames) — and every
-   role resolves per colour tier (**D30**): the 16-`Named` hues, their `256`
+   role resolves per colour tier (**D30**): the bare grey steps, their `256`
    indices, or the `truecolor` hexes, chosen by the shipped capability ladder
    (`resolve_color_mode_from`, `theme.rs`); a hex is honoured only under `Rgb`.
+   The seven presets (`nord`, `dark`, …) stay **coloured escape hatches** — a
+   preset still overrides every chromatic role.
    **`NO_COLOR`** still yields `Theme::plain` — no `fg`, and there `dim` falls
-   back to the `DIM` modifier, the only lever without colour (best-effort; D29).
-4. **Blocks are separated by a blank line between roles** (a tool's tree clusters
-   tight under its `├`). Noise is dim; only the model's prose and *your* prompt
-   are full-strength. A **tool** is a `├` tree row (name + stats, its params/body
-   under `│`, `└`-terminated) and **thinking** is a collapsed `··· thinking`
-   affordance row — richer than a blank-line-only block (§4), not a reflow of the
+   back to the `DIM` modifier, the only lever without colour; red is unavailable,
+   so `error` degrades to **bold** (best-effort; D023/D29).
+4. **Blocks are separated by a blank line between roles** (a tool's cluster sits
+   tight at col 3). Noise is dim; only the model's prose and *your* prompt
+   are full-strength. A **tool** is a flat row (name + right-aligned stats, its
+   params inlined and body at the same column) and **thinking** is a plain dim
+   `thinking` row — richer than a blank-line-only block (§4), not a reflow of the
    base.
 
 ## 2. Vocabulary
 
 The **single** glyph table. §4 names elements but never re-declares a glyph.
+`style` names a **role** (§1.3): under the bare default (D023) every role but
+`error` resolves to the grey ramp, so e.g. `accent` and `border` read as grey.
 
 | element | glyph | style |
 |---|---|---|
-| user prompt | `❯` | accent, bold |
+| user prompt | `❯` | dim (the composer prefix; the prompt itself is default weight, D023) |
 | assistant prose | — | default fg |
-| thinking (in-flight annotation) | `···` | dim row `··· thinking <t>` + live cursor `▌` (D018) |
-| thinking (collapsed row) | `··· thinking` | dim |
-| tool head | `├ name  target  stats` | dim; name `tool_name` |
-| tool body / end | `│   …` / `└` | dim |
+| speaker heads | `WCODE` / ` YOU` | dim (no longer reversed; D023) |
+| thinking (in-flight annotation) | `thinking <t>` | dim row at col 3 + live cursor `▌` (D018; the marker glyph retired, D023) |
+| thinking (collapsed row) | `thinking` | dim |
+| tool head | `name  target  stats` | dim, flat at col 3 (no tree, D023); name `tool_name` |
+| code fence / block quote | `│` | dim (kept — only the *tool* tree is gone, D023) |
 | tool error head | `✗ name  stats` | red |
 | compaction / retry | `⋯` | dim |
 | live cursor | `▌` | accent, steady |
@@ -67,19 +79,16 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | mode indicator (browse) | `▤ browse` | accent |
 | spinner (running) | `⠋⠙⠹⠸…` | accent |
 | status separators | `·` | dim |
-| inline code / code block | `` ` `` | yellow (bold under `NO_COLOR`) |
+| inline code / code block | `` ` `` | plain (monochrome by default; a coloured preset may tint, D023) |
 | table | `─` | header bold; three `─` rules (top / header / bottom); columns separated by a whitespace gutter; cells wrap |
 | overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
-| collapsed affordance | `▸` | dim |
-| expanded affordance | `▾` | dim |
-| copy affordance | `▣` | dim |
 | changes tree | `├ └ │ ─` | dim; leaf stats right-aligned |
 | todos | `☑ ☐` | dim |
 | team state | `● ○ ✓ ✗` | running / idle / done / failed |
 | branch / plan | `⎇` / `⏻` | dim / accent |
 | idle / running | `⏸` / `⠹` | dim / accent |
 | abort / paste chip | `⏹` / `❰ ❱` | dim |
-| context gauge | `▰ ▱` | green → yellow → red by fill |
+| context gauge | `used/limit` | plain text (e.g. `14.2k/272k`), flush-left on the foot (D023) |
 
 ## 3. Layout drafts
 
@@ -89,7 +98,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 > the composer's **foot line**, and has no status row or session row. Read **§4**
 > for the shipped layout; the drafts are kept for the reasoning, not as current
 > targets. Draft B's in-flight thinking streams expanded — **retired by D018**: the
-> live thinking row is now the one-row `··· thinking <t>` annotation of §4.
+> live thinking row is now the one-row `thinking <t>` annotation of §4.
 
 ### A — idle, a completed exchange (78 cols)
 
@@ -120,8 +129,8 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
  ❯ add a test for the ambiguous-anchor case
 
 
-   ··· The tests use an edit(src, from, to) helper; I'll add a case with two
-       identical lines and assert the ambiguity error is returned.
+   thinking  The tests use an edit(src, from, to) helper; I'll add a case with two
+             identical lines and assert the ambiguity error is returned.
    I'll add the test, then run the suite to be sure.
 
    ⚙ edit  crates/wcode-cli/src/tools/edit.rs
@@ -212,48 +221,52 @@ blank pane.
   what the run did. The seeded hint has its own retirement (`clear_hint` at the
   first block) and is in neither list.
 
-- **Header** (D010) — a **pinned top band**, not a transcript block: the running
-  head `WCODE · session <id> ──── project · ⎇ branch`, over a **full-width**
-  `─` rule — one row + one rule, always visible. `WCODE` is a **reverse-video**
-  run (`Modifier::REVERSED`; no glyph, no role), then `· session <id>`;
+- **Header** (D010; amended by D023) — a **pinned top band**, not a transcript
+  block: ONE bare row, no rule, carrying the running
+  head `WCODE · session <id> ──── project · ⎇ branch`. The only `─` is the
+  **leader** between the head's own runs (the `WCODE`/`session` group on the left,
+  `project · ⎇ branch   model · effort` on the right). `WCODE` is a plain
+  `dim` label (the reverse-video run is retired, D023), then `· session <id>`;
   `project · ⎇ branch` reads left-to-right and `model · effort` is a **far-right
   group** on the same row (option A). It is **chrome** — never a browse target.
   At 48 cols the ladder sheds `session` first, then the branch.
-- **Speaker head** — the **user block** opens with a `YOU` head (replacing the
-  transcript's `❯`) — a **reverse-video** run (`Modifier::REVERSED`; no glyph, no
-  role). The **assistant turn carries no head** (D012): it opens directly on its
-  body (the `··· thinking` row or the prose), so a turn does not spend a row on a
-  bare `WCODE` marker — the assistant is the page itself. The head replaces the
-  retired `§N` section head (`§` is no longer in the glyph table, §2). It is
-  **chrome** — never a browse selection target, never copied.
+- **Speaker head** — the **user block** opens with a ` YOU` head (replacing the
+  transcript's `❯`) — a plain `dim` run (the reverse-video run is retired, D023;
+  no glyph, no role). The **assistant turn carries no head** (D012): it opens
+  directly on its body (the `thinking` row or the prose), so a turn does not spend
+  a row on a bare `WCODE` marker — the assistant is the page itself. The head
+  replaces the retired `§N` section head (`§` is no longer in the glyph table,
+  §2). It is **chrome** — never a browse selection target, never copied.
 - **Code plate** — a fenced code block renders a **caption line** above it,
   `plate N — <info>` (the fence's info string verbatim; just `plate N` when
   there is none), all `dim`. `N` is the fenced block's ordinal, **per message,
-  monotonic**. **No disclosure** — the code always shows (the design's `▸`
-  collapse is deferred). No new glyph (`plate`/`—`/the digits/`/` are ASCII;
-  `─` is declared).
-- **Tools (inline, tree)** (D009/T1) — a tool renders **inline, in call order**:
-  at the **position it was called**, flowed with the prose. The render walks the
-  turn's `content` and emits tool `k` at the `k`-th `ToolCall`; the inline tool at
-  the call site is the locator (no reference mark — D021). A tool
-  renders as **one tree row** — `├ name  <params inlined>  …  <note · ms>  ▸ ▣`,
-  the outcome `note · ms` and the `▸`/`▣` affordance right-aligned — when
-  **collapsed**; **expanded**, that head sits over its body (`│   key  value`
-  params + output/diff + a `… +N more` hint), closed by a `└` terminator. The name
+  monotonic**. **No disclosure** — the code always shows (the design's
+  disclosure collapse is deferred). No new glyph (`plate`/`—`/the digits/`/` are
+  ASCII; `─` is declared).
+- **Tools (inline, flat)** (D009/T1; amended by D023) — a tool renders **inline,
+  in call order**: at the **position it was called**, flowed with the prose. The
+  render walks the turn's `content` and emits tool `k` at the `k`-th `ToolCall`;
+  the inline tool at the call site is the locator (no reference mark — D021). A
+  tool renders as **one flat row at col 3** — `name  <params inlined>  …  <note ·
+  ms>` — the `note · ms` stats **right-aligned**; the tree (`├`/`│`/`└`) is
+  retired and so is the disclosure/copy affix with its mouse click geometry
+  (D023). **Expanded**, the head sits over its body (`key  value`
+  params + output/diff + a `… +N more` hint), all at the same column. The name
   prints **once** — no ordinal, no separate `✓ name · note` row. The **`bash`
   command is shown in full** (it wraps, never clips). A tool's **params are never
   hidden**. **Collapsed**, they ride the head row: the first param's value prints
   **bare** (its key dropped, its syntax highlight kept), the rest as `key=value`;
-  the head wraps on a `│   `-aligned continuation when it overflows, so the `bash`
-  command still shows in full. **Expanded**, they re-draw as the `│   key  value`
-  rows. The `▸`/`▾` disclosure and `Ctrl-T` govern the tool's **output body** only
+  the head wraps on a col-3-aligned continuation when it overflows, so the `bash`
+  command still shows in full. **Expanded**, they re-draw as `key  value`
+  rows. `Ctrl-T` governs the tool's **output body** only
   (params are the call's identity and never hide). A tool error is
   forced expanded. `Ctrl-T` toggles every tool's output; browse
   `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
-- **Thinking** (D33/D010; **amended by D018**) — **in flight** it is ONE dim
-  annotation row, not an expansion: `   ··· thinking 1.2s▌` — the `···` gutter
-  marker, `thinking`, the live elapsed, and the live cursor `▌` closing the
-  row. **No reasoning body, no affordance** — the live block is never a
+- **Thinking** (D33/D010; **amended by D018 and D023**) — **in flight** it is ONE
+  dim annotation row, not an expansion: `   thinking 1.2s▌` —
+  `thinking`, the live elapsed, and the live cursor `▌` closing the
+  row, all at col 3 (the marker glyph is retired, D023). **No reasoning body, no
+  affordance** — the live block is never a
   selection target (see **Browse mode**), so nothing expands while the model
   reasons. The elapsed is the run's own clock: `Surface::run_elapsed`
   (`App::run_elapsed`), injected every 120 ms by the run loop — the same
@@ -264,27 +277,27 @@ blank pane.
   or tool delta — "thinking is active" is exactly `content.last()` is
   `Thinking`, which the kernel already maintains by opening a fresh thinking
   block per reasoning stretch. On **commit** it collapses to the unchanged
-  quiet one-line `··· thinking` row (no char count, no timer) with the same
-  `▸`/`▾`/`▣` affordances, expandable with `Enter` — the reasoning text is
-  reachable only after the turn commits. Its `···` marker shares the tool
-  tree's gutter column.
+  quiet one-line `thinking` row (no char count, no timer), expandable with
+  `Enter` — the reasoning text is
+  reachable only after the turn commits, and its body sits at col 3 (the flat
+  cluster).
 - **Todos** (D35) — the `todo` tool's checklist is ONE block that updates in
   place (`── todos  d/t ──` header, `☑`/`☐` rows), in the transcript — removed
   from the sidebar.
 - **Diff / changes** (D36) — a `/changes` selection re-shows the file's diff;
   the run's changeset renders as a directory **tree** (`├─`/`└─`, stats
   right-aligned) in the sidebar and the `/changes` modal.
-- **Affordances** (D32) — every **expandable** block (a tool's head row, or an
-  assistant block whose first content is thinking) carries a `▸`/`▾` disclosure
-  and a `▣` copy cell on its first row, right-aligned at the panel's columns;
-  click toggles/copies, and browse `Enter`/`Space` and `y` are the keyboard
-  parity.
+- **Affordances** (D32; **retired by D023**) — the disclosure/copy affix and its
+  mouse click geometry are gone: a tool row and a thinking row are plain lines.
+  Expansion/copy is **keyboard-only** — `Ctrl-T` toggles every tool's output, and
+  browse `Enter`/`Space`/`y` act per block. Preserving that keyboard parity is the
+  deliberate trade-off for dropping the click cells.
 
 **Gutter** — 1 col margin, marker column, content at a fixed column (so wrapped
-continuation lines align under the text, as in draft B's `···` block). The
-gutter is also the natural home for a `▌` selection bar. A **tool**'s tree
-(`├`/`│`/`└`) rides the gutter on the content column; a thinking row keeps the
-plain `···` marker column (D010).
+continuation lines align under the text). The
+gutter is also the natural home for a `▌` selection bar. A **tool**'s flat row
+sits at col 3 (no tree, D023); a thinking row is a plain `thinking` line at the
+same column (D010/D023).
 
 **Browse mode** — `Ctrl-G` moves a `▌` selection over the committed transcript.
 The bar occupies the gutter's first column (the 1-col margin), *replacing* the
@@ -307,8 +320,8 @@ beside the sessions. (Shift-Enter needs a terminal that reports the modifier —
 kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
 **Layout** — top to bottom (the sidebar, `Ctrl-B`, is an optional left column):
-0. the **header** band (pinned, D010) — the running head over a full-width
-   `─` rule, always visible;
+0. the **header** band (pinned, D010; D023) — ONE bare row (the running head),
+   no rule, always visible;
 1. the **transcript** (flex, plain, scrollable). Committed assistant messages render as
    markdown — headings, bullets, fenced code, aligned tables, inline
    `code`/`**bold**`. It renders in a **measure** — a content column, **default
@@ -317,27 +330,28 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    (a real margin each side); below 84 the content uses the full band width (so
    an 80-col terminal keeps its `❯` at the gutter). The **composer band is never
    centered** — it is the one piece of furniture that stays edge-to-edge. A
-   **tool** is a tree row (params + body); a **thinking** block is a one-row
-   annotation while live and a collapsed row until expanded once committed
-   (D018);
+   **tool** is a flat row (params + body, at col 3, D023); a **thinking** block is
+   a one-row annotation while live and a collapsed row until expanded once
+   committed (D018);
 2. the **team region** — 0..=3 rows, only `Running` teammates (the root is the
    orchestrator, excluded), in the **canonical order** (D34). It is a rider, not
    a band: it collapses to nothing when no teammate runs;
-3. the **composer** — an **open writing line** (the input) over a full-width
-   `─` rule, with a **foot line** below. The composer's **head row is dropped**
+3. the **composer** — an **open writing line** (the input) with a **foot line**
+   below (no rule — D023). The composer's **head row is dropped**
    (D009): the chrome it carried (`project`/`branch`/`session`, `model`/`effort`)
    now rides the pinned **header** band (above), and the composer keeps
-   only the **foot line** — the context gauge left and
-   `[⏻ plan] · [▤ browse] · ⏸ idle`/`⠹ running 3.1s`/`⠹ thinking 3.1s`/`⠹ btw…` · `[↑ N]` `<N>/<M>` right
+   only the **foot line** — the plain `used/limit` text left and
+   `⏻ plan · ▤ browse · ⏸ idle`/`⠹ running 3.1s`/`⠹ thinking 3.1s`/`⠹ btw…` · `↑ N` `<N>/<M>` right
    (the `btw…` state while a `/btw` side ask is in flight; `⠹ thinking <t>`
    replaces `running` while the live message reasons — D018; the **folio**
    `<N>/<M>` is the surface's turn count, `N == M`, so a first turn reads
    `1/1`). There is **no box and no corners**, and **no session row, no status
    row, and no head row**.
-The context gauge is 8 parallelograms (`▰` filled, `▱` empty) colored
-green→yellow→red by fill, then `used / limit`. The header and composer-foot
+The context gauge is plain text — `used/limit` (e.g. `14.2k/272k`), all `dim`,
+flush-left on the composer foot (no parallelograms, no colour; D023). The header
+and composer-foot
 titles clip with `…` then drop least-important-first (header: the session
-id, then branch; foot: the `[↑ N]` scroll, then the gauge, then
+id, then branch; foot: the `↑ N` scroll, then the gauge text, then
 `⏻ plan`/`▤ browse`). The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
@@ -347,7 +361,7 @@ headed by a **ruled `── label ─────…` line** (D011 — the book-
 `─` fill reaches the panel edge), a blank line setting the second off from the
 first:
 1. **`agents`** — the **root/wcode session is the FIRST row** (D018): its label
-   (`wcode` — the header's reverse-video `WCODE` run, lowercased), its state
+   (`wcode` — the header's `WCODE` label, lowercased), its state
    glyph, its live action, the `*` when focused, and the run elapsed on the
    focused row — but **no number badge**. Below it the members' **numbered**
    rows (`1 ● explorer · read a.rs`, `2 ○ developer`, …): a `muted` number
@@ -384,7 +398,7 @@ atom buffer; a paste chip is one unit, never split) ·
 transcript, `↑ N` on the composer's foot line while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52) · `Ctrl-T` expands/collapses every tool's **output** (params stay
-visible — inlined on a collapsed tool's single row, as `│   key  value` rows when
+visible — inlined on a collapsed tool's single row, as `key  value` rows when
 expanded; a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
@@ -410,8 +424,10 @@ Agreed for P0 (see also `tui-plan.md` §9):
 - **Crate**: new `wcode-tui`, depending on `wcode-protocol`.
 - **Versions**: `ratatui` 0.30, `crossterm` 0.29 (jcode's; both exist).
 - **Alt-screen**: yes, with a custom scrollback (P1).
-- **Palette**: one `theme.rs` of named roles (`Theme::colored` / `Theme::plain`),
-  with per-tier colours (`Named`/`256`/`truecolor`, D30) and a `[theme]` / `/theme`
+- **Palette**: one `theme.rs` of named roles (`Theme::colored` / `Theme::plain`);
+  the default (palette B) is the **bare grey ramp with `error` red the only hue**
+  (D023), while a preset (`nord`, `dark`, …) overrides every chromatic role.
+  Per-tier colours (`Named`/`256`/`truecolor`, D30) and a `[theme]` / `/theme`
   overlay (P4, landed); live-reloadable (`static THEME: RwLock<Theme>`).
 - **Markdown**: hand-rolled, applied live and committed (P1/P2). **Clipboard**:
   OSC-52, no `arboard` (P2).
@@ -422,11 +438,11 @@ Agreed for P0 (see also `tui-plan.md` §9):
 
 ## 6. Open questions
 
-- **Thinking** — **resolved (D33/D010); amended by D018**: in flight it is ONE dim `··· thinking <t>` annotation row with the live cursor (no body — the reasoning text is reachable only after the turn commits); on commit it collapses to a quiet one-line `··· thinking` row (no char count), expandable. Tool output is a tree row (D009/T1), collapsible per block (`▸`/`▾`, or browse `Enter`) or all at once (`Ctrl-T`).
+- **Thinking** — **resolved (D33/D010); amended by D018 and D023**: in flight it is ONE dim `thinking <t>` annotation row with the live cursor (no body — the reasoning text is reachable only after the turn commits); on commit it collapses to a quiet one-line `thinking` row (no char count), expandable. Tool output is a flat row (D009/T1, D023), collapsible per block (browse `Enter`) or all at once (`Ctrl-T`).
 - **Timestamps** on turns: lean no.
-- **Header/title bar**: **amended by D010** — the header IS a pinned top band now
-  (the running head over a full-width rule); the composer keeps its **foot line**,
-  and `Ctrl-B` docks the sidebar for the rest.
-- **Block separation**: blank between *roles* (kept); a tool is a panel and a thinking block is an affordance row, so "between every block" is moot.
+- **Header/title bar**: **amended by D010 and D023** — the header IS a pinned top
+  band now (the running head as ONE bare row, no rule); the composer keeps its
+  **foot line**, and `Ctrl-B` docks the sidebar for the rest.
+- **Block separation**: blank between *roles* (kept); a tool is a flat row and a thinking block is a plain row, so "between every block" is moot.
 - **Gutter vs flat**: gutter (drafted) — it is the main thing the TUI buys over
   the line loop. Revisit only if it costs width on 80-col terminals.
