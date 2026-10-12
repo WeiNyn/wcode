@@ -1169,11 +1169,13 @@ mod render_tests {
     #[test]
     fn render_text_emits_a_bold_run_for_a_bold_cell() {
         let mut app = App::new();
-        push_text(&mut app, "bold-run-marker");
-        // The `❯` prompt (accent/user) is BOLD in every theme, so the frame
-        // carries a bold SGR run — `1;<color>` under color, a bare `1` under
-        // NO_COLOR. The process theme is global (another test may `set` one), so
-        // assert the shape, not an exact color. Bold-only is pinned exactly by
+        // W018: the bare palette drops the BOLD accents, so a genuine bold run comes
+        // from markdown `**strong**` (the body modifier), not the `❯` prompt.
+        push_text(&mut app, "**bold-run-marker**");
+        // A strong run carries a `BOLD` modifier in every theme, so the frame emits a
+        // bold SGR run — `1;<color>` under color, a bare `1` under NO_COLOR. The
+        // process theme is global (another test may `set` one), so assert the shape,
+        // not an exact color. Bold-only is pinned exactly by
         // `sgr_params_is_empty_for_the_default_style`.
         let frame = render_text(&mut app, 40, 12);
         assert!(

@@ -4211,10 +4211,11 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             theme::theme().user,
             "the prompt reads in the accent role"
         );
-        assert_ne!(
+        // W018: `user` collapses to the default weight (== `body`).
+        assert_eq!(
             theme::theme().user,
             theme::theme().body,
-            "the accent must differ from the assistant's default body"
+            "both are default weight"
         );
     }
 

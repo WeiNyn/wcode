@@ -5,7 +5,8 @@
 //! `Theme::plain()` is the `NO_COLOR` fallback: no `fg` at all, only
 //! bold/italic/dim — byte-identical to the per-function branches it replaced.
 //!
-//! Palette B is the default (named ANSI colors). A [`ThemeSpec`] — built by
+//! Palette B is the default — the bare grey ramp, `error` the only colour (W018).
+//! A [`ThemeSpec`] — built by
 //! [`parse_theme`] from a `[theme]` table — overlays any role, including a hex
 //! `#rrggbb` truecolor value (opt-in). Theme *detection* (`COLORTERM` /
 //! 256-color) remains open (`tui-plan.md` P2).
@@ -59,53 +60,62 @@ pub(crate) struct Theme {
 }
 
 impl Theme {
-    /// The default palette — a handful of named ANSI colors. Assistant prose
-    /// stays default; `dim` is the workhorse grey and `muted`/`border` the quiet
-    /// pair (`tui-design.md` §1.3, D29).
+    /// The bare skeleton (W018 §4.1) that BOTH palette B and every preset seed
+    /// from: `error` red is the ONLY colour; `body`/`user` are default weight; every
+    /// other role is the grey ramp; the markdown structure roles carry only a
+    /// non-colour modifier. `dim` is the workhorse grey and `muted`/`border` the
+    /// quiet pair (`tui-design.md` §1.3, D29).
     const fn colored() -> Self {
         Theme {
-            accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            // default weight (no fg)
+            body: Style::new(),
+            user: Style::new(),
+            // THE ONLY COLOUR
+            error: Style::new().fg(Color::Red),
+            // the grey ramp (D29)
             dim: Style::new().fg(Color::Gray),
             muted: Style::new().fg(Color::DarkGray),
             border: Style::new().fg(Color::DarkGray),
-            user: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            body: Style::new(),
-            error: Style::new().fg(Color::Red),
-            success: Style::new().fg(Color::Green),
-            warn: Style::new().fg(Color::LightYellow),
-            code: Style::new().fg(Color::Yellow),
-            heading: Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            heading_sub: Style::new().fg(Color::Magenta),
-            link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
-            tool_name: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            thinking: Style::new().fg(Color::Magenta).add_modifier(Modifier::ITALIC),
-            diff_add: Style::new().fg(Color::Green),
-            diff_del: Style::new().fg(Color::Red),
+            // everything else -> the dim grey
+            accent: Style::new().fg(Color::Gray),
+            success: Style::new().fg(Color::Gray),
+            warn: Style::new().fg(Color::Gray),
+            tool_name: Style::new().fg(Color::Gray),
+            thinking: Style::new().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+            diff_add: Style::new().fg(Color::Gray),
+            diff_del: Style::new().fg(Color::Gray),
+            // markdown structure: NO fg, only the non-colour modifier (Q3)
+            code: Style::new(),
+            heading: Style::new().add_modifier(Modifier::BOLD),
+            heading_sub: Style::new().add_modifier(Modifier::UNDERLINED),
+            link: Style::new().add_modifier(Modifier::UNDERLINED),
         }
     }
 
-    /// The `NO_COLOR` palette: no foreground anywhere, only bold/italic/dim.
+    /// The `NO_COLOR` palette: no foreground anywhere — only bold/italic/dim. The
+    /// bare palette modulo the single red→bold step (red is unavailable), so `error`
+    /// degrades to bold; the markdown structure roles keep their modifier.
     const fn plain() -> Self {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let dim = Style::new().add_modifier(Modifier::DIM);
         Theme {
-            accent: bold,
+            body: Style::new(),
+            user: Style::new(),
+            error: bold,
             dim,
             muted: dim,
             border: dim,
-            user: bold,
-            body: Style::new(),
-            error: bold,
-            success: bold,
-            warn: bold,
-            code: bold,
+            accent: dim,
+            success: dim,
+            warn: dim,
+            tool_name: dim,
+            thinking: Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC)),
+            diff_add: dim,
+            diff_del: dim,
             heading: bold,
             heading_sub: Style::new().add_modifier(Modifier::UNDERLINED),
             link: Style::new().add_modifier(Modifier::UNDERLINED),
-            tool_name: bold,
-            thinking: Style::new().add_modifier(Modifier::DIM.union(Modifier::ITALIC)),
-            diff_add: bold,
-            diff_del: bold,
+            code: Style::new(),
         }
     }
 }
@@ -142,7 +152,7 @@ pub(crate) fn set(spec: ThemeSpec) {
     let syntax = palette
         .as_ref()
         .and_then(syntect_theme)
-        .unwrap_or_else(crate::markdown::default_syntect_theme);
+        .unwrap_or_else(crate::markdown::grey_syntect_theme);
     crate::markdown::install_syntax_theme(syntax);
     GENERATION.fetch_add(1, Ordering::Relaxed); // cache-invalidation signal
 }
@@ -528,7 +538,7 @@ fn omarchy_source() -> Result<Source, String> {
 impl Theme {
     /// ALL 17 roles from a palette (NOT an overlay). Palette B (`DEFAULT`) takes
     /// the D30 tier path ([`palette_b`]) — each role's own Named-16 / 256 / hex
-    /// step. Any other preset starts from the palette-B skeleton
+    /// step. Any other preset starts from the bare skeleton
     /// (`Theme::colored()`) so only `fg` varies per role, and its `Rgb` colors
     /// are gated (below); `dim` still takes the grey ramp.
     ///
@@ -591,58 +601,31 @@ fn apply_dim_ramp(theme: &mut Theme, mode: ColorMode) {
     theme.dim.fg = Some(grey_ramp(mode).0);
 }
 
-/// Palette B at a color tier (D30): `Theme::colored()` with every role's `fg`
-/// set to its tier step for `mode` — the Named-16 hues, their 256 indices, or
-/// their truecolor hexes. `body` keeps no `fg` (prose = the terminal default).
+/// Palette B at a color tier (D30): the bare skeleton ([`Theme::colored`]) with a
+/// grey ramp per tier and a per-tier red for `error` — the only chromatic role.
+/// `body`/`user`/`heading`/`heading_sub`/`link`/`code` keep no `fg` (prose = the
+/// terminal default; markdown = modifier-only).
 fn palette_b(mode: ColorMode) -> Theme {
     let mut theme = Theme::colored();
     let (dim, muted, border) = grey_ramp(mode);
     theme.dim.fg = Some(dim);
     theme.muted.fg = Some(muted);
     theme.border.fg = Some(border);
-    // `(accent, red, green, warn, code, magenta, blue)` — the chromatic hues.
-    let (accent, red, green, warn, code, magenta, blue) = match mode {
-        ColorMode::Plain | ColorMode::Named => (
-            Color::Cyan,
-            Color::Red,
-            Color::Green,
-            Color::LightYellow,
-            Color::Yellow,
-            Color::Magenta,
-            Color::Blue,
-        ),
-        ColorMode::Indexed => (
-            Color::Indexed(45),
-            Color::Indexed(203),
-            Color::Indexed(114),
-            Color::Indexed(180),
-            Color::Indexed(180),
-            Color::Indexed(176),
-            Color::Indexed(39),
-        ),
-        ColorMode::Rgb => (
-            Color::Rgb(0x56, 0xb6, 0xc2),
-            Color::Rgb(0xe0, 0x6c, 0x75),
-            Color::Rgb(0x98, 0xc3, 0x79),
-            Color::Rgb(0xd6, 0xb0, 0x6a),
-            Color::Rgb(0xd6, 0xb0, 0x6a),
-            Color::Rgb(0xc6, 0x78, 0xdd),
-            Color::Rgb(0x61, 0xaf, 0xef),
-        ),
+    // `error` is the ONLY chromatic role — a red per tier:
+    let red = match mode {
+        ColorMode::Plain | ColorMode::Named => Color::Red,
+        ColorMode::Indexed => Color::Indexed(203),
+        ColorMode::Rgb => Color::Rgb(0xe0, 0x6c, 0x75),
     };
-    theme.accent.fg = Some(accent);
-    theme.user.fg = Some(accent);
     theme.error.fg = Some(red);
-    theme.diff_del.fg = Some(red);
-    theme.success.fg = Some(green);
-    theme.diff_add.fg = Some(green);
-    theme.warn.fg = Some(warn);
-    theme.code.fg = Some(code);
-    theme.heading.fg = Some(magenta);
-    theme.heading_sub.fg = Some(magenta);
-    theme.thinking.fg = Some(magenta);
-    theme.link.fg = Some(blue);
-    theme.tool_name.fg = Some(blue);
+    // every other non-markdown role -> the SAME dim grey for this tier:
+    theme.accent.fg = Some(dim);
+    theme.success.fg = Some(dim);
+    theme.warn.fg = Some(dim);
+    theme.tool_name.fg = Some(dim);
+    theme.thinking.fg = Some(dim);
+    theme.diff_add.fg = Some(dim);
+    theme.diff_del.fg = Some(dim);
     theme
 }
 
@@ -657,9 +640,10 @@ fn to_syntect(c: Color) -> Option<syntect::highlighting::Color> {
 
 /// A syntect theme from the palette — built ONLY when EVERY palette color is
 /// `to_syntect`-able (an all-RGB palette); `None` otherwise, so the caller
-/// falls back to [`crate::markdown::default_syntect_theme`]. So the `default`
-/// preset (named-16/Reset) uses `base16-ocean.dark`; the six truecolor presets
-/// get a custom theme whose scopes match the UI hues (D11/D14).
+/// ([`set`]) falls back to the bare grey theme
+/// ([`crate::markdown::grey_syntect_theme`]). So the `default` preset
+/// (named-16/Reset) yields a monochrome fence; the six truecolor presets get a
+/// custom theme whose scopes match the UI hues (D11/D14).
 fn syntect_theme(p: &Palette) -> Option<syntect::highlighting::Theme> {
     use syntect::highlighting::{ScopeSelectors, ThemeItem, ThemeSettings};
 
@@ -757,7 +741,7 @@ impl ThemeSpec {
     /// The theme for this spec: the preset palette (if any) with the role
     /// overrides applied. A preset seeds ALL 17 roles ([`Theme::from_palette`]);
     /// then each named role changes only its `fg` — its modifiers stay (`link`
-    /// underlined, `tool_name` and `accent` bold, `thinking` dim+italic). A hex
+    /// underlined, `thinking` italic). A hex
     /// (`#rrggbb` → [`Color::Rgb`]) override is honored only when the terminal
     /// is truecolor ([`ColorMode::Rgb`]): under Plain / Named / Indexed it
     /// degrades to that role's palette-B default rather than emit an `Rgb` a
@@ -784,8 +768,8 @@ impl ThemeSpec {
 }
 
 /// Apply a role→color overlay to `theme`. Each named role changes only its `fg`
-/// — its modifiers stay (`link` underlined, `tool_name` and `accent` bold,
-/// `thinking` dim+italic). A hex (`#rrggbb` → [`Color::Rgb`]) value is honored
+/// — its modifiers stay (`link` underlined, `thinking` italic). A hex
+/// (`#rrggbb` → [`Color::Rgb`]) value is honored
 /// only when the terminal is truecolor ([`ColorMode::Rgb`]); under Plain / Named
 /// / Indexed it is skipped, keeping the role's base color. [`parse_theme_table`]
 /// validated the values; a stray one cannot reach here.
@@ -926,6 +910,87 @@ fn resolve(spec: ThemeSpec, no_color: bool) -> Theme {
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_error_carries_a_foreground_colour() {
+        // W018 §4.1: palette B is the grey ramp + a per-tier red for `error` — no
+        // other role carries a hue (its fg is `None` or on the WHOLE grey ramp).
+        for mode in [ColorMode::Named, ColorMode::Indexed, ColorMode::Rgb] {
+            let (d, m, b) = grey_ramp(mode);
+            let t = ThemeSpec::default().into_theme(mode);
+            let red = match mode {
+                ColorMode::Indexed => Color::Indexed(203),
+                ColorMode::Rgb => Color::Rgb(0xe0, 0x6c, 0x75),
+                _ => Color::Red,
+            };
+            assert_eq!(t.error.fg, Some(red), "error is the only colour ({mode:?})");
+            let roles: [(&str, &Style); 16] = [
+                ("accent", &t.accent),
+                ("dim", &t.dim),
+                ("muted", &t.muted),
+                ("border", &t.border),
+                ("user", &t.user),
+                ("body", &t.body),
+                ("success", &t.success),
+                ("warn", &t.warn),
+                ("code", &t.code),
+                ("heading", &t.heading),
+                ("heading_sub", &t.heading_sub),
+                ("link", &t.link),
+                ("tool_name", &t.tool_name),
+                ("thinking", &t.thinking),
+                ("diff_add", &t.diff_add),
+                ("diff_del", &t.diff_del),
+            ];
+            for (role, style) in roles {
+                assert!(
+                    style.fg.is_none()
+                        || matches!(style.fg, Some(c) if c == d || c == m || c == b),
+                    "{role} must be on the grey ramp (or default), not a hue ({mode:?}): {style:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bare_default_code_fence_is_monochrome() {
+        // Defect #1 (Option A): the bare default's fence theme declares NO scoped hue,
+        // so every token resolves to the one grey foreground. Built locally (the
+        // process-wide syntax-theme store would race other fence tests). The grey is
+        // checked by RAMP MEMBERSHIP, not a literal.
+        let theme = crate::markdown::grey_syntect_theme();
+        assert!(
+            theme.scopes.is_empty(),
+            "the bare fence theme declares no scoped hue"
+        );
+        let (d, m, b) = grey_ramp(ColorMode::Rgb);
+        let on_ramp = |c: syntect::highlighting::Color| {
+            [d, m, b].iter().any(
+                |x| matches!(x, Color::Rgb(rr, gg, bb) if *rr == c.r && *gg == c.g && *bb == c.b),
+            )
+        };
+        let fg = theme.settings.foreground.expect("a grey foreground");
+        assert!(
+            on_ramp(fg),
+            "the fence foreground {fg:?} must be on the grey ramp"
+        );
+
+        // Every highlighted token of a real Rust fence takes that one grey (a
+        // per-token list, not a role list): no keyword/string/comment hue survives.
+        use syntect::easy::HighlightLines;
+        use syntect::parsing::SyntaxSet;
+        let ss = SyntaxSet::load_defaults_nonewlines();
+        let syntax = ss.find_syntax_by_token("rust").expect("the rust syntax");
+        let mut hl = HighlightLines::new(syntax, &theme);
+        let ranges = hl
+            .highlight_line("let x = 1; // a comment\n", &ss)
+            .expect("a highlighted line");
+        let tokens: Vec<(&str, syntect::highlighting::Color)> =
+            ranges.into_iter().map(|(st, txt)| (txt, st.foreground)).collect();
+        assert!(tokens.len() >= 2, "the fence yields several tokens: {tokens:?}");
+        for (token, c) in tokens {
+            assert!(on_ramp(c), "the fence token {token:?} carries a hue: {c:?}");
+        }
+    }
     /// Every role, so a test can assert over all of them.
     fn fields(theme: &Theme) -> [&Style; 17] {
         [
@@ -968,10 +1033,10 @@ mod tests {
             !colored.dim.add_modifier.contains(Modifier::DIM),
             "dim must not use the DIM modifier under color"
         );
-        // `thinking` drops DIM too, keeping magenta + italic.
+        // `thinking` drops DIM too, keeping the grey + italic.
         assert!(!colored.thinking.add_modifier.contains(Modifier::DIM));
         assert!(colored.thinking.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(colored.thinking.fg, Some(Color::Magenta));
+        assert_eq!(colored.thinking.fg, Some(Color::Gray));
 
         // NO_COLOR has no color lever, so `dim` keeps the modifier.
         assert!(
@@ -1013,64 +1078,43 @@ mod tests {
 
     #[test]
     fn each_role_resolves_its_tier_value() {
-        // D30: the whole 17-role matrix for palette B, per color mode. Every
-        // literal is pinned, so a wrong tier value fails.
+        // D30/W018: palette B is the grey ramp at each mode, plus a per-tier red for
+        // `error` — the only chromatic role. Every literal is pinned.
         let named = ThemeSpec::default().into_theme(ColorMode::Named);
-        assert_eq!(named.accent.fg, Some(Color::Cyan));
+        assert_eq!(named.error.fg, Some(Color::Red));
         assert_eq!(named.dim.fg, Some(Color::Gray));
         assert_eq!(named.muted.fg, Some(Color::DarkGray));
         assert_eq!(named.border.fg, Some(Color::DarkGray));
-        assert_eq!(named.user.fg, Some(Color::Cyan));
-        assert_eq!(named.body.fg, None);
-        assert_eq!(named.error.fg, Some(Color::Red));
-        assert_eq!(named.success.fg, Some(Color::Green));
-        assert_eq!(named.warn.fg, Some(Color::LightYellow));
-        assert_eq!(named.code.fg, Some(Color::Yellow));
-        assert_eq!(named.heading.fg, Some(Color::Magenta));
-        assert_eq!(named.heading_sub.fg, Some(Color::Magenta));
-        assert_eq!(named.link.fg, Some(Color::Blue));
-        assert_eq!(named.tool_name.fg, Some(Color::Blue));
-        assert_eq!(named.thinking.fg, Some(Color::Magenta));
-        assert_eq!(named.diff_add.fg, Some(Color::Green));
-        assert_eq!(named.diff_del.fg, Some(Color::Red));
+        for role in [&named.accent, &named.success, &named.warn, &named.tool_name, &named.thinking, &named.diff_add, &named.diff_del] {
+            assert_eq!(role.fg, Some(Color::Gray), "collapses to the dim grey");
+        }
+        for role in [&named.body, &named.user, &named.heading, &named.heading_sub, &named.link, &named.code] {
+            assert_eq!(role.fg, None, "keeps the default fg");
+        }
 
         let indexed = ThemeSpec::default().into_theme(ColorMode::Indexed);
-        assert_eq!(indexed.accent.fg, Some(Color::Indexed(45)));
+        assert_eq!(indexed.error.fg, Some(Color::Indexed(203)));
         assert_eq!(indexed.dim.fg, Some(Color::Indexed(250)));
         assert_eq!(indexed.muted.fg, Some(Color::Indexed(243)));
         assert_eq!(indexed.border.fg, Some(Color::Indexed(238)));
-        assert_eq!(indexed.user.fg, Some(Color::Indexed(45)));
-        assert_eq!(indexed.body.fg, None);
-        assert_eq!(indexed.error.fg, Some(Color::Indexed(203)));
-        assert_eq!(indexed.success.fg, Some(Color::Indexed(114)));
-        assert_eq!(indexed.warn.fg, Some(Color::Indexed(180)));
-        assert_eq!(indexed.code.fg, Some(Color::Indexed(180)));
-        assert_eq!(indexed.heading.fg, Some(Color::Indexed(176)));
-        assert_eq!(indexed.heading_sub.fg, Some(Color::Indexed(176)));
-        assert_eq!(indexed.link.fg, Some(Color::Indexed(39)));
-        assert_eq!(indexed.tool_name.fg, Some(Color::Indexed(39)));
-        assert_eq!(indexed.thinking.fg, Some(Color::Indexed(176)));
-        assert_eq!(indexed.diff_add.fg, Some(Color::Indexed(114)));
-        assert_eq!(indexed.diff_del.fg, Some(Color::Indexed(203)));
+        for role in [&indexed.accent, &indexed.success, &indexed.warn, &indexed.tool_name, &indexed.thinking, &indexed.diff_add, &indexed.diff_del] {
+            assert_eq!(role.fg, Some(Color::Indexed(250)), "collapses to the dim grey");
+        }
+        for role in [&indexed.body, &indexed.user, &indexed.heading, &indexed.heading_sub, &indexed.link, &indexed.code] {
+            assert_eq!(role.fg, None, "keeps the default fg");
+        }
 
         let rgb = ThemeSpec::default().into_theme(ColorMode::Rgb);
-        assert_eq!(rgb.accent.fg, Some(Color::Rgb(0x56, 0xb6, 0xc2)));
+        assert_eq!(rgb.error.fg, Some(Color::Rgb(0xe0, 0x6c, 0x75)));
         assert_eq!(rgb.dim.fg, Some(Color::Rgb(0xa9, 0xb1, 0xba)));
         assert_eq!(rgb.muted.fg, Some(Color::Rgb(0x7d, 0x87, 0x90)));
         assert_eq!(rgb.border.fg, Some(Color::Rgb(0x3b, 0x42, 0x52)));
-        assert_eq!(rgb.user.fg, Some(Color::Rgb(0x56, 0xb6, 0xc2)));
-        assert_eq!(rgb.body.fg, None);
-        assert_eq!(rgb.error.fg, Some(Color::Rgb(0xe0, 0x6c, 0x75)));
-        assert_eq!(rgb.success.fg, Some(Color::Rgb(0x98, 0xc3, 0x79)));
-        assert_eq!(rgb.warn.fg, Some(Color::Rgb(0xd6, 0xb0, 0x6a)));
-        assert_eq!(rgb.code.fg, Some(Color::Rgb(0xd6, 0xb0, 0x6a)));
-        assert_eq!(rgb.heading.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
-        assert_eq!(rgb.heading_sub.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
-        assert_eq!(rgb.link.fg, Some(Color::Rgb(0x61, 0xaf, 0xef)));
-        assert_eq!(rgb.tool_name.fg, Some(Color::Rgb(0x61, 0xaf, 0xef)));
-        assert_eq!(rgb.thinking.fg, Some(Color::Rgb(0xc6, 0x78, 0xdd)));
-        assert_eq!(rgb.diff_add.fg, Some(Color::Rgb(0x98, 0xc3, 0x79)));
-        assert_eq!(rgb.diff_del.fg, Some(Color::Rgb(0xe0, 0x6c, 0x75)));
+        for role in [&rgb.accent, &rgb.success, &rgb.warn, &rgb.tool_name, &rgb.thinking, &rgb.diff_add, &rgb.diff_del] {
+            assert_eq!(role.fg, Some(Color::Rgb(0xa9, 0xb1, 0xba)), "collapses to the dim grey");
+        }
+        for role in [&rgb.body, &rgb.user, &rgb.heading, &rgb.heading_sub, &rgb.link, &rgb.code] {
+            assert_eq!(role.fg, None, "keeps the default fg");
+        }
     }
 
     #[test]
@@ -1080,28 +1124,32 @@ mod tests {
 
     #[test]
     fn the_semantic_palette_keeps_roles_distinct() {
-        // Palette "B": roles that used to be aliases now read as themselves.
+        // W018: palette B collapses to the grey ramp — roles stay distinct by GREY
+        // STEP and non-colour modifier, never by hue.
         let t = Theme::colored();
         // D29: `muted`/`border` share the one named-16 quiet grey but diverge
         // above it (243 vs 238, #7d8790 vs #3b4252).
         assert_eq!(t.muted.fg, t.border.fg, "both the named-16 quiet grey");
         let rgb = ThemeSpec::default().into_theme(ColorMode::Rgb);
         assert_ne!(rgb.muted.fg, rgb.border.fg, "muted vs border, truecolor");
-        assert_ne!(t.code.fg, t.warn.fg, "code (Yellow) vs warn (LightYellow)");
-        assert_ne!(t.tool_name, t.link, "tool_name (bold) vs link (underline)");
+        assert_ne!(t.code.fg, t.warn.fg, "code (default) vs warn (grey)");
+        assert_ne!(t.tool_name, t.link, "tool_name (grey) vs link (underline)");
         assert!(
-            t.tool_name.add_modifier.contains(Modifier::BOLD),
-            "tool_name is bold"
+            !t.tool_name.add_modifier.contains(Modifier::BOLD),
+            "W018: tool_name drops its BOLD (the skeleton is bare)"
         );
         assert_eq!(
             t.thinking.fg,
-            Some(Color::Magenta),
-            "thinking carries the meta hue"
+            Some(Color::Gray),
+            "thinking carries the grey, not a meta hue"
         );
-        assert_ne!(t.heading, t.body);
-        assert!(t.heading.fg.is_some(), "headings carry a color now");
+        assert_ne!(t.heading, t.body, "headings stay bold, body default");
+        assert!(
+            t.heading.fg.is_none() && t.heading.add_modifier.contains(Modifier::BOLD),
+            "headings are BOLD with the default fg"
+        );
         // Intentional aliases — not asserted distinct:
-        // accent == user (prompt/running), success == diff_add, error == diff_del.
+        // accent == success == warn == the dim grey; error == the one red.
     }
 
     #[test]
@@ -1124,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn an_override_sets_only_its_role_and_keeps_modifiers() {
+    fn an_override_changes_only_its_role() {
         let roles = BTreeMap::from([
             ("link".to_string(), "light-cyan".to_string()),
             ("tool_name".to_string(), "light-green".to_string()),
@@ -1133,7 +1181,8 @@ mod tests {
         assert_eq!(theme.link.fg, Some(Color::LightCyan));
         assert_eq!(theme.tool_name.fg, Some(Color::LightGreen));
         assert!(theme.link.add_modifier.contains(Modifier::UNDERLINED));
-        assert!(theme.tool_name.add_modifier.contains(Modifier::BOLD));
+        // W018: the bare skeleton drops the `tool_name` BOLD.
+        assert!(!theme.tool_name.add_modifier.contains(Modifier::BOLD));
         // Untouched roles keep palette B at the chosen tier (D30).
         let base = ThemeSpec::default().into_theme(ColorMode::Rgb);
         assert_eq!(theme.error.fg, base.error.fg);
@@ -1200,8 +1249,8 @@ mod tests {
                 "hex degrades to the role's palette-B tier under {degraded:?}"
             );
             assert!(
-                theme.accent.add_modifier.contains(Modifier::BOLD),
-                "modifiers survive the degradation"
+                !theme.accent.add_modifier.contains(Modifier::BOLD),
+                "W018: the bare skeleton drops the accent BOLD"
             );
         }
     }
@@ -1239,15 +1288,11 @@ mod tests {
     #[test]
     fn the_default_preset_is_palette_b() {
         let theme = Theme::from_palette(preset("default").unwrap(), ColorMode::Named);
-        assert_eq!(theme.error.fg, Some(Color::Red));
+        assert_eq!(theme.error.fg, Some(Color::Red), "the only colour");
         assert_eq!(theme.muted.fg, Some(Color::DarkGray), "D29 named grey");
         assert_eq!(theme.border.fg, Some(Color::DarkGray));
-        assert_eq!(theme.warn.fg, Some(Color::LightYellow));
-        assert_eq!(
-            theme.code.fg,
-            Some(Color::Yellow),
-            "code stays distinct from warn (palette B)"
-        );
+        assert_eq!(theme.warn.fg, Some(Color::Gray), "warn collapses to the grey");
+        assert_eq!(theme.code.fg, None, "code drops its fg (Q3)");
         assert_eq!(theme.body.fg, None, "prose stays the terminal default");
         assert_eq!(theme.dim.fg, Some(Color::Gray), "dim carries the D29 grey");
     }

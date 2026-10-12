@@ -534,6 +534,26 @@ pub(crate) fn install_syntax_theme(theme: syntect::highlighting::Theme) {
         Box::leak(Box::new(theme));
 }
 
+/// The mono syntax theme for the bare default (W018 defect #1): every token
+/// resolves to ONE grey — empty `scopes`, a grey `settings.foreground` — so a
+/// ```rust fence emits no hue. Installed by `theme::set`'s fallback (the palette
+/// is absent, or `syntect_theme` returned `None` for a named-16 default).
+/// Distinct from [`default_syntect_theme`] (base16-ocean.dark), which stays the
+/// [`SYNTAX_THEME`] seed and the tests' builder.
+pub(crate) fn grey_syntect_theme() -> syntect::highlighting::Theme {
+    use syntect::highlighting::{Color, ThemeSettings};
+    // Palette B's Rgb `muted` step (#7d8790), so the fence greys match the chrome.
+    let grey = Color { r: 0x7d, g: 0x87, b: 0x90, a: 0xff };
+    syntect::highlighting::Theme {
+        name: Some("wcode-bare".into()),
+        author: None,
+        settings: ThemeSettings {
+            foreground: Some(grey),
+            ..Default::default()
+        },
+        scopes: vec![], // no per-scope hue: every token resolves to the one grey
+    }
+}
 /// The shipped fallback syntax theme — today's `base16-ocean.dark`. Used when no
 /// preset supplies an all-RGB palette; B3: total, never panics.
 pub(crate) fn default_syntect_theme() -> syntect::highlighting::Theme {
