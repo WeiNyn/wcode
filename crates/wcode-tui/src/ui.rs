@@ -2,8 +2,8 @@
 //!
 //! Bands (top → bottom): session · transcript · [working-team region] · composer
 //! band. The team region grows to at most three rows (running teammates only);
-//! the composer is a **running-head block** (a head line + a `─` rule) over an
-//! open writing line and a foot line — no box, no corners.
+//! the composer is an **open writing line** over a **foot line** (W018 dropped
+//! the head line and its `─` rule) — no box, no corners, no rules.
 //! See `docs/tui-design.md` for the visual spec.
 
 use std::ops::Range;
@@ -64,9 +64,9 @@ const SIDEBAR_MIN_WIDTH: u16 = 80;
 /// on each side. Below it the content uses the full band width (so an 80-col
 /// terminal keeps its `❯` at the gutter).
 const MEASURE_MIN_BAND: usize = 84;
-/// The pinned book header band's height in rows — the head row over its `─` rule
-/// (D010). A fixed top band; it never scrolls with the transcript.
-const HEADER_H: u16 = 2;
+/// The pinned book header band's height in rows (D010) — a single head row (W018
+/// dropped its `─` rule). A fixed top band; it never scrolls with the transcript.
+const HEADER_H: u16 = 1;
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 ///
@@ -131,20 +131,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         working_count as u16
     };
 
-    // The pinned header (head row + `─` rule) is a fixed top band [D010]. Below
-    // it: at least one transcript row is reserved; the composer band (the rule, the
-    // input, and the foot line) then has priority over the team region, so a short
-    // terminal degrades gracefully instead of overflowing.
+    // The pinned header (a single head row) is a fixed top band [D010]. Below it:
+    // at least one transcript row is reserved; the composer band (the input and the
+    // foot line) then has priority over the team region, so a short terminal
+    // degrades gracefully instead of overflowing.
     let header_h = if area.height > HEADER_H + 1 { HEADER_H } else { 0 };
     let spare = area.height.saturating_sub(header_h + 1);
-    let box_h = (input_height + 2).min(spare).max(1);
+    let box_h = (input_height + 1).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
     let areas = Layout::vertical([
-        Constraint::Length(header_h), // pinned book header (head row + rule)
+        Constraint::Length(header_h), // pinned book header (head row)
         Constraint::Min(1),           // transcript (flexes)
         Constraint::Length(team_h),   // working-team region (a rider, 0..=3)
-        Constraint::Length(box_h),    // composer band (rule · input · foot)
+        Constraint::Length(box_h),    // composer band (input · foot)
     ])
     .split(area);
     let header = areas[0];
@@ -160,8 +160,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     draw_input_box(frame, editor, app, &view);
     // The completion/search popups anchor on the composer band's TOP row — the
-    // full-width rule — so their bottom edge rests on the rule and they float over
-    // the transcript interior, never over the composer.
+    // input row — so their bottom edge rests on it and they float over the
+    // transcript interior, never over the composer.
     let above = Rect {
         y: editor.y,
         height: 1,
@@ -180,7 +180,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// input-mode frame stays byte-identical.
 ///
 /// The popup anchors on a 1-row `above` rect at the composer band's top row
-/// (the head line), so it floats over the transcript interior and never covers
+/// (the input line), so it floats over the transcript interior and never covers
 /// the composer.
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let Some(query) = app.search_query() else {
@@ -189,8 +189,8 @@ fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     if app.mode() != Mode::Browse {
         return; // defensive: the prompt never survives exit_browse
     }
-    // Two content rows + the borders; floats above the rule, so the team strip
-    // (below the rule) can never collide.
+    // Two content rows + the borders; floats above the input, so the team strip
+    // (below the input) can never collide.
     let height = 4;
     if above.y < height {
         return; // no room above the input band
@@ -349,8 +349,8 @@ fn draw_completion(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
         selected.saturating_sub(visible - 1).min(rows.len() - visible)
     };
     let height = visible as u16 + 2;
-    // The popup floats above the rule and is drawn over the transcript only; the
-    // team strip sits below the rule, so the two can never overlap.
+    // The popup floats above the input and is drawn over the transcript only; the
+    // team strip sits below the input, so the two can never overlap.
     let width = area.width.saturating_sub(2).clamp(1, 64);
     let rect = Rect {
         x: area.x + 1,
@@ -420,9 +420,9 @@ fn highlight(text: &str, range: Option<&std::ops::Range<usize>>) -> Vec<Span<'st
 /// `Surface::cache` keys on width, so a reflow (e.g. toggling the sidebar,
 /// which changes the bands width by `SIDEBAR_WIDTH`) invalidates every cached
 /// block.
-/// The pinned book header (D010): the head row over a full-width `─` rule, drawn
-/// as a fixed top band (byte-identical to the old transcript block's two rows,
-/// but it never scrolls). Chrome — no affordances, never a browse/click target.
+/// The pinned book header (D010): ONE row — the `session_head_row` — drawn as a
+/// fixed top band (it never scrolls). Chrome — no affordances, never a
+/// browse/click target.
 fn draw_header(frame: &mut Frame, area: Rect, head: &SessionHead) {
     if area.height == 0 {
         return;
@@ -437,17 +437,6 @@ fn draw_header(frame: &mut Frame, area: Rect, head: &SessionHead) {
             height: 1,
         },
     );
-    if area.height >= 2 {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("─".repeat(width), dim()))),
-            Rect {
-                x: area.x,
-                y: area.y + 1,
-                width: area.width,
-                height: 1,
-            },
-        );
-    }
 }
 
 fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -702,14 +691,14 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     }
 }
 
-/// The user block's head row: a reverse-video ` YOU` run in the gutter, padded so
-/// the prompt lands at [`CONTENT_COL`], then the first wrapped line of `text`. The
-/// assistant carries **no** head — it is the page itself (D012).
+/// The user block's head row: a dim ` YOU` run in the gutter, padded so the prompt
+/// lands at [`CONTENT_COL`], then the first wrapped line of `text`. The assistant
+/// carries **no** head — it is the page itself (D012).
 fn user_head(text: &str) -> Line<'static> {
     let filled = 1 + "YOU".chars().count(); // the leading space + the name
     let pad = CONTENT_COL.saturating_sub(filled);
     Line::from(vec![
-        Span::styled(" YOU".to_string(), selection_style()),
+        Span::styled(" YOU".to_string(), dim()),
         Span::styled(" ".repeat(pad), dim()),
         Span::styled(text.to_string(), user()),
     ])
@@ -747,7 +736,7 @@ fn speaker_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Row 0 of the pinned book header (D010): `padded_row(left, right, "─", dim(),
-/// width)`, where `left` = `[ WCODE reversed ] · session <short_id>` and `right`
+/// width)`, where `left` = `[ WCODE dim ] · session <short_id>` and `right`
 /// = `"project · ⎇ branch   model · effort"` — the **3-space gap sits INSIDE the
 /// right run** (D009 §3 option A), and `padded_row` supplies the ONE `─` fill
 /// between `left` and `right`. The ladder (fed to `pick_titles`): full → drop
@@ -762,7 +751,7 @@ fn session_head_row(head: &SessionHead, width: usize) -> Line<'static> {
     let effort = head.effort.as_deref();
 
     let left = |with_session: bool| -> Vec<Span<'static>> {
-        let mut spans = vec![Span::styled("WCODE", selection_style())];
+        let mut spans = vec![Span::styled("WCODE", dim())];
         if let (true, Some(s)) = (with_session, &session) {
             spans.push(Span::styled(s.clone(), dim()));
         }
@@ -1958,40 +1947,25 @@ fn flush(buf: &mut String, chip: bool, spans: &mut Vec<Span<'static>>) {
     });
 }
 
-/// Draw the composer: a **running-head block** (a head line over a full-width
-/// `─` rule) above an **open writing line** (the input) and a **foot line**.
-/// There is no rounded box and no corners — the chrome the box's four corners
-/// used to carry now rides four plain rows (head: project/branch/session left,
-/// model/effort right; foot: the gauge left, plan/browse/state/scroll right).
+/// Draw the composer: an **open writing line** (the input) over a **foot line**
+/// (W018 dropped the head line and its `─` rule). There is no rounded box and no
+/// corners — the chrome the box's four corners used to carry now rides the
+/// transcript's session-head block (head: project/branch/session/model) and the
+/// foot line (the gauge left; plan/browse/state/scroll right).
 ///
 /// The input is drawn at the band's **full width**, so the composer wraps at
 /// `area.width - 3` (the `❯ ` gutter), not the box's narrower inner width.
 ///
-/// On a band too short to seat all three rows the **rule drops first** (it is
-/// pure decoration), then the foot line — so a 1-row input always keeps its
-/// writing line. The composer's **head row is dropped** (D009): the chrome it
-/// carried now rides the transcript's session-head block.
+/// On a band too short to seat both rows the **foot line drops first**, so a
+/// 1-row input always keeps its writing line.
 fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
     let (bl, br) = corner_titles(app, area);
     let w = area.width;
     let h = area.height;
-    let mut row = area.y;
-    // The full-width rule — only when the band seats rule · input · foot.
-    if h >= 3 {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("─".repeat(w as usize), dim()))),
-            Rect {
-                x: area.x,
-                y: row,
-                width: w,
-                height: 1,
-            },
-        );
-        row += 1;
-    }
+    let row = area.y;
     // Foot line — pinned to the last row when it leaves the input a row.
     let foot = (h >= 2).then(|| area.y + h - 1);
-    // The writing line fills the gap between the head/rule and the foot line.
+    // The writing line fills the gap between the band's top and the foot line.
     let input_end = foot.unwrap_or(area.y + h);
     if input_end > row {
         draw_input(
@@ -2007,7 +1981,7 @@ fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
     }
     if let Some(y) = foot {
         frame.render_widget(
-            Paragraph::new(padded_row(&bl, &br, "─", dim(), w)),
+            Paragraph::new(padded_row(&bl, &br, " ", dim(), w)),
             Rect {
                 x: area.x,
                 y,
@@ -2019,10 +1993,11 @@ fn draw_input_box(frame: &mut Frame, area: Rect, app: &App, view: &InputView) {
 }
 
 /// One full-width composer row: `left` at column 0 and `right` right-aligned to
-/// the last column, the gap between filled with `fill` in `style`. A head line
-/// fills with spaces (a running head has no rule); a foot line fills with `─`
-/// (the gauge-to-state leader). [`corner_titles`] has already budgeted the pair
-/// to `width - 1`, so the gap is ≥ 1; a wider pair is clipped by the `Paragraph`.
+/// the last column, the gap between filled with `fill` in `style`. The header's
+/// head row fills with `─` (a leader between its runs, W018); the composer foot
+/// fills with spaces (W018 dropped the gauge-to-state leader). [`corner_titles`]
+/// has already budgeted the pair to `width - 1`, so the gap is ≥ 1; a wider pair
+/// is clipped by the `Paragraph`.
 fn padded_row(
     left: &Line<'static>,
     right: &Line<'static>,
@@ -2171,42 +2146,17 @@ fn sep() -> Span<'static> {
     Span::styled(" · ", dim())
 }
 
-/// Context usage: a colored gauge plus `used / limit` (or just `used`).
+/// Context usage as plain text: `used/limit` (or just `used`), all `dim` (W018
+/// replaced the `▰▱` gauge with flush-left, no-space-around-the-slash text).
 fn token_spans(app: &App) -> Option<Vec<Span<'static>>> {
     let used = app.context_used()?;
     Some(match app.status().context_limit {
-        Some(limit) => {
-            let ratio = if limit == 0 {
-                0.0
-            } else {
-                used as f64 / limit as f64
-            };
-            let bar_style = if ratio >= 0.85 {
-                error_style()
-            } else if ratio >= 0.6 {
-                theme::theme().warn
-            } else {
-                success()
-            };
-            vec![
-                Span::styled(bar(ratio, 8), bar_style),
-                Span::styled(
-                    format!(" {} / {}", format_tokens(used), format_tokens(limit)),
-                    dim(),
-                ),
-            ]
-        }
+        Some(limit) => vec![Span::styled(
+            format!("{}/{}", format_tokens(used), format_tokens(limit)),
+            dim(),
+        )],
         None => vec![Span::styled(format_tokens(used), dim())],
     })
-}
-
-/// A gauge of `cells` parallelograms: filled `▰`, empty `▱` (the caller colors
-/// it by fill: green → yellow → red). e.g. `▰▰▰▰▰▰▱▱`.
-fn bar(ratio: f64, cells: usize) -> String {
-    let filled = ((ratio.clamp(0.0, 1.0) * cells as f64).round() as usize).min(cells);
-    let mut out = "▰".repeat(filled);
-    out.push_str(&"▱".repeat(cells - filled));
-    out
 }
 
 /// Compact token count: `840`, `14.2k`, `272k`, `1M`.
@@ -2786,11 +2736,100 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
-    fn bar_fills_proportionally() {
-        assert_eq!(bar(0.0, 8), "▱▱▱▱▱▱▱▱");
-        assert_eq!(bar(1.0, 8), "▰▰▰▰▰▰▰▰");
-        assert_eq!(bar(0.5, 8), "▰▰▰▰▱▱▱▱");
-        assert_eq!(bar(2.0, 8), "▰▰▰▰▰▰▰▰"); // clamped
+    fn no_full_width_rule_is_drawn() {
+        // W018 Phase A: the header, composer, and foot rules are gone. A rule is a
+        // line composed ONLY of `─`; `session_head_row` still fills `─` BETWEEN its
+        // left/right runs, so assert the ABSENCE of a *pure* `─` line.
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            !text.lines().any(|l| {
+                let t = l.trim_end();
+                !t.is_empty() && t.chars().all(|c| c == '─')
+            }),
+            "no pure ─ rule line:\n{text}"
+        );
+        // The head row's own `─` leader survives (it is NOT a pure rule), so the
+        // absence check above is not vacuous.
+        assert!(text.contains('─'), "the head-row leader is gone too:\n{text}");
+    }
+
+    #[test]
+    fn the_gauge_is_plain_text() {
+        // W018 Phase A: `token_spans` emits flush-left `used/limit` text, all dim,
+        // with no `▰`/`▱` gauge.
+        let mut app = App::new();
+        app.set_status(crate::app::Status {
+            context_limit: Some(272_000),
+            ..Default::default()
+        });
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::TurnEnd {
+                message: AgentMessage::Assistant {
+                    content: Vec::new(),
+                    stop_reason: wcode_harness::message::StopReason::Stop,
+                    usage: Some(wcode_harness::message::Usage {
+                        input_tokens: 14_200,
+                        output_tokens: 0,
+                        cache_read_tokens: None,
+                        cache_write_tokens: None,
+                    }),
+                    model: None,
+                },
+            },
+        ));
+        let spans = token_spans(&app).expect("a gauge");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "14.2k/272k", "flush-left, no spaces around the slash");
+        assert!(
+            spans.iter().all(|s| s.style == dim()),
+            "every gauge span is dim: {spans:?}"
+        );
+        assert!(
+            !text.contains('▰') && !text.contains('▱'),
+            "no gauge glyphs: {text}"
+        );
+    }
+
+    #[test]
+    fn wcode_and_you_are_not_reversed_but_selection_is() {
+        let mut app = App::new();
+        app.seed_history(&root(), &[AgentMessage::user_text("hello"), reply("world")]);
+        let terminal = render(&mut app, 60, 20);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("WCODE"), "the head:\n{text}");
+        assert!(text.contains(" YOU"), "the user head:\n{text}");
+        // No active drag ⇒ nothing carries `REVERSED`: the labels render plain.
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the `WCODE`/` YOU` labels must not be reversed: {:?}",
+            reversed_cells(&terminal)
+        );
+
+        // A drag STILL reverses exactly its cells — `selection_style()` is intact.
+        let (row, _x0) = row_of(&app, "hello");
+        let start = {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .find(|&x| buffer[(x, row)].symbol() == "h")
+                .expect("the 'h' of hello")
+        };
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: start, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: start + 2, row }));
+        let terminal = render(&mut app, 60, 20);
+        let mut cells: Vec<(u16, u16)> = reversed_cells(&terminal)
+            .into_iter()
+            .filter(|&(x, y)| y == row && x >= start)
+            .collect();
+        cells.sort_unstable();
+        assert_eq!(
+            cells,
+            vec![(start, row), (start + 1, row), (start + 2, row)],
+            "a drag still reverses exactly the selected cells"
+        );
     }
 
     #[test]
@@ -4290,7 +4329,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             &mut app,
             "# the anchor is the text\n\nAn anchor is the text you quote.",
         );
-        let text = buffer_text(&render(&mut app, 80, 12));
+        let terminal = render(&mut app, 80, 12);
+        let text = buffer_text(&terminal);
         // Only the pinned header carries `WCODE`; the turn itself has no head
         // (D012 — the assistant is the page).
         assert_eq!(
@@ -4301,6 +4341,11 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(
             text.contains("An anchor is the text you quote."),
             "the body:\n{text}"
+        );
+        // W018: the `WCODE` label is no longer reverse-video.
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the `WCODE` head must not be reversed:\n{text}"
         );
     }
 
@@ -4482,24 +4527,29 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             plan: false,
         });
         let text = buffer_text(&render(&mut app, 80, 14));
-        // The composer is rule + open writing line — NO box, NO corners.
+        // The composer is an open writing line over a foot line — NO box, NO
+        // corners, and no full-width `─` rule (W018).
         assert!(
             !text.contains('╭') && !text.contains('╮') && !text.contains('╰') && !text.contains('╯'),
             "the composer must be frameless:\n{text}"
         );
         assert!(!text.contains('│'), "no side border columns:\n{text}");
-        let lines: Vec<&str> = text.lines().collect();
-        // No composer head row (D009): the LAST full-width rule leads the composer
-        // band, the writing line below it, the foot line below that.
-        let rule = lines
-            .iter()
-            .rposition(|l| *l == "─".repeat(80))
-            .expect("a composer rule");
-        assert!(lines[rule + 1].contains('❯'), "the writing line:\n{text}");
         assert!(
-            lines[rule + 2].contains('─') && lines[rule + 2].ends_with("⏸ idle"),
-            "the foot line carries the leader + state:\n{text}"
+            !text.lines().any(|l| {
+                let t = l.trim_end();
+                !t.is_empty() && t.chars().all(|c| c == '─')
+            }),
+            "no full-width `─` rule:\n{text}"
         );
+        // The foot is the LAST non-blank row (its state chip ends the line); the
+        // writing line seats directly above it — no rule row between.
+        let lines: Vec<&str> = text.lines().collect();
+        let foot = lines
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .expect("a foot line");
+        assert!(lines[foot].ends_with("⏸ idle"), "the foot line:\n{text}");
+        assert!(lines[foot - 1].contains('❯'), "the writing line:\n{text}");
     }
 
     #[test]
@@ -4547,20 +4597,27 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             effort: Some("high".into()),
             ..Default::default()
         });
-        let text = buffer_text(&render(&mut app, 80, 14));
+        let terminal = render(&mut app, 80, 14);
+        let text = buffer_text(&terminal);
         let first = text.lines().next().unwrap_or_default();
-        // Row 0: the reverse-video `WCODE`, the session, the project · branch, and
-        // the model · effort far right.
+        // Row 0: the dim `WCODE`, the session, the project · branch, and the
+        // model · effort far right.
         assert!(first.contains("WCODE"), "the speaker head:\n{text}");
         assert!(first.contains("session abcdef01"), "the session group:\n{text}");
         assert!(first.contains("wcode"), "the project group:\n{text}");
         assert!(first.contains("⎇ main*"), "the branch:\n{text}");
         assert!(first.contains("zephyr-9 · high"), "model · effort:\n{text}");
-        // The rule follows the head, on the measure.
-        assert_eq!(
-            text.lines().nth(1),
-            Some("─".repeat(80).as_str()),
-            "the rule:\n{text}"
+        // The header is a single row (W018): no `─` rule follows it, so row 1 is
+        // now the transcript.
+        assert!(!text.contains(&"─".repeat(80)), "no full-width rule:\n{text}");
+        assert!(
+            !text.lines().nth(1).unwrap_or_default().contains("WCODE"),
+            "the header is one row:\n{text}"
+        );
+        // W018: the `WCODE` label is no longer reverse-video.
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the `WCODE` head must not be reversed:\n{text}"
         );
     }
 
@@ -4571,15 +4628,18 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         app.set_git(Some("main*".into()));
         let text = buffer_text(&render(&mut app, 80, 14));
         // The chrome rides the head block; the composer has no head row above its
-        // rule (the row directly above the composer rule carries no `wcode`/`⎇`).
+        // input. The rule is gone (W018), so anchor on the composer's `❯` (the LAST
+        // one — the transcript's empty hint also carries a `❯`) and assert the row
+        // directly above it (where a composer head row would sit) is chrome-free.
         let lines: Vec<&str> = text.lines().collect();
-        let rule = lines
+        let input = lines
             .iter()
-            .rposition(|l| *l == "─".repeat(80))
-            .expect("the composer rule");
+            .rposition(|l| l.contains('❯'))
+            .expect("the composer input row");
+        assert!(input > 0, "no row above the input:\n{text}");
         assert!(
-            !lines[rule - 1].contains("wcode") && !lines[rule - 1].contains('⎇'),
-            "no composer head row above the rule:\n{text}"
+            !lines[input - 1].contains("wcode") && !lines[input - 1].contains('⎇'),
+            "no composer head row above the input:\n{text}"
         );
     }
 
@@ -4797,7 +4857,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     #[test]
     fn a_short_terminal_draws_the_composer_without_panicking() {
         let mut app = App::new();
-        // Every band height must draw without panicking (the rule/foot degrade).
+        // Every band height must draw without panicking (the foot drops first).
         for height in [2u16, 3, 4, 5, 6, 8] {
             let text = buffer_text(&render(&mut app, 80, height));
             assert!(
@@ -4805,9 +4865,12 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                 "the composer is frameless at height {height}:\n{text}"
             );
         }
-        // At five rows the composer band seats rule · input · foot (no head row).
+        // At five rows the composer band seats input · foot (no rule, no head row).
         let text = buffer_text(&render(&mut app, 80, 5));
-        assert!(text.lines().any(|l| l == "─".repeat(80)), "a rule:\n{text}");
+        assert!(
+            !text.contains(&"─".repeat(80)),
+            "no full-width rule:\n{text}"
+        );
         assert!(text.contains('❯'), "the input survives:\n{text}");
         assert!(text.contains("⏸ idle"), "the foot line survives:\n{text}");
     }
@@ -5585,7 +5648,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn the_transcript_centers_its_measure_on_a_wide_band() {
         // 120 cols: the measure (68) is centered — a 26-col margin each side.
         let mut app = App::new();
-        let text = buffer_text(&render(&mut app, 120, 40));
+        let terminal = render(&mut app, 120, 40);
+        let text = buffer_text(&terminal);
         let hit = app.hit.transcript.as_ref().expect("a transcript hit");
         assert_eq!((hit.rect.x, hit.rect.width), (26, 68), "a centered measure");
         // The transcript content is indented by the pad; the margin to its left is
@@ -5608,6 +5672,11 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             text.lines().next().unwrap_or_default().chars().next(),
             Some('W'),
             "the pinned header is full-bleed:\n{text}"
+        );
+        // W018: the `WCODE` label is no longer reverse-video.
+        assert!(
+            reversed_cells(&terminal).is_empty(),
+            "the `WCODE` head must not be reversed:\n{text}"
         );
 
         // 80 cols: below the threshold — the content rides the gutter.
