@@ -1,6 +1,10 @@
 # W020 — Orchestrator team control (runtime) — brief
 
-- **Status:** **SIGNED OFF** (human, this session) with three amendments — see §0. Implementing.
+- **Status:** **SHIPPED** — second-layer review APPROVED (`d3a4fcf`). Branch
+  `w020-orchestrator-team-control`; commits `eefaea6` · `186626e` · `3ad8596` ·
+  `c467250` · `d3a4fcf`. Gates: `cargo test --workspace` 1219 passed/0 failed ·
+  `cargo clippy --workspace --all-targets` clean · zero `SKETCH` markers.
+- **Decision record:** [D024](../decisions/D024-orchestrator-team-control.md) · tracker item 82.
 - **Work item:** W020 (`docs/work/W020-orchestrator-team-control.md`)
 - **Decisions:** proposes a new **D0NN** (retire semantics + the live apply-team / prompt gap)
 - **Author:** brainstormer (read-only brief; recorded by the orchestrator)
@@ -289,3 +293,21 @@ a host handler (likely W6b, decide in the record).
 - **The VS Code host's request routing for a member op** — `commands.ts` is the pure
   table; the host handler was not read.
 - **Line numbers** drift; every citation pairs the number with a quoted snippet.
+
+## §11 Review log
+
+| gate | outcome |
+|---|---|
+| First layer (sketch) | **BLOCKED** — 4 blockers (out-of-scope dirty files; two missed `Member::new`/`Spawn::new` call sites; the team-file parse could not route through `Config::load_with`), settled as amendments A1–A13. |
+| Implementation | `eefaea6` (registry remove) · `186626e` (member ops) · `3ad8596` (pool + team tool) · `c467250` (docs). One turn-limit stop mid-flight (red build) — resumed and finished. |
+| Second layer | **BLOCKED** once (B1: the `team` partial-apply branch was untested) → `d3a4fcf`. Then **APPROVED**. |
+
+Carried-forward, non-gating: `Orchestrator::pool()` `#[allow(dead_code)]` (tests-only);
+`#[derive(Default)]` on `SpawnArgs`/`MemberArgs` (test convenience); the retire DAG guard does
+not filter by task state (a `Done` node still blocks without `force`); `spawn_remote` + `agent`
+untested (only the in-process path exercises `spec_for`); `resolve_member_files` duplicates
+`main.rs::resolve_team_files` (hoist deferred, D024).
+
+**Not verified:** no live model-driven E2E and no served-peer socket check (no endpoint was
+listening) — the six capabilities rest on kernel/CLI `Request`/`SessionActor` seam tests plus a
+refused-port boot run that exercised the startup team.
