@@ -58,6 +58,14 @@ impl Phonebook {
         self.names.lock().unwrap().get(name).cloned()
     }
 
+    /// Drop `name → address` (the inverse of [`Self::insert`]); the retire path
+    /// calls it so a retired member stops resolving by name. Root-local — the
+    /// phonebook is never shared across a socket. Returns whether the name was
+    /// present.
+    pub fn remove(&self, name: &str) -> bool {
+        self.names.lock().unwrap().remove(name).is_some()
+    }
+
     /// The known names, sorted — for the `peers` tool.
     pub fn entries(&self) -> Vec<(String, SessionId)> {
         let mut entries: Vec<_> = self
@@ -167,6 +175,11 @@ impl SessionFactory {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// The configured members dir, or `None` for an in-memory team.
+    pub fn members_dir(&self) -> Option<&std::path::Path> {
+        self.template.members_dir.as_deref()
     }
 
     /// Install a sink that receives a [`SurfaceSpec`] for each worker spawned
@@ -525,6 +538,29 @@ pub struct Orchestrator {
     tasks: TaskList,
 }
 
+// ==== SKETCH (review-only, not real code) — W020 §4.1 (pool plumbing) ====
+// `Orchestrator` gains the resolved agent pool and the applied-team state:
+//
+//     /// The resolved agent pool — the FOLDED `[team]` + `.wcode/agents/*.md`
+//     /// set (`cfg.team`, main.rs:748), captured at startup. `spawn {
+//     /// agent:"<name>" }` resolves against it (op 5). `Arc` so each tool's clone
+//     /// is cheap.
+//     pool: AgentPool,
+//     /// Whether this session already HAS a team — set at startup when
+//     /// `cfg.team` is non-empty, and by a successful live `team` apply. The
+//     /// `team` tool refuses when `Some`. The value is the applied team's name,
+//     /// or a startup marker (`<TBD>`: `"[config]"`) — the marker text is the one
+//     /// open point (only "is it Some" is read today).
+//     team_applied: TeamApplied,
+//
+// with these aliases near `short_name` (:77):
+//
+//     /// The resolved agent pool ([`Orchestrator::pool`]).
+//     pub type AgentPool = std::sync::Arc<Vec<crate::config::TeamMember>>;
+//     /// The shared "a team is applied" cell ([`Orchestrator::team_applied`]).
+//     pub type TeamApplied = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+// ==== /SKETCH ====
+
 impl Orchestrator {
     // Convenience ctor over an in-memory plan; the composition root uses
     // `with_tasks` (a journaled list), so this is exercised by tests.
@@ -543,6 +579,33 @@ impl Orchestrator {
             phonebook: Phonebook::default(),
             tasks,
         }
+    }
+
+// ==== SKETCH (review-only, not real code) — W020 §4.1 §4.2 ====
+// New `impl Orchestrator` methods (bodies `todo!()`), placed beside `with_tasks`:
+//
+//     /// Builder over [`Self::with_tasks`]: set the resolved md pool and whether
+//     /// the session STARTED with a team (`!cfg.team.is_empty()`). Called once in
+//     /// `build_runtime` (main.rs:1371). `started_with_team` seeds
+//     /// `team_applied` with the startup marker.
+//     pub fn with_team(self, pool: AgentPool, started_with_team: bool) -> Self { todo!() }
+//
+//     /// The resolved md pool — `spawn { agent }` reads it (via the `Spawn` tool).
+//     pub fn pool(&self) -> &[crate::config::TeamMember] { todo!() }
+//
+//     /// The applied team's name, or `None` when the session has none — the
+//     /// `team` tool's guard.
+//     pub fn applied_team(&self) -> Option<String> { todo!() }
+//
+//     /// Mark a team applied (a successful live `team` apply).
+//     pub fn mark_team_applied(&self, name: &str) { todo!() }
+// ==== /SKETCH ====
+
+    /// The active group's members dir (`WorkerTemplate.members_dir`), so
+    /// `tools()` can hand `Member` the group for the durable retire flag.
+    /// Delegates to the factory's own accessor.
+    pub fn members_dir(&self) -> Option<&std::path::Path> {
+        self.factory.members_dir()
     }
 
     /// The root's A2A tools — `spawn`, `message`, and `peers`.
@@ -567,6 +630,8 @@ impl Orchestrator {
                 self.registry.clone(),
                 self.id.clone(),
                 self.phonebook.clone(),
+                self.tasks.clone(),
+                self.members_dir().map(SessionGroup::from_members_dir),
             )),
             // The plan — root-only: only the root holds this tool set.
             erased(crate::tools::task::Task::new(
@@ -575,6 +640,20 @@ impl Orchestrator {
             )),
         ]
     }
+
+// ==== SKETCH (review-only, not real code) — W020 §4.1 (tools wiring) ====
+// Still to wire in `tools()`:
+//   * `Spawn::new` gains the resolved pool (op 5):
+//         erased(Spawn::new(
+//             self.factory.clone(),
+//             self.id.clone(),
+//             self.phonebook.clone(),
+//             self.pool.clone(),                                        // NEW
+//         )),
+//   * a NEW root-only `team` tool (op 6) — it holds a clone of `self` so it can
+//     call `spawn_worker`:
+//         erased(crate::tools::team::Team::new(self.clone())),
+// ==== /SKETCH ====
 
     /// Forward a spawn sink to the factory, so a live TUI can add runtime-spawned
     /// workers as surfaces (the `[team]` startup members are added by the
@@ -1708,5 +1787,33 @@ mod tests {
             "the default set must not offer `task`/`member`: {defaults:?}"
         );
     }
+
+    /// `Phonebook::remove` drops a name so it stops resolving (the retire path);
+    /// it reports whether the name was present.
+    #[test]
+    fn phonebook_remove_drops_a_name() {
+        let book = Phonebook::default();
+        let addr = SessionId::agent("w1");
+        book.insert("w1", addr.clone());
+        assert_eq!(book.get("w1"), Some(addr));
+        assert!(book.remove("w1"), "remove reports the name was present");
+        assert_eq!(book.get("w1"), None, "the name no longer resolves");
+        assert!(!book.remove("w1"), "a second remove finds nothing");
+    }
 }
+
+// ==== SKETCH (review-only, not real code) — W020 §4.2 / §5 step 1 (tests) ====
+// Extend `mod tests` (the `factory()`/`orchestrator()` helpers, agents.rs:731…):
+//
+//     #[test] fn the_team_tool_is_root_only() { todo!() }
+//         // `o.tools()` contains `"team"`; `default_tools(..)` does NOT (mirror
+//         // `the_task_tool_is_root_only` just above).
+//     #[test] fn with_team_records_the_pool_and_the_startup_marker() { todo!() }
+//         // `with_team(pool, true)` → `pool()` == pool and
+//         // `applied_team().is_some()`; `with_team(pool, false)` →
+//         // `applied_team() == None`.
+//
+// REGRESSION (W020 §6): `spawn_registers_and_owns_the_worker`,
+// `spawn_emits_a_surface_spec_on_success_only`.
+// ==== /SKETCH ====
 
