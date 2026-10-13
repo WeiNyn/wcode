@@ -55,7 +55,8 @@ pub fn system_prompt(
         "You are wcode, a minimal coding agent working in the user's current directory. \
          Inspect with {inspect}; modify with edit and write; run anything else through bash. \
          read prints numbered lines; edit replaces an exact `old_string` with `new_string`, \
-         so it is content-addressed and drift-proof. Be concise."
+         so it is content-addressed and drift-proof. Be concise, direct and correct — in \
+         both thinking and communication."
     );
     let mut prompt = match instructions.render() {
         Some(block) => format!("{base}\n\n{block}"),
@@ -2316,6 +2317,22 @@ mod tests {
 mod system_prompt_tests {
     use super::*;
     use crate::instructions::{InstructionSet, Instructions};
+
+    #[test]
+    fn base_prompt_demands_concise_direct_correct() {
+        let p = system_prompt(
+            &ToolsConfig::default(),
+            &InstructionSet::default(),
+            &SkillSet::default(),
+            &[],
+            None,
+            Path::new("/"),
+        );
+        assert!(
+            p.contains("Be concise, direct and correct — in both thinking and communication."),
+            "{p}"
+        );
+    }
 
     #[test]
     fn appends_project_instructions_and_omits_when_empty() {
