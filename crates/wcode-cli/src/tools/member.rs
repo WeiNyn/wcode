@@ -31,8 +31,9 @@ const CANCEL_POLL: Duration = Duration::from_millis(100);
 /// Budget for `compact` — a peer's own summarization call on its model. Longer
 /// than `ASK_TIMEOUT`: the reply is `Compaction` or `Ack` (`NothingToDo`); a
 /// *Running* peer defers a `Compact` to its next turn boundary, so this bounds
-/// the wait after that run ends.
-const COMPACT_TIMEOUT: Duration = Duration::from_secs(120);
+/// the wait after that run ends. Three minutes — a summarization call on a
+/// large context is slow, and a premature timeout only reports "busy".
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Default, Deserialize, schemars::JsonSchema)]
 pub struct MemberArgs {

@@ -87,7 +87,7 @@ Two of the six needed a decision because the honest behaviour is narrower than
   re-queued and **ACKed immediately** even mid-run (`actor.rs`), so `model`/
   `effort` never hang; `Compact` is **not** in that list, so it defers to the
   next turn boundary and can time out — `member`'s `compact` waits
-  `COMPACT_TIMEOUT` (120 s) and, on timeout, says "busy — its run must end
+  `COMPACT_TIMEOUT` (3 min) and, on timeout, says "busy — its run must end
   first" rather than reporting a blind send.
 - **No human surface.** All six capabilities are tools; there is no TUI/REPL
   `/`-command and no VS Code command (amendment 3), so no new visual element and
