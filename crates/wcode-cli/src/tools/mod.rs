@@ -14,6 +14,7 @@ pub mod peers;
 pub mod read;
 pub mod spawn;
 pub mod task;
+pub mod team;
 pub mod session_search;
 pub mod todo;
 pub mod webfetch;

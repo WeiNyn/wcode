@@ -130,6 +130,93 @@ pub fn discover(cwd: &Path, home: Option<&Path>) -> Vec<TeamMember> {
     out
 }
 
+/// Resolve an agent NAME against the discovered pool. `Ok(&TeamMember)` when
+/// found; `Err` naming the available names otherwise (`spawn { agent }`, op 5).
+///
+/// Pure: no filesystem access — the pool is the folded `[team]` + `.wcode/
+/// agents/*.md` set already built by [`discover`] + [`parse_agent_md`] at
+/// startup. Names are listed SORTED.
+pub fn resolve_role<'a>(pool: &'a [TeamMember], name: &str) -> Result<&'a TeamMember, String> {
+    pool.iter().find(|m| m.name == name).ok_or_else(|| {
+        let mut names: Vec<&str> = pool.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        format!("no agent `{name}` (available: {})", names.join(", "))
+    })
+}
+
+/// Fill each member's `file = "<md>"` in place from its agent `.md` (relative to
+/// `cwd` unless absolute), the same override rules `main.rs::resolve_team_files`
+/// applies at load. Returns `Err` on a missing/unparseable file, a differing
+/// name, or a nameless entry.
+///
+/// FRICTION: `main.rs::resolve_team_files` returns `ConfigError` and also does
+/// the final-uniqueness check; this returns `String` and does NOT (the `team`
+/// tool's duplicate check is `spawn_worker`'s). The two share intent but not
+/// code — a follow-up could hoist `main.rs`'s body onto this one (W020 A9).
+pub fn resolve_member_files(team: &mut [TeamMember], cwd: &Path) -> Result<(), String> {
+    for member in team.iter_mut() {
+        let Some(file) = member.file.take() else {
+            continue;
+        };
+        let path = if file.is_absolute() {
+            file
+        } else {
+            cwd.join(file)
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("[[team]] file {}: {e}", path.display()))?;
+        let resolved = parse_agent_md(&text).ok_or_else(|| {
+            format!(
+                "{} does not parse into a member (missing or invalid frontmatter/`name`)",
+                path.display()
+            )
+        })?;
+
+        // A name given both inline and in the file must agree.
+        if !member.name.is_empty() && member.name != resolved.name {
+            return Err(format!(
+                "{} names `{}` but the entry names `{}`",
+                path.display(),
+                resolved.name,
+                member.name
+            ));
+        }
+        if member.name.is_empty() {
+            member.name = resolved.name;
+        }
+        // A sibling key in the same `[[team]]` overrides the file's when set.
+        if member.role.is_none() {
+            member.role = resolved.role;
+        }
+        if member.model.is_none() {
+            member.model = resolved.model;
+        }
+        if member.tools.is_none() {
+            member.tools = resolved.tools;
+        }
+        if member.base_url.is_none() {
+            member.base_url = resolved.base_url;
+        }
+        if member.api_key.is_none() {
+            member.api_key = resolved.api_key;
+        }
+        if member.effort.is_none() {
+            member.effort = resolved.effort;
+        }
+        // `read_only` is a `bool`, so an inline `false` cannot override a file's
+        // `true`; `true` always wins.
+        if resolved.read_only {
+            member.read_only = true;
+        }
+    }
+
+    // Neither a `name` nor a `file`: the entry addresses no worker.
+    if team.iter().any(|m| m.name.trim().is_empty()) {
+        return Err("a `[[team]]` entry needs a `name` or a `file`".into());
+    }
+    Ok(())
+}
+
 /// Project scan only: `cwd/.wcode/agents/**/*.md`.
 fn discover_project(cwd: &Path) -> Vec<TeamMember> {
     let mut files = Vec::new();
@@ -353,5 +440,125 @@ mod tests {
             "---\nname: g\n---\nbody\n",
         );
         assert_eq!(discover(cwd.path(), None).len(), 1);
+    }
+
+    // --- resolve_role (op 5) --------------------------------------------------
+
+    fn member(name: &str) -> TeamMember {
+        TeamMember {
+            name: name.into(),
+            file: None,
+            model: None,
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+            read_only: false,
+            effort: None,
+        }
+    }
+
+    #[test]
+    fn resolve_role_finds_a_pool_member_by_name() {
+        let pool = vec![member("judge"), member("scout")];
+        let found = resolve_role(&pool, "scout").unwrap();
+        assert_eq!(found.name, "scout");
+    }
+
+    #[test]
+    fn an_unknown_agent_lists_the_pool_names_sorted() {
+        let pool = vec![member("scout"), member("judge")];
+        let err = resolve_role(&pool, "ghost").unwrap_err();
+        assert!(err.contains("no agent `ghost`"), "{err}");
+        assert!(err.contains("judge, scout"), "sorted names: {err}");
+    }
+
+    // --- resolve_member_files (op 6) ------------------------------------------
+
+    fn member_file(name: &str) -> TeamMember {
+        TeamMember {
+            file: Some(PathBuf::from(name)),
+            ..member("")
+        }
+    }
+
+    #[test]
+    fn resolve_member_files_fills_a_named_file_member() {
+        let cwd = tempfile::tempdir().unwrap();
+        write_md(
+            cwd.path(),
+            "judge.md",
+            "---\nname: judge\nmodel: m1\ntools: [read]\nread_only: true\n---\nYou judge.\n",
+        );
+        let mut team = vec![member_file("judge.md")];
+        resolve_member_files(&mut team, cwd.path()).unwrap();
+        assert_eq!(team[0].name, "judge");
+        assert_eq!(team[0].model.as_deref(), Some("m1"));
+        assert_eq!(team[0].tools, Some(vec!["read".to_string()]));
+        assert_eq!(team[0].role.as_deref(), Some("You judge."));
+        assert!(team[0].read_only);
+        assert!(team[0].file.is_none(), "the routing hint is consumed");
+    }
+
+    #[test]
+    fn resolve_member_files_lets_a_sibling_key_win() {
+        // The same override rules `main.rs::resolve_team_files` applies: an
+        // inline key set in the `[[team]]` entry beats the file's (A9).
+        let cwd = tempfile::tempdir().unwrap();
+        write_md(
+            cwd.path(),
+            "judge.md",
+            "---\nname: judge\nmodel: from-file\n---\nfile role\n",
+        );
+        let mut inline = member_file("judge.md");
+        inline.model = Some("inline".into());
+        inline.role = Some("inline role".into());
+        let mut team = vec![inline];
+        resolve_member_files(&mut team, cwd.path()).unwrap();
+        assert_eq!(team[0].model.as_deref(), Some("inline"), "inline model wins");
+        assert_eq!(team[0].role.as_deref(), Some("inline role"));
+    }
+
+    #[test]
+    fn resolve_member_files_read_only_true_wins_over_an_inline_false() {
+        let cwd = tempfile::tempdir().unwrap();
+        write_md(
+            cwd.path(),
+            "judge.md",
+            "---\nname: judge\nread_only: true\n---\nbody\n",
+        );
+        let mut team = vec![member_file("judge.md")];
+        team[0].read_only = false; // absent and false are one value
+        resolve_member_files(&mut team, cwd.path()).unwrap();
+        assert!(team[0].read_only, "`true` in the file always wins");
+    }
+
+    #[test]
+    fn resolve_member_files_rejects_a_differing_name() {
+        let cwd = tempfile::tempdir().unwrap();
+        write_md(cwd.path(), "judge.md", "---\nname: judge\n---\nbody\n");
+        let mut team = vec![TeamMember {
+            name: "other".into(),
+            file: Some(PathBuf::from("judge.md")),
+            ..member("other")
+        }];
+        let err = resolve_member_files(&mut team, cwd.path()).unwrap_err();
+        assert!(err.contains("names `judge` but the entry names `other`"), "{err}");
+    }
+
+    #[test]
+    fn resolve_member_files_rejects_a_missing_file() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut team = vec![member_file("ghost.md")];
+        let err = resolve_member_files(&mut team, cwd.path()).unwrap_err();
+        assert!(err.contains("ghost.md"), "{err}");
+    }
+
+    #[test]
+    fn resolve_member_files_rejects_a_nameless_entry() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut team = vec![member("")];
+        let err = resolve_member_files(&mut team, cwd.path()).unwrap_err();
+        assert!(err.contains("needs a `name` or a `file`"), "{err}");
     }
 }
