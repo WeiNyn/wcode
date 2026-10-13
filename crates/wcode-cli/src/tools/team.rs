@@ -374,4 +374,61 @@ read_only = true
             Some("from-md")
         );
     }
+
+    /// A **partial** apply: member 1 joins, member 2 fails the loud allow-list
+    /// gate (`spawn_worker::validate_tools`). The apply is non-transactional, so
+    /// member 1 stays; the output names how many joined; and the session is
+    /// already a team, so a retry is refused.
+    #[tokio::test]
+    async fn a_partial_apply_names_the_joiners_and_marks_the_team() {
+        let dir = tempfile::tempdir().unwrap();
+        write_team(
+            dir.path(),
+            "scout",
+            // `w1` is valid and joins; `reviewer`'s tool is unknown, so
+            // `validate_tools` fails it on the SECOND member.
+            "[[team]]\nname = \"w1\"\n\n[[team]]\nname = \"reviewer\"\ntools = [\"definitely-not-a-tool\"]\n",
+        );
+        let o = orchestrator();
+        let tool = Team::new(o.clone());
+
+        let out = tool
+            .execute(TeamArgs { name: "scout".into() }, &ctx(dir.path()))
+            .await;
+
+        // 1. The output is an error naming how many joined, and who.
+        assert!(out.is_error, "{}", out.output);
+        assert!(
+            out.output.contains("1 of 2 members joined"),
+            "{}",
+            out.output
+        );
+        assert!(
+            out.output.contains("w1"),
+            "names the member that joined: {}",
+            out.output
+        );
+
+        // 2. The team is now marked applied, so a retry IS refused.
+        assert_eq!(o.applied_team().as_deref(), Some("scout"));
+        let retry = tool
+            .execute(TeamArgs { name: "scout".into() }, &ctx(dir.path()))
+            .await;
+        assert!(retry.is_error, "{}", retry.output);
+        assert!(
+            retry.output.contains("already has the team `scout`"),
+            "{}",
+            retry.output
+        );
+
+        // 3. Member 1 is still live — a partial apply is non-transactional.
+        assert!(
+            o.registry().contains(&SessionId::agent("w1")),
+            "w1 stays after the later failure"
+        );
+        assert!(
+            !o.registry().contains(&SessionId::agent("reviewer")),
+            "the failed member never joined"
+        );
+    }
 }
