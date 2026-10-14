@@ -1369,6 +1369,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             None => TaskList::with_sink(None, false, cap),
         };
         crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
+            .with_team(std::sync::Arc::new(cfg.team.clone()), !cfg.team.is_empty())
     });
 
     // C4 — the verify gate (`VerifyGateHooks`, `crate::verify_gate`): once the

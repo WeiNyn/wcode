@@ -174,6 +174,35 @@ impl Registry {
         locals
     }
 
+    /// Remove `id` from the address book and every per-session map, then
+    /// re-publish the roster.
+    ///
+    /// Drops the `id` entry from `peers` (the address book), `owners`, `models`,
+    /// `states`, `efforts`, and `windows`, then calls [`Self::refresh_roster`]
+    /// so every [`Self::subscribe`]r — a socket server, the TUI — pushes the
+    /// SHRUNK roster.
+    ///
+    /// # Notes
+    /// - **The per-session state watcher** `register` spawned (`tokio::spawn` of
+    ///   a `while state_rx.changed() …` loop) ends only when the session drops.
+    ///   It can re-insert a `states` entry after this returns, but NEVER a
+    ///   `peers` entry — so [`Self::locals`] (which reads `peers`) stays clean
+    ///   and [`Self::contains`]/[`Self::resolve`] report the id gone at once.
+    ///   Documented, not fixed (layering: no back-ref).
+    /// - Removing an unknown `id` is a harmless no-op (`refresh_roster` still runs).
+    ///
+    /// Not idempotent-erroring and not socket-routed: this is the ROOT-LOCAL
+    /// retire path (no `Request` ends a served peer's session).
+    pub fn remove(&self, id: &SessionId) {
+        self.inner.peers.lock().unwrap().remove(id);
+        self.inner.owners.lock().unwrap().remove(id);
+        self.inner.models.lock().unwrap().remove(id);
+        self.inner.states.lock().unwrap().remove(id);
+        self.inner.efforts.lock().unwrap().remove(id);
+        self.inner.windows.lock().unwrap().remove(id);
+        self.refresh_roster();
+    }
+
     /// A live view of [`Self::locals`]: a receiver **seeded** with the current
     /// local roster and updated whenever it changes (a session is
     /// `register`ed). A socket server serves it, so a session that appears
@@ -621,5 +650,46 @@ mod tests {
                 to: b.clone()
             })
         );
+    }
+    #[tokio::test]
+    async fn remove_drops_peers_states_models_and_republishes() {
+        let reg = Registry::new();
+        let orch = SessionId::agent("orch");
+        let w1 = SessionId::agent("w1");
+        reg.register(w1.clone(), session());
+        reg.set_owner(w1.clone(), orch.clone());
+        reg.set_model(w1.clone(), "m1");
+        reg.set_effort(w1.clone(), Some("high".into()));
+        reg.set_context_window(w1.clone(), 1_000);
+        reg.set_state(w1.clone(), MemberState::Running);
+        assert!(reg.contains(&w1));
+
+        let mut rx = reg.subscribe();
+        reg.remove(&w1);
+
+        // Every per-session map is cleared...
+        assert!(!reg.contains(&w1), "peers entry dropped");
+        assert_eq!(reg.state_of(&w1), MemberState::Idle, "state cleared");
+        assert_eq!(reg.model_of(&w1), None, "model cleared");
+        assert_eq!(reg.effort_of(&w1), None, "effort cleared");
+        assert_eq!(reg.window_of(&w1), None, "window cleared");
+        // ...and routing reports it gone (unknown, not merely unpermitted).
+        assert!(
+            matches!(reg.resolve(&orch, &w1), Err(RouteError::Unknown(id)) if id == w1),
+            "an unknown route after remove"
+        );
+        assert!(reg.locals().is_empty(), "the local roster excludes it");
+        // A subscriber (the socket server, the TUI) WOKE with the smaller list.
+        next_change(&mut rx).await;
+        assert!(rx.borrow().is_empty(), "the shrunk roster was published");
+    }
+
+    #[tokio::test]
+    async fn remove_of_an_unknown_id_is_a_no_op() {
+        let reg = Registry::new();
+        let ghost = SessionId::agent("ghost");
+        // No panic and no error; it simply re-publishes the (unchanged) roster.
+        reg.remove(&ghost);
+        assert!(!reg.contains(&ghost));
     }
 }

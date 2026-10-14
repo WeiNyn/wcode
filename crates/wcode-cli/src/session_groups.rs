@@ -400,6 +400,12 @@ pub struct MemberRecord {
     /// Reasoning-effort override (D3); `None` inherits, synonyms clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The member was RETIRED at runtime (W020 §0 amendment 2). A `true` record
+    /// suppresses the member's respawn in [`rebuild_team`] on `--resume`; the
+    /// member's `.jsonl` stays on disk as an audit trail. `#[serde(default)] +
+    /// is_false` so an older manifest still reads (absent == false).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retired: bool,
 }
 
 impl MemberRecord {
@@ -414,11 +420,16 @@ impl MemberRecord {
             api_key: spec.api_key.clone(),
             read_only: spec.read_only,
             effort: spec.effort.clone(),
+            // A fresh launch is never retired; the flag is only ever set by
+            // [`retire_member`] (W020 §0 amendment 2).
+            retired: false,
         })
     }
 
     /// Back to a spec, with `name` pinned to this record's name. The caller
     /// overrides `name` with the file stem if the two disagree (manifest stale).
+    /// `retired` is deliberately NOT carried: the skip happens in
+    /// [`rebuild_team`], not here.
     pub fn to_worker_spec(&self) -> WorkerSpec {
         WorkerSpec {
             name: Some(self.name.clone()),
@@ -482,6 +493,45 @@ pub fn record_member(group: &SessionGroup, spec: &WorkerSpec) -> io::Result<()> 
         }
     }
     write_manifest(group, &manifest)
+}
+
+/// Set the `retired` flag on member `name`'s manifest record and write it — the
+/// durable half of the `retire` op (W020 §0 amendment 2). The member's `.jsonl`
+/// is left on disk (an audit trail); the flag is what suppresses the respawn in
+/// [`rebuild_team`].
+///
+/// If the name has no record, one is created (`retired: true`, name only) so the
+/// skip survives even a phantom-member window (a member file written before its
+/// manifest record — see [`MemberResume::Restored`]).
+///
+/// # Errors
+/// A manifest read/write failure ([`write_manifest`]), surfaced.
+pub fn retire_member(group: &SessionGroup, name: &str) -> io::Result<()> {
+    let mut manifest = load_manifest(group).unwrap_or_else(|| Manifest::new(group.id()));
+    match manifest.members.iter_mut().find(|r| r.name == name) {
+        Some(record) => record.retired = true,
+        None => manifest.members.push(MemberRecord {
+            name: name.to_string(),
+            model: None,
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+            read_only: false,
+            effort: None,
+            retired: true,
+        }),
+    }
+    write_manifest(group, &manifest)
+}
+
+/// Whether member `name`'s manifest record is `retired`. An absent record reads
+/// `false`, so the phantom-member rule stays intact: a header-only file with no
+/// record still resumes ([`MemberResume::Restored`]).
+fn member_retired(group: &SessionGroup, name: &str) -> bool {
+    load_manifest(group)
+        .and_then(|m| m.members.into_iter().find(|r| r.name == name))
+        .is_some_and(|r| r.retired)
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +658,17 @@ pub fn rebuild_team(
         };
         if let Err(reason) = validate_member_name(&name) {
             resumed.push(MemberResume::Skipped { name, reason });
+            continue;
+        }
+        // A retired member (W020 §0 amendment 2) does NOT respawn: its manifest
+        // record's `retired` flag suppresses it; the `.jsonl` stays on disk. No
+        // `MemberResume` variant is added — it is reported as `Skipped` so the
+        // `team: … (restored …)` line stays honest about who is absent.
+        if member_retired(group, &name) {
+            resumed.push(MemberResume::Skipped {
+                name,
+                reason: "retired".into(),
+            });
             continue;
         }
         match Session::open(&group.member_path(&name)) {
@@ -1314,7 +1375,129 @@ mod tests {
         f.write_all(format!("{line}\n").as_bytes()).unwrap();
     }
 
+    /// Append a torn line (a partial write) to a file.
     fn append_torn_line(path: &Path, partial: &str) {
         append_line(path, partial);
     }
+
+    // ---- retire (W020 §0 amendment 2) ----
+
+    #[test]
+    fn retired_flag_roundtrips_and_defaults_false() {
+        let base = tempfile::tempdir().unwrap();
+        let group = make_group(base.path(), "100_a");
+        // A record written WITHOUT the key reads back `false` (an older manifest).
+        record_member(
+            &group,
+            &WorkerSpec {
+                name: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let written = fs::read_to_string(group.manifest_path()).unwrap();
+        assert!(
+            !written.contains("retired"),
+            "`false` is skipped from the JSON: {written}"
+        );
+        assert!(!load_manifest(&group).unwrap().members[0].retired);
+
+        // A `retired: true` record serializes the key and reads back true.
+        retire_member(&group, "w1").unwrap();
+        let written = fs::read_to_string(group.manifest_path()).unwrap();
+        assert!(written.contains("\"retired\": true"), "{written}");
+        assert!(load_manifest(&group).unwrap().members[0].retired);
+    }
+
+    #[test]
+    fn retire_member_sets_the_flag_and_creates_a_record_when_absent() {
+        let base = tempfile::tempdir().unwrap();
+        let group = make_group(base.path(), "100_a");
+        record_member(
+            &group,
+            &WorkerSpec {
+                name: Some("w1".into()),
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        retire_member(&group, "w1").unwrap();
+        let record = load_manifest(&group)
+            .unwrap()
+            .members
+            .into_iter()
+            .find(|r| r.name == "w1")
+            .unwrap();
+        assert!(record.retired, "the flag was set");
+        assert_eq!(record.model.as_deref(), Some("m"), "other fields kept");
+
+        // A name with no record gets a minimal one so the skip survives.
+        retire_member(&group, "phantom").unwrap();
+        assert!(member_retired(&group, "phantom"));
+        assert!(
+            !member_retired(&group, "never-recorded"),
+            "an absent record still reads not-retired"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_team_skips_a_retired_member() {
+        let base = tempfile::tempdir().unwrap();
+        let group = make_group(base.path(), "100_a");
+        // A member file + its launch record.
+        let mut w1 = create_group_member_session(&group, "w1").unwrap();
+        w1.append(user_message("prior")).unwrap();
+        record_member(
+            &group,
+            &WorkerSpec {
+                name: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        retire_member(&group, "w1").unwrap();
+
+        let o = orchestrator(Some(group.members_dir.clone()));
+        let root = o.id().clone();
+        let resumed = rebuild_team(&group, &o, &root);
+        assert_eq!(resumed.len(), 1, "the retired member is reported");
+        match &resumed[0] {
+            MemberResume::Skipped { name, reason } => {
+                assert_eq!(name, "w1");
+                assert_eq!(reason, "retired");
+            }
+            other => panic!("a retired member must not be Restored: {other:?}"),
+        }
+        assert!(
+            !o.registry().contains(&SessionId::agent("w1")),
+            "a retired member is not rebuilt"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_team_still_resumes_a_recordless_member() {
+        // The phantom-member rule: a header-only file with no manifest record
+        // still resumes (retirement only suppresses a member with a `retired`
+        // record).
+        let base = tempfile::tempdir().unwrap();
+        let group = make_group(base.path(), "100_a");
+        create_group_member_session(&group, "w1").unwrap();
+        assert!(load_manifest(&group).is_none(), "no manifest was written");
+
+        let o = orchestrator(Some(group.members_dir.clone()));
+        let root = o.id().clone();
+        let resumed = rebuild_team(&group, &o, &root);
+        assert_eq!(resumed.len(), 1);
+        match &resumed[0] {
+            MemberResume::Restored { id, messages } => {
+                assert_eq!(id.as_str(), "agent:w1");
+                assert_eq!(*messages, 0, "a header-only file seeds no messages");
+            }
+            other => panic!("a recordless member still resumes: {other:?}"),
+        }
+    }
 }
+

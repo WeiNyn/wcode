@@ -10,9 +10,10 @@ use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 #[cfg(unix)]
 use wcode_protocol::Backend;
 
-use crate::agents::{Phonebook, SessionFactory, WorkerSpec, short_name};
+use crate::agents::{AgentPool, Phonebook, SessionFactory, WorkerSpec, short_name};
+use crate::agent_files;
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 pub struct SpawnArgs {
     /// The task the worker should carry out.
     task: String,
@@ -48,11 +49,19 @@ pub struct SpawnArgs {
     /// clears; any other value sets it.
     #[serde(default)]
     effort: Option<String>,
+
+    /// Spawn from a discovered agent `.md` (`.wcode/agents/<name>.md`) BY NAME:
+    /// the resolved [`TeamMember`](crate::config::TeamMember) fills the spec
+    /// fields NOT set explicitly here (an explicit arg still wins). An unknown
+    /// name is an error listing the available names.
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 impl SpawnArgs {
     /// Map the tool args onto a worker spec: `role` → `system`; `name`, `model`,
     /// `tools`, and the provider (`base_url`/`api_key`) pass through unchanged.
+    /// Pure and pool-free — [`Spawn::spec_for`] layers an `agent` md on top.
     fn to_worker_spec(&self) -> WorkerSpec {
         WorkerSpec {
             name: self.name.clone(),
@@ -75,20 +84,72 @@ pub struct Spawn {
     factory: Arc<SessionFactory>,
     me: SessionId,
     phonebook: Phonebook,
+    /// The resolved agent pool (`cfg.team`) — `agent` resolves against it.
+    /// `Arc`, so the clone from `Orchestrator::tools` is cheap.
+    pool: AgentPool,
 }
 
 impl Spawn {
-    pub fn new(factory: Arc<SessionFactory>, me: SessionId, phonebook: Phonebook) -> Self {
+    pub fn new(
+        factory: Arc<SessionFactory>,
+        me: SessionId,
+        phonebook: Phonebook,
+        pool: AgentPool,
+    ) -> Self {
         Self {
             factory,
             me,
             phonebook,
+            pool,
         }
+    }
+
+    /// The worker spec for `args`: the explicit args, with an `agent` md's fields
+    /// filling only what the args left `None` (an explicit arg wins).
+    ///
+    /// # Errors
+    /// `agent` names no pool member → `Err` listing the available names.
+    fn spec_for(&self, args: &SpawnArgs) -> Result<WorkerSpec, String> {
+        let mut spec = args.to_worker_spec();
+        if let Some(name) = &args.agent {
+            let member = agent_files::resolve_role(&self.pool, name)?;
+            // Arg-over-pool: fill only the fields the args left unset.
+            if spec.name.is_none() {
+                spec.name = Some(member.name.clone());
+            }
+            if spec.model.is_none() {
+                spec.model = member.model.clone();
+            }
+            if spec.system.is_none() {
+                spec.system = member.role.clone();
+            }
+            if spec.tools.is_none() {
+                spec.tools = member.tools.clone();
+            }
+            if spec.base_url.is_none() {
+                spec.base_url = member.base_url.clone();
+            }
+            if spec.api_key.is_none() {
+                spec.api_key = member.api_key.clone();
+            }
+            if spec.effort.is_none() {
+                spec.effort = member.effort.clone();
+            }
+            // A `bool` has no `None`, so the md's `true` wins unless an arg set
+            // it: only `true` is ever additive.
+            if member.read_only {
+                spec.read_only = true;
+            }
+        }
+        Ok(spec)
     }
 
     /// The in-process path: validate, spawn, register, and hand over the task.
     fn spawn_local(&self, args: SpawnArgs) -> ToolOutput {
-        let spec = args.to_worker_spec();
+        let spec = match self.spec_for(&args) {
+            Ok(spec) => spec,
+            Err(e) => return error(e),
+        };
         // Fail loudly on a bad allow-list entry rather than silently dropping it
         // (D14) — the model must learn the name was wrong.
         if let Err(e) = self.factory.validate_tools(&spec) {
@@ -138,6 +199,10 @@ impl Spawn {
     /// an error; the in-process path is unchanged.
     #[cfg(unix)]
     async fn spawn_remote(&self, to: &str, args: SpawnArgs) -> ToolOutput {
+        let spec = match self.spec_for(&args) {
+            Ok(spec) => spec,
+            Err(e) => return error(e),
+        };
         let target = self
             .phonebook
             .get(to)
@@ -163,14 +228,14 @@ impl Spawn {
         };
         match client
             .ask(Request::Define {
-                name: args.name,
-                model: args.model,
-                role: args.role,
-                tools: args.tools,
-                base_url: args.base_url,
-                api_key: args.api_key,
-                read_only: args.read_only,
-                effort: args.effort.clone(),
+                name: spec.name,
+                model: spec.model,
+                role: spec.system,
+                tools: spec.tools,
+                base_url: spec.base_url,
+                api_key: spec.api_key,
+                read_only: spec.read_only,
+                effort: spec.effort,
             })
             .await
         {
@@ -218,6 +283,16 @@ impl Spawn {
     }
 }
 
+/// A loud `is_error` output — the twin of the tool-output errors inline in the
+/// `spawn_local`/`spawn_remote` paths (used for the `agent`-resolution failure).
+fn error(message: String) -> ToolOutput {
+    ToolOutput {
+        output: message,
+        is_error: true,
+        ..ToolOutput::default()
+    }
+}
+
 #[async_trait::async_trait]
 impl TypedTool for Spawn {
     type Args = SpawnArgs;
@@ -235,8 +310,10 @@ impl TypedTool for Spawn {
          always kept; an unknown tool name is rejected), `base_url`/`api_key` \
          put it on its own provider, `read_only` refuses the mutating tools and \
          mutating `bash`/`bg`, `effort` overrides its reasoning effort (`-`/ \
-         `none`/`off` clears it), and `to` defines it on a served peer \
-         (a `--peer`/`[peers]` name or `agent:<id>`) instead of in-process."
+         `none`/`off` clears it), `agent` spawns from a discovered \
+         `.wcode/agents/<name>.md` role (an explicit arg still wins), and `to` \
+         defines it on a served peer (a `--peer`/`[peers]` name or `agent:<id>`) \
+         instead of in-process."
     }
 
     async fn execute(&self, args: SpawnArgs, _ctx: &ToolContext) -> ToolOutput {
@@ -334,6 +411,7 @@ mod tests {
             factory(),
             SessionId::agent("orch"),
             Phonebook::default(),
+            AgentPool::default(),
         ));
         let out = tool
             .execute(
@@ -359,6 +437,7 @@ mod tests {
             api_key: Some("wk".into()),
             read_only: true,
             effort: Some("high".into()),
+            agent: None,
         };
         let spec = args.to_worker_spec();
         assert_eq!(spec.name.as_deref(), Some("w9"));
@@ -416,7 +495,7 @@ mod tests {
 
         let root = SessionId::agent("orch");
         let book = Phonebook::default();
-        let tool = erased(Spawn::new(factory.clone(), root.clone(), book.clone()));
+        let tool = erased(Spawn::new(factory.clone(), root.clone(), book.clone(), AgentPool::default()));
         let out = tool
             .execute(
                 serde_json::json!({ "task": "DO THE THING", "to": "agent:r", "name": "reviewer", "read_only": true, "effort": "high" }),
@@ -469,6 +548,7 @@ mod tests {
             factory(),
             SessionId::agent("orch"),
             Phonebook::default(),
+            AgentPool::default(),
         ));
         let out = tool
             .execute(serde_json::json!({ "task": "hi", "to": "ghost" }), ctx())
@@ -476,4 +556,116 @@ mod tests {
         assert!(out.is_error, "{out:?}");
         assert!(out.output.contains("ghost"), "{}", out.output);
     }
+
+    /// A pool with one `judge` member (the shape a `.wcode/agents/judge.md`
+    /// folds into).
+    fn judge_pool() -> AgentPool {
+        Arc::new(vec![crate::config::TeamMember {
+            name: "judge".into(),
+            file: None,
+            model: Some("from-md".into()),
+            role: Some("You judge.".into()),
+            tools: Some(vec!["read".into()]),
+            base_url: Some("http://md/v1".into()),
+            api_key: Some("md-key".into()),
+            read_only: true,
+            effort: Some("high".into()),
+        }])
+    }
+
+    /// `agent` fills the spec from the md; an explicit arg still wins.
+    #[test]
+    fn spawn_args_resolve_an_agent_from_the_pool() {
+        let tool = Spawn::new(
+            factory(),
+            SessionId::agent("orch"),
+            Phonebook::default(),
+            judge_pool(),
+        );
+
+        // No explicit overrides: the md supplies every field.
+        let args = SpawnArgs {
+            task: "t".into(),
+            agent: Some("judge".into()),
+            ..SpawnArgs::default()
+        };
+        let spec = tool.spec_for(&args).unwrap();
+        assert_eq!(spec.name.as_deref(), Some("judge"), "name defaults to the md");
+        assert_eq!(spec.model.as_deref(), Some("from-md"));
+        assert_eq!(spec.system.as_deref(), Some("You judge."));
+        assert_eq!(spec.tools, Some(vec!["read".to_string()]));
+        assert_eq!(spec.base_url.as_deref(), Some("http://md/v1"));
+        assert_eq!(spec.api_key.as_deref(), Some("md-key"));
+        assert!(spec.read_only);
+        assert_eq!(spec.effort.as_deref(), Some("high"));
+
+        // An explicit arg wins over the md; unset fields still come from the md.
+        let args = SpawnArgs {
+            task: "t".into(),
+            agent: Some("judge".into()),
+            name: Some("w9".into()),
+            model: Some("explicit".into()),
+            role: Some("explicit role".into()),
+            ..SpawnArgs::default()
+        };
+        let spec = tool.spec_for(&args).unwrap();
+        assert_eq!(spec.name.as_deref(), Some("w9"), "arg wins");
+        assert_eq!(spec.model.as_deref(), Some("explicit"));
+        assert_eq!(spec.system.as_deref(), Some("explicit role"));
+        assert_eq!(spec.tools, Some(vec!["read".to_string()]), "md fills the rest");
+        assert!(spec.read_only);
+    }
+
+    /// An `agent` naming no pool member errors, listing the available names.
+    #[test]
+    fn an_unknown_agent_lists_the_pool_names() {
+        let tool = Spawn::new(
+            factory(),
+            SessionId::agent("orch"),
+            Phonebook::default(),
+            judge_pool(),
+        );
+        let args = SpawnArgs {
+            task: "t".into(),
+            agent: Some("ghost".into()),
+            ..SpawnArgs::default()
+        };
+        let err = tool.spec_for(&args).err().unwrap();
+        assert!(err.contains("no agent `ghost`"), "{err}");
+        assert!(err.contains("judge"), "lists the pool: {err}");
+    }
+
+    /// End-to-end through the tool: `spawn { agent }` defines a worker whose spec
+    /// is the md's, delivered its task.
+    #[tokio::test]
+    async fn spawn_agent_uses_the_md_spec() {
+        let tool = erased(Spawn::new(
+            factory(),
+            SessionId::agent("orch"),
+            Phonebook::default(),
+            judge_pool(),
+        ));
+        let out = tool
+            .execute(serde_json::json!({ "task": "judge it", "agent": "judge" }), ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(out.output.contains("agent:judge"), "{}", out.output);
+    }
+
+    /// And an unknown `agent` surfaces the same loud error through `execute`.
+    #[tokio::test]
+    async fn spawn_agent_unknown_name_errors_through_execute() {
+        let tool = erased(Spawn::new(
+            factory(),
+            SessionId::agent("orch"),
+            Phonebook::default(),
+            judge_pool(),
+        ));
+        let out = tool
+            .execute(serde_json::json!({ "task": "x", "agent": "ghost" }), ctx())
+            .await;
+        assert!(out.is_error, "{out:?}");
+        assert!(out.output.contains("no agent `ghost`"), "{}", out.output);
+    }
 }
+

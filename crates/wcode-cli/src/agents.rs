@@ -58,6 +58,14 @@ impl Phonebook {
         self.names.lock().unwrap().get(name).cloned()
     }
 
+    /// Drop `name → address` (the inverse of [`Self::insert`]); the retire path
+    /// calls it so a retired member stops resolving by name. Root-local — the
+    /// phonebook is never shared across a socket. Returns whether the name was
+    /// present.
+    pub fn remove(&self, name: &str) -> bool {
+        self.names.lock().unwrap().remove(name).is_some()
+    }
+
     /// The known names, sorted — for the `peers` tool.
     pub fn entries(&self) -> Vec<(String, SessionId)> {
         let mut entries: Vec<_> = self
@@ -81,6 +89,16 @@ pub fn short_name(address: &SessionId) -> String {
         .unwrap_or(address.as_str())
         .to_string()
 }
+
+/// The resolved agent pool — the FOLDED `[team]` + `.wcode/agents/*.md` set
+/// (`cfg.team`), captured at startup. `spawn { agent }` (op 5) resolves against
+/// it. `Arc`, so each tool's clone is cheap.
+pub type AgentPool = std::sync::Arc<Vec<crate::config::TeamMember>>;
+
+/// The shared "a team is applied" cell ([`Orchestrator::applied_team`]). The
+/// value is the applied team's name, or the startup marker `"[config]"` when
+/// the session began with a `[team]`; only "is it `Some`" is read today.
+pub type TeamApplied = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
 /// The fixed configuration a worker inherits from its orchestrator. Owned (not
 /// borrowed) so a [`SessionFactory`] can be shared across tool calls.
@@ -167,6 +185,11 @@ impl SessionFactory {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// The configured members dir, or `None` for an in-memory team.
+    pub fn members_dir(&self) -> Option<&std::path::Path> {
+        self.template.members_dir.as_deref()
     }
 
     /// Install a sink that receives a [`SurfaceSpec`] for each worker spawned
@@ -523,6 +546,13 @@ pub struct Orchestrator {
     id: SessionId,
     phonebook: Phonebook,
     tasks: TaskList,
+    /// The resolved agent pool — the FOLDED `[team]` + `.wcode/agents/*.md` set
+    /// (`cfg.team`), captured at startup. `spawn { agent }` resolves against it.
+    pool: AgentPool,
+    /// Whether this session already HAS a team — set at startup when `cfg.team`
+    /// is non-empty (the marker `"[config]"`), and by a successful live `team`
+    /// apply (the team's name). The `team` tool refuses when `Some`.
+    team_applied: TeamApplied,
 }
 
 impl Orchestrator {
@@ -542,7 +572,47 @@ impl Orchestrator {
             id: SessionId::agent("orchestrator"),
             phonebook: Phonebook::default(),
             tasks,
+            pool: AgentPool::default(),
+            team_applied: TeamApplied::default(),
         }
+    }
+
+    /// Builder over [`Self::with_tasks`]: set the resolved md pool and whether
+    /// the session STARTED with a team (`!cfg.team.is_empty()`). Called once in
+    /// `build_runtime`. `started_with_team` seeds `team_applied` with the startup
+    /// marker, so the `team` tool refuses a re-apply on a config-team session.
+    pub fn with_team(mut self, pool: AgentPool, started_with_team: bool) -> Self {
+        self.pool = pool;
+        if started_with_team {
+            *self.team_applied.lock().unwrap() = Some("[config]".to_string());
+        }
+        self
+    }
+
+    /// The resolved md pool — `spawn { agent }` reads it. The `Spawn` tool holds
+    /// the `AgentPool` directly, so this accessor is for callers that want the
+    /// slice (and for tests); `#[allow(dead_code)]` mirrors [`Self::new`].
+    #[allow(dead_code)]
+    pub fn pool(&self) -> &[crate::config::TeamMember] {
+        &self.pool
+    }
+
+    /// The applied team's name (or the startup marker), or `None` when the
+    /// session has none — the `team` tool's guard.
+    pub fn applied_team(&self) -> Option<String> {
+        self.team_applied.lock().unwrap().clone()
+    }
+
+    /// Mark a team applied (a successful live `team` apply).
+    pub fn mark_team_applied(&self, name: &str) {
+        *self.team_applied.lock().unwrap() = Some(name.to_string());
+    }
+
+    /// The active group's members dir (`WorkerTemplate.members_dir`), so
+    /// `tools()` can hand `Member` the group for the durable retire flag.
+    /// Delegates to the factory's own accessor.
+    pub fn members_dir(&self) -> Option<&std::path::Path> {
+        self.factory.members_dir()
     }
 
     /// The root's A2A tools — `spawn`, `message`, and `peers`.
@@ -552,6 +622,7 @@ impl Orchestrator {
                 self.factory.clone(),
                 self.id.clone(),
                 self.phonebook.clone(),
+                self.pool.clone(),
             )),
             erased(Message::new(
                 self.registry.clone(),
@@ -567,12 +638,16 @@ impl Orchestrator {
                 self.registry.clone(),
                 self.id.clone(),
                 self.phonebook.clone(),
+                self.tasks.clone(),
+                self.members_dir().map(SessionGroup::from_members_dir),
             )),
             // The plan — root-only: only the root holds this tool set.
             erased(crate::tools::task::Task::new(
                 self.tasks.clone(),
                 self.phonebook.clone(),
             )),
+            // Apply a project team file live (op 6) — root-only, like the rest.
+            erased(crate::tools::team::Team::new(self.clone())),
         ]
     }
 
@@ -1200,6 +1275,7 @@ mod tests {
             factory,
             SessionId::agent("orch"),
             book.clone(),
+            AgentPool::default(),
         ));
 
         let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1707,6 +1783,71 @@ mod tests {
             !defaults.contains(&"task".to_string()) && !defaults.contains(&"member".to_string()),
             "the default set must not offer `task`/`member`: {defaults:?}"
         );
+    }
+
+    /// `Phonebook::remove` drops a name so it stops resolving (the retire path);
+    /// it reports whether the name was present.
+    #[test]
+    fn phonebook_remove_drops_a_name() {
+        let book = Phonebook::default();
+        let addr = SessionId::agent("w1");
+        book.insert("w1", addr.clone());
+        assert_eq!(book.get("w1"), Some(addr));
+        assert!(book.remove("w1"), "remove reports the name was present");
+        assert_eq!(book.get("w1"), None, "the name no longer resolves");
+        assert!(!book.remove("w1"), "a second remove finds nothing");
+    }
+
+    /// The `team` tool is root-only, like `spawn`/`member`/`task` — a worker
+    /// never holds it, so a worker cannot apply a team.
+    #[test]
+    fn the_team_tool_is_root_only() {
+        let o = orchestrator();
+        let root: Vec<String> = o.tools().iter().map(|t| t.name().to_string()).collect();
+        assert!(root.contains(&"team".to_string()), "root tools: {root:?}");
+        assert!(root.contains(&"spawn".to_string()), "root tools: {root:?}");
+
+        let defaults: Vec<String> =
+            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new())
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect();
+        assert!(
+            !defaults.contains(&"team".to_string()) && !defaults.contains(&"spawn".to_string()),
+            "the default set must not offer `team`/`spawn`: {defaults:?}"
+        );
+    }
+
+    /// `with_team` records the resolved pool and seeds the startup marker only
+    /// when the session began with a `[team]`.
+    #[test]
+    fn with_team_records_the_pool_and_the_startup_marker() {
+        let pool: AgentPool = Arc::new(vec![crate::config::TeamMember {
+            name: "judge".into(),
+            file: None,
+            model: None,
+            role: None,
+            tools: None,
+            base_url: None,
+            api_key: None,
+            read_only: false,
+            effort: None,
+        }]);
+
+        // Started with a `[team]`: the pool is recorded and the marker is set.
+        let started = orchestrator().with_team(pool.clone(), true);
+        assert_eq!(started.pool().len(), 1);
+        assert_eq!(started.pool()[0].name, "judge");
+        assert_eq!(started.applied_team().as_deref(), Some("[config]"));
+
+        // No `[team]` at startup: same pool, but no applied-team marker.
+        let bare = orchestrator().with_team(pool, false);
+        assert_eq!(bare.pool().len(), 1);
+        assert_eq!(bare.applied_team(), None);
+
+        // A live apply flips the marker to the team's name.
+        bare.mark_team_applied("scout");
+        assert_eq!(bare.applied_team().as_deref(), Some("scout"));
     }
 }
 
