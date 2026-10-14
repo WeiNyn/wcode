@@ -18,7 +18,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
 use wcode_harness::stats::session_stats;
-use wcode_harness::streamfn::{LlmEndpoint, LlmOpts, list_models, rig_stream_fn};
+use wcode_harness::streamfn::{EndpointPref, LlmOpts, list_models, rig_stream_fn};
 use wcode_harness::tool::Tool;
 use wcode_protocol::Backend;
 #[cfg(unix)]
@@ -435,22 +435,19 @@ fn push_launch_args(
     // `llm`'s endpoint/base_url may be a `[models.<id>]` profile, and promoting
     // them to `--base-url`/`--endpoint` would make that profile the re-exec'd
     // DEFAULT (switching back to an unmapped model would then hit the wrong wire).
+    // `base.endpoint` is an `EndpointPref`, so emit its `wire()` — `"auto"` for
+    // `Auto`, never a resolved pin (a re-exec must not silently re-pin auto). The
+    // `None` arm wraps the concrete `llm.endpoint`, which cannot recover `Auto`.
     let (endpoint, base_url) = match llm.model_profiles.base() {
         Some(base) => (base.endpoint, base.base_url.clone()),
-        None => (llm.endpoint, llm.base_url.clone()),
+        None => (EndpointPref::Pinned(llm.endpoint), llm.base_url.clone()),
     };
     if let Some(url) = base_url {
         args.push("--base-url".to_string());
         args.push(url);
     }
     args.push("--endpoint".to_string());
-    args.push(
-        match endpoint {
-            LlmEndpoint::Chat => "chat",
-            LlmEndpoint::Responses => "responses",
-        }
-        .to_string(),
-    );
+    args.push(endpoint.wire().to_string());
     args.push("--effort".to_string());
     args.push(llm.effort.clone().unwrap_or_else(|| "-".to_string()));
     // Keep the orchestrator/team across a re-exec: a resumed session must still
@@ -1523,7 +1520,7 @@ fn out(s: &str) {
 mod tests {
     use super::*;
 
-    use wcode_harness::streamfn::{LlmProfile, LlmProvider, ModelProfiles};
+    use wcode_harness::streamfn::{LlmEndpoint, LlmProfile, LlmProvider, ModelProfiles};
 
     #[tokio::test]
     async fn build_agent_leaves_the_shared_hook_set_untouched() {
@@ -1812,7 +1809,7 @@ mod tests {
     #[test]
     fn reload_args_forwards_the_launch_base_not_the_settled_provider() {
         let base = LlmProvider {
-            endpoint: LlmEndpoint::Chat,
+            endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
             base_url: Some("http://base/v1".into()),
             api_key: Some("base-key".into()),
         };
@@ -1827,7 +1824,7 @@ mod tests {
         );
         let mut llm = LlmOpts {
             model: "m2".into(),
-            endpoint: base.endpoint,
+            endpoint: base.endpoint.resolve(base.base_url.as_deref(), "m2"),
             base_url: base.base_url.clone(),
             api_key: base.api_key.clone(),
             model_profiles: profiles,
@@ -1859,6 +1856,51 @@ mod tests {
         assert!(
             !args.iter().any(|a| a == "http://openai/v1"),
             "must not leak the profile's base_url, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn reload_args_forwards_auto_when_the_base_pref_is_auto() {
+        // A base whose `endpoint` is `EndpointPref::Auto` re-execs with
+        // `--endpoint auto`, NOT a resolved pin.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some("http://base/v1".into()),
+            api_key: None,
+        };
+        let llm = LlmOpts {
+            model: "m".into(),
+            base_url: base.base_url.clone(),
+            model_profiles: ModelProfiles::new(base.clone()),
+            ..LlmOpts::default()
+        };
+        let args = reload_args(&llm, None, false, false, false, None, None, None);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--endpoint" && w[1] == "auto"),
+            "auto must survive a re-exec, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn reload_args_forwards_a_pinned_label() {
+        // A `Pinned(Responses)` base still forwards the concrete label.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Pinned(LlmEndpoint::Responses),
+            base_url: Some("http://base/v1".into()),
+            api_key: None,
+        };
+        let llm = LlmOpts {
+            model: "m".into(),
+            base_url: base.base_url.clone(),
+            model_profiles: ModelProfiles::new(base.clone()),
+            ..LlmOpts::default()
+        };
+        let args = reload_args(&llm, None, false, false, false, None, None, None);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--endpoint" && w[1] == "responses"),
+            "a pin must forward its label, got: {args:?}"
         );
     }
 

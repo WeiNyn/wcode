@@ -799,7 +799,9 @@ mod tests {
     use wcode_harness::event::AgentEvent;
     use wcode_harness::message::ContentBlock;
     use wcode_harness::protocol::Request;
-    use wcode_harness::streamfn::{LlmEndpoint, LlmProfile, LlmProvider, LlmStream, ModelProfiles};
+    use wcode_harness::streamfn::{
+        EndpointPref, LlmEndpoint, LlmProfile, LlmProvider, LlmStream, ModelProfiles,
+    };
 
     /// A factory whose workers run on a never-streaming model — enough to prove
     /// spawn/registration, since the messages we deliver are `Notify` (no turn).
@@ -1447,7 +1449,7 @@ mod tests {
         // FIX A: the worker's `spec.model` selects a `[models.<id>]` profile,
         // which re-points the endpoint too (not just base_url/api_key).
         let mut profiles = ModelProfiles::new(LlmProvider {
-            endpoint: LlmEndpoint::Chat,
+            endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
             base_url: Some("http://shared/v1".into()),
             api_key: Some("shared-key".into()),
         });
@@ -1488,11 +1490,45 @@ mod tests {
     }
 
     #[test]
+    fn an_auto_worker_derives_the_endpoint_from_its_own_model() {
+        // W021: a worker inherits the root's `Auto` pref, so its own responses-only
+        // model id must re-derive the endpoint (brief §5 step 6's worker gate).
+        let profiles = ModelProfiles::new(LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some("https://opencode.ai/zen/go/v1".into()),
+            api_key: None,
+        });
+        let llm = LlmOpts {
+            base_url: Some("https://opencode.ai/zen/go/v1".into()),
+            model_profiles: profiles,
+            ..Default::default()
+        };
+        let stream_fn: StreamFn = Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        let (factory, _registry) = factory_full(stream_fn, llm);
+        let cfg = factory.worker_config(
+            &SessionId::agent("w1"),
+            &SessionId::agent("orch"),
+            &WorkerSpec {
+                model: Some("grok-4.7".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.llm.model, "grok-4.7");
+        assert_eq!(
+            cfg.llm.endpoint,
+            LlmEndpoint::Responses,
+            "an auto worker derives the endpoint from its own model id"
+        );
+    }
+
+    #[test]
     fn an_explicit_spec_provider_wins_over_the_model_profile() {
         // FIX A precedence: a profile loses to an explicit `spec.base_url` /
         // `spec.api_key`, but its endpoint still applies (the spec has none).
         let mut profiles = ModelProfiles::new(LlmProvider {
-            endpoint: LlmEndpoint::Chat,
+            endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
             base_url: Some("http://shared/v1".into()),
             api_key: Some("shared-key".into()),
         });

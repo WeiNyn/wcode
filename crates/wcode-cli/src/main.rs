@@ -45,7 +45,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -55,7 +55,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --config <path>    overlay config file, deep-merged over the global config (also WCODE_CONFIG)
    --team <name>      use ./.wcode/teams/<name>.toml as the overlay (a named project team;
                       mutually exclusive with --config)
-   --endpoint <e>     override the configured endpoint (chat|responses)
+   --endpoint <e>     override the configured endpoint (chat|responses|auto; auto = derive)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
    --sequential       run tool calls one at a time (default: independent calls in a
@@ -86,11 +86,11 @@ config: ~/.config/wcode/config.toml
   model = \"...\"      (required)
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
-  endpoint = \"...\"   (optional, chat|responses, default chat)
+  endpoint = \"...\"   (optional, chat|responses|auto, default auto: derive from the model)
   effort = \"...\"     (optional, free-style reasoning effort, omitted = not sent)
 
   [models.\"<id>\"]     (optional; overrides the DEFAULT provider for that model id)
-  endpoint = \"...\"    (optional; chat|responses — overrides the default endpoint)
+  endpoint = \"...\"    (optional; chat|responses|auto — overrides the default endpoint; auto = derive)
   base_url = \"...\"    (optional; overrides the default base_url)
   api_key = \"...\"    (optional; overrides the default api_key)
 
@@ -259,7 +259,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--endpoint" => {
                 a.endpoint = Some(
                     args.get(i)
-                        .ok_or("--endpoint requires chat|responses")?
+                        .ok_or("--endpoint requires chat|responses|auto")?
                         .clone(),
                 );
                 i += 1;
@@ -441,11 +441,15 @@ fn config_dump(cfg: &Config) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "provider: {}", cfg.provider_summary());
+    let endpoint_source = if cfg.endpoint.is_none() {
+        "auto".to_string()
+    } else {
+        cfg.provenance.endpoint.to_string()
+    };
     let _ = writeln!(
         out,
-        "endpoint: {} (source: {})",
-        endpoint_label(cfg.endpoint),
-        cfg.provenance.endpoint
+        "endpoint: {} (source: {endpoint_source})",
+        endpoint_label(cfg.resolved_endpoint(&cfg.model)),
     );
     let effective_base = cfg.effective_base_url(&cfg.model);
     let base_source = if cfg
@@ -3023,6 +3027,78 @@ mod tests {
         assert!(!dump.contains(OPENAI_DEFAULT_BASE_URL), "{dump}");
         // The startup diagnostic is likewise profile-aware: no implicit warning.
         assert!(!cfg.effective_base_url_is_implicit(&cfg.model));
+    }
+
+    #[test]
+    fn config_dump_renders_the_auto_endpoint_and_its_source() {
+        let zen = "https://opencode.ai/zen/go/v1";
+        // 1. zen base + a responses-only model, endpoint absent ⇒ derived + auto.
+        let auto_zen = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("grok-4.7".into()),
+                base_url: Some(zen.into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&auto_zen).contains("endpoint: responses (source: auto)"),
+            "{}",
+            config_dump(&auto_zen)
+        );
+
+        // 2. a non-zen base ⇒ auto resolves to chat, still labelled auto.
+        let auto_openai = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("grok-4.7".into()),
+                base_url: Some("https://api.openai.com/v1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&auto_openai).contains("endpoint: chat (source: auto)"),
+            "{}",
+            config_dump(&auto_openai)
+        );
+
+        // 3. an explicit toml pin wins AND reports its source ("config", lowercase).
+        let pinned = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("grok-4.7".into()),
+                base_url: Some(zen.into()),
+                endpoint: Some("chat".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            config_dump(&pinned).contains("endpoint: chat (source: config)"),
+            "{}",
+            config_dump(&pinned)
+        );
+
+        // 4. `--endpoint auto` lands provenance = Flag but STILL prints "(source:
+        //    auto)" — the line reports the unpinned value, not the origin.
+        let mut flag_auto = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("grok-4.7".into()),
+                base_url: Some(zen.into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        flag_auto.endpoint = None;
+        flag_auto.provenance.endpoint = crate::config::Source::Flag;
+        assert!(
+            config_dump(&flag_auto).contains("endpoint: responses (source: auto)"),
+            "{}",
+            config_dump(&flag_auto)
+        );
     }
 
     #[tokio::test]

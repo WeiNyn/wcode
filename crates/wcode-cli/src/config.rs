@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use wcode_harness::compaction::CompactionPolicy;
 use wcode_harness::streamfn::{
-    LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, ModelProfiles, RetryPolicy,
+    EndpointPref, LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, ModelProfiles, RetryPolicy,
 };
 
 use crate::instructions::Mode;
@@ -480,7 +480,10 @@ pub struct Config {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: String,
-    pub endpoint: LlmEndpoint,
+    /// `None` = AUTO (derive from the catalog in `settle`); `Some(e)` = a PINNED
+    /// wire. Absence is now DISTINCT from `Chat` (they were conflated by
+    /// `parse_endpoint`).
+    pub endpoint: Option<LlmEndpoint>,
     pub effort: Option<String>,
     pub hooks: HooksConfig,
     pub tools: ToolsConfig,
@@ -805,13 +808,8 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     let mut models: std::collections::BTreeMap<String, LlmProfile> =
         std::collections::BTreeMap::new();
     for (id, entry) in &file.models {
-        let endpoint = match entry.endpoint.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some(value) => Some(
-                parse_endpoint(Some(value))
-                    .map_err(|e| ConfigError::Io(format!("[models.{id:?}] {e}")))?,
-            ),
-        };
+        let endpoint = parse_endpoint(entry.endpoint.as_deref())
+            .map_err(|e| ConfigError::Io(format!("[models.{id:?}] {e}")))?;
         models.insert(
             id.clone(),
             LlmProfile {
@@ -971,13 +969,18 @@ pub(crate) fn topo_order(w: &Workflow) -> Result<Vec<&WorkflowNode>, ConfigError
     Ok(out)
 }
 
-pub fn parse_endpoint(value: Option<&str>) -> Result<LlmEndpoint, String> {
+/// Parse an endpoint value. `None`/`""`/`"auto"` ⇒ `Ok(None)` = AUTO (derive from
+/// the catalog); `"chat"`/`"responses"` ⇒ `Ok(Some(..))` = a PIN.
+///
+/// # Errors
+/// Any other value ⇒ `Err`, naming the value and the three valid words.
+pub fn parse_endpoint(value: Option<&str>) -> Result<Option<LlmEndpoint>, String> {
     match value.map(str::trim) {
-        None | Some("") => Ok(LlmEndpoint::Chat),
-        Some("chat") => Ok(LlmEndpoint::Chat),
-        Some("responses") => Ok(LlmEndpoint::Responses),
+        None | Some("") | Some("auto") => Ok(None),
+        Some("chat") => Ok(Some(LlmEndpoint::Chat)),
+        Some("responses") => Ok(Some(LlmEndpoint::Responses)),
         Some(other) => Err(format!(
-            "unknown endpoint {other:?}: valid values are \"chat\", \"responses\""
+            "unknown endpoint {other:?}: valid values are \"chat\", \"responses\", \"auto\""
         )),
     }
 }
@@ -1088,9 +1091,10 @@ impl Config {
         config_dir().map(|d| d.join("config.toml"))
     }
 
-    /// `chat · base_url <url|https://api.openai.com/v1 (implicit)> · model <id>
-    /// · key <source>` — one line, no secret. Used by the startup diagnostic,
-    /// the REPL banner and `--dump-config`.
+    /// `chat|responses · base_url <url|https://api.openai.com/v1 (implicit)> ·
+    /// model <id> · key <source>` — one line, no secret. The leading token is the
+    /// RESOLVED wire (an unpinned `endpoint` derives it from the catalog). Used by
+    /// the startup diagnostic, the REPL banner and `--dump-config`.
     pub fn provider_summary(&self) -> String {
         let base = match self.effective_base_url(&self.model) {
             Some(url) => url.to_string(),
@@ -1098,7 +1102,7 @@ impl Config {
         };
         format!(
             "{} · base_url {base} · model {} · key {}",
-            endpoint_label(self.endpoint),
+            endpoint_label(self.resolved_endpoint(&self.model)),
             self.model,
             self.provenance.api_key
         )
@@ -1120,13 +1124,24 @@ impl Config {
     pub fn effective_base_url_is_implicit(&self, model: &str) -> bool {
         self.effective_base_url(model).is_none()
     }
+
+    /// The concrete wire for `model`: its pin, else the catalog decision against
+    /// the model's EFFECTIVE base (profile-aware), else `Chat`. Mirrors the kernel's
+    /// `EndpointPref::resolve` — used only for labels/diagnostics.
+    pub fn resolved_endpoint(&self, model: &str) -> LlmEndpoint {
+        EndpointPref::from(self.endpoint).resolve(self.effective_base_url(model), model)
+    }
+
     pub fn to_llm_opts(&self) -> LlmOpts {
+        let pref = EndpointPref::from(self.endpoint); // None ⇒ Auto, Some ⇒ Pinned
         let mut opts = LlmOpts {
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),
             temperature: None,
-            endpoint: self.endpoint,
+            // The concrete LAUNCH seed (`settle` re-resolves it, profile-aware).
+            // Uses the GLOBAL base here; the profile-aware base is applied in `settle`.
+            endpoint: pref.resolve(self.base_url.as_deref(), &self.model),
             effort: self.effort.clone(),
             session_id: None,
             retry: self.retry,
@@ -1134,7 +1149,9 @@ impl Config {
         };
         // The launch provider (after the env/config globals) is what an unmapped
         // model falls back to; each `[models.<id>]` overlays the fields it sets.
-        let mut profiles = ModelProfiles::new(LlmProvider::of(&opts));
+        // The endpoint PREFERENCE (fixed vs auto) rides along so `settle` can
+        // re-derive on every switch.
+        let mut profiles = ModelProfiles::new(LlmProvider::of(&opts, pref));
         for (id, profile) in &self.models {
             profiles.insert(id.clone(), profile.clone());
         }
@@ -1178,11 +1195,13 @@ mod tests {
 
     #[test]
     fn endpoint_parses_chat_and_responses() {
-        assert_eq!(parse_endpoint(None).unwrap(), LlmEndpoint::Chat);
-        assert_eq!(parse_endpoint(Some("chat")).unwrap(), LlmEndpoint::Chat);
+        assert_eq!(parse_endpoint(None).unwrap(), None);
+        assert_eq!(parse_endpoint(Some("")).unwrap(), None);
+        assert_eq!(parse_endpoint(Some("auto")).unwrap(), None);
+        assert_eq!(parse_endpoint(Some("chat")).unwrap(), Some(LlmEndpoint::Chat));
         assert_eq!(
             parse_endpoint(Some("responses")).unwrap(),
-            LlmEndpoint::Responses
+            Some(LlmEndpoint::Responses)
         );
     }
 
@@ -1191,6 +1210,7 @@ mod tests {
         let err = parse_endpoint(Some("grpc")).unwrap_err();
         assert!(err.contains("grpc"), "error names the value: {err}");
         assert!(err.contains("chat") && err.contains("responses"));
+        assert!(err.contains("auto"), "the error names auto too: {err}");
     }
 
     #[test]
@@ -1207,9 +1227,89 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
-        assert_eq!(cfg.endpoint, LlmEndpoint::Responses);
+        assert_eq!(cfg.endpoint, Some(LlmEndpoint::Responses));
         assert_eq!(cfg.to_llm_opts().endpoint, LlmEndpoint::Responses);
+    }
+
+    #[test]
+    fn parse_endpoint_auto_and_absence_are_none() {
+        assert_eq!(parse_endpoint(None).unwrap(), None);
+        assert_eq!(parse_endpoint(Some("")).unwrap(), None);
+        assert_eq!(parse_endpoint(Some("auto")).unwrap(), None); // explicit opt-in
+        assert_eq!(parse_endpoint(Some("chat")).unwrap(), Some(LlmEndpoint::Chat));
+        assert_eq!(
+            parse_endpoint(Some("responses")).unwrap(),
+            Some(LlmEndpoint::Responses)
+        );
+    }
+
+    #[test]
+    fn parse_endpoint_unknown_names_all_three_valid_words() {
+        let err = parse_endpoint(Some("grpc")).unwrap_err();
+        assert!(
+            err.contains("grpc")
+                && err.contains("chat")
+                && err.contains("responses")
+                && err.contains("auto")
+        );
+    }
+
+    #[test]
+    fn a_models_profile_auto_endpoint_inherits() {
+        // `[models.x].endpoint = "auto"` ⇒ None ⇒ inherit (like absent/empty).
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                models: std::collections::BTreeMap::from([(
+                    "auto".to_string(),
+                    ModelProfile {
+                        endpoint: Some("auto".into()),
+                        base_url: Some("http://auto/v1".into()),
+                        ..ModelProfile::default()
+                    },
+                )]),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.models.get("auto").unwrap().endpoint.is_none());
+    }
+
+    #[test]
+    fn absolute_endpoint_auto_makes_to_llm_opts_carry_auto() {
+        // `endpoint` absent ⇒ `to_llm_opts` seeds a resolved launch endpoint AND
+        // the base provider carries `EndpointPref::Auto` (auto-consistent). A
+        // `--endpoint chat` pin ⇒ `Pinned(Chat)`.
+        let auto = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                base_url: Some("http://zen/v1".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        let opts = auto.to_llm_opts();
+        assert_eq!(opts.endpoint, LlmEndpoint::Chat, "non-zen launch base");
+        assert_eq!(
+            opts.model_profiles.base().unwrap().endpoint,
+            EndpointPref::Auto
+        );
+
+        let pinned = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                endpoint: Some("chat".into()),
+                ..FileConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pinned.to_llm_opts().model_profiles.base().unwrap().endpoint,
+            EndpointPref::Pinned(LlmEndpoint::Chat)
+        );
     }
 
     #[test]
