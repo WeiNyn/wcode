@@ -37,7 +37,7 @@ More at **[weinyn.github.io/wcode](https://weinyn.github.io/wcode/)**.
 model = "gpt-4.1"      # required
 base_url = "https://api.openai.com/v1"  # optional; any OpenAI-compatible endpoint
 api_key = "sk-..."     # optional
-endpoint = "chat"      # optional; chat|responses, default chat
+endpoint = "auto"      # optional; chat|responses|auto, default auto (derive from the model)
 effort = "high"        # optional; free-style reasoning effort, omitted = not sent
 
 # Per-model providers: when a model id is selected (mid-session `/model`, a
