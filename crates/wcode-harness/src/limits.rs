@@ -14,6 +14,8 @@
 //! response usage (`prompt_tokens` → `crate::message::Usage::input_tokens`),
 //! not from here; these limits only say *how much* fits.
 
+use crate::streamfn::LlmEndpoint;
+
 /// Context window assumed when neither the model catalog nor config supplies
 /// one: a conservative baseline so an unknown model still compacts in time.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -65,6 +67,29 @@ pub fn model_limit(base_url: Option<&str>, model: &str) -> Option<ModelLimit> {
     None
 }
 
+/// The wire protocol `model` speaks on OpenCode Go, when we recognize it.
+/// `None` = unknown / both-work / not served by `chat`-or-`responses`, or a
+/// non-zen provider — the caller (`EndpointPref::resolve`) falls back to `Chat`.
+///
+/// Gated by `is_opencode_go` EXACTLY like `model_limit`: a known id behind a
+/// non-OpenCode base is NOT assumed (mirrors `unknown_model_or_provider_is_none`).
+/// Only the responses-only ids are enumerated; every other id is `None`
+/// (both-works, or speaks a protocol wcode does not implement).
+///
+/// # Returns
+/// `Some(LlmEndpoint::Responses)` for an id in `OPENCODE_GO_RESPONSES_ONLY` under a
+/// zen base; `None` otherwise (never `Some(Chat)` — absence means "let the caller
+/// default to chat").
+///
+/// Does NOT promise: it does not verify the id exists in the live catalog, and it is
+/// a snapshot of the OpenCode Go listing (`OPENCODE_GO_RESPONSES_ONLY`).
+pub fn model_protocol(base_url: Option<&str>, model: &str) -> Option<LlmEndpoint> {
+    if is_opencode_go(base_url) && OPENCODE_GO_RESPONSES_ONLY.contains(&model) {
+        return Some(LlmEndpoint::Responses);
+    }
+    None
+}
+
 fn opencode_go(model: &str) -> Option<ModelLimit> {
     OPENCODE_GO
         .iter()
@@ -74,6 +99,20 @@ fn opencode_go(model: &str) -> Option<ModelLimit> {
             output: *output,
         })
 }
+
+/// The snapshot ids served by OpenCode Go ONLY on the Responses wire
+/// (`/responses`); every other id in `OPENCODE_GO` answers on `chat`. Snapshot from
+/// the orchestrator's live probe. Served by NEITHER wcode wire: `claude-haiku-5-5`,
+/// `minimax-m2.7`, `gemini-4-argon-contributor` — deliberately absent, so they fall
+/// through to chat = today's behavior.
+static OPENCODE_GO_RESPONSES_ONLY: &[&str] = &[
+    "grok-4.6",
+    "grok-4.7",
+    "gpt-5.6-luna",
+    "gpt-6-luna",
+    "muse-spark-1.2-contributor",
+    "muse-spark-1.3-contributor",
+];
 
 /// OpenCode Go (zen) model table, snapshotted from the models.dev `opencode-go`
 /// catalog: `(model id, context window, max output tokens)`.
@@ -214,5 +253,38 @@ mod tests {
         assert_eq!(small.reserve(), 4_096);
         assert_eq!(small.trigger(), 4_096);
         assert!(small.is_full(4_096));
+    }
+
+    #[test]
+    fn model_protocol_matrix() {
+        // Every responses-only id under a zen base ⇒ Responses.
+        for id in [
+            "grok-4.6",
+            "grok-4.7",
+            "gpt-5.6-luna",
+            "gpt-6-luna",
+            "muse-spark-1.2-contributor",
+            "muse-spark-1.3-contributor",
+        ] {
+            assert_eq!(model_protocol(ZEN, id), Some(LlmEndpoint::Responses), "{id}");
+        }
+    }
+
+    #[test]
+    fn model_protocol_both_works_and_unknown_are_none() {
+        // A both-works id (chat), an unknown id: no protocol fact.
+        assert_eq!(model_protocol(ZEN, "deepseek-v4-flash"), None);
+        assert_eq!(model_protocol(ZEN, "no-such-model"), None);
+    }
+
+    #[test]
+    fn model_protocol_needs_a_zen_base() {
+        // A known responses-only id behind a NON-zen base is NOT assumed
+        // (mirrors `unknown_model_or_provider_is_none`).
+        assert_eq!(
+            model_protocol(Some("https://api.openai.com/v1"), "grok-4.7"),
+            None
+        );
+        assert_eq!(model_protocol(None, "grok-4.7"), None);
     }
 }

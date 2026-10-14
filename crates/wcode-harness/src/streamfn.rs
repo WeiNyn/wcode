@@ -32,6 +32,59 @@ pub enum LlmEndpoint {
     Responses,
 }
 
+/// Whether the wire endpoint is FIXED (`Pinned`) or DERIVED from the model
+/// catalog (`Auto`). Carried by `LlmProvider` (below) so `settle` can resolve
+/// it against the SETTLED base_url + model — the fix for a mid-session switch.
+/// `LlmOpts.endpoint` stays a concrete `LlmEndpoint`: it is the RESOLVED value,
+/// written by `settle`/`to_llm_opts`, so `open_stream` is untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EndpointPref {
+    /// Derive via `crate::limits::model_protocol`, falling back to `Chat`.
+    #[default]
+    Auto,
+    /// A pinned wire (`--endpoint chat|responses`, `endpoint = "..."` at any layer).
+    Pinned(LlmEndpoint),
+}
+
+impl EndpointPref {
+    /// The concrete wire for `model` reachable at `base_url`.
+    ///
+    /// `Pinned(e)` yields `e` unconditionally (a pin always wins). `Auto` asks the
+    /// catalog (`crate::limits::model_protocol`) and falls back to `Chat` when the
+    /// catalog has no fact (non-zen base, unknown/both-works/unspeakable id).
+    pub fn resolve(self, base_url: Option<&str>, model: &str) -> LlmEndpoint {
+        match self {
+            Self::Pinned(e) => e,
+            Self::Auto => {
+                crate::limits::model_protocol(base_url, model).unwrap_or(LlmEndpoint::Chat)
+            }
+        }
+    }
+
+    /// The wire spelling for a re-exec `--endpoint` argument (see `repl.rs`).
+    /// `Auto` ⇒ "auto" (the explicit opt-in); a pin ⇒ its `LlmEndpoint` label.
+    /// Decided here (kernel) so the CLI and the config dump cannot drift on the
+    /// literal.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Pinned(LlmEndpoint::Chat) => "chat",
+            Self::Pinned(LlmEndpoint::Responses) => "responses",
+        }
+    }
+}
+
+/// The CLI's `Config.endpoint: Option<LlmEndpoint>` maps straight across:
+/// `None` ⇒ `Auto`, `Some(e)` ⇒ `Pinned(e)`.
+impl From<Option<LlmEndpoint>> for EndpointPref {
+    fn from(value: Option<LlmEndpoint>) -> Self {
+        match value {
+            Some(e) => Self::Pinned(e),
+            None => Self::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LlmOpts {
     pub model: String,
@@ -103,24 +156,28 @@ impl LlmProfile {
 /// so flags/env/config globals define the DEFAULT provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LlmProvider {
-    pub endpoint: LlmEndpoint,
+    /// Fixed-or-derived wire (W021). See [`EndpointPref`].
+    pub endpoint: EndpointPref,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
 }
 
 impl LlmProvider {
-    /// The provider `llm` is on right now.
-    pub fn of(llm: &LlmOpts) -> Self {
+    /// The provider `llm` is on, with its endpoint PREFERENCE supplied explicitly
+    /// (a concrete `LlmOpts.endpoint` cannot recover `Auto` — this is the reason
+    /// for the extra param).
+    pub fn of(llm: &LlmOpts, endpoint: EndpointPref) -> Self {
         Self {
-            endpoint: llm.endpoint,
+            endpoint,
             base_url: llm.base_url.clone(),
             api_key: llm.api_key.clone(),
         }
     }
 
-    /// Reset `llm`'s provider fields to this one.
+    /// Reset `llm`'s base_url/api_key to this one. The ENDPOINT is deliberately
+    /// NOT set here any more: an `EndpointPref` cannot be resolved until the
+    /// profile overlay has settled base_url, so `settle` resolves it (below).
     fn apply(&self, llm: &mut LlmOpts) {
-        llm.endpoint = self.endpoint;
         llm.base_url = self.base_url.clone();
         llm.api_key = self.api_key.clone();
     }
@@ -157,8 +214,10 @@ impl ModelProfiles {
         self.profiles.get(model)
     }
 
-    /// Settle `llm`'s provider for `llm.model`: reset endpoint/base_url/api_key
-    /// to `base`, then overlay that model's profile. No-op when `base` is `None`.
+    /// Settle `llm`'s provider for `llm.model`: reset base_url/api_key to `base`,
+    /// overlay that model's profile, then resolve the endpoint
+    /// (`profile pin ▸ base pin ▸ model_protocol ▸ Chat`). No-op when `base` is
+    /// `None`.
     pub fn settle(&self, llm: &mut LlmOpts) {
         // A non-empty map that is not managing providers is the footgun: those
         // profiles would be silently dead. (The `Default` is legitimately empty.)
@@ -169,15 +228,30 @@ impl ModelProfiles {
         let Some(base) = &self.base else {
             return;
         };
+        // 1. base_url / api_key from the base. (`LlmProvider::apply` no longer
+        //    sets `llm.endpoint` — a pref needs the settled base_url first.)
         base.apply(llm);
-        if let Some(profile) = self.resolve(&llm.model) {
+        // 2. profile overlay: a profile ENDPOINT (`Some`) is a PIN and is written
+        //    straight to `llm.endpoint` by `LlmProfile::apply` (UNCHANGED);
+        //    base_url/api_key overlay here too.
+        let profile = self.resolve(&llm.model);
+        if let Some(profile) = profile {
             profile.apply(llm);
+        }
+        // 3. resolve the endpoint ONLY when no profile pinned one. Uses the
+        //    SETTLED `llm.base_url` — so a profile that overrides only `base_url`
+        //    re-derives against THAT base. Precedence: base pin ▸ catalog ▸ chat.
+        let pinned_by_profile = profile.is_some_and(|p| p.endpoint.is_some());
+        if !pinned_by_profile {
+            llm.endpoint = base.endpoint.resolve(llm.base_url.as_deref(), &llm.model);
         }
     }
 
     /// The launch provider an unmapped model falls back to; `None` when the map
     /// is not managing providers (the `Default`). Re-forwarded verbatim across a
     /// `/reload` / resume so the DEFAULT provider survives the process boundary.
+    /// Now carries an [`EndpointPref`], so the PREF (not a resolved pin) survives
+    /// — that is exactly what keeps `auto` across a re-exec.
     pub fn base(&self) -> Option<&LlmProvider> {
         self.base.as_ref()
     }
@@ -1779,7 +1853,7 @@ mod tests {
         // those (not the endpoint), so an endpoint-only swap reuses it and a
         // base_url change rebuilds it.
         let base = LlmProvider {
-            endpoint: LlmEndpoint::Chat,
+            endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
             base_url: Some("http://127.0.0.1:9/v1".to_string()),
             api_key: Some("k".to_string()),
         };
@@ -1804,7 +1878,7 @@ mod tests {
         let settled = |model: &str| {
             let mut llm = LlmOpts {
                 model: model.to_string(),
-                endpoint: base.endpoint,
+                endpoint: base.endpoint.resolve(base.base_url.as_deref(), model),
                 base_url: base.base_url.clone(),
                 api_key: base.api_key.clone(),
                 model_profiles: profiles.clone(),
@@ -1830,6 +1904,163 @@ mod tests {
         let moved = settled("moved");
         cache.get(&moved).expect("rebuilds");
         assert_eq!(builds(), 2, "a base_url change must rebuild the client");
+    }
+
+    const ZEN: &str = "https://opencode.ai/zen/go/v1";
+
+    #[test]
+    fn endpoint_pref_resolve_matrix() {
+        // Pinned wins over the catalog.
+        assert_eq!(
+            EndpointPref::Pinned(LlmEndpoint::Chat).resolve(Some(ZEN), "grok-4.7"),
+            LlmEndpoint::Chat
+        );
+        // Auto picks the catalog for a responses-only zen id.
+        assert_eq!(
+            EndpointPref::Auto.resolve(Some(ZEN), "grok-4.7"),
+            LlmEndpoint::Responses
+        );
+        // Auto ⇒ chat for a both-works id, an unknown id, and off-zen.
+        assert_eq!(
+            EndpointPref::Auto.resolve(Some(ZEN), "deepseek-v4-flash"),
+            LlmEndpoint::Chat
+        );
+        assert_eq!(
+            EndpointPref::Auto.resolve(Some("https://api.openai.com/v1"), "grok-4.7"),
+            LlmEndpoint::Chat
+        );
+        assert_eq!(
+            EndpointPref::Auto.resolve(None, "grok-4.7"),
+            LlmEndpoint::Chat
+        );
+    }
+
+    #[test]
+    fn endpoint_pref_wire_and_from_option() {
+        assert_eq!(EndpointPref::Auto.wire(), "auto");
+        assert_eq!(EndpointPref::Pinned(LlmEndpoint::Chat).wire(), "chat");
+        assert_eq!(EndpointPref::Pinned(LlmEndpoint::Responses).wire(), "responses");
+        assert_eq!(EndpointPref::from(None), EndpointPref::Auto);
+        assert_eq!(
+            EndpointPref::from(Some(LlmEndpoint::Responses)),
+            EndpointPref::Pinned(LlmEndpoint::Responses)
+        );
+    }
+
+    #[test]
+    fn settle_auto_derives_from_the_catalog() {
+        // Base pref = Auto, zen base: a responses-only id ⇒ Responses; a both-works
+        // id ⇒ Chat.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some(ZEN.to_string()),
+            api_key: None,
+        };
+        let profiles = ModelProfiles::new(base.clone());
+        let settled = |model: &str| {
+            let mut llm = LlmOpts {
+                model: model.to_string(),
+                // Seed a STALE concrete `Chat`: only `settle` can produce
+                // `Responses`, so deleting its derive step fails this test.
+                endpoint: LlmEndpoint::Chat,
+                base_url: base.base_url.clone(),
+                model_profiles: profiles.clone(),
+                ..LlmOpts::default()
+            };
+            llm.settle_provider();
+            llm
+        };
+        assert_eq!(settled("grok-4.7").endpoint, LlmEndpoint::Responses);
+        assert_eq!(settled("deepseek-v4-flash").endpoint, LlmEndpoint::Chat);
+    }
+
+    #[test]
+    fn settle_profile_pin_beats_auto_and_base_pin() {
+        // A profile `endpoint = Some(Chat)` pins even on a responses-only id —
+        // profile pin ▸ base pin ▸ catalog ▸ chat.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some(ZEN.to_string()),
+            api_key: None,
+        };
+        let mut profiles = ModelProfiles::new(base.clone());
+        profiles.insert(
+            "grok-4.7",
+            LlmProfile {
+                endpoint: Some(LlmEndpoint::Chat),
+                ..LlmProfile::default()
+            },
+        );
+        let mut llm = LlmOpts {
+            model: "grok-4.7".into(),
+            base_url: base.base_url.clone(),
+            model_profiles: profiles,
+            ..LlmOpts::default()
+        };
+        llm.settle_provider();
+        assert_eq!(
+            llm.endpoint,
+            LlmEndpoint::Chat,
+            "a profile pin must beat the catalog"
+        );
+    }
+
+    #[test]
+    fn settle_profile_base_url_only_re_resolves_the_endpoint() {
+        // A profile that sets ONLY base_url (endpoint None) re-derives the endpoint
+        // against the NEW base — here it moves onto zen, so auto ⇒ Responses.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some("http://plain/v1".into()),
+            api_key: None,
+        };
+        let mut profiles = ModelProfiles::new(base.clone());
+        profiles.insert(
+            "grok-4.7",
+            LlmProfile {
+                base_url: Some(ZEN.to_string()),
+                ..LlmProfile::default()
+            },
+        );
+        let mut llm = LlmOpts {
+            model: "grok-4.7".into(),
+            base_url: base.base_url.clone(),
+            model_profiles: profiles,
+            ..LlmOpts::default()
+        };
+        llm.settle_provider();
+        assert_eq!(llm.base_url.as_deref(), Some(ZEN));
+        assert_eq!(
+            llm.endpoint,
+            LlmEndpoint::Responses,
+            "a base_url-only profile must re-derive against the new base"
+        );
+    }
+
+    #[test]
+    fn set_model_flips_chat_to_responses_and_back() {
+        // `settle` is the funnel `Agent::set_model` calls: boot on a both-works zen
+        // id (Chat), switch to `grok-4.7` ⇒ Responses, then back ⇒ Chat.
+        let base = LlmProvider {
+            endpoint: EndpointPref::Auto,
+            base_url: Some(ZEN.to_string()),
+            api_key: None,
+        };
+        let profiles = ModelProfiles::new(base.clone());
+        let mut llm = LlmOpts {
+            model: "deepseek-v4-flash".into(),
+            base_url: base.base_url.clone(),
+            model_profiles: profiles,
+            ..LlmOpts::default()
+        };
+        llm.settle_provider();
+        assert_eq!(llm.endpoint, LlmEndpoint::Chat);
+        llm.model = "grok-4.7".into();
+        llm.settle_provider();
+        assert_eq!(llm.endpoint, LlmEndpoint::Responses);
+        llm.model = "deepseek-v4-flash".into();
+        llm.settle_provider();
+        assert_eq!(llm.endpoint, LlmEndpoint::Chat);
     }
 
     #[test]

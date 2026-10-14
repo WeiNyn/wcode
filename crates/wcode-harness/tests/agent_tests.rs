@@ -19,7 +19,7 @@ use wcode_harness::hooks::{Hooks, HooksSet};
 use wcode_harness::message::{AgentMessage, StopReason};
 use wcode_harness::session::{Session, SessionEntry};
 use wcode_harness::streamfn::{
-    LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, LlmStream, ModelProfiles, StreamFn,
+    EndpointPref, LlmEndpoint, LlmOpts, LlmProfile, LlmProvider, LlmStream, ModelProfiles, StreamFn,
 };
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool, erased};
 
@@ -622,7 +622,7 @@ async fn set_model_settles_the_provider_and_round_trips() {
 
     // The launch provider (chat) plus a profile for m2 (responses).
     let base = LlmProvider {
-        endpoint: LlmEndpoint::Chat,
+        endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
         base_url: Some("http://base".into()),
         api_key: Some("base-key".into()),
     };
@@ -638,7 +638,7 @@ async fn set_model_settles_the_provider_and_round_trips() {
 
     let llm = LlmOpts {
         model: "m1".into(),
-        endpoint: base.endpoint,
+        endpoint: base.endpoint.resolve(base.base_url.as_deref(), "m1"),
         base_url: base.base_url.clone(),
         api_key: base.api_key.clone(),
         model_profiles: profiles,
@@ -714,7 +714,7 @@ async fn set_model_on_unmapped_id_settles_to_the_base_provider() {
     }
 
     let base = LlmProvider {
-        endpoint: LlmEndpoint::Chat,
+        endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
         base_url: Some("http://base".into()),
         api_key: Some("base-key".into()),
     };
@@ -730,7 +730,7 @@ async fn set_model_on_unmapped_id_settles_to_the_base_provider() {
     );
     let llm = LlmOpts {
         model: "m1".into(),
-        endpoint: base.endpoint,
+        endpoint: base.endpoint.resolve(base.base_url.as_deref(), "m1"),
         base_url: base.base_url.clone(),
         api_key: base.api_key.clone(),
         model_profiles: profiles,
@@ -763,7 +763,7 @@ async fn set_model_on_unmapped_id_settles_to_the_base_provider() {
 #[test]
 fn all_none_profile_leaves_the_base_provider() {
     let base = LlmProvider {
-        endpoint: LlmEndpoint::Chat,
+        endpoint: EndpointPref::Pinned(LlmEndpoint::Chat),
         base_url: Some("http://base/v1".into()),
         api_key: Some("base-key".into()),
     };
@@ -778,7 +778,11 @@ fn all_none_profile_leaves_the_base_provider() {
         ..LlmOpts::default()
     };
     llm.settle_provider();
-    assert_eq!(llm.endpoint, base.endpoint);
+    assert_eq!(
+        llm.endpoint,
+        base.endpoint.resolve(base.base_url.as_deref(), "m"),
+        "an all-None profile inherits the base endpoint"
+    );
     assert_eq!(llm.base_url, base.base_url);
     assert_eq!(llm.api_key, base.api_key);
 }
@@ -788,7 +792,7 @@ fn all_none_profile_leaves_the_base_provider() {
 #[test]
 fn profile_with_no_endpoint_keeps_the_base_endpoint() {
     let mut profiles = ModelProfiles::new(LlmProvider {
-        endpoint: LlmEndpoint::Responses,
+        endpoint: EndpointPref::Pinned(LlmEndpoint::Responses),
         base_url: Some("http://base/v1".into()),
         api_key: None,
     });
