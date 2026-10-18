@@ -2598,7 +2598,7 @@ fn instantiate_workflow(
     for node in order {
         let incoming: Vec<&crate::config::WorkflowEdge> =
             workflow.incoming_edges(&node.id).collect();
-        let mut deps: Vec<u32> = Vec::with_capacity(incoming.len());
+        let mut deps: Vec<crate::tasks::Dep> = Vec::with_capacity(incoming.len());
         for e in incoming {
             // `e.from` is already created: `topo_order` over `edges` guarantees
             // every source precedes its target (Blocker 1).
@@ -2608,7 +2608,13 @@ fn instantiate_workflow(
                     node.id, e.from
                 ))
             };
-            deps.push(src);
+            deps.push(match &e.condition {
+                None => crate::tasks::Dep::Id(src),
+                Some(c) => crate::tasks::Dep::Edged {
+                    id: src,
+                    condition: Some(c.clone()),
+                },
+            });
         }
         let t = match tasks.create(crate::config::node_title(node, task), deps, node.gate) {
             Ok(t) => t,
@@ -2668,7 +2674,7 @@ fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
         title: task.title.clone(),
         owner: task.owner.as_ref().map(crate::agents::short_name),
         state: task.state.label().to_string(),
-        deps: task.deps.clone(),
+        deps: task.deps.iter().map(|d| d.id()).collect(),
         attempts: task.attempts,
     }
 }
@@ -3413,7 +3419,11 @@ mod tests {
         let snap = tasks.snapshot();
         assert_eq!(snap.len(), 2);
         let b = snap.iter().find(|t| t.title == "b").unwrap();
-        assert_eq!(b.deps, vec![1], "b depends on a's assigned (numeric) id");
+        assert_eq!(
+            b.deps.iter().map(|d| d.id()).collect::<Vec<_>>(),
+            vec![1],
+            "b depends on a's assigned (numeric) id"
+        );
         assert_eq!(b.owner.as_ref().map(|o| o.as_str()), Some("agent:w1"));
     }
 

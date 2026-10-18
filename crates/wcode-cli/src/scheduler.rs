@@ -69,7 +69,241 @@ pub struct Scheduler {
     /// Cancels an in-flight `Script` run. A fresh, never-cancelled token is fine
     /// for P3 (the script timeout bounds a runaway).
     cancel: CancellationToken,
+    // ==== SKETCH (review-only, not real code) ====  (W025 §4.3, plan step 5)
+    //
+    // FIVE NEW fields appended to `Scheduler`:
+    //
+    //     /// The edge judge (B2j). `dispatch` spawns `judge.decide(…)` for a
+    //     /// `judge` edge; the verdict arrives on `judge_rx`, so ALL `TaskList`
+    //     /// mutation stays on the loop thread (the design's invariant).
+    //     judge: Arc<dyn crate::judge::Judge>,
+    //     /// Verdict channel sender — cloned into each spawned `decide` task.
+    //     /// Payload `(node id, verdict)`; `None` = unparseable.
+    //     judge_tx: tokio::sync::mpsc::UnboundedSender<(u32, crate::judge::Verdict)>,
+    //     /// The receiver half, built in `new` and TAKEN once by `run`
+    //     /// (A6). `Mutex<Option<…>>`, not a bare field: `run(self)` owns
+    //     /// `self`, so a bare receiver would be unreachable there while
+    //     /// `new` must still create the pair for `judge_tx`. Sound because a
+    //     /// `Scheduler` runs exactly once.
+    //     judge_rx: std::sync::Mutex<
+    //         Option<tokio::sync::mpsc::UnboundedReceiver<(u32, crate::judge::Verdict)>>,
+    //     >,
+    //     /// Nodes with an in-flight `judge.decide` — EXCLUDED from `frontier`
+    //     /// so a pending (async) verdict is not re-dispatched.
+    //     judging: std::collections::HashSet<u32>,
+    //     /// Nodes blocked-and-escalated ONCE (a refused `script`, or a judge
+    //     /// `None` verdict). AMENDMENT A14 (reviewer R1): a
+    //     /// `HashMap<id, reset_epoch>`, NOT a `HashSet` — it records the
+    //     /// `Task.reset_epoch` seen at mark time. `TaskList::reset` BUMPS that
+    //     /// epoch, so a `task reset` is observable and `prune_unjudgeable` can
+    //     /// drop the entry. EXCLUDED from `frontier` until then.
+    //     unjudgeable: std::collections::HashMap<u32, u32>,
+    //
+    // // AMENDMENT A5 — these ARE `Scheduler` fields, not locals. FRICTION #5
+    // // (the brief calls judging/unjudgeable "loop-local"): they cannot be
+    // // locals if `frontier` filters on `judging`, because `frontier(&self)`
+    // // (`scheduler.rs:159` HEAD) has no other channel. Fields keep `frontier`'s
+    // // signature, so the existing
+    // // `frontier_includes_a_script_node_but_not_an_ownerless_session`
+    // // (`scheduler.rs:931` HEAD) keeps a zero-arg `frontier()` READ; the COST
+    // // (accepted) is `dispatch`/`edges_admit` becoming `&mut self` and
+    // // `run(mut self)`.
+    //
+    // // AMENDMENT A6 — `judge_rx` stays `Mutex<Option<Receiver<…>>>`, taken
+    // // once in `run` (see the field's doc above). One run, so the `take` cannot
+    // // fail; `expect("Scheduler::run is called once")`.
+    // ==== /SKETCH ====
 }
+
+// ==== SKETCH (review-only, not real code) ====  (W025 §4.3, plan steps 4–5)
+//
+// --- `Scheduler::new` — CHANGED signature (one new parameter) ---
+//
+// pub fn new(
+//     registry: Registry,
+//     root: SessionId,
+//     tasks: TaskList,
+//     self_addr: SessionId,
+//     working_dir: PathBuf,
+//     hooks: HooksSet,
+//     cancel: CancellationToken,
+//     judge: Arc<dyn crate::judge::Judge>,   // NEW (last, so call sites read)
+// ) -> Self
+//
+// Body: store `judge`; build the verdict channel here and keep BOTH ends —
+//     let (judge_tx, judge_rx) = tokio::sync::mpsc::unbounded_channel();
+// — storing `judge_tx` in the field and `judge_rx` in
+// `judge_rx: std::sync::Mutex<Option<UnboundedReceiver<(u32, Verdict)>>>` (a
+// fifth sketched field, `None` until `run` takes it — friction #6).
+// `Scheduler::new` is called from **TEN** sites (A10): the production site
+// `agents.rs:777` (HEAD) / `:819` (tree)
+// `crate::scheduler::Scheduler::new(` and NINE in `scheduler.rs`
+// (`451/522/629/676/732/770/938/958/975`, HEAD). Every one adds the `judge`
+// argument; each test helper passes
+// `Arc::new(crate::judge::FakeJudge::new(vec![]))` (an empty script = no judge
+// edge exercised) except the new judge tests. The existing
+// `frontier_includes_a_script_node_but_not_an_ownerless_session`
+// (`scheduler.rs:931` HEAD) gains the argument at its `Scheduler::new` call
+// (`:938` HEAD) while its `scheduler.frontier()` READ stays zero-argument
+// (A10 / friction #5).
+//
+// --- `Scheduler::run` — CHANGED (owns `self` mutably now) ---
+//
+// pub async fn run(mut self)
+//
+// Body delta over scheduler.rs:118-156:
+//   * `let mut judge_rx = self.judge_rx.lock().unwrap().take()
+//        .expect("Scheduler::run is called once");`
+//   * the loop selects on the plan watch AND the verdict channel:
+//         tokio::select! {
+//             changed = updates.changed() => { if changed.is_err() { break; } }
+//             Some((id, verdict)) = judge_rx.recv() => self.on_verdict(id, verdict),
+//         }
+//     replacing `if updates.changed().await.is_err() { break; }` (scheduler.rs:153).
+//   * `self.dispatch(&ready).await` becomes
+//         let ready = self.frontier();
+//         self.dispatch(&ready).await;
+//     (borrow order, because `dispatch` is now `&mut self`).
+//   * the existing escalate block (scheduler.rs:133-152) is unchanged.
+//
+// /// Apply one async verdict on the loop thread (the ONLY place a judge
+// /// result mutates the plan).
+// /// `Some(true)` → clear `judging`, dispatch the node normally.
+// /// `Some(false)` → `tasks.skip(id)`; clear `judging`.
+// /// `None` → clear `judging`, `unjudgeable.insert(id, epoch)` where `epoch` is
+// /// the task's CURRENT `reset_epoch` (read from a snapshot), `escalate` once
+// /// naming the edge + a reply tail; the node stays `Todo`. `frontier` then
+// /// excludes it (no tight re-judge loop) until a `reset` bumps the epoch.
+// fn on_verdict(&mut self, id: u32, verdict: crate::judge::Verdict) { todo!() }
+//
+// --- `Scheduler::frontier` — signature UNCHANGED (scheduler.rs:159) ---
+//
+// fn frontier(&self) -> Vec<u32>
+//
+// Body delta: the `.filter(...)` at scheduler.rs:163-169 additionally drops any
+// id in `self.judging` (awaiting an async verdict) AND any id in
+// `self.unjudgeable` (blocked-and-escalated; re-armed only by a reset, A14).
+// (Note it already drops an owner-less non-`Script` node, scheduler.rs:165-168 —
+// the new `can_run` predicate composes with that.)
+//
+// /// Drop `unjudgeable` entries whose `reset_epoch` has moved (A14 / R1): a
+// /// `task reset` bumps the node's epoch, so the entry no longer matches and
+// /// the node returns to the frontier for a FRESH judge run. Called at the TOP
+// /// of every `run` iteration, BEFORE `frontier()`.
+// fn prune_unjudgeable(&mut self) {
+//     let snap = self.tasks.snapshot();
+//     self.unjudgeable.retain(|id, epoch| {
+//         snap.iter().any(|t| t.id == *id && t.reset_epoch == *epoch)
+//     });
+// }
+//
+// `run`'s loop body becomes, in order:
+//     self.prune_unjudgeable();
+//     let ready = self.frontier();
+//     self.dispatch(&ready).await;
+//     // … the existing failed-set escalation block, unchanged …
+//
+// --- `Scheduler::dispatch` — CHANGED (`&mut self`, evaluates edges first) ---
+//
+// async fn dispatch(&mut self, frontier: &[u32])
+//
+// Body delta over scheduler.rs:201-281: for each ready `id`, BEFORE the
+// existing `match &task.run` (scheduler.rs:207), evaluate the node's INCOMING
+// edges, AND-ed (sign-off rev-2 #5): every incoming edge must be taken.
+//
+// // ==== BLOCKER B2 / AMENDMENT A11 — the gate OUTCOME, not a bool ====
+// //
+// // A judge edge is ASYNC: `edges_admit` cannot report "admit" (an unjudged
+// // node would dispatch before the verdict) nor "skip" (a silent prune). It
+// // needs a PENDING arm. So:
+// //
+// // /// The result of evaluating a ready node's incoming edges (AND-ed,
+// // /// sign-off rev-2 #5: every incoming edge must be taken).
+// // enum EdgeGate {
+// //     /// Every incoming edge is taken (or there are none): dispatch normally.
+// //     Admit,
+// //     /// A `script` condition exited NON-ZERO: the target is `Skipped` for
+// //     /// real, never dispatched.
+// //     Skip,
+// //     /// A `judge` condition spawned; the verdict arrives on `judge_rx`.
+// //     /// The node is in `judging` and must NOT be re-dispatched.
+// //     Pending,
+// //     /// A `script` was REFUSED by `before_tool_call`, or a judge replied
+// //     /// `None`. Block-and-escalate (A13): visible, never a silent prune.
+// //     /// Carries the refusal reason / reply tail for the escalation `Wake`.
+// //     Unjudgeable(String),
+// // }
+// //
+// // async fn edges_admit(&mut self, id: u32) -> EdgeGate {
+// //     // A belt-and-suspenders with `frontier`'s filter (A14): an already
+// //     // unjudgeable node must never spawn a second judge. No re-mark, no
+// //     // re-escalate here — `unjudgeable.insert` already happened.
+// //     if self.unjudgeable.contains_key(&id) {
+// //         return EdgeGate::Unjudgeable("already blocked; reset it".into());
+// //     }
+// //     todo!()
+// // }
+// //
+// // and in `dispatch`, right after the `let Some(task) = … else { continue };`
+// // (scheduler.rs:203-205):
+// //
+// //     match self.edges_admit(id).await {
+// //         EdgeGate::Admit => {}                      // fall through to the run match
+// //         EdgeGate::Skip => { let _ = self.tasks.skip(id); continue; }
+// //         EdgeGate::Pending => continue,             // spawned; verdict on judge_rx
+// //         EdgeGate::Unjudgeable(tail) => {           // block-and-escalate ONCE
+// //             // A14: `unjudgeable` is a HashMap<id, epoch>; the epoch is the
+// //             // node's CURRENT `reset_epoch` (a reset bumps it → prune drops
+// //             // the entry). `is_none()` = first insert = escalate once.
+// //             let epoch = self.tasks.snapshot().iter()
+// //                 .find(|t| t.id == id).map_or(0, |t| t.reset_epoch);
+// //             if self.unjudgeable.insert(id, epoch).is_none() {
+// //                 self.escalate(unjudgeable_content(id, task.title.as_str(), &tail));
+// //             }
+// //             continue;
+// //         }
+// //     }
+//
+// `script` edges run SYNCHRONOUSLY INSIDE `edges_admit`, mirroring the `Script`
+// node path (`scheduler.rs:226-240` HEAD): build the SAME `ToolCall { id:
+// format!("script-{id}"), name: "bash", arguments: json!({ "command": cmd }) }`,
+// run `self.hooks.before_tool_call(&call).await` FIRST, then `run_command(cmd,
+// dir, SCRIPT_TIMEOUT, &self.cancel, None, label)` and take `code == Some(0)`.
+//
+// // ==== AMENDMENT A13 — a policy REFUSAL is NOT a skip ====
+// // Outcomes, exhaustively:
+// //   * `before_tool_call` returns `Some(reason)` on a `script` edge
+// //     → `EdgeGate::Unjudgeable` (block-and-escalate). A policy prune must
+// //       stay VISIBLE; it is never `Skip`.
+// //   * the script ran and exited ≠ 0 → `EdgeGate::Skip` (a genuine verdict —
+// //     `skip` is used for this and NOTHING else).
+// //   * the script exited 0 → that edge is taken (continue the AND-fold).
+// //   * a judge edge → `EdgeGate::Pending` (spawn) — the verdict decides later:
+// //     `Some(false)` → `tasks.skip(id)`; `Some(true)` → clear `judging` and
+// //       dispatch; `None` → `Unjudgeable`.
+//
+// A `judge` edge instead marks `self.judging.insert(id)` and `tokio::spawn`s
+// the verdict: it clones `self.judge`, `self.judge_tx`, the criterion `String`,
+// and the upstream artifact `Option<String>` (the `from` node's `artifact`),
+// then `let v = judge.decide(&crit, up.as_deref()).await; let _ =
+// tx.send((id, v));` — the borrow of `crit` is internal to the spawned block, so
+// the task is `'static` (no lifetime fight with `Judge::decide<'a>`).
+//
+// // (The clearing mechanism is `prune_unjudgeable` above, A14/R1 — the epoch
+// // diff. There is no `state == Todo` retained-set form: it cannot observe a
+// // reset, which is the bug R1 closed.)
+//
+// --- `Scheduler::escalate` — UNCHANGED (scheduler.rs:177 HEAD) ---
+// It is reused verbatim for the `unjudgeable` reminder: one `Wake` from
+// `self_addr` to the root. Only the CONTENT differs, so add a sibling:
+//
+// // /// The escalation `Wake` for a blocked-and-escalated edge: names the node
+// // /// and title, a tail of the raw reply/refusal, and points at
+// // /// `task op: reset id:<id>` (the escape hatch). Pure (like
+// // /// `escalation_content`, scheduler.rs:292 HEAD) so its text is testable.
+// fn unjudgeable_content(id: u32, title: &str, tail: &str) -> String { todo!() }
+//
+// ==== /SKETCH ====
 
 impl Scheduler {
     /// Build a scheduler over the root's shared plan and registry.
@@ -212,7 +446,7 @@ impl Scheduler {
                     let deps: Vec<Task> = task
                         .deps
                         .iter()
-                        .filter_map(|d| snapshot.iter().find(|t| t.id == *d).cloned())
+                        .filter_map(|d| snapshot.iter().find(|t| t.id == d.id()).cloned())
                         .collect();
                     let content = dispatch_content(task, &deps);
                     if self
@@ -366,7 +600,7 @@ mod tests {
     use wcode_harness::streamfn::{LlmOpts, LlmStream, StreamFn};
 
     use super::*;
-    use crate::tasks::{RunSpec, TaskState};
+    use crate::tasks::{Dep, RunSpec, TaskState};
 
     /// A task record carrying just the fields the content builder reads.
     fn node(id: u32, title: &str) -> Task {
@@ -377,6 +611,7 @@ mod tests {
             state: TaskState::Todo,
             deps: Vec::new(),
             attempts: 0,
+            reset_epoch: 0,
             feedback: None,
             artifact: None,
             gate: false,
@@ -620,7 +855,7 @@ mod tests {
         let (registry, root, worker, worker_id) = wiring();
         let tasks = TaskList::new();
         let work = tasks.create("implement", vec![], false).unwrap();
-        let gate = tasks.create("verify", vec![work.id], true).unwrap();
+        let gate = tasks.create("verify", vec![Dep::Id(work.id)], true).unwrap();
         tasks.assign(work.id, worker_id.clone()).unwrap();
         tasks.assign(gate.id, worker_id.clone()).unwrap();
 
@@ -667,7 +902,7 @@ mod tests {
         let (registry, root, worker, worker_id) = wiring();
         let tasks = TaskList::new();
         let work = tasks.create("implement", vec![], false).unwrap();
-        let gate = tasks.create("verify", vec![work.id], true).unwrap();
+        let gate = tasks.create("verify", vec![Dep::Id(work.id)], true).unwrap();
         tasks.assign(work.id, worker_id.clone()).unwrap();
         tasks.assign(gate.id, worker_id.clone()).unwrap();
 
@@ -723,7 +958,7 @@ mod tests {
         let (root_handle, self_addr) = escalate_edge(&registry, &root);
         let tasks = TaskList::new();
         let work = tasks.create("implement", vec![], false).unwrap();
-        let gate = tasks.create("verify", vec![work.id], true).unwrap();
+        let gate = tasks.create("verify", vec![Dep::Id(work.id)], true).unwrap();
         tasks.assign(work.id, worker_id.clone()).unwrap();
         tasks.assign(gate.id, worker_id.clone()).unwrap();
 
@@ -851,7 +1086,7 @@ mod tests {
     async fn a_script_gate_rejects_then_passes() {
         let tasks = TaskList::new();
         let work = tasks.create("work", vec![], false).unwrap().id;
-        let gate = tasks.create("verify", vec![work], true).unwrap().id;
+        let gate = tasks.create("verify", vec![Dep::Id(work)], true).unwrap().id;
         tasks
             .configure(gate, RunSpec::Script { command: "false".into() }, true)
             .unwrap();
@@ -924,6 +1159,55 @@ mod tests {
         };
         assert!(hooks.before_tool_call(&call).await.is_some());
     }
+
+// ==== SKETCH (review-only, not real code) ====  (W025 §5.4–5.5 gates; A10/A13)
+//
+// Placed inside `#[cfg(test)] mod tests` (scheduler.rs:354 HEAD). The existing
+// helper `fn spawn_scheduler(tasks: &TaskList, hooks: HooksSet)`
+// (scheduler.rs:768 HEAD) gains a judge argument, or a sibling
+// `spawn_scheduler_with_judge(tasks, hooks, judge)`; its two callers are
+// `empty_and_ownerless_plans_do_not_stall` (scheduler.rs:958/975 HEAD) and
+// `frontier_includes_a_script_node…`-adjacent tests.
+//
+// /// A `script` edge whose command exits non-zero makes its target `Skipped`
+// /// and it is NEVER dispatched (no `Doing`, no `Wake`). Needs a
+// /// `before_tool_call`-safe command (`false`), so `HooksSet::default()`.
+// #[tokio::test]
+// async fn a_false_script_condition_skips_the_target() { todo!() }
+//
+// /// `FakeJudge::new(vec![Some(true)])` → the guarded node is dispatched
+// /// (reaches `Doing`/`Done`); a second plan with `vec![Some(false)]` → the
+// /// target is `Skipped`, never dispatched. No live model.
+// #[tokio::test]
+// async fn a_judge_take_dispatches_and_skip_marks_skipped() { todo!() }
+//
+// /// `FakeJudge::new(vec![None])` → the node stays `Todo`, lands in
+// /// `unjudgeable`, and the root receives EXACTLY ONE escalation `Wake`
+// /// (assert via `has_pending(&mut root_rx)` — the helper the existing escalate
+// /// tests use) and no tight re-judge loop.
+// #[tokio::test]
+// async fn an_unparseable_verdict_escalates_once() { todo!() }
+//
+// // A13: a REFUSED `script` edge (a hook returning `Some(reason)`) escalates
+// // like an unparseable verdict and is NOT `Skipped` — the sibling of the
+// // existing `a_blocked_script_fails_without_running`
+// // (scheduler.rs:~1000 HEAD, `BlockMarker`), but asserting `Todo` +
+// // `unjudgeable` + one escalation rather than `Failed`.
+// #[tokio::test]
+// async fn a_refused_script_edge_escalates_and_is_not_skipped() { todo!() }
+//
+// // A13/A14: `unjudgeable` is CLEARED by a reset — `tasks.reset(id)` bumps
+// // `reset_epoch`; the next `prune_unjudgeable()` drops the entry, the node is
+// // back in `frontier`, and the `FakeJudge` is asked again (a second verdict is
+// // consumed). This test FAILS if the epoch is not bumped (R1).
+// #[tokio::test]
+// async fn unjudgeable_is_cleared_by_a_reset() { todo!() }
+//
+// // KEPT GREEN: `frontier_includes_a_script_node_but_not_an_ownerless_session`
+// // (scheduler.rs:931 HEAD) — see A5/A10: its `Scheduler::new` call gains the
+// // judge argument, its `frontier()` read stays zero-arg.
+//
+// ==== /SKETCH ====
 
     /// `frontier` includes a `Script` node with no owner, but not an owner-less
     /// `Session` node.

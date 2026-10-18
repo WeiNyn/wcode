@@ -15,7 +15,7 @@ use wcode_harness::protocol::SessionId;
 use wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
 
 use crate::agents::{Phonebook, short_name};
-use crate::tasks::{ReopenOutcome, Task as TaskRecord, TaskList};
+use crate::tasks::{Dep, ReopenOutcome, Task as TaskRecord, TaskList};
 
 /// Args for the `task` tool. Every field is optional at the type level so one
 /// schema serves all ops; the op-specific requirement is enforced in `execute`.
@@ -49,6 +49,7 @@ pub struct TaskArgs {
     #[serde(default)]
     gate: Option<bool>,
 }
+
 
 /// The root's task tool — the plan the orchestrator shares with its workers.
 ///
@@ -125,7 +126,7 @@ fn render(tasks: &[TaskRecord]) -> String {
                 let ids = t
                     .deps
                     .iter()
-                    .map(|d| format!("#{d}"))
+                    .map(|d| format!("#{}", d.id()))
                     .collect::<Vec<_>>()
                     .join(",");
                 line.push_str(&format!(" ← {ids}"));
@@ -163,7 +164,13 @@ impl TypedTool for Task {
                 let Some(title) = args.title.as_deref() else {
                     return err("create needs `title`");
                 };
-                let deps = args.deps.clone().unwrap_or_default();
+                let deps = args
+                    .deps
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Dep::Id)
+                    .collect();
                 match self.list.create(title, deps, args.gate.unwrap_or(false)) {
                     Ok(task) => ToolOutput {
                         output: format!("created #{} {}", task.id, task.title),
@@ -396,7 +403,7 @@ mod tests {
             .execute(serde_json::json!({ "op": "depends", "id": 3, "on": 1 }), ctx())
             .await;
         assert!(!out.is_error, "{out:?}");
-        assert_eq!(list.snapshot()[2].deps, vec![1]);
+        assert_eq!(list.snapshot()[2].deps, vec![Dep::Id(1)]);
 
         // A cycle (1 → 3 while 3 → 1) is rejected.
         let out = tool
@@ -543,6 +550,7 @@ mod tests {
             state: TaskState::Todo,
             deps: vec![],
             attempts: 0,
+            reset_epoch: 0,
             feedback: None,
             artifact: None,
             gate: false,
@@ -555,8 +563,9 @@ mod tests {
             title: "verify".into(),
             owner: Some(SessionId::agent("reviewer")),
             state: TaskState::Todo,
-            deps: vec![2],
+            deps: vec![Dep::Id(2)],
             attempts: 1,
+            reset_epoch: 0,
             feedback: Some("x".into()),
             artifact: None,
             gate: true,
