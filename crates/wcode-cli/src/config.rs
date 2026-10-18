@@ -235,14 +235,121 @@ pub struct OrchestratorConfig {
 pub struct Workflow {
     /// Rework cap; `None` keeps the built-in 3 (`tasks.rs`, P2).
     pub max_attempts: Option<u32>,
-    /// Nodes in author order; `depends_on` names refer to sibling `id`s. TOML
-    /// spells this `[[workflow.node]]`.
+    /// Nodes in author order. TOML spells this `[[workflow.node]]`.
     #[serde(rename = "node", default)]
     pub nodes: Vec<WorkflowNode>,
+    /// Edges of the graph; TOML spells this `[[workflow.edge]]`. Replaces
+    /// `WorkflowNode.depends_on`. Overlays replace this array wholesale
+    /// (`overlay_replaces_arrays_wholesale`).
+    #[serde(rename = "edge", default)]
+    pub edges: Vec<WorkflowEdge>,
+}
+
+// W025 (B1): the workflow is a node/edge graph. An edge carries an optional
+// condition; `WorkflowNode.depends_on` is gone. See
+// `docs/work/W025-workflow-edges-and-lateral-messaging.md` §4.1.
+
+/// One directed edge of the workflow graph: `to` runs after `from`. No `id`
+/// (identity is the `(from, to)` pair — a duplicate pair is a load error, D14).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct WorkflowEdge {
+    /// Source node id (must name a `[[workflow.node]]`).
+    pub from: String,
+    /// Target node id (must name a `[[workflow.node]]`).
+    pub to: String,
+    /// Optional guard. Absent = the edge is unconditional (always taken).
+    #[serde(default)]
+    pub condition: Option<EdgeCondition>,
+}
+
+/// An edge's guard. Exactly ONE mode: `script`, or `judge` + `criterion`
+/// (validated at load, D14-loud). Flat inline-table TOML: the author tags the
+/// mode by key (`{ script = "…" }` / `{ judge = "…", criterion = "…" }`).
+///
+/// `Serialize` (A1) because a `tasks::Dep::Edged` / `PlanOp` field carries it
+/// into the journal; `deny_unknown_fields` (A2) makes a mistyped key a hard
+/// PARSE error — the D14-loud "unknown keys are an error" rule the brief asks
+/// for.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeCondition {
+    /// A shell test (sync). Exit 0 = taken. Mutually exclusive with `judge`.
+    #[serde(default)]
+    pub script: Option<String>,
+    /// The `judger` member name (async). Mutually exclusive with `script`, and
+    /// REQUIRED (non-empty) when the `judge` mode is selected.
+    #[serde(default)]
+    pub judge: Option<String>,
+    /// The judge's question. REQUIRED (non-empty) iff `judge` is set.
+    #[serde(default)]
+    pub criterion: Option<String>,
+}
+
+/// The single validated mode of an [`EdgeCondition`] — one source of truth for
+/// the validator, the scheduler's `dispatch`, and
+/// `main.rs::instantiate_workflow` (which would otherwise each re-derive the xor
+/// and drift).
+pub(crate) enum EdgeMode<'a> {
+    /// `script` mode: run the shell command; exit 0 = taken.
+    Script(&'a str),
+    /// `judge` mode: the member name + its criterion.
+    Judge {
+        member: &'a str,
+        criterion: &'a str,
+    },
+}
+
+impl EdgeCondition {
+    /// The single validated mode. `Err(msg)` when neither or both modes are
+    /// set, or a required string is blank — the fragment the caller prefixes
+    /// with `edge {from} → {to}: ` (`validate_workflow_structure`).
+    pub(crate) fn mode(&self) -> Result<EdgeMode<'_>, String> {
+        match (&self.script, &self.judge) {
+            (Some(_), Some(_)) => Err("exactly one of `script`|`criterion`".to_string()),
+            (None, None) => Err("needs one of `script`|`judge`".to_string()),
+            (Some(s), None) => {
+                if s.trim().is_empty() {
+                    return Err("empty script".to_string());
+                }
+                Ok(EdgeMode::Script(s))
+            }
+            (None, Some(j)) => {
+                if j.trim().is_empty() {
+                    return Err("empty judge".to_string());
+                }
+                let criterion = self.criterion.as_deref().unwrap_or("");
+                if criterion.trim().is_empty() {
+                    return Err("empty criterion".to_string());
+                }
+                Ok(EdgeMode::Judge {
+                    member: j,
+                    criterion,
+                })
+            }
+        }
+    }
+}
+
+impl Workflow {
+    /// Every edge whose `to == to`, in author order — the `to`-node's
+    /// blocked-by set. Used by [`validate_workflow_structure`] (a `gate` needs
+    /// ≥1 incoming edge) and by `main.rs::instantiate_workflow` (one `Dep` per
+    /// incoming edge).
+    pub(crate) fn incoming_edges<'a>(
+        &'a self,
+        to: &'a str,
+    ) -> impl Iterator<Item = &'a WorkflowEdge> {
+        self.edges.iter().filter(move |e| e.to == to)
+    }
 }
 
 /// One node in a `[workflow]` template.
+///
+/// `deny_unknown_fields`: `depends_on` was removed (W025) — a legacy
+/// `depends_on` key is now a hard PARSE error, not silently ignored (D14-loud;
+/// the graph is edges-only).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowNode {
     /// A string label, unique within the workflow (resolved to a numeric task id).
     pub id: String,
@@ -255,9 +362,6 @@ pub struct WorkflowNode {
     pub member: Option<String>,
     #[serde(default)]
     pub script: Option<String>,
-    /// Sibling node ids this node runs after; resolved to task ids at boot.
-    #[serde(default)]
-    pub depends_on: Vec<String>,
     /// A gate (judgment or physical): its `reject` re-opens its deps (§5).
     #[serde(default)]
     pub gate: bool,
@@ -843,13 +947,14 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
 }
 
 /// Reject a malformed `[workflow]` STRUCTURE at load time (D14 style): unique
-/// node ids; every `depends_on` names a sibling id; exactly one of
-/// `member`|`script`; a `script` is non-empty; a `gate` has deps; and the
-/// graph is ACYCLIC. Membership is NOT checked here — a `member` node may
-/// name a team entry supplied by a `.wcode/agents/*.md` file or a
-/// `[[team]] file = …`, which fold/resolve AFTER `merge`; see
-/// [`validate_workflow_members`], called from `main.rs::load_config_raw` on
-/// the FINAL team. `Err(ConfigError::Workflow(msg))`.
+/// node ids; exactly one of `member`|`script`; a `script` is non-empty; every
+/// edge names two node ids (no self-edge, no duplicate `(from, to)` pair, at
+/// most one distinct `judge` name); an edge carries exactly one condition mode;
+/// a `gate` has ≥1 incoming edge; and the graph is ACYCLIC. Membership is NOT
+/// checked here — a `member` node may name a team entry supplied by a
+/// `.wcode/agents/*.md` file or a `[[team]] file = …`, which fold/resolve AFTER
+/// `merge`; see [`validate_workflow_members`], called from
+/// `main.rs::load_config_raw` on the FINAL team. `Err(ConfigError::Workflow(msg))`.
 pub(crate) fn validate_workflow_structure(w: &Workflow) -> Result<(), ConfigError> {
     let bad = ConfigError::Workflow;
     if w.nodes.is_empty() {
@@ -884,17 +989,55 @@ pub(crate) fn validate_workflow_structure(w: &Workflow) -> Result<(), ConfigErro
             }
             (Some(_), None) => {}
         }
-        for dep in &node.depends_on {
-            if !ids.contains(dep.as_str()) {
-                return Err(bad(format!(
-                    "node `{}`: depends_on `{dep}` is not a node id",
-                    node.id
-                )));
+    }
+    // Edges: endpoints name nodes, no self-edge, one edge per `(from, to)` pair,
+    // exactly one condition mode, and at most ONE distinct `judge` name (A12) —
+    // the `Scheduler` holds one `Arc<dyn Judge>` and `Judge::decide` takes no
+    // member argument, so two judge names cannot be dispatched.
+    let mut seen_pairs = std::collections::HashSet::new();
+    let mut judge_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for e in &w.edges {
+        let ctx = format!("edge {} → {}: ", e.from, e.to);
+        if !ids.contains(e.from.as_str()) {
+            return Err(bad(format!("{ctx}`{}` is not a node id", e.from)));
+        }
+        if !ids.contains(e.to.as_str()) {
+            return Err(bad(format!("{ctx}`{}` is not a node id", e.to)));
+        }
+        if e.from == e.to {
+            return Err(bad(format!("{ctx}a node cannot depend on itself")));
+        }
+        if !seen_pairs.insert((e.from.as_str(), e.to.as_str())) {
+            return Err(bad(format!("duplicate edge {} → {}", e.from, e.to)));
+        }
+        if let Some(c) = &e.condition {
+            match c.mode() {
+                // The payloads are validated by `mode()`; the scheduler reads
+                // them in `dispatch` (C3). Binding here keeps the match total
+                // without a dead-field warning.
+                Ok(EdgeMode::Script(cmd)) => {
+                    let _ = cmd;
+                }
+                Ok(EdgeMode::Judge { member, criterion }) => {
+                    let _ = criterion;
+                    judge_names.insert(member);
+                }
+                Err(m) => return Err(bad(format!("{ctx}{m}"))),
             }
         }
-        if node.gate && node.depends_on.is_empty() {
+    }
+    if judge_names.len() > 1 {
+        let mut names: Vec<&str> = judge_names.into_iter().collect();
+        names.sort_unstable();
+        return Err(bad(format!(
+            "edges name more than one judge: {}",
+            names.join(", ")
+        )));
+    }
+    for node in &w.nodes {
+        if node.gate && w.incoming_edges(&node.id).next().is_none() {
             return Err(bad(format!(
-                "node `{}`: a gate needs at least one depends_on",
+                "node `{}`: a gate needs at least one incoming edge",
                 node.id
             )));
         }
@@ -940,17 +1083,21 @@ pub(crate) fn topo_order(w: &Workflow) -> Result<Vec<&WorkflowNode>, ConfigError
         .collect();
     let mut indeg = vec![0usize; w.nodes.len()];
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); w.nodes.len()];
-    for (i, node) in w.nodes.iter().enumerate() {
-        for dep in &node.depends_on {
-            let Some(&d) = pos.get(dep.as_str()) else {
-                return Err(ConfigError::Workflow(format!(
-                    "node `{}`: depends_on `{dep}` is not a node id",
-                    node.id
-                )));
-            };
-            adj[d].push(i);
-            indeg[i] += 1;
-        }
+    for e in &w.edges {
+        let Some(&d) = pos.get(e.from.as_str()) else {
+            return Err(ConfigError::Workflow(format!(
+                "edge `{}` → `{}`: `{}` is not a node id",
+                e.from, e.to, e.from
+            )));
+        };
+        let Some(&i) = pos.get(e.to.as_str()) else {
+            return Err(ConfigError::Workflow(format!(
+                "edge `{}` → `{}`: `{}` is not a node id",
+                e.from, e.to, e.to
+            )));
+        };
+        adj[d].push(i);
+        indeg[i] += 1;
     }
     let mut queue: VecDeque<usize> = (0..w.nodes.len()).filter(|&i| indeg[i] == 0).collect();
     let mut out = Vec::with_capacity(w.nodes.len());
@@ -1724,19 +1871,37 @@ name = "reviewer"
     }
 
     #[test]
-    fn toml_workflow_parses_nodes() {
+    fn edge_parses_an_unconditional_and_a_script_condition() {
+        // Both `[[workflow.edge]]` forms deserialize; a node `depends_on` key is
+        // now a hard error (the field is gone).
         let file: FileConfig = toml::from_str(
             "model = \"m\"\n[workflow]\nmax_attempts = 5\n\
              [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
-             [[workflow.node]]\nid = \"b\"\ndepends_on = [\"a\"]\ngate = true\nscript = \"true\"\n",
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\ngate = true\n\
+             [[workflow.node]]\nid = \"c\"\nscript = \"true\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\n\
+             [[workflow.edge]]\nfrom = \"b\"\nto = \"c\"\ncondition = { script = \"test -f x\" }\n",
         )
         .unwrap();
         let w = file.workflow.unwrap();
         assert_eq!(w.max_attempts, Some(5));
-        assert_eq!(w.nodes.len(), 2);
-        assert_eq!(w.nodes[1].depends_on, vec!["a"]);
+        assert_eq!(w.nodes.len(), 3);
+        assert_eq!(w.edges.len(), 2);
+        assert_eq!((w.edges[0].from.as_str(), w.edges[0].to.as_str()), ("a", "b"));
+        assert!(w.edges[0].condition.is_none(), "unconditional edge");
+        assert_eq!(
+            w.edges[1]
+                .condition
+                .as_ref()
+                .and_then(|c| c.script.as_deref()),
+            Some("test -f x")
+        );
         assert!(w.nodes[1].gate);
-        assert_eq!(w.nodes[1].script.as_deref(), Some("true"));
+        // `depends_on` no longer exists → an unknown field is a parse error.
+        let bad: Result<FileConfig, _> = toml::from_str(
+            "model = \"m\"\n[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"x\"]\n",
+        );
+        assert!(bad.is_err(), "`depends_on` is no longer a node field");
     }
 
     /// Merge a `model` + one `w1` team + `toml`, expecting a config error.
@@ -1746,6 +1911,13 @@ name = "reviewer"
         merge(EnvLike::default(), file).unwrap_err()
     }
 
+    /// Merge a `model` + one `w1` team + `toml`, expecting success.
+    fn merges_ok(toml: &str) -> bool {
+        let file: FileConfig =
+            toml::from_str(&format!("model = \"m\"\n[[team]]\nname = \"w1\"\n{toml}")).unwrap();
+        merge(EnvLike::default(), file).is_ok()
+    }
+
     #[test]
     fn workflow_rejects_a_bad_graph() {
         let dup = merge_workflow(
@@ -1753,47 +1925,58 @@ name = "reviewer"
              [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n",
         );
         assert!(matches!(dup, ConfigError::Workflow(m) if m.contains("duplicate")));
-        let unknown =
-            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"ghost\"]\n");
+        let unknown = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"ghost\"\n",
+        );
         assert!(matches!(unknown, ConfigError::Workflow(m) if m.contains("not a node id")));
         let cycle = merge_workflow(
-            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"b\"]\n\
-             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\ndepends_on = [\"a\"]\n",
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\n\
+             [[workflow.edge]]\nfrom = \"b\"\nto = \"a\"\n",
         );
         assert!(matches!(cycle, ConfigError::Workflow(m) if m.contains("acyclic")));
-        let self_edge =
-            merge_workflow("[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ndepends_on = [\"a\"]\n");
-        assert!(matches!(self_edge, ConfigError::Workflow(m) if m.contains("acyclic")));
+        let self_edge = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"a\"\n",
+        );
+        assert!(
+            matches!(self_edge, ConfigError::Workflow(m) if m.contains("cannot depend on itself"))
+        );
     }
 
     #[test]
     fn structure_still_rejects_cycle_dup_and_dangling_dep() {
-        // The structural phase (called from `merge`) still catches graph
-        // errors without needing a team.
-        let node = |id: &str, member: Option<&str>, deps: &[&str]| WorkflowNode {
+        // The structural phase (called from `merge`) still catches graph errors
+        // without needing a team.
+        let node = |id: &str| WorkflowNode {
             id: id.into(),
-            member: member.map(String::from),
-            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            member: Some("w1".into()),
             ..Default::default()
         };
-        let dup = validate_workflow_structure(&Workflow {
+        let edge = |from: &str, to: &str| WorkflowEdge {
+            from: from.into(),
+            to: to.into(),
+            condition: None,
+        };
+        let wf = |nodes: Vec<WorkflowNode>, edges: Vec<WorkflowEdge>| Workflow {
             max_attempts: None,
-            nodes: vec![node("a", Some("w1"), &[]), node("a", Some("w1"), &[])],
-        })
-        .unwrap_err();
+            nodes,
+            edges,
+        };
+
+        let dup = validate_workflow_structure(&wf(vec![node("a"), node("a")], vec![])).unwrap_err();
         assert!(matches!(dup, ConfigError::Workflow(m) if m.contains("duplicate")));
 
-        let dangling = validate_workflow_structure(&Workflow {
-            max_attempts: None,
-            nodes: vec![node("a", Some("w1"), &["ghost"])],
-        })
-        .unwrap_err();
+        let dangling =
+            validate_workflow_structure(&wf(vec![node("a")], vec![edge("a", "ghost")])).unwrap_err();
         assert!(matches!(dangling, ConfigError::Workflow(m) if m.contains("not a node id")));
 
-        let cycle = validate_workflow_structure(&Workflow {
-            max_attempts: None,
-            nodes: vec![node("a", Some("w1"), &["b"]), node("b", Some("w1"), &["a"])],
-        })
+        let cycle = validate_workflow_structure(&wf(
+            vec![node("a"), node("b")],
+            vec![edge("a", "b"), edge("b", "a")],
+        ))
         .unwrap_err();
         assert!(matches!(cycle, ConfigError::Workflow(m) if m.contains("acyclic")));
     }
@@ -1804,6 +1987,7 @@ name = "reviewer"
         // check: membership is deferred to the FINAL team.
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
                 member: Some("judge".into()),
@@ -1820,6 +2004,7 @@ name = "reviewer"
         // regression that proves membership runs on the FINAL team (amendment 4).
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
                 member: Some("judge".into()),
@@ -1852,6 +2037,7 @@ name = "reviewer"
         let bad_member = validate_workflow_members(
             &Workflow {
                 max_attempts: None,
+                edges: vec![],
                 nodes: vec![WorkflowNode {
                     id: "a".into(),
                     member: Some("ghost".into()),
@@ -1896,6 +2082,88 @@ name = "reviewer"
         assert_eq!(cfg.workflow.unwrap().max_attempts, Some(5));
     }
 
+    #[test]
+    fn a_duplicate_edge_pair_is_rejected() {
+        let dup = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\n",
+        );
+        assert!(matches!(dup, ConfigError::Workflow(m) if m.contains("duplicate edge")));
+    }
+
+    #[test]
+    fn an_edge_needs_exactly_one_condition_mode() {
+        let neither = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = {}\n",
+        );
+        assert!(matches!(neither, ConfigError::Workflow(m) if m.contains("needs one of")));
+        let both = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = { script = \"true\", judge = \"j\" }\n",
+        );
+        assert!(matches!(both, ConfigError::Workflow(m) if m.contains("exactly one")));
+        let no_criterion = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = { judge = \"j\" }\n",
+        );
+        assert!(matches!(no_criterion, ConfigError::Workflow(m) if m.contains("empty criterion")));
+        assert!(
+            merges_ok(
+                "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+                 [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+                 [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = { judge = \"j\", criterion = \"ok?\" }\n",
+            ),
+            "judge + criterion is a valid mode"
+        );
+    }
+
+    #[test]
+    fn an_unknown_condition_key_fails_to_load() {
+        // A2: `deny_unknown_fields` makes a mistyped key a hard SERDE parse
+        // error — assert the LOAD fails, not the message text.
+        let bad: Result<FileConfig, _> = toml::from_str(
+            "model = \"m\"\n[workflow]\nmax_attempts = 1\n\
+             [[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = { scripts = \"true\" }\n",
+        );
+        assert!(bad.is_err(), "an unknown condition key must fail to load");
+    }
+
+    #[test]
+    fn more_than_one_judge_name_is_rejected() {
+        let two = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\n\
+             [[workflow.node]]\nid = \"c\"\nmember = \"w1\"\n\
+             [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\ncondition = { judge = \"j1\", criterion = \"?\" }\n\
+             [[workflow.edge]]\nfrom = \"b\"\nto = \"c\"\ncondition = { judge = \"j2\", criterion = \"?\" }\n",
+        );
+        assert!(matches!(two, ConfigError::Workflow(m) if m.contains("more than one judge")));
+    }
+
+    #[test]
+    fn a_gate_needs_an_incoming_edge() {
+        let no_edge = merge_workflow(
+            "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\ngate = true\n",
+        );
+        assert!(matches!(no_edge, ConfigError::Workflow(m) if m.contains("gate needs")));
+        assert!(
+            merges_ok(
+                "[workflow]\n[[workflow.node]]\nid = \"a\"\nmember = \"w1\"\n\
+                 [[workflow.node]]\nid = \"b\"\nmember = \"w1\"\ngate = true\n\
+                 [[workflow.edge]]\nfrom = \"a\"\nto = \"b\"\n",
+            ),
+            "a gate with an incoming edge loads"
+        );
+    }
+
     // ---- workflow task injection: {{task}} substitution (P1) ----
 
     fn wf_node(id: &str, title: Option<&str>) -> WorkflowNode {
@@ -1936,12 +2204,14 @@ name = "reviewer"
     fn uses_task_detects_a_title_only() {
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![wf_node("a", Some("Explore: {{task}}"))],
         };
         assert!(w.uses_task());
         // A placeholder in a `script` (not a title) does not count.
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![WorkflowNode {
                 script: Some("echo {{task}}".into()),
                 ..Default::default()
@@ -1951,12 +2221,14 @@ name = "reviewer"
         // A title carrying *other* brace syntax is not the placeholder.
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![wf_node("a", Some("Explore: {task} {{foo}}"))],
         };
         assert!(!w.uses_task());
         // A plain title with no placeholder is not a use of the task.
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![wf_node("a", Some("Explore the codebase"))],
         };
         assert!(!w.uses_task());
