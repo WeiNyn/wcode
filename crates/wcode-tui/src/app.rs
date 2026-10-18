@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
-use wcode_harness::stats::session_stats;
+use wcode_harness::stats::{SessionStats, aggregate, session_stats};
 use wcode_harness::protocol::{Request, SessionId};
 
 // The per-block render cache stores `ui`'s own output type (`Line`) so a hit hands
@@ -118,6 +118,17 @@ pub enum Action {
     Cancel,
     /// Send a request and route its reply back as an [`AppEvent::Agent`].
     Ask(Request),
+
+    /// Send `request` to the surface with this id — NOT the focused one — and
+    /// route the reply back as [`AppEvent::Agent`] tagged with that id, exactly
+    /// like [`Action::Ask`]. Used by the `/usage` fan-out, which asks every
+    /// surface once and assembles one modal.
+    ///
+    /// A target the loop does not have (a surface added or retired between the
+    /// emit and the dispatch) is answered SYNTHETICALLY with a tagged
+    /// `AgentEvent::Error`, never dropped: the collector must finish, or the modal
+    /// never opens.
+    AskTo(SessionId, Request),
     /// Copy this text to the terminal clipboard (OSC-52).
     Copy(String),
 }
@@ -497,6 +508,87 @@ pub enum InfoRow {
     /// lowercase section labels `commands` / `keys`. An EMPTY string is the
     /// blank-row idiom — no `Blank` variant exists.
     Prose(String),
+}
+
+/// One session's answer to the `/usage` fan-out.
+#[derive(Clone, Debug, PartialEq)]
+enum UsageAnswer {
+    /// Asked; the reply has not landed.
+    Pending,
+    /// Answered "cannot say". Three ways to get here, all the same to a reader:
+    /// an `AgentEvent::Ack` (a peer that predates `Request::Usage` catches it as
+    /// `Request::Unknown`), an `AgentEvent::Error` (a closed backend, or the run
+    /// loop's own ask timeout), or no backend at all for that id. NEVER rendered
+    /// as zero usage.
+    Unavailable,
+    /// A real report.
+    Stats(SessionStats),
+}
+
+/// The in-flight `/usage` fan-out: whom we asked, in ASK order, and what came
+/// back. ONE modal is assembled from it (brief Q6: "one modal, not N lines").
+///
+/// Why an `App` field and not on [`Surface`]: a surface cannot see its peers,
+/// and the body is one document over every surface.
+#[derive(Clone, Debug)]
+struct UsageCollect {
+    /// `(id, label)` in ASK order: the focused surface first, then the rest of
+    /// the roster. Kept so a late answer lands in the row its ask opened.
+    asked: Vec<(SessionId, String)>,
+    /// One slot per `asked` entry, SAME INDEX — `answers[i]` belongs to
+    /// `asked[i].0`.
+    answers: Vec<UsageAnswer>,
+}
+
+impl UsageCollect {
+    /// Seed a fan-out over `targets` (focused first), everything `Pending`.
+    /// An empty `targets` yields an immediately-complete collect, which the
+    /// caller opens as an empty modal rather than never opening one.
+    fn new(targets: Vec<(SessionId, String)>) -> Self {
+        let answers = vec![UsageAnswer::Pending; targets.len()];
+        Self {
+            asked: targets,
+            answers,
+        }
+    }
+
+    /// Record one reply. Returns `true` when this collect CONSUMED the event —
+    /// the caller then skips [`Surface::apply`], because a `Usage`-ask `Ack`
+    /// must not clear an unrelated `/plan` toggle (`Surface::apply`'s
+    /// `AgentEvent::Ack => { self.plan_pending = None; false }`) and a
+    /// `Usage`-ask `Error` must not paint a failed run.
+    ///
+    /// Contract: `false` for any id this collect did not ask, and for any event
+    /// that is not `Usage`/`Ack`/`Error` — so normal routing is untouched. A
+    /// second answer for the same id overwrites the first.
+    fn absorb(&mut self, id: &SessionId, event: &AgentEvent) -> bool {
+        let Some(i) = self.asked.iter().position(|(aid, _)| aid == id) else {
+            return false;
+        };
+        match event {
+            AgentEvent::Usage { stats } => self.answers[i] = UsageAnswer::Stats(stats.clone()),
+            AgentEvent::Ack | AgentEvent::Error { .. } => {
+                self.answers[i] = UsageAnswer::Unavailable;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// No `Pending` slot left: every ask either answered or was declared
+    /// unavailable. The trigger for opening the modal. No timer of its own —
+    /// the timeout is the ask loop's (`ask_budget`), and it always ends in a
+    /// tagged `Error`, i.e. one more answer.
+    fn is_complete(&self) -> bool {
+        !self.answers.iter().any(|a| matches!(a, UsageAnswer::Pending))
+    }
+}
+
+/// Strip a `summary()`'s leading `"usage: "` (a member/total row reads
+/// `w1: 3 turns, …`, not `w1: usage: 3 turns, …`); a summary without the prefix
+/// is returned unchanged.
+fn strip_usage_prefix(s: &str) -> String {
+    s.strip_prefix("usage: ").unwrap_or(s).to_string()
 }
 
 /// A filterable list the user navigates and selects from. `items` is the full
@@ -1283,23 +1375,6 @@ pub struct Surface {
     /// A `/btw` side ask is in flight; the status line shows `⠹ btw…`. Set on
     /// submit, cleared on the reply.
     btw_pending: bool,
-    /// A `/usage` `GetHistory` is in flight: its reply opens the ` usage ` modal
-    /// instead of a transient line. Set on submit ([`App::run_command`]'s
-    /// `"usage"` arm, like [`Surface::btw_pending`]), cleared when the reply
-    /// lands ([`Surface::render_usage`]) or when the request errors
-    /// (`AgentEvent::Error`).
-    ///
-    /// Per-surface (not `App`-level) because the reply is routed to a surface
-    /// ([`Surface::apply`]) and `render_usage` is a `Surface` method.
-    usage_pending: bool,
-    /// The modal a surface has just ASKED its owner to open: `(title, body)`,
-    /// bare lowercase title (Q5). `Surface::apply` owns no `overlay` (that is an
-    /// [`App`] field), so the `/usage` reply parks the request here and
-    /// [`App::handle`] drains it immediately after `apply` returns — which is
-    /// what lets `apply -> bool` keep its "changed" contract. `None` = nothing to
-    /// open; always drained in the same `handle` turn, so it is never
-    /// observably stale.
-    pending_info: Option<(String, String)>,
     /// The latest `AgentEvent::Todo` list, cached for `/verify` (a client-side
     /// render of the event — never `Session::todo()`, whose own-session write the
     /// agent's in-memory entries never see).
@@ -1380,8 +1455,6 @@ impl Surface {
             context_used: None,
             plan_pending: None,
             btw_pending: false,
-            usage_pending: false,
-            pending_info: None,
             last_todos: None,
             scroll: 0,
             max_scroll: 0,
@@ -1820,7 +1893,6 @@ impl Surface {
             AgentEvent::Error { message } => {
                 self.flush_live();
                 self.btw_pending = false; // a /btw reply that errored is no longer pending
-                self.usage_pending = false; // nor a /usage one — a failed reply must not leave the flag set
                 // A run failure (the loop emits `Error` before `AgentEnd`) marks the
                 // member failed; an idle reply error (SetModel/Compact/…) does not.
                 // `failed` is never cleared here — only `AgentStart` clears it.
@@ -2014,15 +2086,14 @@ impl Surface {
 
     /// Render a `GetHistory` reply as a one-line usage summary.
     ///
-    /// A reply the user asked for (`/usage` set [`Surface::usage_pending`]) parks a
-    /// ` usage ` modal request in [`Surface::pending_info`] for [`App::handle`] to
-    /// drain — this is a `Surface` method with no path to the `App`'s overlay. Any
-    /// other reply (a startup `GetHistory` replay, a stray one) stays a transient
-    /// line (the defensive branch).
+    /// Always a transient line: `/usage` no longer routes through here (its
+    /// reply is `AgentEvent::Usage`, assembled by the App-level collector), so
+    /// the only callers are a startup `GetHistory` replay and a stray reply —
+    /// each keeps its line (`a_stray_history_reply_does_not_open_a_modal`).
+    /// `context_used` is still recorded from the reported turn.
     fn render_usage(&mut self, messages: &[AgentMessage]) {
         let stats = session_stats(messages);
-        // Keep the live context-fullness readout the status line consumes — both
-        // paths.
+        // Keep the live context-fullness readout the status line consumes.
         if let Some(used) = stats.last_input_tokens {
             self.context_used = Some(used);
         }
@@ -2032,22 +2103,7 @@ impl Surface {
         if let (Some(used), Some(limit)) = (stats.last_input_tokens, self.status.context_limit) {
             line.push_str(&format!(", context {used}/{limit}"));
         }
-        if self.usage_pending {
-            // The reply the user asked for: open the modal, push no transient.
-            self.usage_pending = false;
-            self.pending_info = Some((String::from("usage"), line));
-        } else {
-            // Defensive: a stray reply the user did not ask for stays a line, so a
-            // startup `GetHistory` replay cannot pop a modal.
-            self.push_transient(line);
-        }
-    }
-
-    /// Hand the owner any modal this surface has asked to open — `(title, body)`
-    /// — clearing the slot. [`App::handle`] drains it right after `apply` returns,
-    /// so a surface can open a modal without reaching the [`App`].
-    fn take_pending_info(&mut self) -> Option<(String, String)> {
-        self.pending_info.take()
+        self.push_transient(line);
     }
 
     /// The text of the most recent assistant reply, if any.
@@ -2389,6 +2445,16 @@ pub struct App {
     /// set idle (SIGTERM-idle is a plain quit).
     force_quit: bool,
     actions: Vec<Action>,
+
+    /// A `/usage` fan-out in flight: whom `/usage` asked and what they answered,
+    /// drained into ONE ` usage ` modal when every surface has replied (or the
+    /// ask loop's timeout declared one unavailable). `None` = no fan-out running.
+    /// A second `/usage` while one is in flight REPLACES it (the newer roster
+    /// wins; the older replies then find no slot and route normally, harmlessly).
+    //
+    // Not on `Surface`: the body is one document over every surface, and a
+    // surface cannot see its peers (see `UsageCollect`).
+    usage_collect: Option<UsageCollect>,
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
     /// The open browse search prompt, if any — see [`BrowseSearch`].
@@ -2480,6 +2546,7 @@ impl App {
             should_quit: false,
             force_quit: false,
             actions: Vec::new(),
+            usage_collect: None,
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -2680,6 +2747,147 @@ impl App {
             .map(|l| InfoRow::Prose(l.to_string()))
             .collect();
         self.open_info_rows(title, rows);
+    }
+
+    /// The surfaces `/usage` must ask, in report order: the FOCUSED one first,
+    /// then every other surface in roster order (index 0, the root, among them).
+    /// `(id, label)` — the label is the row's left column.
+    ///
+    /// Includes remote peers: a `--socket` client's members are surfaces too,
+    /// and `AskTo` resolves whichever backend `lib.rs` holds for that id.
+    fn usage_targets(&self) -> Vec<(SessionId, String)> {
+        let focused = self.focus();
+        let mut targets = Vec::with_capacity(self.surfaces.len());
+        let s = &self.surfaces[focused];
+        targets.push((s.id.clone(), s.label.clone()));
+        for (i, s) in self.surfaces.iter().enumerate() {
+            if i != focused {
+                targets.push((s.id.clone(), s.label.clone()));
+            }
+        }
+        targets
+    }
+
+    /// Seed the fan-out and emit the asks — the `/usage` command arm's whole
+    /// body. One `Action::AskTo` per target, plus nothing else.
+    fn request_usage(&mut self) {
+        let targets = self.usage_targets();
+        self.usage_collect = Some(UsageCollect::new(targets.clone()));
+        for (id, _label) in targets {
+            self.actions.push(Action::AskTo(id, Request::Usage));
+        }
+    }
+
+    /// Offer one event to the in-flight fan-out. Returns `true` when it was
+    /// CONSUMED (the caller then skips `Surface::apply`).
+    ///
+    /// When the absorb completes the fan-out, this opens the modal (through
+    /// [`App::open_info_rows`]) and clears `usage_collect`. Never opens a second
+    /// modal for the same fan-out: `usage_collect` is taken with `.take()`.
+    ///
+    /// Side effect kept from today: a `Stats` answer for a surface also refreshes
+    /// that surface's `context_used` from `stats.last_input_tokens` — the same
+    /// field the status line's gauge reads, so a `/usage` never leaves it stale.
+    fn absorb_usage(&mut self, id: &SessionId, event: &AgentEvent) -> bool {
+        // Resolve the surface and the reported turn BEFORE borrowing the
+        // collector, so the two borrows never overlap.
+        let idx = self.surface_index(id);
+        let used = match event {
+            AgentEvent::Usage { stats } => stats.last_input_tokens,
+            _ => None,
+        };
+        let Some(collect) = self.usage_collect.as_mut() else {
+            return false;
+        };
+        if !collect.absorb(id, event) {
+            return false;
+        }
+        let complete = collect.is_complete();
+        // `collect`'s borrow ends here.
+        if let (Some(idx), Some(used)) = (idx, used) {
+            self.surfaces[idx].context_used = Some(used);
+        }
+        if complete {
+            let rows = self.usage_rows();
+            self.usage_collect = None;
+            self.open_info_rows("usage", rows);
+        }
+        true
+    }
+
+    /// The modal body: one [`InfoRow::Item`] per ASKED surface in ask order, then
+    /// a `total` row when more than one was asked.
+    ///
+    /// Contract:
+    /// - `Stats(s)` ⇒ `Item { label, detail }` where `detail` is `s.summary()`
+    ///   with the `"usage: "` prefix STRIPPED — the same formatter the REPL's
+    ///   `usage_lines` uses, so the two surfaces cannot drift;
+    /// - the FOCUSED row additionally appends `, context {used}/{limit}` when
+    ///   that surface's `status.context_limit` is set and `s.last_input_tokens`
+    ///   is `Some` — byte-for-byte today's body, so a single-surface modal still
+    ///   shows the context readout it shows today;
+    /// - `Unavailable`/`Pending` ⇒ `Item { label, detail: "unavailable" }` —
+    ///   never `$0`/0 turns (`an_ack_from_an_older_peer_reads_as_unavailable`);
+    /// - a `total` row (label `"total"`) is appended only when `asked.len() > 1`,
+    ///   and its stats are [`aggregate`] over the `Stats` rows ONLY; an
+    ///   unavailable member contributes nothing, so the total is a documented
+    ///   FLOOR (amendment (c)), suffixed `" (N unavailable)"` when any is.
+    fn usage_rows(&self) -> Vec<InfoRow> {
+        let Some(collect) = &self.usage_collect else {
+            return Vec::new();
+        };
+        let focused = self.focus();
+        let focused_id = &self.surfaces[focused].id;
+        let focused_limit = self.surfaces[focused].status.context_limit;
+        let mut rows: Vec<InfoRow> = Vec::with_capacity(collect.asked.len() + 1);
+        for (i, (id, label)) in collect.asked.iter().enumerate() {
+            let detail = match &collect.answers[i] {
+                UsageAnswer::Stats(stats) => {
+                    let mut body = strip_usage_prefix(&stats.summary());
+                    if id == focused_id
+                        && let (Some(used), Some(limit)) =
+                            (stats.last_input_tokens, focused_limit)
+                    {
+                        body.push_str(&format!(", context {used}/{limit}"));
+                    }
+                    body
+                }
+                UsageAnswer::Pending | UsageAnswer::Unavailable => "unavailable".to_string(),
+            };
+            rows.push(InfoRow::Item {
+                label: label.clone(),
+                detail,
+            });
+        }
+        if collect.asked.len() > 1 {
+            let answered: Vec<SessionStats> = collect
+                .answers
+                .iter()
+                .filter_map(|a| match a {
+                    UsageAnswer::Stats(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            let unavailable = collect
+                .answers
+                .iter()
+                .filter(|a| matches!(a, UsageAnswer::Unavailable))
+                .count();
+            let body = if answered.is_empty() {
+                "unavailable".to_string()
+            } else {
+                let mut body = strip_usage_prefix(&aggregate(&answered).summary());
+                if unavailable > 0 {
+                    body.push_str(&format!(" ({unavailable} unavailable)"));
+                }
+                body
+            };
+            rows.push(InfoRow::Item {
+                label: "total".to_string(),
+                detail: body,
+            });
+        }
+        rows
     }
 
     /// Open an info modal from EXPLICIT rows — the door `/help` uses, so the row
@@ -3568,18 +3776,18 @@ impl App {
                 }
             }
             AppEvent::Agent(id, event) => {
-                // Route to the surface that owns this session; an unknown id is
-                // ignored (a stray/duplicate event must not panic).
-                if let Some(idx) = self.surface_index(&id) {
-                    if self.surfaces[idx].apply(event) {
+                // The `/usage` fan-out drains FIRST. A reply it asked for is NOT
+                // the surface's: a `Usage`-ask `Ack` must not clear an unrelated
+                // `/plan` toggle (`Surface::apply`'s
+                // `AgentEvent::Ack => { self.plan_pending = None; false }`) and a
+                // `Usage`-ask `Error` must not paint a failed run.
+                if !self.absorb_usage(&id, &event) {
+                    // Route to the surface that owns this session; an unknown id
+                    // is ignored (a stray/duplicate event must not panic).
+                    if let Some(idx) = self.surface_index(&id)
+                        && self.surfaces[idx].apply(event)
+                    {
                         self.dirty = true;
-                    }
-                    // The drain site for `Surface::pending_info` — the only way a
-                    // surface may ask for a modal. A `/usage` reply arrives OUT of
-                    // the command frame, so the modal opens here, not in
-                    // `run_command`: the reply the user asked for, seconds later.
-                    if let Some((title, text)) = self.surfaces[idx].take_pending_info() {
-                        self.open_info(title, text); // sets `dirty` itself
                     }
                 }
             }
@@ -3870,12 +4078,7 @@ impl App {
             // (§2 non-scope): `/effort`, `/width`, `/btw`, a bad `/plan`/`/reload`
             // arg, an unknown command, and the action confirmations.
             "verify" => self.open_info("verify", self.verify_text()),
-            "usage" => {
-                // `/usage` replies OUT of this frame (a later `AgentEvent::History`),
-                // so raise the flag; `render_usage` opens the modal.
-                self.focused_mut().usage_pending = true;
-                self.actions.push(Action::Ask(Request::GetHistory));
-            }
+            "usage" => self.request_usage(),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
             "reload" => match arg {
@@ -5153,8 +5356,8 @@ mod tests {
         submit(&mut app, "/usage");
         app.handle(AppEvent::Agent(
             root(),
-            AgentEvent::History {
-                messages: vec![AgentMessage::user_text("q")],
+            AgentEvent::Usage {
+                stats: stats_t(1, 10, 5),
             },
         ));
         assert!(
@@ -5827,7 +6030,10 @@ mod tests {
         );
 
         submit(&mut app, "/usage");
-        assert_eq!(app.take_actions(), vec![Action::Ask(Request::GetHistory)]);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::AskTo(root(), Request::Usage)]
+        );
 
         submit(&mut app, "/btw why the sky?");
         assert_eq!(
@@ -7442,11 +7648,14 @@ mod tests {
         assert!(app.transcript().is_empty(), "no user block was committed");
         assert!(app.completion_rows().is_empty());
 
-        // A complete name: Enter submits it as today (`/usage` asks for history).
+        // A complete name: Enter submits it as today (`/usage` asks every surface).
         let mut app = App::new();
         typed(&mut app, "/usage");
         app.handle(AppEvent::Key(Key::Enter));
-        assert_eq!(app.take_actions(), vec![Action::Ask(Request::GetHistory)]);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::AskTo(root(), Request::Usage)]
+        );
     }
 
     #[test]
@@ -8577,8 +8786,9 @@ mod tests {
         assert_eq!(app.overlay_scroll(), 0, "nothing visible, nothing to scroll");
     }
 
-    /// `submit("/usage")` raises the flag; the LATER `History` reply opens the
-    /// ` usage ` modal, pushes no transient, and still sets `context_used`.
+    /// `submit("/usage")` asks every surface; ONE `Usage` reply opens the
+    /// ` usage ` modal as a single Item row, pushes no transient, and refreshes
+    /// `context_used` from the reported turn.
     #[test]
     fn a_usage_reply_opens_the_usage_modal() {
         let mut app = App::new();
@@ -8589,8 +8799,14 @@ mod tests {
         );
         app.handle(AppEvent::Agent(
             root(),
-            AgentEvent::History {
-                messages: usage_messages(),
+            AgentEvent::Usage {
+                stats: SessionStats {
+                    turns: 1,
+                    input_tokens: 500,
+                    output_tokens: 20,
+                    last_input_tokens: Some(500),
+                    ..Default::default()
+                },
             },
         ));
         assert!(
@@ -8603,6 +8819,13 @@ mod tests {
             chatter(&app),
             vec!["/usage".to_string()],
             "echo only, no reply line"
+        );
+        // ONE surface ⇒ one Item row, no total (root's label is "wcode").
+        let rows = info_rows(&app);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            matches!(&rows[0], InfoRow::Item { label, detail } if label == "wcode" && detail == "1 turn, 500 in, 20 out"),
+            "{rows:?}"
         );
     }
 
@@ -8622,6 +8845,196 @@ mod tests {
             app.transcript().last(),
             Some(Block::Notice(t) | Block::Transient(t)) if t.contains("1 turn")
         ));
+    }
+
+    fn stats_t(turns: u64, input: u64, output: u64) -> SessionStats {
+        SessionStats {
+            turns,
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    fn small_stats() -> SessionStats {
+        stats_t(1, 10, 5)
+    }
+
+    /// Brief §7.1. Three surfaces (root + two members), `/usage`, three `Usage`
+    /// replies, ONE modal: 4 rows — root, w1, w2, `total` — and the total's
+    /// detail is the summed summary, not a repeat of the root's.
+    #[test]
+    fn all_members_usage_opens_one_modal_with_a_total_row() {
+        let mut app = App::new();
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("w1"),
+            label: "w1".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("w2"),
+            label: "w2".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        submit(&mut app, "/usage");
+        assert!(app.overlay().is_none(), "nothing opens on submit");
+
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Usage {
+                stats: stats_t(1, 10, 5),
+            },
+        ));
+        assert!(app.overlay().is_none(), "one answer is not the modal");
+        app.handle(AppEvent::Agent(
+            SessionId::agent("w1"),
+            AgentEvent::Usage {
+                stats: stats_t(2, 40, 20),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            SessionId::agent("w2"),
+            AgentEvent::Usage {
+                stats: stats_t(0, 0, 0),
+            },
+        ));
+
+        let rows = info_rows(&app);
+        assert_eq!(rows.len(), 4, "root, w1, w2, total: {rows:?}");
+        for (row, (label, detail)) in rows.iter().zip([
+            ("wcode", "1 turn, 10 in, 5 out"),
+            ("w1", "2 turns, 40 in, 20 out"),
+            ("w2", "(no usage reported)"),
+            ("total", "3 turns, 50 in, 25 out"),
+        ]) {
+            match row {
+                InfoRow::Item { label: l, detail: d } => {
+                    assert_eq!((l.as_str(), d.as_str()), (label, detail), "{rows:?}");
+                }
+                other => panic!("expected an Item row, got {other:?}"),
+            }
+        }
+    }
+
+    /// Brief §7.1. `/usage` emits ONE `Action::AskTo(id, Request::Usage)` per
+    /// surface, in focused-then-roster order — never a focus-bound
+    /// `Action::Ask(Request::GetHistory)`.
+    #[test]
+    fn usage_modal_opens_from_an_ask_to_every_surface() {
+        let mut app = App::new();
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("w1"),
+            label: "w1".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        // Focus the member: its ask comes first, then the root.
+        app.set_focus(1);
+        submit(&mut app, "/usage");
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::AskTo(SessionId::agent("w1"), Request::Usage),
+                Action::AskTo(root(), Request::Usage),
+            ]
+        );
+    }
+
+    /// THE `Ack`-AS-UNAVAILABLE CONTRACT. A member that answers `Ack` (a peer
+    /// which predates `Request::Usage`) is rendered `unavailable`; the modal
+    /// still opens once every surface answered; and the member's optimistic
+    /// `/plan` toggle survives the `Ack` (the collector consumed it —
+    /// `Surface::apply` would have cleared it).
+    #[test]
+    fn an_ack_from_an_older_peer_reads_as_unavailable() {
+        let mut app = App::new();
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("w1"),
+            label: "w1".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        // Focus the member and start an optimistic `/plan on` (plan_pending =
+        // Some(false), status.plan = true).
+        app.set_focus(1);
+        submit(&mut app, "/plan on");
+        let _ = app.take_actions();
+        assert!(app.status().plan, "the optimistic toggle is on");
+
+        submit(&mut app, "/usage");
+        let _ = app.take_actions();
+        // The member (focused, asked first) answers `Ack` — the collector
+        // CONSUMES it, so `Surface::apply` never clears `plan_pending`.
+        app.handle(AppEvent::Agent(SessionId::agent("w1"), AgentEvent::Ack));
+        // The root answers, completing the fan-out and opening the modal.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Usage {
+                stats: small_stats(),
+            },
+        ));
+
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { title, .. }) if title == "usage"),
+            "the modal opens once every surface answered: {:?}",
+            app.overlay()
+        );
+        assert!(
+            app.status().plan,
+            "the /usage Ack did not clear the optimistic plan toggle"
+        );
+        let rows = info_rows(&app);
+        assert!(
+            matches!(&rows[0], InfoRow::Item { label, detail } if label == "w1" && detail == "unavailable"),
+            "an Ack reads as unavailable, not zero: {rows:?}"
+        );
+    }
+
+    /// A `Usage`-ask that FAILS (a tagged `AgentEvent::Error`) completes the
+    /// fan-out the same way: an `unavailable` row, the modal opens, and NO
+    /// failed-run paint on the surface (`Surface::apply` never sees the `Error`).
+    #[test]
+    fn a_usage_ask_error_completes_the_fan_out_without_failing_the_surface() {
+        let mut app = App::new();
+        app.add_surface(SurfaceInfo {
+            id: SessionId::agent("w1"),
+            label: "w1".into(),
+            model: "m".into(),
+            is_root: false,
+        });
+        submit(&mut app, "/usage");
+        let _ = app.take_actions();
+        // The root's ask fails; the member still answers.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::Error {
+                message: "request timed out".into(),
+            },
+        ));
+        app.handle(AppEvent::Agent(
+            SessionId::agent("w1"),
+            AgentEvent::Usage {
+                stats: small_stats(),
+            },
+        ));
+
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { title, .. }) if title == "usage"),
+            "the modal opens: {:?}",
+            app.overlay()
+        );
+        assert!(
+            !app.transcript().iter().any(|b| matches!(b, Block::Error(_))),
+            "a usage-ask Error must not paint the surface: {:?}",
+            app.transcript()
+        );
+        let rows = info_rows(&app);
+        assert!(
+            matches!(&rows[0], InfoRow::Item { label, detail } if label == "wcode" && detail == "unavailable"),
+            "a failed ask reads as unavailable: {rows:?}"
+        );
     }
 
     /// A `History` reply carrying usage: one assistant turn with a tool call and

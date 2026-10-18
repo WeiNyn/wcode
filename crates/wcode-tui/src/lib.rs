@@ -568,7 +568,8 @@ async fn event_loop(
             }
         }
 
-        // Actions target the focused surface's backend.
+        // Actions target the focused surface's backend — except `AskTo`, which
+        // names its target (the `/usage` fan-out asks every surface).
         let idx = app.focus();
         let (id, backend) = &backends[idx];
         for action in app.take_actions() {
@@ -580,6 +581,25 @@ async fn event_loop(
                     let _ = backend.send(Request::Cancel);
                 }
                 Action::Ask(request) => spawn_ask(id, backend, &reply_tx, request),
+                Action::AskTo(target, request) => {
+                    // Resolve the backend by id (a linear find over the small
+                    // root+team vec): `Backend` carries no id of its own, so the id
+                    // lives in the `backends` pair.
+                    match backends.iter().find(|(bid, _)| bid == &target) {
+                        Some((_, backend)) => spawn_ask(&target, backend, &reply_tx, request),
+                        // A surface vanished between the emit and the dispatch (a
+                        // retired member): answer it SYNTHETICALLY so the collector
+                        // can finish, instead of leaving the modal pending forever.
+                        None => {
+                            let _ = reply_tx.send(AppEvent::Agent(
+                                target,
+                                AgentEvent::Error {
+                                    message: "no such surface".into(),
+                                },
+                            ));
+                        }
+                    }
+                }
                 Action::Copy(text) => {
                     let _ = clipboard::copy(&text);
                 }
