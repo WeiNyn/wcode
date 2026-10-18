@@ -2,7 +2,8 @@
 
 Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices) **and by D023** (W018: P5 "prose only, fully bare" — no band rules, plain head labels, treeless tools, a text gauge, a grey default with red the only hue) **and by D026** (information
 modals: `/help`, `/verify`, `/usage`, `/tasks`, `/team roster` open a scrollable
-popup). Companion to [`tui-plan.md`](tui-plan.md) (the
+popup) **and by D027** (the ` help ` body is `F1`'s two-column table — an item
+row per command and per key, prose for the rest). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -408,8 +409,9 @@ visible — inlined on a collapsed tool's single row, as `key  value` rows when
 expanded; a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
-same `KEYS` table is printed by `/help`) · `/help`, `/verify`, `/usage`,
-`/tasks`, and `/team roster` open an **information modal** instead — `↑`/`↓`
+same `KEYS` table is printed by `/help`, in the same two-column style) ·
+`/help`, `/verify`, `/usage`, `/tasks`, and `/team roster` open an
+**information modal** instead — `↑`/`↓`
 and `PgUp`/`PgDn` scroll its body (not the transcript), the wheel nudges it
 three lines, and `Esc` closes it; every other key is swallowed, as with `F1` ·
 `Ctrl-G` enters **transcript browse**
@@ -428,16 +430,32 @@ overlay over the sessions on disk; choosing one quits and re-execs into it
   `/team roster` open a `Clear`ed, centered, rounded-border modal: the frame
   glyphs are §2's `overlay frame` row (`╭ ╮ ╰ ╯ ─ │`) and no glyph is new. It is
   the visual twin of the `F1` keymap — title = the lowercase command name
-  (` help `, ` usage `, ` verify `, ` tasks `, ` team `), body = that command's
-  report text. A report is prose you read, not a row that scrolls away, which is
-  why it earns a surface instead of a `Notice` (the echoed `/<command>` line
-  still prints in the transcript, so the record of what was asked survives). The
-  body scrolls (`↑`/`↓` one line, `PgUp`/`PgDn` a page, the wheel three lines)
-  and carries a trailing dim `— N more —` hint while it is clipped. Dismissal is
-  **`Esc` only**: while it is open every other key is swallowed — the same
-  rationale as `F1` — so a stray character can never leak into the composer.
-  The `F1` keymap modal (`Overlay::Help`) is unchanged; bare usage hints and
-  error lines stay transient `Notice` rows, not modals.
+  (` help `, ` usage `, ` verify `, ` tasks `, ` team `), and its geometry is the
+  same panel `F1` draws (width `area.width − 4` clamped to 64, centered, height
+  from the row window), so ` help ` and ` keys ` are always the **same size**:
+  one is never widened past the other. A report is prose you read, not a row
+  that scrolls away, which is why it earns a surface instead of a `Notice` (the
+  echoed `/<command>` line still prints in the transcript, so the record of what
+  was asked survives). The body scrolls (`↑`/`↓` one line, `PgUp`/`PgDn` a page,
+  the wheel three lines) and carries a trailing dim `— N more —` hint while it
+  is clipped. Dismissal is **`Esc` only**: while it is open every other key is
+  swallowed — the same rationale as `F1` — so a stray character can never leak
+  into the composer. Bare usage hints and error lines stay transient `Notice`
+  rows, not modals.
+- **Info modal body rows** (D027) — the body is a list of **rows**, and a row is
+  one of two kinds. An **item** row is `F1`'s row byte-for-byte: a one-space
+  indent, an `accent` label padded to a 22-col column, then a `dim` detail — the
+  two-column look. A **prose** row is one body-weight span: the report text of
+  the four non-tabular commands, and the bare lowercase section labels
+  `commands` / `keys`. `/help` is therefore the `F1` keymap with a commands table
+  above it — `commands`, one item per `COMMANDS` entry (label `/name` + its
+  ` args`, or its aliases in brackets — `/new [clear]`; detail its `summary`),
+  a blank row, `keys`, then one item per `KEYS` entry styled exactly as `F1`
+  styles them. `/verify`, `/tasks`, `/team roster`, and `/usage` stay prose rows.
+  Rows never wrap — an over-long one clips horizontally, exactly as `F1` clips,
+  so an item's detail is budgeted to the ~39-col column the 64-col panel leaves
+  (D027). The `F1` keymap modal (`Overlay::Help`) is unchanged: ` keys `,
+  ` esc / F1 to close`, no `— N more —`.
 
 ## 5. Decisions
 
