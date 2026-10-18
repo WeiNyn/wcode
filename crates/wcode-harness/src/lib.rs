@@ -6,6 +6,7 @@ pub mod hooks;
 pub mod limits;
 pub mod loop_;
 pub mod message;
+pub mod pricing;
 pub mod protocol;
 pub mod session;
 pub mod stats;
