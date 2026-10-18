@@ -1526,6 +1526,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         && let Some(workflow) = &cfg.workflow
     {
         let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
+        register_adjacency(o.registry(), workflow);
         eprintln!("workflow: {n} nodes");
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
@@ -2489,6 +2490,35 @@ fn should_instantiate_workflow(
     has_task: bool,
 ) -> bool {
     !resuming_group && has_workflow && has_task
+}
+
+/// Register workflow-edge adjacency in the registry: for each edge whose BOTH
+/// endpoints are `member` (session) nodes, `allow_pair` their addresses, so the
+/// two may `message` each other (A1). A `script` node has no address, so such an
+/// edge contributes no pair. Call once at boot, right after
+/// [`instantiate_workflow`], before the scheduler spawns.
+fn register_adjacency(reg: &wcode_protocol::Registry, w: &crate::config::Workflow) {
+    for e in &w.edges {
+        let (Some(a), Some(b)) = (member_of(w, &e.from), member_of(w, &e.to)) else {
+            continue; // a script endpoint has no session address
+        };
+        // Adjacency is keyed by the MEMBER/SESSION ADDRESS (`agent:<member>`,
+        // `tools/message.rs::address`), NOT by the node id: a node id
+        // (`explore`) deliberately differs from a member name (`explorer`) —
+        // `instantiate_workflow` already maps `member` → `address(m)` for the
+        // node's owner, so the pair must use the SAME mapping or `deliver` would
+        // target `agent:explore`, which is not a registered session.
+        reg.allow_pair(
+            &crate::tools::message::address(a),
+            &crate::tools::message::address(b),
+        );
+    }
+}
+
+/// The `member` name of the node with id `id`, or `None` for a `script` node
+/// (or an unknown id, which load validation rules out).
+fn member_of<'a>(w: &'a crate::config::Workflow, id: &str) -> Option<&'a str> {
+    w.nodes.iter().find(|n| n.id == id)?.member.as_deref()
 }
 
 /// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so an
