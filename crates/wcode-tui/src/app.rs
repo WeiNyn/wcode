@@ -2667,6 +2667,12 @@ impl App {
         };
         let lines = text.lines().count();
         let visible = info_visible_rows(lines, height);
+        // Nothing is visible (no frame drawn yet, or a terminal too short for the
+        // borders + footer + a row): scrolling is meaningless, so this is the
+        // documented no-op — not a clamp against the whole body.
+        if visible == 0 {
+            return;
+        }
         let max = lines.saturating_sub(visible) as isize;
         let next = (*scroll as isize).saturating_add(delta).clamp(0, max) as u16;
         if next != *scroll {
@@ -8471,6 +8477,13 @@ mod tests {
         app.open_info("t", "one\ntwo");
         app.handle(AppEvent::Key(Key::Down));
         assert_eq!(app.overlay_scroll(), 0, "a short body never scrolls");
+
+        // No frame drawn yet (`terminal_height == 0`): nothing is visible, so a
+        // scroll is a no-op — NOT a clamp against the whole body.
+        let mut app = App::new();
+        app.open_info("t", (0..50).map(|i| format!("row {i}")).collect::<Vec<_>>().join("\n"));
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.overlay_scroll(), 0, "nothing visible, nothing to scroll");
     }
 
     /// `submit("/usage")` raises the flag; the LATER `History` reply opens the
