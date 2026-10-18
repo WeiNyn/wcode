@@ -17,7 +17,7 @@ use wcode_harness::event::{TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{App, Block, InputView, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
+use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::app::{ChangeRow, change_totals, changes_header, info_visible_rows};
 use crate::markdown;
 use crate::theme;
@@ -27,6 +27,10 @@ use crate::theme;
 /// line up; the longest speaker label is `WCODE` (5), plus the 1-col margin and
 /// a 1-col gap.
 const CONTENT_COL: usize = 7;
+/// The label column width, in columns, shared by the `F1` keymap and the `/help`
+/// info modal (D027: "an `accent` label padded to a 22-col column"). Both panels
+/// read it from here via [`item_line`], so `/help` and `F1` render the same table.
+pub(crate) const ITEM_LABEL_COLS: usize = 22;
 /// The flat tool-cluster gutter (W018): three columns — the same column the
 /// thinking row's word sits in — so a tool's head, its params, its body, and the
 /// thinking body all line up at col 3. Replaces the retired `├`/`│`/`└` tree.
@@ -231,9 +235,29 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
     match app.overlay() {
         Some(Overlay::Pick(picker)) => draw_picker(frame, area, picker),
         Some(Overlay::Help) => draw_help(frame, area),
-        Some(Overlay::Info { title, text, scroll }) => draw_info(frame, area, title, text, *scroll),
+        Some(Overlay::Info { title, rows, scroll }) => {
+            draw_info(frame, area, title, rows, *scroll)
+        }
         None => {}
     }
+}
+
+/// One item row — `F1`'s row, byte-for-byte: a one-space indent, an `accent`
+/// label padded to [`ITEM_LABEL_COLS`], then a `dim` detail. The ONLY definition
+/// of that row: `draw_help` and `draw_info`'s `Item` arm both call it, so a
+/// change to the look is a one-line change, not a hunt.
+///
+/// # Contracts: `label` shorter than the column is padded; longer is NOT
+/// truncated (it overflows into the detail column, as `{:<22}` pads-only does);
+/// no wrapping; `# Panics: never`.
+fn item_line(label: &str, detail: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {label:<width$}", width = ITEM_LABEL_COLS),
+            accent(),
+        ),
+        Span::styled(detail.to_string(), dim()),
+    ])
 }
 
 /// Draw the `F1` keymap, centered like the picker — a thin caller of
@@ -242,12 +266,7 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_help(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = KEYS
         .iter()
-        .map(|(chord, what)| {
-            Line::from(vec![
-                Span::styled(format!(" {chord:<22}"), accent()),
-                Span::styled((*what).to_string(), dim()),
-            ])
-        })
+        .map(|(chord, what)| item_line(chord, what))
         .collect();
     lines.push(Line::default());
     draw_info_panel(
@@ -263,22 +282,32 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Draw the info modal body `text` at `scroll`, under a rounded ` title ` panel.
+/// Draw the info modal body `rows` at `scroll`, under a rounded ` title ` panel.
 ///
-/// The door used by the `Overlay::Info` dispatch arm: it owns the `String` →
-/// `Vec<Line>` conversion (plain, unstyled, NOT wrapped) and hands the panel
-/// helper what it needs.
+/// The door used by the `Overlay::Info` dispatch arm: it maps each [`InfoRow`] to
+/// a `Line` — an `Item` through [`item_line`] (so `/help` and `F1` share one row
+/// definition), a `Prose` as one body-weight, unstyled span — and hands the panel
+/// helper the lines.
 ///
 /// # Contracts
 /// - `scroll` is not trusted: [`draw_info_panel`] clamps the first drawn row to
-///   `min(scroll, body_len - visible)`, so a stale scroll after a resize cannot
+///   `min(scroll, rows.len() - visible)`, so a stale scroll after a resize cannot
 ///   render a blank panel.
-/// - No wrapping and no markdown: a row longer than the panel width is clipped
-///   horizontally, exactly as `F1` clips. Wrapping would break
-///   [`info_visible_rows`].
-/// - # Panics: never; an empty `text` renders an empty body, not a panic.
-fn draw_info(frame: &mut Frame, area: Rect, title: &str, text: &str, scroll: u16) {
-    let lines: Vec<Line> = text.lines().map(|l| Line::from(l.to_string())).collect();
+/// - No wrapping and no markdown: an over-long row clips horizontally, exactly as
+///   `F1` clips — for an `Item`, the detail is budgeted to the ~39-col column the
+///   64-col panel leaves (D027).
+/// - A `Prose("")` row is a blank line — the `/help` section separator.
+/// - A `Prose` is deliberately NOT styled (body weight), unlike `F1`'s dim footer;
+///   that is D027's choice, not an oversight.
+/// - # Panics: never; `rows` empty renders an empty body.
+fn draw_info(frame: &mut Frame, area: Rect, title: &str, rows: &[InfoRow], scroll: u16) {
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|row| match row {
+            InfoRow::Item { label, detail } => item_line(label, detail),
+            InfoRow::Prose(text) => Line::from(text.clone()),
+        })
+        .collect();
     draw_info_panel(
         frame,
         area,
@@ -291,7 +320,6 @@ fn draw_info(frame: &mut Frame, area: Rect, title: &str, text: &str, scroll: u16
         },
     );
 }
-
 /// The arguments of [`draw_info_panel`]: a centered rounded panel over `lines`
 /// scrolled to `scroll`, titled ` {title} `, with one dim `footer` row. `more`
 /// gates the `— N more —` overflow hint, so `F1` (`more: false`) never shows it.
@@ -2409,7 +2437,7 @@ pub(crate) fn code_style() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Action, App, AppEvent, Key, MouseEvent, MouseKind};
+    use crate::app::{Action, App, AppEvent, Key, MouseEvent, MouseKind, help_rows};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wcode_harness::protocol::SessionId;
@@ -5736,8 +5764,9 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(text.contains(" help "), "the padded title:\n{text}");
         assert!(text.contains("esc to close"), "the footer:\n{text}");
         // The exact clipped hint — `— ` alone is in every KEYS row, so it would
-        // prove nothing. `help_text` is `commands:` + `keys:` + one row per chord.
-        let body = KEYS.len() + 2;
+        // prove nothing. Derive the count from the builder (D027): `commands`
+        // header + one row per command + a blank + `keys` + one row per key.
+        let body = help_rows().len();
         let hidden = body - info_visible_rows(body, 20);
         assert!(
             text.contains(&format!("— {hidden} more —")),
@@ -5757,6 +5786,116 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         }
         let after = buffer_text(&render(&mut app, 80, 20));
         assert_ne!(before, after, "the scroll did not reach the renderer");
+    }
+
+    /// The foreground color of the first cell of the first buffer row containing
+    /// `needle` — the style-aware probe `buffer_text` (symbols only) cannot give.
+    fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> ratatui::style::Color {
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(byte) = row.find(needle) {
+                let x = row[..byte].chars().count() as u16;
+                return buffer[(x, y)].fg;
+            }
+        }
+        panic!("{needle:?} not found in the frame");
+    }
+
+    /// The heart of D027: a `/help` ITEM row and an `F1` row render identically —
+    /// same indent, same 22-col label column, same detail. Asserted by drawing
+    /// BOTH, so a future styling change cannot desync them.
+    #[test]
+    fn help_rows_render_in_f1s_two_column_style() {
+        // Drawn tall enough that neither body clips ( `/help` is 48 rows, so it
+        // needs height ≥ 51 to show them all).
+        let mut f1 = App::new();
+        f1.handle(AppEvent::Key(Key::F(1)));
+        let f1_text = buffer_text(&render(&mut f1, 80, 56));
+        // `/help`, the same size.
+        let mut help = App::new();
+        typed(&mut help, "/help");
+        help.handle(AppEvent::Key(Key::Enter));
+        let help_frame = buffer_text(&render(&mut help, 80, 56));
+
+        // Every KEYS row of both modals is the exact two-column row.
+        for (chord, what) in KEYS {
+            let row = format!(" {chord:<width$}{what}", width = ITEM_LABEL_COLS);
+            assert!(f1_text.contains(&row), "F1 row drift: {row:?}");
+            assert!(help_frame.contains(&row), "/help row drift: {row:?}");
+        }
+        // A command's item row renders in the SAME style — asserted through
+        // `help_rows()` (the builder), never by importing `COMMANDS`.
+        let command_row = help_rows()
+            .iter()
+            .find_map(|r| match r {
+                InfoRow::Item { label, detail } if label.starts_with('/') => {
+                    Some(format!(" {label:<width$}{detail}", width = ITEM_LABEL_COLS))
+                }
+                _ => None,
+            })
+            .expect("a command item row");
+        assert!(
+            help_frame.contains(&command_row),
+            "the command row is not in F1 style: {command_row:?}\n{help_frame}"
+        );
+        // The retired single-line form is gone.
+        assert!(
+            !help_frame.contains("commands: /new"),
+            "the retired one-liner:\n{help_frame}"
+        );
+    }
+
+    /// The section labels are PROSE rows: bare, lowercase, body-weight — no
+    /// colon, no item-accent (D027 §Decision).
+    #[test]
+    fn the_help_section_labels_are_bare_prose() {
+        // Model: the two section labels are `Prose` rows, bare and colon-free.
+        let rows = help_rows();
+        assert_eq!(rows[0], InfoRow::Prose("commands".into()));
+        assert_eq!(
+            rows.iter().find(|r| matches!(r, InfoRow::Prose(t) if t == "keys")),
+            Some(&InfoRow::Prose("keys".into())),
+            "a bare `keys` header row"
+        );
+        assert!(
+            rows.iter().all(|r| !matches!(r, InfoRow::Prose(t) if t.contains(':'))),
+            "a section label carries a colon"
+        );
+        // Render: the label is body-weight, NOT the item-accent of a command row.
+        let mut app = App::new();
+        typed(&mut app, "/help");
+        app.handle(AppEvent::Key(Key::Enter));
+        let terminal = render(&mut app, 80, 40);
+        assert!(
+            buffer_text(&terminal).contains("commands"),
+            "the `commands` label is drawn"
+        );
+        assert_ne!(
+            fg_of(&terminal, "commands"),
+            fg_of(&terminal, "/new"),
+            "the section label must be body-weight, not item-accent"
+        );
+    }
+
+    /// Guards the `item_line` extraction: with `draw_help` now a caller, F1's
+    /// frame is unchanged — its first body row is exactly the first KEYS item, its
+    /// footer is intact, and it shows no `— N more —`.
+    #[test]
+    fn f1_stays_byte_identical_after_the_item_row_extraction() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(1)));
+        let text = buffer_text(&render(&mut app, 64, 40));
+        let (chord, what) = KEYS[0];
+        let row = format!(" {chord:<width$}{what}", width = ITEM_LABEL_COLS);
+        assert!(text.contains(&row), "F1's first row drifted: {row:?}\n{text}");
+        assert!(!text.contains("more —"), "F1 leaked the overflow hint:\n{text}");
+        assert!(
+            text.contains("esc / F1 to close"),
+            "F1's footer drifted:\n{text}"
+        );
     }
 }
 

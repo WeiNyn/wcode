@@ -465,18 +465,38 @@ pub enum Overlay {
     ///   `"tasks"`, `"team"`); the renderer pads it into ` title ` (Q5) — the
     ///   padding is never stored, so `draw_help`'s `" keys "` and an info
     ///   `" help "` render through one panel helper.
-    /// - `text` is the whole body; `'\n'` separates rows. Not markdown, not
-    ///   styled, NOT wrapped: the renderer splits `lines()` and clips
-    ///   horizontally at the panel width (as `F1` does). Wrapping would break
-    ///   [`info_visible_rows`], which counts logical lines.
+    /// - `rows` is the whole body, one [`InfoRow`] per DRAWN line — a row is a
+    ///   line, which is what keeps the scroll arithmetic row-agnostic
+    ///   ([`App::info_lines`], [`info_visible_rows`], [`App::info_scroll`]). An
+    ///   [`InfoRow::Item`] renders as `F1`'s two-column row; a [`InfoRow::Prose`]
+    ///   as one body-weight span. Not wrapped: an over-long row clips horizontally
+    ///   at the panel width, as `F1` clips (D027). Wrapping would break
+    ///   [`info_visible_rows`], which counts rows.
     /// - `scroll` is the index of the FIRST visible body row (`0` = top),
     ///   clamped by [`App::info_scroll`] against [`info_visible_rows`].
     /// - `Esc` is the only close key; every other key is swallowed (Q2). No `q`.
     Info {
         title: String,
-        text: String,
+        rows: Vec<InfoRow>,
         scroll: u16,
     },
+}
+
+/// A row of an [`Overlay::Info`] body — one DRAWN line, so the scroll arithmetic
+/// stays row-agnostic (one row is one line; see [`info_visible_rows`]). App-local
+/// rather than `ratatui::Line`: the row is a MODEL fact (`label`/`detail`), the
+/// producers are all `String` builders, and its `Debug` prints readably in a test
+/// failure.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InfoRow {
+    /// `F1`'s row, byte-for-byte: a one-space indent, an `accent` label padded to
+    /// the 22-col column, then a `dim` detail (D027 §Decision).
+    Item { label: String, detail: String },
+    /// One body-weight, unwrapped span: the report text of the four non-tabular
+    /// commands (`/verify`, `/tasks`, `/team roster`, `/usage`) AND the bare
+    /// lowercase section labels `commands` / `keys`. An EMPTY string is the
+    /// blank-row idiom — no `Blank` variant exists.
+    Prose(String),
 }
 
 /// A filterable list the user navigates and selects from. `items` is the full
@@ -679,13 +699,13 @@ const COMMANDS: &[Command] = &[
         name: "plan",
         aliases: &[],
         args: Some("[on|off]"),
-        summary: "toggle plan mode (explore, don't mutate)",
+        summary: "toggle plan mode",
     },
     Command {
         name: "verify",
         aliases: &[],
         args: None,
-        summary: "check the plan's progress (are we finished?)",
+        summary: "check the plan's progress",
     },
     Command {
         name: "usage",
@@ -709,13 +729,13 @@ const COMMANDS: &[Command] = &[
         name: "width",
         aliases: &[],
         args: Some("<cols>"),
-        summary: "set the transcript width (40-200; also Alt-[ / Alt-])",
+        summary: "set the transcript width",
     },
     Command {
         name: "team",
         aliases: &[],
         args: Some("[name|roster]"),
-        summary: "switch to a project team (picker), or `roster` to list the team",
+        summary: "switch to a project team",
     },
     Command {
         name: "tasks",
@@ -947,23 +967,43 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("wheel (info)", "scroll the info modal three lines"),
 ];
 
-/// The generated `/help` text: the command list, then the keymap from [`KEYS`].
-fn help_text() -> String {
-    let mut out = String::from("commands:");
-    for cmd in COMMANDS {
-        out.push(' ');
-        out.push('/');
-        out.push_str(cmd.name);
-        if let Some(args) = cmd.args {
-            out.push(' ');
-            out.push_str(args);
+/// The `/help` item label for `cmd`: `"/"` + `name`, then its `args`
+/// (`/model <id>`, `/reload [--no-session]`); with no args, its aliases in
+/// brackets (`/new [clear]`, `/exit [quit]`, `/resume [sessions]`, `|`-joined if
+/// ever more than one). Precedence args-then-aliases is unobservable today (the
+/// three aliased commands all have `args: None`), but stated.
+fn command_label(cmd: &Command) -> String {
+    let mut label = format!("/{}", cmd.name);
+    match cmd.args {
+        Some(args) => {
+            label.push(' ');
+            label.push_str(args);
         }
+        None if !cmd.aliases.is_empty() => {
+            label.push_str(&format!(" [{}]", cmd.aliases.join("|")));
+        }
+        None => {}
     }
-    out.push_str("\nkeys:");
-    for (chord, what) in KEYS {
-        out.push_str(&format!("\n  {chord} — {what}"));
-    }
-    out
+    label
+}
+
+/// The `/help` body: a `commands` table (one [`InfoRow::Item`] per [`COMMANDS`]
+/// entry) above the `keys` table (one item per [`KEYS`] entry, styled exactly as
+/// `F1` styles them), with a blank [`InfoRow::Prose`] between the sections. This
+/// is the single `/help` body source; no trailing blank row.
+pub(crate) fn help_rows() -> Vec<InfoRow> {
+    let mut rows = vec![InfoRow::Prose("commands".to_string())];
+    rows.extend(COMMANDS.iter().map(|cmd| InfoRow::Item {
+        label: command_label(cmd),
+        detail: cmd.summary.to_string(),
+    }));
+    rows.push(InfoRow::Prose(String::new()));
+    rows.push(InfoRow::Prose("keys".to_string()));
+    rows.extend(KEYS.iter().map(|(chord, what)| InfoRow::Item {
+        label: (*chord).to_string(),
+        detail: (*what).to_string(),
+    }));
+    rows
 }
 
 /// `true` when `query` is already a complete command name *or alias* — nothing
@@ -2618,12 +2658,12 @@ impl App {
         self.dirty = true;
     }
 
-    /// Open an informational modal — the `/`-command twin of [`App::open_help`]
-    /// directly above, and the ONLY door to [`Overlay::Info`].
-    ///
-    /// `title` is the bare lowercase word (`"help"`, `"verify"`, `"usage"`,
-    /// `"tasks"`, `"team"`); the renderer pads it into ` title `. `text` is the
-    /// whole body (`\n`-separated). Scroll always resets to the top on open.
+    /// Open an informational modal from PROSE text — the door the four
+    /// non-tabular commands use (`/verify`, `/tasks`, `/team roster`, and the
+    /// `/usage` reply drain). The `/`-command twin of [`App::open_help`]. `title`
+    /// is the bare lowercase word (`"help"`, `"verify"`, …); the renderer pads it
+    /// into ` title `. Each `text` line becomes one [`InfoRow::Prose`]. Scroll
+    /// always resets to the top on open.
     ///
     /// # Contracts
     /// - Replaces whatever overlay is open. A `/`-command typed under a modal is
@@ -2631,12 +2671,27 @@ impl App {
     ///   only ever replace the overlay it is opening over in tests.
     /// - Touches neither the transcript nor the input: the echoed `/<cmd>`
     ///   transient from [`App::command`] is already pushed (Q4).
-    /// - Marks the frame dirty; never sends a `Request`.
-    /// - # Panics: never.
+    /// - `text.lines()` on `""` yields zero rows — a body-less panel, not a panic.
+    /// - Marks the frame dirty; never sends a `Request`; # Panics: never.
     fn open_info(&mut self, title: impl Into<String>, text: impl Into<String>) {
+        let text: String = text.into();
+        let rows: Vec<InfoRow> = text
+            .lines()
+            .map(|l| InfoRow::Prose(l.to_string()))
+            .collect();
+        self.open_info_rows(title, rows);
+    }
+
+    /// Open an info modal from EXPLICIT rows — the door `/help` uses, so the row
+    /// SHAPE is built by the caller ([`help_rows`]) and never inferred from a
+    /// string. Same contract as [`App::open_info`], which is now a wrapper:
+    /// replaces any open overlay, resets `scroll` to `0`, marks the frame dirty,
+    /// touches neither the transcript nor the input, never sends a `Request`,
+    /// never panics.
+    fn open_info_rows(&mut self, title: impl Into<String>, rows: Vec<InfoRow>) {
         self.overlay = Some(Overlay::Info {
             title: title.into(),
-            text: text.into(),
+            rows,
             scroll: 0,
         });
         self.dirty = true;
@@ -2662,10 +2717,11 @@ impl App {
     /// - Sets `dirty`; # Panics: never.
     fn info_scroll(&mut self, delta: isize) {
         let height = self.terminal_height;
-        let Some(Overlay::Info { text, scroll, .. }) = self.overlay.as_mut() else {
+        // Row-agnostic: one row is one line, so only the count changes.
+        let Some(Overlay::Info { rows, scroll, .. }) = self.overlay.as_mut() else {
             return;
         };
-        let lines = text.lines().count();
+        let lines = rows.len();
         let visible = info_visible_rows(lines, height);
         // Nothing is visible (no frame drawn yet, or a terminal too short for the
         // borders + footer + a row): scrolling is meaningless, so this is the
@@ -2687,11 +2743,11 @@ impl App {
         info_visible_rows(self.info_lines(), self.terminal_height)
     }
 
-    /// Body line count of the open modal (`Info{text}` → `text.lines().count()`),
-    /// `0` when none is open. Pairs with [`App::info_page`]; both are pure reads.
+    /// Row count of the open modal (`Info{rows}` → `rows.len()`), `0` when none is
+    /// open. Pairs with [`App::info_page`]; both are pure reads.
     fn info_lines(&self) -> usize {
         match &self.overlay {
-            Some(Overlay::Info { text, .. }) => text.lines().count(),
+            Some(Overlay::Info { rows, .. }) => rows.len(),
             _ => 0,
         }
     }
@@ -3835,7 +3891,10 @@ impl App {
             },
             "tasks" => self.open_info("tasks", tasks_text(&self.tasks)),
             "surface" => self.open_surface_picker(),
-            "help" => self.open_info("help", help_text()),
+            // `/help` is the one command with a TABULAR body — it opens explicit
+            // rows. The other prose producers (`/verify`, `/team roster`, `/tasks`,
+            // the `/usage` drain) keep `open_info(title, text)` and stay prose.
+            "help" => self.open_info_rows("help", help_rows()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
             // assert keeps a table entry from silently shadowing a real arm.
             _ => debug_assert!(
@@ -4790,6 +4849,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::ITEM_LABEL_COLS;
     use wcode_harness::message::StopReason;
 
     fn typed(app: &mut App, s: &str) {
@@ -4995,13 +5055,31 @@ mod tests {
             .collect()
     }
 
-    /// The body of the open info modal (panics when none is open) — the
-    /// test-side twin of [`App::overlay_title`].
-    fn info_body(app: &App) -> &str {
+    /// The rows of the open info modal (panics when none is open).
+    fn info_rows(app: &App) -> &[InfoRow] {
         match app.overlay() {
-            Some(Overlay::Info { text, .. }) => text,
+            Some(Overlay::Info { rows, .. }) => rows,
             other => panic!("expected an open info modal, got {other:?}"),
         }
+    }
+
+    /// The open info modal's body FLATTENED to text — what a row prints as when
+    /// there is no styling to see: an `Item` as `label` padded to the
+    /// [`ITEM_LABEL_COLS`] column, then the detail (mirroring the renderer); a
+    /// `Prose` as its text. Returns `String` (the rows own their text), so the
+    /// existing `assert_eq!(info_body(&app), "(no team)")` / `contains(…)` call
+    /// sites keep working.
+    fn info_body(app: &App) -> String {
+        info_rows(app)
+            .iter()
+            .map(|row| match row {
+                InfoRow::Item { label, detail } => {
+                    format!(" {label:<width$}{detail}", width = ITEM_LABEL_COLS)
+                }
+                InfoRow::Prose(text) => text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The headline effect (W014c): a `/`-command's chatter is TRANSIENT — it
@@ -7176,7 +7254,10 @@ mod tests {
     #[test]
     fn the_command_table_lists_reload() {
         assert!(COMMANDS.iter().any(|c| c.name == "reload"));
-        assert!(help_text().contains("/reload [--no-session]"));
+        // The label carries `args`, so this is `command_label`'s regression test
+        // (a bare `/reload` would fail it).
+        assert!(help_rows().iter().any(|r| matches!(r,
+            InfoRow::Item { label, .. } if label == "/reload [--no-session]")));
     }
 
     #[test]
@@ -7204,31 +7285,44 @@ mod tests {
     fn help_lists_every_command_and_the_keymap_from_the_tables() {
         let mut app = App::new();
         submit(&mut app, "/help");
-        let text = info_body(&app);
         assert_eq!(app.overlay_title(), "help");
-        assert!(
-            text.starts_with(
-                "commands: /new /exit /model <id> /theme [name] /effort [level] /compact [text] \
-                 /changes /resume /reload [--no-session] /btw <question> /plan [on|off] \
-                 /verify /usage /copy /surface /width <cols> /team [name|roster] /tasks /help"
-            ),
-            "the command listing changed: {text}"
-        );
+        let rows = info_rows(&app);
+        // Section labels are PROSE rows (D027) — bare, lowercase, no colon.
+        assert_eq!(rows[0], InfoRow::Prose("commands".into()));
+        // One Item per COMMANDS entry, in table order: label = command_label,
+        // detail = summary (compared to the field, never a literal).
+        for (i, cmd) in COMMANDS.iter().enumerate() {
+            let InfoRow::Item { label, detail } = &rows[1 + i] else {
+                panic!("row {} is not an Item: {:?}", 1 + i, rows[1 + i]);
+            };
+            assert_eq!(label, &command_label(cmd));
+            assert_eq!(detail, cmd.summary);
+        }
+        // The blank row + the `keys` header, then one Item per KEYS entry exactly
+        // as F1 styles them.
+        let keys_at = 1 + COMMANDS.len();
+        assert_eq!(rows[keys_at], InfoRow::Prose(String::new()), "the blank row");
+        assert_eq!(rows[keys_at + 1], InfoRow::Prose("keys".into()));
+        for (i, (chord, what)) in KEYS.iter().enumerate() {
+            assert_eq!(
+                rows[keys_at + 2 + i],
+                InfoRow::Item {
+                    label: (*chord).into(),
+                    detail: (*what).into()
+                }
+            );
+        }
+        assert_eq!(rows.len(), COMMANDS.len() + KEYS.len() + 3, "2 headers + 1 blank");
+        // Discovery: every command name is a `/`-prefixed label (the word the user
+        // types) and every KEYS chord appears as a label (the loop above).
         for name in [
             "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload",
             "btw", "plan", "verify", "usage", "copy", "surface", "width", "team", "tasks", "help",
         ] {
+            let prefixed = format!("/{name}");
             assert!(
-                text.contains(&format!("/{name}")),
-                "{name} missing from help: {text}"
-            );
-        }
-        // The keymap is generated from `KEYS`, so discovery has a path without F1.
-        assert!(text.contains("keys:"), "keys section missing: {text}");
-        for (chord, _) in KEYS {
-            assert!(
-                text.contains(chord),
-                "{chord} missing from /help: {text}"
+                rows.iter().any(|r| matches!(r, InfoRow::Item { label, .. } if label.starts_with(&prefixed))),
+                "{name} missing from /help: {rows:?}"
             );
         }
     }
@@ -8421,10 +8515,7 @@ mod tests {
             // The echo survives; no reply transient does.
             assert_eq!(chatter(&app), vec![cmd.to_string()], "{cmd}");
             assert_eq!(app.overlay_title(), title, "{cmd}");
-            let Some(Overlay::Info { text, .. }) = app.overlay() else {
-                unreachable!()
-            };
-            assert!(!text.is_empty(), "{cmd} opened an empty body");
+            assert!(!info_rows(&app).is_empty(), "{cmd} opened an empty body");
         }
     }
 
@@ -8554,6 +8645,74 @@ mod tests {
             }),
             model: None,
         }]
+    }
+
+    /// `/help` is a TABLE: two prose section labels with Items between them, in
+    /// table order — the command list first, the keymap second. (The drawn styling
+    /// is ui.rs's; see `help_rows_render_in_f1s_two_column_style` there.)
+    #[test]
+    fn help_rows_are_items_in_f1_style() {
+        let mut app = App::new();
+        submit(&mut app, "/help");
+        let rows = info_rows(&app);
+        assert_eq!(rows.first(), Some(&InfoRow::Prose("commands".into())));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r, InfoRow::Item { .. }))
+                .count(),
+            COMMANDS.len() + KEYS.len(),
+            "one Item per command and per key"
+        );
+        // The retired single-line header is gone.
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r, InfoRow::Prose(t) if t.starts_with("commands:"))),
+            "the old `commands:` line survives: {rows:?}"
+        );
+        // The prose commands stay prose — one Prose row per text line.
+        for cmd in ["/verify", "/tasks", "/team roster"] {
+            let mut app = App::new();
+            submit(&mut app, cmd);
+            assert!(
+                info_rows(&app).iter().all(|r| matches!(r, InfoRow::Prose(_))),
+                "{cmd} produced a non-Prose row"
+            );
+        }
+    }
+
+    /// `command_label` is the `/help` label formula: args win, aliases in brackets
+    /// when there are none, bare name otherwise.
+    #[test]
+    fn command_labels_carry_args_or_aliases_in_brackets() {
+        let label = |name: &str| command_label(command_named(name).unwrap());
+        assert_eq!(label("model"), "/model <id>", "args win");
+        assert_eq!(label("reload"), "/reload [--no-session]");
+        assert_eq!(label("new"), "/new [clear]", "aliases, no args");
+        assert_eq!(label("exit"), "/exit [quit]");
+        assert_eq!(label("resume"), "/resume [sessions]");
+        assert_eq!(label("tasks"), "/tasks", "neither args nor aliases");
+        // Every label is `/`-prefixed.
+        assert!(COMMANDS.iter().all(|c| command_label(c).starts_with('/')));
+    }
+
+    /// The scroll machinery is row-agnostic: `/help`'s table scrolls and clamps by
+    /// ROWS. (Extends `the_info_modal_scrolls_and_clamps`, which passes as-is.)
+    #[test]
+    fn a_row_body_scrolls_by_rows() {
+        let mut app = App::new();
+        submit(&mut app, "/help");
+        let body = info_rows(&app).len();
+        app.set_terminal_height(10); // 7 visible rows
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.overlay_scroll(), 1, "one Down is one row");
+        for _ in 0..body {
+            app.handle(AppEvent::Key(Key::Down));
+        }
+        assert_eq!(
+            app.overlay_scroll() as usize,
+            body - info_visible_rows(body, 10),
+            "clamped to the last row"
+        );
     }
 }
 
