@@ -56,7 +56,7 @@ pub struct TodoItem {
     pub content: String,
     pub status: TodoStatus,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     AgentStart,
@@ -169,6 +169,24 @@ pub enum AgentEvent {
     Status {
         last_assistant_text: Option<String>,
     },
+
+    /// Reply: this session's usage report — turns, summed input/output/cache
+    /// tokens, the cache hit rate, per-tool `calls`/`errors`/`result_bytes`, and
+    /// a `$` cost when the model is priced (all inside [`crate::stats::SessionStats`]).
+    /// Answers a [`crate::protocol::Request::Usage`]. Never streamed (see
+    /// [`AgentEvent::Ack`]) — the [`AgentEvent::Status`] rationale: a FOLDED
+    /// summary ships, not the transcript, so a mid-session `Usage` needs no
+    /// baseline and cannot be invalidated by compaction. Purely additive on the
+    /// wire (`{"type":"usage","stats":{…}}`), exactly like `CompactionSkipped`
+    /// (`event.rs:117-119`) — an older peer drops the frame — so
+    /// `crate::protocol::PROTOCOL_VERSION` stays 1.
+    ///
+    /// `stats.cost` is `None` when nothing could be priced (an unknown model, or
+    /// a session that reported no usage) — absence, never `$0`.
+    Usage {
+        stats: crate::stats::SessionStats,
+    },
+
     /// Reply: the model catalog the provider advertises, answering a
     /// [`crate::protocol::Request::ListModels`]. Never streamed (see
     /// [`AgentEvent::Ack`]) — one reply, correlated by the transport, exactly
@@ -336,6 +354,31 @@ mod tests {
             "status",
         );
         roundtrip(
+            AgentEvent::Usage {
+                stats: crate::stats::SessionStats {
+                    turns: 1,
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_read_tokens: 400,
+                    cache_write_tokens: 5,
+                    cache_turns: 1,
+                    tools: vec![crate::stats::ToolStat {
+                        name: "read".into(),
+                        calls: 2,
+                        errors: 1,
+                        result_bytes: 42,
+                    }],
+                    tool_errors: 1,
+                    last_input_tokens: Some(1_000),
+                    cost: Some(crate::stats::Cost {
+                        micro_usd: 391,
+                        unpriced_turns: 0,
+                    }),
+                },
+            },
+            "usage",
+        );
+        roundtrip(
             AgentEvent::Models { models: vec!["m1".into(), "m2".into()] },
             "models",
         );
@@ -407,5 +450,16 @@ mod tests {
         let v2 = serde_json::to_value(&AgentEvent::TurnEnd { message: m }).unwrap();
         assert_eq!(v2["type"], "turn_end");
         assert_eq!(v2["message"]["role"], "user");
+
+        // Pin the flat `usage` shape once so a field rename cannot slip past.
+        let v3 = serde_json::to_value(&AgentEvent::Usage {
+            stats: crate::stats::SessionStats {
+                turns: 1,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(v3["type"], "usage");
+        assert_eq!(v3["stats"]["turns"], 1);
     }
 }

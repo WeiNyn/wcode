@@ -41,6 +41,7 @@
 //!        SetEffort {..} ─► agent.set_effort(..)
 //!        Compact   {..} ─► agent.compact(..).await
 //!        GetHistory     ─► reply with the context
+//!        Usage          ─► reply with folded stats (+ $ when priced)
 //!        Unknown        ─► (ignored)
 //! ```
 //!
@@ -102,7 +103,8 @@
 //! `send` is fire-and-forget; `ask` awaits a reply. The reply is an
 //! [`AgentEvent`] reply variant — [`AgentEvent::History`] for `GetHistory`,
 //! [`AgentEvent::Ack`]/[`AgentEvent::Error`] for `SetModel`/`SetEffort`/
-//! [`AgentEvent::Compaction`] for `Compact` — correlated in-process by a
+//! [`AgentEvent::Compaction`] for `Compact`, [`AgentEvent::Usage`] for `Usage`
+//! — correlated in-process by a
 //! one-shot channel. Replies are never fanned out on the event stream; the wire
 //! (S2) will carry the same variants correlated by the envelope's `reply_to`.
 //!
@@ -121,6 +123,7 @@ use crate::hooks::HooksSet;
 use crate::loop_::LoopError;
 use crate::message::{AgentMessage, StopReason};
 use crate::protocol::{MemberState, Request, SessionId};
+use crate::streamfn::LlmOpts;
 
 /// Default outbox buffer: how far a subscriber may lag before it starts losing
 /// events (`broadcast` semantics — the slowest reader drops, it never blocks the
@@ -319,6 +322,31 @@ async fn gate_inbound(hooks: &HooksSet, message: &mut Message) -> Option<String>
     hooks.before_inbound(from.as_ref(), request).await
 }
 
+/// Build the `Request::Usage` reply: fold the transcript, then price it with
+/// the provider THIS session bills against — the one body both arms share, so
+/// an idle and a mid-run report can never disagree about what a report is.
+///
+/// Contract:
+/// - the fold is the pure [`crate::stats::session_stats`] over `messages` (the
+///   idle arm passes the live `Agent::messages()`, the mid-run arm the
+///   turn-boundary snapshot);
+/// - `cost` comes from [`crate::pricing::cost_of`] on the SAME slice with
+///   `llm.base_url.as_deref()` / `&llm.model`, so a model switched mid-session
+///   is priced per message and the turns that cannot be priced are COUNTED
+///   (`Cost::unpriced_turns`), not silently dropped;
+/// - an unknown provider or model yields `cost: None` inside an otherwise
+///   valid report — a missing price is never an [`AgentEvent::Error`];
+/// - empty `messages` ⇒ a `SessionStats::default()` in the reply, i.e.
+///   "(no usage reported)" downstream: a fresh session answers, it does not fail.
+///
+/// Does NOT promise: a `$` for a non-zen provider, tier rates, or a per-model
+/// `base_url` (see `pricing`'s module doc). Panics on nothing.
+fn usage_reply(messages: &[AgentMessage], llm: &LlmOpts) -> AgentEvent {
+    let mut stats = crate::stats::session_stats(messages);
+    stats.cost = crate::pricing::cost_of(messages, llm.base_url.as_deref(), &llm.model);
+    AgentEvent::Usage { stats }
+}
+
 /// Service one mailbox item: run the request, then answer an `Ask` with the
 /// reply it produced (a `Tell` drops the reply on the floor).
 async fn dispatch(
@@ -438,6 +466,7 @@ async fn dispatch(
         Request::Status => AgentEvent::Status {
             last_assistant_text: crate::message::last_assistant_text(agent.messages()),
         },
+        Request::Usage => usage_reply(agent.messages(), agent.llm()),
         // A served peer is defined by a socket server's injected handler; an
         // in-process session has no factory, so it can only refuse.
         Request::Define { .. } => AgentEvent::Error {
@@ -581,6 +610,19 @@ async fn run(
                         let _ = reply.send(AgentEvent::Status {
                             last_assistant_text: side.last_assistant_text(),
                         });
+                    }
+                    // The mid-run twin of the idle arm: answered AT ONCE from the
+                    // turn-boundary snapshot, so a `/usage` never waits for the run
+                    // to finish. `side.history()` clones the snapshot; the fold needs
+                    // the slice and the reply owns the result. This arm must NOT fall
+                    // through to `deferred` — a read that queues behind a run is the
+                    // bug `GetHistory` already fixed.
+                    Message::Ask {
+                        request: Request::Usage,
+                        reply,
+                        ..
+                    } => {
+                        let _ = reply.send(usage_reply(&side.history(), side.llm()));
                     }
                     Message::Ask {
                         request: Request::SideAsk { text },
@@ -1570,6 +1612,108 @@ mod tests {
             ["m1", "m1", "m2"],
             "the swap applied after the run, not before"
         );
+    }
+
+    #[tokio::test]
+    async fn usage_reply_is_answered_mid_run_without_waiting() {
+        // Cloned from `ask_status_is_answered_mid_run_from_the_snapshot`: same
+        // GateTool + release choreography, one assertion changed — the mid-run
+        // ask answers at once with folded, PRICED stats.
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        // Seed a priced assistant (zen base + deepseek-v4.1-flash) so the mid-run
+        // reply folds ONE turn and reports a cost.
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![gate]);
+        cfg.llm.base_url = Some("https://opencode.ai/zen/go/v1".into());
+        cfg.llm.model = "deepseek-v4.1-flash".into();
+        cfg.context = vec![AgentMessage::Assistant {
+            content: vec![crate::message::ContentBlock::Text {
+                text: "seeded work".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: Some(crate::message::Usage {
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: Some(400),
+                cache_write_tokens: None,
+            }),
+            model: Some("deepseek-v4.1-flash".into()),
+        }];
+        let handle = SessionActor::spawn(Agent::new(cfg));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // run is inside the tool
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), handle.ask(Request::Usage))
+            .await
+            .expect("usage must not wait for the run")
+            .unwrap();
+        let AgentEvent::Usage { stats } = reply else {
+            panic!("expected Usage, got {reply:?}");
+        };
+        assert_eq!(stats.turns, 1);
+        assert!(stats.cost.is_some(), "a priced model reports a cost mid-run");
+
+        release.notify_one();
+        wait_for_end(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn an_idle_usage_reply_folds_the_live_transcript() {
+        // The idle arm reads the FRESH `Agent::messages()`, not the snapshot.
+        let rec = Recorder::default();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![]);
+        cfg.llm.base_url = None; // unpriced: a valid report with cost: None
+        cfg.context = vec![AgentMessage::Assistant {
+            content: vec![crate::message::ContentBlock::Text {
+                text: "done".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: Some(crate::message::Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
+            model: None,
+        }];
+        let handle = SessionActor::spawn(Agent::new(cfg));
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), handle.ask(Request::Usage))
+            .await
+            .expect("an idle usage read answers")
+            .unwrap();
+        let AgentEvent::Usage { stats } = reply else {
+            panic!("expected Usage, got {reply:?}");
+        };
+        assert_eq!(stats.turns, 1);
+        assert_eq!(stats.input_tokens, 10);
+        assert_eq!(stats.cost, None, "no base_url ⇒ no price, never $0");
     }
 
     #[tokio::test]

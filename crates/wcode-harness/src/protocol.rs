@@ -211,6 +211,7 @@ pub struct SessionInfo {
 /// | `SetModel` | `Agent::set_model` |
 /// | `SetEffort` | `Agent::set_effort` |
 /// | `Compact` | `Agent::compact` |
+/// | `Usage` | `crate::stats::session_stats` + `pricing::cost_of` |
 ///
 /// The one exception is [`Request::ListSessions`]: a transport-level probe the
 /// server answers, not an `Agent` method.
@@ -283,6 +284,23 @@ pub enum Request {
     /// [`Request::GetHistory`]). A `member`-style peek: the reply is one small
     /// string, not the whole history. Reply: [`AgentEvent::Status`].
     Status,
+
+    /// Read this session's usage report: turns, summed tokens, the cache hit
+    /// rate, per-tool `calls`/`errors`/`result_bytes`, and a `$` cost when the
+    /// model is priced — WITHOUT shipping the transcript (unlike
+    /// [`Request::GetHistory`]). The [`Request::Status`] rationale applies: a
+    /// folded summary, one small payload, no baseline needed on the client.
+    ///
+    /// Answered from the actor's own `Agent`/`SideHandle`, which is where the
+    /// provider lives (`agent.rs:410` `llm: LlmOpts,`), so the actor — not the
+    /// front-end — prices the session. A `Usage` arriving mid-run is answered
+    /// from the turn-boundary snapshot (like `GetHistory`), never deferred.
+    /// Reply: [`AgentEvent::Usage`].
+    ///
+    /// On a remote peer that predates the variant, `#[serde(other)] Unknown`
+    /// catches it and the actor answers `Ack` — read as "unavailable", NOT as
+    /// zero usage (WS-D/WS-E decide the rendering).
+    Usage,
 
     /// Ask the **transport** for the sessions a server serves — serve order,
     /// root first. The one request that names no `Agent` method: an in-process
@@ -422,6 +440,7 @@ mod tests {
         roundtrip(Request::Wake { content: "w".into() }, "wake");
         roundtrip(Request::SideAsk { text: "why?".into() }, "side_ask");
         roundtrip(Request::Status, "status");
+        roundtrip(Request::Usage, "usage");
         roundtrip(Request::ListSessions, "list_sessions");
         roundtrip(Request::ListModels, "list_models");
         roundtrip(
@@ -450,6 +469,33 @@ mod tests {
             },
             "define",
         );
+    }
+
+    #[test]
+    fn usage_request_roundtrips_with_costs() {
+        roundtrip(Request::Usage, "usage");
+        roundtrip(
+            AgentEvent::Usage {
+                stats: crate::stats::SessionStats {
+                    turns: 1,
+                    input_tokens: 1_000,
+                    output_tokens: 500,
+                    cache_read_tokens: 400,
+                    cache_turns: 1,
+                    tool_errors: 1,
+                    cost: Some(crate::stats::Cost {
+                        micro_usd: 391,
+                        unpriced_turns: 0,
+                    }),
+                    ..Default::default()
+                },
+            },
+            "usage",
+        );
+        let frame = RequestFrame::new(7, SessionId::new("s1"), Request::Usage);
+        let back: RequestFrame =
+            serde_json::from_value(serde_json::to_value(&frame).unwrap()).unwrap();
+        assert_eq!(back, frame);
     }
 
     #[test]
@@ -505,6 +551,7 @@ mod tests {
         assert!(!is_inbound(&Request::Submit { text: "x".into() }));
         assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::Status));
+        assert!(!is_inbound(&Request::Usage));
         assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
         assert!(!is_inbound(&Request::SetPlanMode { on: true }));
         assert!(!is_inbound(&Request::Cancel));

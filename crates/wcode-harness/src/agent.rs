@@ -388,6 +388,13 @@ impl Agent {
     pub fn session_id(&self) -> Option<String> {
         self.session.as_ref().and_then(session_header_id)
     }
+
+    /// The provider options this agent bills against — the `base_url`/`model`
+    /// pair `pricing::model_price` keys on. Read-only, so the actor can price a
+    /// usage report without the `&mut` a run holds.
+    pub(crate) fn llm(&self) -> &LlmOpts {
+        &self.llm
+    }
 }
 
 /// The reply to a `/btw` side question: the answer text and the turn's token
@@ -425,6 +432,12 @@ impl SideHandle {
         let rx = self.ctx.subscribe();
         let messages = rx.borrow();
         crate::message::last_assistant_text(&messages[..])
+    }
+
+    /// The provider options captured when the handle was taken — what a
+    /// MID-RUN usage report is priced with (`Request::Usage`).
+    pub(crate) fn llm(&self) -> &LlmOpts {
+        &self.llm
     }
 
     /// Answer `text` tool-free from the latest snapshot; semantics match
