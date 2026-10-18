@@ -192,6 +192,54 @@ impl SessionFactory {
         self.template.members_dir.as_deref()
     }
 
+    /// The edge judge (B2j). `member` is a resolved
+    /// [`TeamMember`](crate::config::TeamMember) — the `judger`
+    /// (`.wcode/agents/judger.md` or a `[[team]]` entry) — or `None` to fall back
+    /// to the ROOT template's `llm`/`stream_fn` + the built-in contract
+    /// ([`JUDGE_SYSTEM_CONTRACT`](crate::judge::JUDGE_SYSTEM_CONTRACT)).
+    ///
+    /// The member supplies ROLE + MODEL ONLY: its `model`/`base_url`/`api_key`/
+    /// `effort` override `template.llm`, and its `role` is appended to the
+    /// contract as a `# Role` section. Its `tools` field is IGNORED — the judge
+    /// is never spawned, so the completion has zero tools by construction
+    /// (resolving D3 for the judge).
+    ///
+    /// Never returns `None`: a judge always exists (the fallback above), so the
+    /// scheduler's field is a plain `Arc<dyn Judge>`.
+    pub fn judge(&self, member: Option<&crate::config::TeamMember>) -> Arc<dyn crate::judge::Judge> {
+        let mut llm = self.template.llm.clone();
+        let mut system = crate::judge::JUDGE_SYSTEM_CONTRACT.to_string();
+        if let Some(m) = member {
+            if let Some(model) = &m.model {
+                llm.model = model.clone();
+                // The model's own `[models.<id>]` profile settles the provider;
+                // an explicit `base_url`/`api_key` below still wins (the SAME
+                // order `worker_config_with` uses).
+                llm.settle_provider();
+            }
+            if let Some(base_url) = &m.base_url {
+                llm.base_url = Some(base_url.clone());
+            }
+            if let Some(api_key) = &m.api_key {
+                llm.api_key = Some(api_key.clone());
+            }
+            match m.effort.as_deref() {
+                None => {}
+                Some("-" | "none" | "off") => llm.effort = None,
+                Some(level) => llm.effort = Some(level.to_string()),
+            }
+            if let Some(role) = &m.role {
+                system.push_str("\n\n# Role\n");
+                system.push_str(role);
+            }
+        }
+        Arc::new(crate::judge::ModelJudge::new(
+            llm,
+            self.template.stream_fn.clone(),
+            system,
+        ))
+    }
+
     /// Install a sink that receives a [`SurfaceSpec`] for each worker spawned
     /// after this call — the runtime feed a live TUI adds surfaces from (D27
     /// removed the old `TeamUpdate` feed; this replaces it).
@@ -753,6 +801,7 @@ impl Orchestrator {
         self.phonebook.insert(short_name(&id), id);
     }
 
+
     /// Register the root's mailbox so a worker can report back to it.
     /// Start the DAG scheduler as a detached task over this orchestrator's plan.
     ///
@@ -766,6 +815,7 @@ impl Orchestrator {
         working_dir: PathBuf,
         hooks: HooksSet,
         cancel: CancellationToken,
+        judger: Option<&crate::config::TeamMember>,
     ) {
         let self_addr = SessionId::agent("scheduler");
         // Permit the scheduler → root escalation `Wake`: the root owns
@@ -773,6 +823,9 @@ impl Orchestrator {
         // be `register`ed yet (`permitted` reads only `owners`); an escalation
         // before it is just a `deliver` → `Unknown`, which `escalate` ignores.
         self.registry.set_owner(self_addr.clone(), self.id.clone());
+        // The edge judge (B2j). `judger` is the resolved `judger` member, or
+        // `None` → the root template's model + the built-in contract.
+        let judge = self.factory.judge(judger);
         tokio::spawn(
             crate::scheduler::Scheduler::new(
                 self.registry.clone(),
@@ -782,6 +835,7 @@ impl Orchestrator {
                 working_dir,
                 hooks,
                 cancel,
+                judge,
             )
             .run(),
         );

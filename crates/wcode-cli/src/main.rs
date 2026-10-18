@@ -19,10 +19,6 @@ mod agents;
 mod config;
 mod frontmatter;
 mod instructions;
-// The judge seam is implemented and unit-tested here; Stage 3b wires it into
-// the scheduler/factory. Until then nothing in the binary references it, so the
-// module-level `allow` keeps `clippy --all-targets` clean.
-#[allow(dead_code)]
 mod judge;
 mod repl;
 mod rtk;
@@ -1541,10 +1537,20 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // runtime is present. A served `--owner` worker (no orchestrator) spawns
     // nothing.
     if let Some(o) = &orchestrator {
+        // The single distinct `judge` name across the workflow's edges (A12
+        // guarantees ≤1), resolved from the folded `[team]`; absent → `None` →
+        // the root template's model + the built-in judge contract.
+        let judger = cfg.workflow.as_ref().and_then(|w| {
+            let name = w.edges.iter().find_map(|e| {
+                e.condition.as_ref().and_then(|c| c.judge.as_deref())
+            })?;
+            cfg.team.iter().find(|m| m.name == name)
+        });
         o.spawn_scheduler(
             cwd.clone(),
             hooks.clone(),
             tokio_util::sync::CancellationToken::new(),
+            judger,
         );
     }
     Runtime {
@@ -2485,108 +2491,6 @@ fn should_instantiate_workflow(
     !resuming_group && has_workflow && has_task
 }
 
-// ==== SKETCH (review-only, not real code) ====  (W025 §4.2, plan steps 1–2/6)
-//
-// `instantiate_workflow` (main.rs:2486) — CHANGED BODY, same signature
-// (`fn instantiate_workflow(tasks: &TaskList, workflow: &Workflow, task:
-// Option<&str>) -> usize`). The topological order now comes from
-// `config::topo_order` walking `edges` (config.rs:933, rewritten — see the
-// config sketch), so main.rs:2492-2493 needs no edit; only the dep BUILD
-// changes.
-//
-// The `depends_on` walk at main.rs:2497-2506
-//     let mut deps: Vec<u32> = Vec::with_capacity(node.depends_on.len());
-//     for d in &node.depends_on {
-//         match ids.get(d.as_str()) {
-//             Some(&id) => deps.push(id),
-//             None => workflow_fail(&format!(
-//                 "node `{}`: depends_on `{d}` was not created",
-//                 node.id
-//             )),
-//         }
-//     }
-// becomes an INCOMING-EDGE walk producing `Vec<crate::tasks::Dep>`:
-//
-//     let incoming: Vec<&crate::config::WorkflowEdge> =
-//         workflow.incoming_edges(&node.id).collect();
-//     let mut deps: Vec<crate::tasks::Dep> = Vec::with_capacity(incoming.len());
-//     for e in incoming {
-//         // `e.from` is already created: `topo_order` over `edges` guarantees
-//         // every source precedes its target (Blocker 1).
-//         let Some(&src) = ids.get(e.from.as_str()) else {
-//             workflow_fail(&format!(
-//                 "node `{}`: edge from `{}` was not created",
-//                 node.id, e.from
-//             ))
-//         };
-//         deps.push(match &e.condition {
-//             None => crate::tasks::Dep::Id(src),
-//             Some(c) => crate::tasks::Dep::Edged {
-//                 id: src,
-//                 condition: Some(c.clone()),
-//             },
-//         });
-//     }
-//
-// `tasks.create(crate::config::node_title(node, task), deps, node.gate)`
-// (main.rs:2507) keeps its shape — `create` now takes `Vec<Dep>` (see the
-// tasks.rs sketch). Everything else in the fn (main.rs:2508-2532: `ids.insert`,
-// the member/script `match`, `assign`, `configure`) is UNCHANGED.
-// The `n = order.len()` return (main.rs:2495) is unchanged.
-//
-// ==== AMENDMENT A8 — adjacency registration (DECIDED; friction #9) ====
-//
-// The brief (§4.4) anchors this at `agents.rs:407` HEAD
-// (`tools.push(erased(Message::new(`) — WRONG: that line builds one worker's
-// `message` tool and knows nothing about edges or peers. The graph is known
-// HERE, and `cfg.workflow` is in scope at the caller (`main.rs:1519-1529` HEAD
-// boot block). DECISION: a SEPARATE function, NOT a widened
-// `instantiate_workflow` (keeps the count-returning fn pure of the registry):
-//
-// /// Register workflow-edge adjacency in the registry: for each edge whose
-// /// BOTH endpoints are `member` (session) nodes, `allow_pair` their
-// /// addresses, so the two may `message` each other (A1). A `script` node has
-// /// no address, so such an edge contributes no pair. Call once at boot,
-// /// right after `instantiate_workflow`, before `spawn_scheduler`.
-// fn register_adjacency(reg: &wcode_protocol::Registry, w: &crate::config::Workflow) {
-//     for e in &w.edges {
-//         let (Some(a), Some(b)) = (member_of(w, &e.from), member_of(w, &e.to)) else {
-//             continue;   // a script endpoint has no session address
-//         };
-//         // §F DOC AMENDMENT: adjacency is keyed by the MEMBER/SESSION ADDRESS
-//         // (`agent:<member>`, `tools/message.rs:57 HEAD address()`), NOT by
-//         // the node id. A node id (`explore`) deliberately differs from a
-//         // member name (`explorer`) — `main.rs:2512` HEAD already maps
-//         // `member` → `address(m)` for the node's owner, so the pair must use
-//         // the SAME mapping or `deliver` would target `agent:explore`, which
-//         // is not a registered session. The brief §8's "workflow nodes may
-//         // `message` each other by `agent:<id>`" means the MEMBER, not the
-//         // node id.
-//         reg.allow_pair(&crate::tools::message::address(a),
-//                        &crate::tools::message::address(b));
-//     }
-// }
-//
-// /// The `member` name of the node with id `id`, or `None` for a `script` node
-// /// (or an unknown id, which load validation rules out).
-// fn member_of<'a>(w: &'a crate::config::Workflow, id: &str) -> Option<&'a str> {
-//     w.nodes.iter().find(|n| n.id == id)?.member.as_deref()
-// }
-//
-// The boot block (`main.rs:1519-1529` HEAD) becomes two statements:
-//     let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
-//     register_adjacency(o.registry(), workflow);      // NEW (A8)
-//     eprintln!("workflow: {n} nodes");
-// `Orchestrator::registry()` already exists — HEAD `agents.rs:715` / tree
-// `:757` (`pub fn registry(&self) -> &Registry`). So `instantiate_workflow`'s
-// SIGNATURE IS NOT TOUCHED, and its `#[cfg(test)]` caller
-// `instantiate_workflow_handles_a_later_authored_dependency` (HEAD
-// `main.rs:3259`, tree `:3353`) keeps its call shape — though its
-// `WorkflowNode` literals at HEAD `main.rs:3270`/`:3278` still carry a
-// `depends_on: vec![…]` field that MUST be migrated to `[[workflow.edge]]`
-// (step 6), and its assertion at HEAD `main.rs:3289` becomes `vec![Dep::Id(1)]`.
-//
-// ==== /SKETCH ====
 /// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so an
 /// edge's `from` may name a later-authored node — Blocker 1), mapping each
 /// string id to its numeric task id before resolving deps. Returns the count.
@@ -2657,21 +2561,6 @@ fn workflow_fail(msg: &str) -> ! {
 }
 
 
-// ==== SKETCH (review-only, not real code) ====  (W025 §4.2, plan step 2)
-//
-// `task_item` (main.rs:2543) — ONE field changes. `wcode_tui::TaskItem.deps`
-// is `Vec<u32>` (`crates/wcode-tui/src/app.rs:1195 pub deps: Vec<u32>,`,
-// rendered as `← #a,#b`), so the new `Task.deps: Vec<Dep>` must be mapped
-// through `Dep::id()`:
-//
-//     deps: task.deps.clone(),                                  // main.rs:2549
-//  →  deps: task.deps.iter().map(|d| d.id()).collect(),
-//
-// Nothing else in `task_item` moves: `state` already carries
-// `task.state.label()` (main.rs:2548), so a fifth variant's `"skipped"` label
-// flows to the TUI for free (see the `TaskState` sketch in tasks.rs).
-//
-// ==== /SKETCH ====
 /// Map a task-list entry to the TUI's view type (owner shortened to `w1`).
 fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
     wcode_tui::TaskItem {
