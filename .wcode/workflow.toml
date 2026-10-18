@@ -20,7 +20,14 @@
 #
 # The graph turns a feature request into a PR whose pipeline (CI) passes:
 #
-#   explore → sketch → review-sketch → implement → verify → publish → ci
+#   explore → sketch → review-sketch → implement → verify → publish
+#                                         └──────── implement → ci ← publish
+#
+# The graph is nodes + `[[workflow.edge]]` edges. An edge may carry an optional
+# condition (`condition = { script = "…" }` — a shell test, exit 0 = taken — or
+# `condition = { judge = "judger", criterion = "…" }` — a no-tool LLM verdict).
+# A false/SKIP condition makes the target `Skipped`: it never runs, but its own
+# dependents still become ready (a skip prunes a step, it does not stall the DAG).
 #
 # The brainstorm/brief step is deliberately NOT a node here (D001): it needs a
 # human's sign-off, and a headless run has none. It lives in the prompt layer —
@@ -101,41 +108,60 @@ title = "Explore the repo for the feature request: {{task}}"
 [[workflow.node]]
 id = "sketch"                       # sketch the interface before coding
 member = "sketcher"
-depends_on = ["explore"]
 title = "Sketch the interface for: {{task}}"
 
 [[workflow.node]]
 id = "review-sketch"                # first-layer gate: approve the sketch, or
 member = "reviewer"                 # reject it and re-open `sketch`
-depends_on = ["sketch"]
 gate = true
 title = "First-layer review of the sketch"
 
 [[workflow.node]]
 id = "implement"                    # the developer fills the approved sketch on
 member = "developer"                # a feature branch it creates or reuses
-depends_on = ["review-sketch"]
 title = "Create/reuse a feature branch, then implement the feature: {{task}}"
 
 [[workflow.node]]
 id = "verify"                       # second-layer gate: approve the diff (after
 member = "reviewer"                 # running cargo test/clippy), or re-open it
-depends_on = ["implement"]
 gate = true
 title = "Second-layer review: read the diff, run cargo test --workspace and cargo clippy --workspace --all-targets, then approve or reject"
 
 [[workflow.node]]
 id = "publish"                      # commit + push the branch + open/update the PR
 member = "developer"
-depends_on = ["verify"]
 title = "Commit all changes, push the branch, and open or update the PR (gh pr create --fill, or gh pr view when it already exists)"
 
 [[workflow.node]]
 id = "ci"                           # the pipeline gate: wait for the PR checks
 member = "developer"                # (gh pr checks --watch) and report the result
-depends_on = ["implement", "publish"]
 gate = true
 title = "Wait for the PR checks to finish (gh pr checks --watch, run via bash with a long timeout_secs such as 900), then report PASS or FAIL"
+
+# The DAG as explicit edges (a `depends_on` on a node is gone). One edge per
+# `(from, to)` pair; `topo_order` walks these. Unconditional here — a condition
+# is opt-in per edge (`condition = { script = "…" }` / `{ judge = … }`).
+[[workflow.edge]]
+from = "explore"
+to = "sketch"
+[[workflow.edge]]
+from = "sketch"
+to = "review-sketch"
+[[workflow.edge]]
+from = "review-sketch"
+to = "implement"
+[[workflow.edge]]
+from = "implement"
+to = "verify"
+[[workflow.edge]]
+from = "verify"
+to = "publish"
+[[workflow.edge]]
+from = "implement"
+to = "ci"
+[[workflow.edge]]
+from = "publish"
+to = "ci"
 
 # grep/find are off by default; the explorer's allow-list names them.
 [tools]

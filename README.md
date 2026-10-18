@@ -156,9 +156,10 @@ effort = "high"
 
 ### `[workflow]` — a plan template (requires `--agents`)
 
-A single `[workflow]` table seeds the task DAG at boot. Each `[[workflow.node]]`
-becomes a node, instantiated in **topological order** (so a `depends_on` may name
-a later-authored sibling):
+A single `[workflow]` table seeds the task DAG at boot. Nodes are
+`[[workflow.node]]`; the graph is `[[workflow.edge]]` (one edge per `(from, to)`
+pair), instantiated in **topological order** (so an edge's `from` may name a
+later-authored node). An edge may carry an optional `condition`:
 
 ```toml
 [workflow]
@@ -172,20 +173,44 @@ title = "Explore: {{task}}" # optional label; {{task}} is the run's task
 [[workflow.node]]
 id = "implement"
 member = "builder"
-depends_on = ["explore"]    # sibling ids; resolved to Task ids at boot
 
 [[workflow.node]]
 id = "verify"
-depends_on = ["implement"]
 gate = true
 script = "cargo test --workspace"   # a physical gate (exit code = verdict)
+
+[[workflow.edge]]
+from = "explore"            # both endpoints name a node id
+to = "implement"
+
+[[workflow.edge]]
+from = "implement"
+to = "verify"
+condition = { script = "test -f docs/plan.md" }   # sync: exit 0 = taken
+
+[[workflow.edge]]
+from = "verify"
+to = "publish"
+condition = { judge = "judger", criterion = "Did the diff pass review?" }  # async
 ```
+
+An edge's `condition` is exactly ONE of two kinds:
+
+- **`script`** — a shell test run under the bash automation policy; exit `0`
+  takes the edge, a non-zero exit makes the target `Skipped`. (A policy
+  *refusal* blocks-and-escalates instead — never a silent skip.)
+- **`judge`** — a **zero-tool, one-shot** completion by the `judger` member
+  (or, absent one, the root's model). The reply is parsed for a
+  `VERDICT: TAKE`/`VERDICT: SKIP` line: `TAKE` takes the edge, `SKIP` makes the
+  target `Skipped`, and an unparseable reply blocks-and-escalates.
 
 A node is a `member` (a `[team]` name) OR a `script` (`sh -c`, run under the bash
 automation policy); `gate = true` makes its reject re-open its deps, and a gate
-needs at least one `depends_on`. The graph is validated acyclic at load. The plan
-shows in the TUI's `/tasks` listing as
-`#id [state] title (owner) ← #deps ×attempts`.
+needs at least one incoming edge. The graph is validated acyclic at load (each
+endpoint names a node, no self-edge, one edge per pair). A condition that is
+false/SKIP leaves the target `Skipped` — shown as `[skipped]`, terminal, and its
+own dependents still become ready. The plan shows in the TUI's `/tasks` listing
+as `#id [state] title (owner) ← #deps ×attempts`.
 
 A node may carry an optional `title` (its label, dispatched to the worker as
 `#<id> <title>`; absent → the node `id`). The one placeholder recognized in a

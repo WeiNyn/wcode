@@ -2164,6 +2164,27 @@ name = "reviewer"
         );
     }
 
+    /// The repo's own `.wcode/workflow.toml` parses AND validates structurally —
+    /// the W025 migration (`depends_on` → `[[workflow.edge]]`). Guards the file in
+    /// CI (skipped when run outside a repo checkout, e.g. a published crate).
+    #[test]
+    fn the_repo_workflow_toml_migrated_to_edges() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.wcode/workflow.toml");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let file: FileConfig = toml::from_str(&text).expect("the workflow file parses");
+        let w = file.workflow.expect("it declares a [workflow]");
+        assert_eq!(w.nodes.len(), 7, "seven nodes");
+        assert_eq!(w.edges.len(), 7, "seven edges");
+        assert!(
+            !text.contains("depends_on ="),
+            "the migrated file carries no `depends_on =` config"
+        );
+        validate_workflow_structure(&w).expect("the migrated graph is structurally valid");
+    }
+
     // ---- workflow task injection: {{task}} substitution (P1) ----
 
     fn wf_node(id: &str, title: Option<&str>) -> WorkflowNode {
