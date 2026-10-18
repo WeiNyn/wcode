@@ -451,7 +451,13 @@ overlay over the sessions on disk; choosing one quits and re-execs into it
   above it — `commands`, one item per `COMMANDS` entry (label `/name` + its
   ` args`, or its aliases in brackets — `/new [clear]`; detail its `summary`),
   a blank row, `keys`, then one item per `KEYS` entry styled exactly as `F1`
-  styles them. `/verify`, `/tasks`, `/team roster`, and `/usage` stay prose rows.
+  styles them. `/verify`, `/tasks`, and `/team roster` stay prose rows; `/usage`
+  is an **item** ledger (D028) — one item per asked surface (label = the member,
+  detail = its `summary()` body, the focused one with `, context U/L` appended),
+  plus a `total` item when more than one surface answered. A surface that did not
+  answer (`Ack`/closed/timeout) reads `unavailable`, never zero-filled, and the
+  total carries a `(N unavailable)` suffix — the kernel's `Cost::unpriced_turns`
+  honesty, applied to members.
   Rows never wrap — an over-long one clips horizontally, exactly as `F1` clips,
   so an item's detail is budgeted to the ~39-col column the 64-col panel leaves
   (D027). The `F1` keymap modal (`Overlay::Help`) is unchanged: ` keys `,

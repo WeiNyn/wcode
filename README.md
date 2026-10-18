@@ -392,7 +392,7 @@ REPL commands (unknown `/...` lines go to the LLM as prompt text):
 | `/effort [level]` | show/set reasoning effort (free-style, logged as `EffortChange`); `/effort -` clears to send-nothing |
 | `/resume [path]` | reopen a session and replay its history as context (default: latest); restores model + effort |
 | `/sessions` | list sessions, `*` marks the current one |
-| `/usage` | print aggregate token usage for the current conversation (input/output, plus cache read/write when reported) |
+| `/usage` | usage report — the focused session's line, one line per local team member, and a total: input/output tokens, cache hit rate, per-tool calls/errors, and a `~$` cost when the model's price is known |
 | `/btw <question>` | a tool-free side question answered from the current context (never committed); a dim `btw: …` prints while it is in flight — the TUI's status corner shows `⠹ btw…` until the reply |
 | `/plan [on|off]` | toggle (bare) or set plan mode: the editing tools are disabled and mutating shell commands refused (the `PlanModeHooks` denylist), and a `# Plan mode` section is appended to the system prompt — explore and propose, then record the plan as a todo list and `/plan off` to execute |
 | `/verify` | render the plan's progress: the last cached todo checklist, its done count, and whether anything is unfinished |
