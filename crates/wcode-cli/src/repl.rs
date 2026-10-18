@@ -17,7 +17,7 @@ use wcode_harness::loop_::DEFAULT_MAX_TURNS;
 use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
 use wcode_harness::protocol::Request;
 use wcode_harness::session::Session;
-use wcode_harness::stats::session_stats;
+use wcode_harness::stats::{SessionStats, aggregate};
 use wcode_harness::streamfn::{EndpointPref, LlmOpts, list_models, rig_stream_fn};
 use wcode_harness::tool::Tool;
 use wcode_protocol::Backend;
@@ -1188,19 +1188,61 @@ reload(
                 };
                 print_verify(cached.as_deref(), last_text.as_deref());
             }
-            Some(Command::Usage) => match backend.ask(Request::GetHistory).await {
-                Ok(AgentEvent::History { messages }) => {
-                    let stats = session_stats(&messages);
-                    println!("{}", stats.summary());
-                    if let Some(limit) = model_limit(llm.base_url.as_deref(), &llm.model) {
-                        let used = stats.last_input_tokens.unwrap_or(0);
-                        let pct = used * 100 / limit.context.max(1);
-                        println!("context: {used}/{} ({pct}%)", limit.context);
+            Some(Command::Usage) => {
+                // Row 0 is the focused session; `usage_lines` renders it as
+                // `summary()` verbatim, so its label is unused (an empty one).
+                let mut rows: Vec<UsageRow> = Vec::new();
+                let focused_stats = match backend.ask(Request::Usage).await {
+                    Ok(AgentEvent::Usage { stats }) => {
+                        rows.push((String::new(), Some(stats.clone())));
+                        Some(stats)
+                    }
+                    // An older peer catches `usage` as `Request::Unknown` and
+                    // answers `Ack` — "unavailable", never "zero usage".
+                    Ok(AgentEvent::Ack) => {
+                        rows.push((String::new(), None));
+                        None
+                    }
+                    Ok(AgentEvent::Error { message }) => {
+                        eprintln!("usage: {message}");
+                        rows.push((String::new(), None));
+                        None
+                    }
+                    Ok(_) => {
+                        eprintln!("usage: unexpected reply");
+                        rows.push((String::new(), None));
+                        None
+                    }
+                    Err(_) => {
+                        eprintln!("usage: session closed");
+                        continue;
+                    }
+                };
+                // One line per LOCAL member. `locals()` is the in-process roster
+                // only, sorted by address; skip the orchestrator's own root (the
+                // focused line already is it) so the total is not double-counted.
+                if let Some(o) = &orchestrator {
+                    for (id, handle) in o.registry().locals() {
+                        if &id == o.id() {
+                            continue;
+                        }
+                        let stats = match Backend::from(handle).ask(Request::Usage).await {
+                            Ok(AgentEvent::Usage { stats }) => Some(stats),
+                            Ok(_) | Err(_) => None,
+                        };
+                        rows.push((id.as_str().to_string(), stats));
                     }
                 }
-                Ok(_) => eprintln!("usage: unexpected reply"),
-                Err(_) => eprintln!("usage: session closed"),
-            },
+                for (i, line) in usage_lines(&rows).iter().enumerate() {
+                    println!("{line}");
+                    if i == 0
+                        && let Some(ctx) =
+                            focused_stats.as_ref().and_then(|s| context_line(&llm, s))
+                    {
+                        println!("{ctx}");
+                    }
+                }
+            }
             Some(Command::Compact(arg)) => {
                 match backend.ask(Request::Compact { instructions: arg }).await {
                     // `/compact` is a request/reply (`Request::Compact`), not the
@@ -1252,6 +1294,85 @@ reload(
         owner,
         name,
     );
+}
+
+/// One row per session the REPL reported on: the label to print ("root", "w1",
+/// …) and its stats — `None` when that session did NOT answer (an `Ack` from a
+/// peer that predates `Request::Usage`, a closed session, a timeout).
+type UsageRow = (String, Option<SessionStats>);
+
+/// Strip the leading `"usage: "` from a `summary()` so a labeled row reads
+/// `w1: 3 turns, …` instead of `w1: usage: 3 turns, …`. A summary without the
+/// prefix (`"(no usage reported)"`) is returned unchanged.
+fn strip_usage_prefix(s: &str) -> String {
+    s.strip_prefix("usage: ").unwrap_or(s).to_string()
+}
+
+/// The `/usage` report, one line per element, ready to `println!`: the FOCUSED
+/// session first, then one line per LOCAL member, then the `total`.
+///
+/// Contract:
+/// - `rows[0]` is the focused session and renders as `stats.summary()` VERBATIM,
+///   with its `usage: ` prefix intact — so a teamless REPL prints exactly the
+///   bytes it prints today (`repl.rs:1291` `println!("{}", stats.summary());`).
+/// - `rows[1..]` render `"{label}: {body}"`, where `body` is `summary()` with
+///   its leading `"usage: "` stripped: `w1: 3 turns, 40 in, 20 out, 87% cache`.
+/// - a `None` row renders `"{label}: unavailable"` — never a zero-filled line
+///   (an older peer's `Ack` is "I cannot say", not "you used nothing").
+/// - `total` is appended WHEN `rows.len() > 1` only: `"total: {body}"` from
+///   [`aggregate`] over the rows that DID answer (`None` rows contribute
+///   nothing — the total is a documented FLOOR). When at least one row is
+///   unavailable the body is suffixed `" (N unavailable)"`; when NO row answered
+///   it is `"unavailable"`.
+/// - `rows.is_empty()` ⇒ `Vec::new()` (never panics); a 1-row call appends no
+///   total, which is what keeps the teamless output byte-identical.
+/// - no colour, no `DIM`/`RESET`, no context chrome (see [`context_line`]).
+fn usage_lines(rows: &[UsageRow]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    // Row 0: the focused session, `summary()` verbatim (prefix intact).
+    lines.push(match &rows[0].1 {
+        Some(stats) => stats.summary(),
+        None => "usage: unavailable".to_string(),
+    });
+    // Rows 1..: labeled members, the `usage: ` prefix stripped.
+    for (label, stats) in &rows[1..] {
+        lines.push(match stats {
+            Some(stats) => format!("{label}: {}", strip_usage_prefix(&stats.summary())),
+            None => format!("{label}: unavailable"),
+        });
+    }
+    // The floor total, only once there is more than the focused row.
+    if rows.len() > 1 {
+        let answered: Vec<SessionStats> = rows.iter().filter_map(|(_, s)| s.clone()).collect();
+        let unavailable = rows.iter().filter(|(_, s)| s.is_none()).count();
+        let body = if answered.is_empty() {
+            "unavailable".to_string()
+        } else {
+            let mut body = strip_usage_prefix(&aggregate(&answered).summary());
+            if unavailable > 0 {
+                body.push_str(&format!(" ({unavailable} unavailable)"));
+            }
+            body
+        };
+        lines.push(format!("total: {body}"));
+    }
+    lines
+}
+
+/// The FOCUSED session's `context U/L (P%)` line, or `None` only when the
+/// launched model has no catalog limit — the exact text `repl.rs:1292-1296`
+/// prints today, extracted so `/usage` stays testable without an `LlmOpts`.
+///
+/// Prints whenever [`model_limit`] is `Some` (even with no reported turn: the
+/// used count is then 0), reproducing today's arm byte-for-byte.
+fn context_line(llm: &LlmOpts, stats: &SessionStats) -> Option<String> {
+    let limit = model_limit(llm.base_url.as_deref(), &llm.model)?;
+    let used = stats.last_input_tokens.unwrap_or(0);
+    let pct = used * 100 / limit.context.max(1);
+    Some(format!("context: {used}/{} ({pct}%)", limit.context))
 }
 
 /// `/skills`: what was discovered, one block per skill, with the file the
@@ -1521,6 +1642,96 @@ mod tests {
     use super::*;
 
     use wcode_harness::streamfn::{LlmEndpoint, LlmProfile, LlmProvider, ModelProfiles};
+
+    fn stats(turns: u64, input: u64, output: u64) -> SessionStats {
+        SessionStats {
+            turns,
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    /// Brief §7.1's REPL gate. Focused first, then one line per member, then the
+    /// total — and the member lines are prefix-stripped. The total is a floor
+    /// over the rows that answered (amendment (c): suffix the unavailable count).
+    #[test]
+    fn usage_lines_totals_every_local_member() {
+        let rows: Vec<UsageRow> = vec![
+            (String::new(), Some(stats(1, 10, 5))),
+            ("w1".into(), Some(stats(2, 40, 20))),
+            ("w2".into(), None),
+        ];
+        assert_eq!(
+            usage_lines(&rows),
+            vec![
+                "usage: 1 turn, 10 in, 5 out".to_string(),
+                "w1: 2 turns, 40 in, 20 out".to_string(),
+                "w2: unavailable".to_string(),
+                "total: 3 turns, 50 in, 25 out (1 unavailable)".to_string(),
+            ]
+        );
+    }
+
+    /// The byte-identity gate (brief §8): ONE row ⇒ exactly `[summary()]`, and
+    /// no `total` row — so a teamless `/usage` still prints today's line.
+    #[test]
+    fn a_teamless_usage_report_is_exactly_todays_line() {
+        let rows: Vec<UsageRow> = vec![(String::new(), Some(stats(1, 10, 5)))];
+        assert_eq!(
+            usage_lines(&rows),
+            vec!["usage: 1 turn, 10 in, 5 out".to_string()]
+        );
+    }
+
+    /// A member that did not answer is NAMED, not zero-filled — the `Ack` (older
+    /// peer) / closed / timeout case. Also: an empty roster is an empty report.
+    #[test]
+    fn an_unavailable_member_reads_as_unavailable_not_zero() {
+        let rows: Vec<UsageRow> = vec![
+            (String::new(), Some(stats(1, 10, 5))),
+            ("w1".into(), None),
+        ];
+        let lines = usage_lines(&rows);
+        assert_eq!(lines[1], "w1: unavailable");
+        assert_eq!(lines[2], "total: 1 turn, 10 in, 5 out (1 unavailable)");
+        assert!(usage_lines(&[]).is_empty());
+    }
+
+    /// `context_line` prints whenever the launched model has a catalog limit —
+    /// with or without a reported turn (`used` is then 0) — and only returns
+    /// `None` when the model has no catalog limit (amendment A1).
+    #[test]
+    fn context_line_only_needs_a_catalog_limit() {
+        let zen = LlmOpts {
+            model: "deepseek-v4.1-flash".into(),
+            base_url: Some("https://opencode.ai/zen/go/v1".into()),
+            ..LlmOpts::default()
+        };
+        let reported = SessionStats {
+            turns: 1,
+            input_tokens: 500,
+            output_tokens: 1,
+            last_input_tokens: Some(500),
+            ..Default::default()
+        };
+        assert_eq!(
+            context_line(&zen, &reported).as_deref(),
+            Some("context: 500/1000000 (0%)")
+        );
+        // No reported turn still prints the today-identical line (used 0).
+        assert_eq!(
+            context_line(&zen, &SessionStats::default()).as_deref(),
+            Some("context: 0/1000000 (0%)")
+        );
+        // No catalog limit ⇒ no line.
+        let unknown = LlmOpts {
+            model: "mystery".into(),
+            base_url: None,
+            ..LlmOpts::default()
+        };
+        assert_eq!(context_line(&unknown, &reported), None);
+    }
 
     #[tokio::test]
     async fn build_agent_leaves_the_shared_hook_set_untouched() {
