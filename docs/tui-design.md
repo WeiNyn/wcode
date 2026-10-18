@@ -1,6 +1,8 @@
 # wcode TUI — design (visual spec)
 
-Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices) **and by D023** (W018: P5 "prose only, fully bare" — no band rules, plain head labels, treeless tools, a text gauge, a grey default with red the only hue). Companion to [`tui-plan.md`](tui-plan.md) (the
+Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices) **and by D023** (W018: P5 "prose only, fully bare" — no band rules, plain head labels, treeless tools, a text gauge, a grey default with red the only hue) **and by D026** (information
+modals: `/help`, `/verify`, `/usage`, `/tasks`, `/team roster` open a scrollable
+popup). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -208,13 +210,17 @@ blank pane.
 - **Notices** (D018) — a dim row in the content column, no glyph of its own (the
   `⏹` of `⏹ aborted` and the `⋯` prefixes are table glyphs). The **lifetime
   depends on the origin**: **command chatter is transient** — the echoed
-  `/<command>` line and every reply, usage-hint, and error line the
-  `/`-command path emits (`/help`, `/usage`, `/copy`, `/verify`, `/tasks`,
-  `/team roster`, …), plus the submit-time `a turn is already running` guard —
+  `/<command>` line, the bare usage-hint and error lines the `/`-command path
+  emits (`/width` with no argument or out of range, an unknown command, …), the
+  `/copy` reply, and the action confirmations (`theme: <name>`,
+  `width: N cols`), plus the submit-time `a turn is already running` guard —
   all retired at the **next submit on that surface** (notices are per-surface;
   a retire never crosses surfaces). A transient row renders **exactly** like a
   `Notice`; retirement removes it, it is not restyled, and the browse selection
-  lands on the same block. **Run events are permanent** —
+  lands on the same block. A report is **not** chatter, so it gets no transient
+  row at all: `/help`, `/verify`, `/usage`, `/tasks`, and `/team roster` open an
+  **information modal** (below) and leave only their echoed `/<command>` line
+  behind. **Run events are permanent** —
   `⋯ compacted N messages`, `⋯ compaction skipped: <reason>`,
   `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, and the
   `⋯ N earlier message(s)` divider stay for the session: they are the record of
@@ -402,7 +408,11 @@ visible — inlined on a collapsed tool's single row, as `key  value` rows when
 expanded; a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
-same `KEYS` table is printed by `/help`) · `Ctrl-G` enters **transcript browse**
+same `KEYS` table is printed by `/help`) · `/help`, `/verify`, `/usage`,
+`/tasks`, and `/team roster` open an **information modal** instead — `↑`/`↓`
+and `PgUp`/`PgDn` scroll its body (not the transcript), the wheel nudges it
+three lines, and `Esc` closes it; every other key is swallowed, as with `F1` ·
+`Ctrl-G` enters **transcript browse**
 (a `▌` selection over the committed blocks — `j`/`k` next/prev, `g`/`G` first/last,
 `PgUp`/`PgDn` by a page, the wheel scrolls the view), where `Esc`/`q`/`Ctrl-G`
 leave (in browse `Esc` leaves the mode and does **not** cancel or quit). Browse owns
@@ -413,6 +423,21 @@ in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same
 overlay over the sessions on disk; choosing one quits and re-execs into it
 (`--resume`), since a pure client cannot rebuild a session in place.
+
+- **Information modals** (D026) — `/help`, `/verify`, `/usage`, `/tasks`, and
+  `/team roster` open a `Clear`ed, centered, rounded-border modal: the frame
+  glyphs are §2's `overlay frame` row (`╭ ╮ ╰ ╯ ─ │`) and no glyph is new. It is
+  the visual twin of the `F1` keymap — title = the lowercase command name
+  (` help `, ` usage `, ` verify `, ` tasks `, ` team `), body = that command's
+  report text. A report is prose you read, not a row that scrolls away, which is
+  why it earns a surface instead of a `Notice` (the echoed `/<command>` line
+  still prints in the transcript, so the record of what was asked survives). The
+  body scrolls (`↑`/`↓` one line, `PgUp`/`PgDn` a page, the wheel three lines)
+  and carries a trailing dim `— N more —` hint while it is clipped. Dismissal is
+  **`Esc` only**: while it is open every other key is swallowed — the same
+  rationale as `F1` — so a stray character can never leak into the composer.
+  The `F1` keymap modal (`Overlay::Help`) is unchanged; bare usage hints and
+  error lines stay transient `Notice` rows, not modals.
 
 ## 5. Decisions
 
