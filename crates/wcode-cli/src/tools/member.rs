@@ -1,9 +1,9 @@
 //! The `member` tool: inspect or stop a teammate mid-run (§10.1).
 //!
-//! The kernel answers `Status`/`SideAsk` from a turn-boundary snapshot while a
-//! run is in flight, and services `Cancel` immediately — so all three ops work
-//! while the member is thinking or inside a tool call, without waiting for its
-//! run to end. `Status` is a lean read (one string), not the whole transcript.
+//! The kernel answers `Status`/`SideAsk`/`Usage` from a turn-boundary snapshot
+//! while a run is in flight, and services `Cancel` immediately — so every op
+//! works while the member is thinking or inside a tool call, without waiting for
+//! its run to end. `Status`/`Usage` are lean reads, not the whole transcript.
 
 use std::time::{Duration, Instant};
 
@@ -42,8 +42,9 @@ pub struct MemberArgs {
     /// `status` — the member's last completed work, no model call; `ask` — a
     /// tool-free question answered by the member's model from its current
     /// context (needs `text`); `cancel` — stop its in-flight run; `model`/
-    /// `effort` — retune it; `compact` — summarize its older history now;
-    /// `retire` — drop it from the roster (and mark it retired).
+    /// `effort` — retune it; `usage` — its own tokens, cache hit rate, tool
+    /// errors and `$` cost, no model call; `compact` — summarize its older
+    /// history now; `retire` — drop it from the roster (and mark it retired).
     op: String,
     /// The question for `op = "ask"`.
     #[serde(default)]
@@ -117,6 +118,51 @@ impl Member {
                     ..ToolOutput::default()
                 }
             }
+            Ok(other) => ToolOutput {
+                output: format!("[{state}] {to} · unexpected reply: {other:?}"),
+                ..ToolOutput::default()
+            },
+            Err(AskError::Timeout) => ToolOutput {
+                output: format!("[{state}] {to} · no reply within {STATUS_TIMEOUT:?}"),
+                ..ToolOutput::default()
+            },
+            Err(AskError::Closed) => error(format!("{to} has shut down")),
+        }
+    }
+
+    /// `op = "usage"`: the member's own usage report — `Request::Usage` (WS-C)
+    /// → `AgentEvent::Usage { stats }`, rendered by `stats.summary()`.
+    ///
+    /// Uses [`STATUS_TIMEOUT`], not a new constant: `Request::Usage` is answered
+    /// from the turn-boundary snapshot exactly like `Request::Status` (the
+    /// actor's mid-run arm), so it is an instant read and a *Running* member
+    /// answers at once. It is NOT a model call.
+    ///
+    /// Output: `"[{state}] {to} · {summary}"`, mirroring [`Self::status`]'s
+    /// `"[{state}] {to} · {work}"` — the state label is what tells the caller
+    /// whether the numbers are final. The summary is the kernel's one shared
+    /// wording (`turns/in/out`, `% cache`, `N tool errors`, `~$0.0012`), so this
+    /// tool invents no formatting and a priced member shows its `$` for free.
+    async fn usage(&self, to: &SessionId) -> ToolOutput {
+        let state = self.registry.state_of(to).label();
+        let backend = match self.registry.resolve(&self.me, to) {
+            Ok(backend) => backend,
+            Err(e) => return error(format!("cannot reach {to}: {e}")),
+        };
+        match backend.ask_within(Request::Usage, STATUS_TIMEOUT).await {
+            Ok(AgentEvent::Usage { stats }) => ToolOutput {
+                output: format!("[{state}] {to} · {}", stats.summary()),
+                ..ToolOutput::default()
+            },
+            // An older peer catches `usage` as `Request::Unknown` and answers
+            // `Ack`: "unavailable", never "zero usage".
+            Ok(AgentEvent::Ack) => ToolOutput {
+                output: format!(
+                    "[{state}] {to} · usage unavailable (peer predates Request::Usage)"
+                ),
+                ..ToolOutput::default()
+            },
+            Ok(AgentEvent::Error { message }) => error(format!("[{state}] {to} · {message}")),
             Ok(other) => ToolOutput {
                 output: format!("[{state}] {to} · unexpected reply: {other:?}"),
                 ..ToolOutput::default()
@@ -384,14 +430,17 @@ impl TypedTool for Member {
          model from its current context (needs `text`); `op = \"cancel\"` stops \
          the member's in-flight run and waits for it to stop; \
          `op = \"model\"`/`op = \"effort\"` retune a peer (the roster is \
-         updated); `op = \"compact\"` summarizes a peer's older history now; \
-         `op = \"retire\"` drops it from the roster AND marks it retired so it \
-         does not respawn on --resume."
+         updated); `op = \"usage\"` reports the member's own tokens, cache hit \
+         rate, per-tool errors and `$` cost (no model call); `op = \
+         \"compact\"` summarizes a peer's older history now; `op = \"retire\"` \
+         drops it from the roster AND marks it retired so it does not respawn \
+         on --resume."
     }
 
     async fn execute(&self, args: MemberArgs, _ctx: &ToolContext) -> ToolOutput {
         let to = self.target(&args.to);
         match args.op.as_str() {
+            "usage" => self.usage(&to).await,
             "status" => self.status(&to).await,
             "ask" => match args.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                 Some(text) => self.ask(&to, text).await,
@@ -409,7 +458,7 @@ impl TypedTool for Member {
             "compact" => self.compact(&to, args.instructions.as_deref()).await,
             "retire" => self.retire(&to, args.force).await,
             other => error(format!(
-                "unknown op `{other}` (expected status | ask | cancel | model | effort | compact | retire)"
+                "unknown op `{other}` (expected status | ask | cancel | model | effort | compact | usage | retire)"
             )),
         }
     }
@@ -571,6 +620,60 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.output);
         assert!(out.output.contains("running cargo test"), "{}", out.output);
+    }
+
+    #[tokio::test]
+    async fn usage_reports_the_members_tokens_without_a_model_call() {
+        let registry = Registry::new();
+        let assistant = AgentMessage::Assistant {
+            content: vec![wcode_harness::message::ContentBlock::Text {
+                text: "did some work".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            usage: Some(wcode_harness::message::Usage {
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_read_tokens: Some(400),
+                cache_write_tokens: None,
+            }),
+            model: None,
+        };
+        let id = member_session(&registry, "w1", vec![assistant], text_stream("unused"));
+        registry.set_owner(id.clone(), SessionId::agent("orchestrator"));
+
+        let out = orchestrator(&registry)
+            .execute(
+                MemberArgs {
+                    to: "w1".into(),
+                    op: "usage".into(),
+                    ..MemberArgs::default()
+                },
+                &ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(out.output.contains("1 turn"), "{}", out.output);
+        assert!(out.output.contains("1000 in"), "{}", out.output);
+    }
+
+    #[tokio::test]
+    async fn usage_on_an_empty_member_reports_no_usage() {
+        let registry = Registry::new();
+        let id = member_session(&registry, "w1", Vec::new(), text_stream("unused"));
+        registry.set_owner(id.clone(), SessionId::agent("orchestrator"));
+
+        let out = orchestrator(&registry)
+            .execute(
+                MemberArgs {
+                    to: "w1".into(),
+                    op: "usage".into(),
+                    ..MemberArgs::default()
+                },
+                &ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.output);
+        assert!(out.output.contains("(no usage reported)"), "{}", out.output);
     }
 
     #[tokio::test]
