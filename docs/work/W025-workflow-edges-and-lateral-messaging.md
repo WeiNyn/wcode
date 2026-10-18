@@ -1,13 +1,16 @@
 # W025 — Workflow graph as nodes + conditional edges, and node-to-node (lateral) talk — brief
 
-- **Status:** **IMPLEMENTED — second-layer review pending.** Design was APPROVED
-  (rev. 2; all six §0 recommendations signed off). Landed in commits `1a80f1d`
-  (config edges) · `fa128d1` (runtime `Dep`/`Skipped`/`reset_epoch`) · `1fd5c03`
-  (`Registry::allow_pair` + widened `permitted`) · `b9abb48` (the judge) ·
-  `6ed6296` (scheduler edge conditions) · `dd405ed` (adjacency + wiring) + the
-  migration/docs commit. `cargo test --workspace` + `cargo clippy --workspace
-  --all-targets` clean; script-condition skip live-verified. The D029/D030
-  decision records and the tracker row (item 83) record the outcome.
+- **Status:** **APPROVED — second-layer review after implementation.** Design was
+  APPROVED (rev. 2; all six §0 recommendations signed off). Landed in 7 commits
+  `1a80f1d` … `a0a7c6e` on branch `w025-workflow-edges-and-lateral-messaging`:
+  config edges · runtime `Dep`/`Skipped`/`reset_epoch` · `Registry::allow_pair` +
+  widened `permitted` · the judge · scheduler edge conditions · adjacency +
+  wiring · migration/docs. `cargo test --workspace` + `cargo clippy --workspace
+  --all-targets` clean; script-condition skip live-verified; **zero `SKETCH`
+  markers**. The D029/D030 records and tracker row 83 record the outcome.
+  **One tracked follow-up (F1):** the AND-fold stops at the first `judge` edge,
+  so a later conditional edge on the same target is not re-evaluated — see row 83
+  and D029's "Known limitation".
 - **Work item:** W025 (`docs/work/W025-workflow-edges-and-lateral-messaging.md`)
 - **Decision records:** **D029** (conditional edges + `TaskState::Skipped`) and
   **D030** (workflow-scoped lateral messaging; amends

@@ -78,3 +78,17 @@ observable and the scheduler re-arms a fresh judge run.
 - Pre-existing configs that used `depends_on` must migrate to `[[workflow.edge]]`
   (a loud parse error otherwise). `.wcode/workflow.toml`, `README.md`, and the
   plan docs were migrated in the same change.
+
+## Known limitation (F1, tracked)
+
+The AND-fold stops at the **first** `judge` edge: `edges_admit`
+(`crates/wcode-cli/src/scheduler.rs`) returns `EdgeGate::Pending` and on a `TAKE`
+verdict `on_verdict` calls `dispatch_one`, so any conditional edge **authored
+after** a `judge` edge on the same target is never evaluated. The failure
+direction is *runs extra* (never a silent prune), and it is unreachable from the
+shipped unconditional `.wcode/workflow.toml`; it is therefore a non-blocking,
+tracked follow-up (tracker row 83), not a defect in the shipped path. Fix
+options: (i) load-validate that a node has at most one incoming conditional edge
+(smallest, matches the tested reality), or (ii) evaluate every `script` edge
+before any `judge` spawn and track per-edge judge state (the fuller AND). Either
+way this record is amended, and a script-before-judge ordering test is added.
