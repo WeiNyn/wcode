@@ -18,7 +18,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
 use crate::app::{App, Block, InputView, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
-use crate::app::{ChangeRow, change_totals, changes_header};
+use crate::app::{ChangeRow, change_totals, changes_header, info_visible_rows};
 use crate::markdown;
 use crate::theme;
 
@@ -72,6 +72,10 @@ const HEADER_H: u16 = 1;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let full = frame.area();
     app.set_terminal_width(full.width);
+    // The height, beside the width — the info modal's scroll clamp reads it
+    // (`App::terminal_height`). Same source (`full` == the whole terminal), same
+    // frame, so the clamp and `draw_info_panel` can never disagree.
+    app.set_terminal_height(full.height);
     // Start every frame from an empty hit map: a closed sidebar / a resize must
     // never leave stale geometry behind (the app holds no layout constants).
     app.clear_hit_map();
@@ -227,11 +231,14 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
     match app.overlay() {
         Some(Overlay::Pick(picker)) => draw_picker(frame, area, picker),
         Some(Overlay::Help) => draw_help(frame, area),
+        Some(Overlay::Info { title, text, scroll }) => draw_info(frame, area, title, text, *scroll),
         None => {}
     }
 }
 
-/// Draw the `F1` keymap, centered like the picker.
+/// Draw the `F1` keymap, centered like the picker — a thin caller of
+/// [`draw_info_panel`], so its rendered bytes are identical to the modal it was
+/// before the info panel was factored out.
 fn draw_help(frame: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = KEYS
         .iter()
@@ -243,10 +250,88 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         })
         .collect();
     lines.push(Line::default());
-    lines.push(Line::from(Span::styled(" esc / F1 to close", dim())));
+    draw_info_panel(
+        frame,
+        area,
+        InfoPanel {
+            title: "keys",
+            lines,
+            scroll: 0,
+            footer: " esc / F1 to close",
+            more: false,
+        },
+    );
+}
+
+/// Draw the info modal body `text` at `scroll`, under a rounded ` title ` panel.
+///
+/// The door used by the `Overlay::Info` dispatch arm: it owns the `String` →
+/// `Vec<Line>` conversion (plain, unstyled, NOT wrapped) and hands the panel
+/// helper what it needs.
+///
+/// # Contracts
+/// - `scroll` is not trusted: [`draw_info_panel`] clamps the first drawn row to
+///   `min(scroll, body_len - visible)`, so a stale scroll after a resize cannot
+///   render a blank panel.
+/// - No wrapping and no markdown: a row longer than the panel width is clipped
+///   horizontally, exactly as `F1` clips. Wrapping would break
+///   [`info_visible_rows`].
+/// - # Panics: never; an empty `text` renders an empty body, not a panic.
+fn draw_info(frame: &mut Frame, area: Rect, title: &str, text: &str, scroll: u16) {
+    let lines: Vec<Line> = text.lines().map(|l| Line::from(l.to_string())).collect();
+    draw_info_panel(
+        frame,
+        area,
+        InfoPanel {
+            title,
+            lines,
+            scroll,
+            footer: " esc to close",
+            more: true,
+        },
+    );
+}
+
+/// The arguments of [`draw_info_panel`]: a centered rounded panel over `lines`
+/// scrolled to `scroll`, titled ` {title} `, with one dim `footer` row. `more`
+/// gates the `— N more —` overflow hint, so `F1` (`more: false`) never shows it.
+struct InfoPanel<'a> {
+    title: &'a str,
+    lines: Vec<Line<'a>>,
+    scroll: u16,
+    footer: &'a str,
+    more: bool,
+}
+
+/// The shared scrollable panel: `Clear`, a centered rounded border titled
+/// ` {title} `, the `lines[start..]` window clipped to the visible rows, and one
+/// dim `footer` row carrying `— N more —` when the body is clipped and `more`.
+///
+/// # Contracts
+/// - `title` is BARE (`"keys"`, `"help"`); this fn adds the two padding spaces —
+///   that is how `draw_help` keeps `" keys "` byte-identical.
+/// - Geometry: `visible = info_visible_rows(lines.len(), area.height)`, panel
+///   height `visible + 3` (2 borders + footer), width
+///   `area.width.saturating_sub(4).clamp(1, 64)`.
+/// - `start = min(scroll, lines.len() - visible)`, the one renderer-side clamp;
+///   [`App::info_scroll`] shares the same geometry, so the two never disagree.
+/// - # Panics: never.
+fn draw_info_panel(frame: &mut Frame, area: Rect, panel: InfoPanel) {
+    let InfoPanel {
+        title,
+        lines,
+        scroll,
+        footer,
+        more,
+    } = panel;
+    let visible = info_visible_rows(lines.len(), area.height);
+    // Clamp a stale scroll here too, so a resize between a keystroke and this
+    // frame cannot render a blank panel.
+    let start = (scroll as usize).min(lines.len().saturating_sub(visible));
+    let end = (start + visible).min(lines.len());
 
     let width = area.width.saturating_sub(4).clamp(1, 64);
-    let height = (lines.len() as u16 + 2).min(area.height);
+    let height = (visible as u16 + 3).min(area.height);
     let rect = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
@@ -259,10 +344,18 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border())
-        .title(Span::styled(" keys ", border()));
+        .title(Span::styled(format!(" {title} "), border()));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    frame.render_widget(Paragraph::new(lines), inner);
+
+    let mut rows: Vec<Line> = lines[start..end].to_vec();
+    let mut foot = vec![Span::styled(footer.to_string(), dim())];
+    let hidden = lines.len() - end;
+    if more && hidden > 0 {
+        foot.push(Span::styled(format!("   — {hidden} more —"), dim()));
+    }
+    rows.push(Line::from(foot));
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 /// Draw a picker modal, centered over everything else. `Clear` first so the
@@ -3462,13 +3555,16 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn f1_renders_the_help_overlay_with_the_keymap() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
-        let text = buffer_text(&render(&mut app, 64, 30));
+        // Tall enough for the whole body (KEYS grew when the info chords landed).
+        let text = buffer_text(&render(&mut app, 64, 40));
         assert!(text.contains("keys"), "help title missing:\n{text}");
         // Every chord in `KEYS` must be rendered — so this can never go stale.
         for (chord, _) in KEYS {
             assert!(text.contains(chord), "chord {chord:?} missing:\n{text}");
         }
         assert!(text.contains("toggle this help"), "F1's description missing:\n{text}");
+        // F1 is not scrollable and must never show the info modal's overflow hint.
+        assert!(!text.contains("more —"), "F1 must show no `— N more —` hint:\n{text}");
     }
 
     #[test]
@@ -5619,6 +5715,48 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
         assert!(frame.contains("☐ map the seam"), "a pending row:\n{frame}");
         assert!(frame.contains("☐ run the suite"), "a pending row:\n{frame}");
+    }
+
+    #[test]
+    fn info_modals_render_rounded_borders() {
+        let mut app = App::new();
+        typed(&mut app, "/help");
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 80, 24));
+        assert!(text.contains('╭'), "the info border is rounded:\n{text}");
+        assert!(!text.contains('┌'), "a square corner remains in the info:\n{text}");
+    }
+
+    #[test]
+    fn an_info_modal_shows_its_title_footer_and_more_hint() {
+        let mut app = App::new();
+        typed(&mut app, "/help");
+        app.handle(AppEvent::Key(Key::Enter));
+        let text = buffer_text(&render(&mut app, 80, 20)); // the help body overflows
+        assert!(text.contains(" help "), "the padded title:\n{text}");
+        assert!(text.contains("esc to close"), "the footer:\n{text}");
+        // The exact clipped hint — `— ` alone is in every KEYS row, so it would
+        // prove nothing. `help_text` is `commands:` + `keys:` + one row per chord.
+        let body = KEYS.len() + 2;
+        let hidden = body - info_visible_rows(body, 20);
+        assert!(
+            text.contains(&format!("— {hidden} more —")),
+            "the clipped hint (expected {hidden}):\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_info_modal_starts_lower() {
+        let mut app = App::new();
+        typed(&mut app, "/help");
+        app.handle(AppEvent::Key(Key::Enter));
+        let _ = buffer_text(&render(&mut app, 80, 20)); // 1st frame sets terminal_height
+        let before = buffer_text(&render(&mut app, 80, 20));
+        for _ in 0..3 {
+            app.handle(AppEvent::Key(Key::Down));
+        }
+        let after = buffer_text(&render(&mut app, 80, 20));
+        assert_ne!(before, after, "the scroll did not reach the renderer");
     }
 }
 

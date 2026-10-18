@@ -337,6 +337,28 @@ fn changes_item_width(terminal: u16) -> usize {
     modal.saturating_sub(4)
 }
 
+/// The ONE geometry both the info modal's renderer (`ui::draw_info_panel`) and
+/// its scroll clamp ([`App::info_scroll`]) read — so a keystroke can never scroll
+/// past a drawn row, nor stop short of the last one. Sibling of
+/// [`changes_item_width`] (the other "renderer and model must agree" helper, D36).
+///
+/// The panel is `visible + 3` rows tall: 2 borders + 1 footer (the ` esc to
+/// close` row, carrying `— N more —` when clipped) + `visible` body rows. Rows
+/// are LOGICAL lines — the body is not wrapped, so the clamp needs no
+/// measurement pass.
+///
+/// # Contracts
+/// - `terminal_height == 0` (no frame drawn yet — [`App::new`]) or `< 4` (no room
+///   for borders + footer + one row) → `0`: nothing is visible, so nothing is
+///   scrollable; [`App::info_scroll`] inherits this as a no-op.
+/// - Never returns more than `line_count` — a short body needs no scroll, and
+///   `— 0 more —` must be un-representable.
+/// - Pure: no `self`, no state, no allocation.
+/// - # Panics: never.
+pub(crate) fn info_visible_rows(line_count: usize, terminal_height: u16) -> usize {
+    line_count.min(terminal_height.saturating_sub(3) as usize)
+}
+
 /// The changes header (D36): `changes  {n} file(s)  +{a} −{r}`.
 pub(crate) fn changes_header(files: usize, added: usize, removed: usize) -> String {
     format!(
@@ -433,6 +455,28 @@ pub enum Overlay {
     Pick(Picker),
     /// The `F1` keymap. A pure modal: it dismisses only on `Esc` / `F1`.
     Help,
+    /// A scrollable informational modal opened by a `/`-command (`/help`,
+    /// `/verify`, `/tasks`, `/team roster`, `/usage`) — the visual twin of
+    /// [`Overlay::Help`], with content from outside `KEYS` and with scroll. Its
+    /// own variant rather than a widened `Help` (Q6): the two have different
+    /// content sources and `F1` stays byte-identical (§2 non-scope).
+    ///
+    /// - `title` is the BARE lowercase word (`"help"`, `"usage"`, `"verify"`,
+    ///   `"tasks"`, `"team"`); the renderer pads it into ` title ` (Q5) — the
+    ///   padding is never stored, so `draw_help`'s `" keys "` and an info
+    ///   `" help "` render through one panel helper.
+    /// - `text` is the whole body; `'\n'` separates rows. Not markdown, not
+    ///   styled, NOT wrapped: the renderer splits `lines()` and clips
+    ///   horizontally at the panel width (as `F1` does). Wrapping would break
+    ///   [`info_visible_rows`], which counts logical lines.
+    /// - `scroll` is the index of the FIRST visible body row (`0` = top),
+    ///   clamped by [`App::info_scroll`] against [`info_visible_rows`].
+    /// - `Esc` is the only close key; every other key is swallowed (Q2). No `q`.
+    Info {
+        title: String,
+        text: String,
+        scroll: u16,
+    },
 }
 
 /// A filterable list the user navigates and selects from. `items` is the full
@@ -894,6 +938,13 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-Y", "copy the last reply"),
     ("Esc", "cancel a run (no-op when idle)"),
     ("Ctrl-C", "cancel a run; quit when idle"),
+    // The info modal's scroll chords. No close row: `Esc` is already in this
+    // table (the row above), and the modal renders its own ` esc to close`
+    // footer — a second `Esc` row would be a lie for the picker, which also
+    // uses it (Q2).
+    ("↑ / ↓ (info)", "scroll the info modal a line"),
+    ("PgUp / PgDn (info)", "scroll the info modal a page"),
+    ("wheel (info)", "scroll the info modal three lines"),
 ];
 
 /// The generated `/help` text: the command list, then the keymap from [`KEYS`].
@@ -1192,6 +1243,23 @@ pub struct Surface {
     /// A `/btw` side ask is in flight; the status line shows `⠹ btw…`. Set on
     /// submit, cleared on the reply.
     btw_pending: bool,
+    /// A `/usage` `GetHistory` is in flight: its reply opens the ` usage ` modal
+    /// instead of a transient line. Set on submit ([`App::run_command`]'s
+    /// `"usage"` arm, like [`Surface::btw_pending`]), cleared when the reply
+    /// lands ([`Surface::render_usage`]) or when the request errors
+    /// (`AgentEvent::Error`).
+    ///
+    /// Per-surface (not `App`-level) because the reply is routed to a surface
+    /// ([`Surface::apply`]) and `render_usage` is a `Surface` method.
+    usage_pending: bool,
+    /// The modal a surface has just ASKED its owner to open: `(title, body)`,
+    /// bare lowercase title (Q5). `Surface::apply` owns no `overlay` (that is an
+    /// [`App`] field), so the `/usage` reply parks the request here and
+    /// [`App::handle`] drains it immediately after `apply` returns — which is
+    /// what lets `apply -> bool` keep its "changed" contract. `None` = nothing to
+    /// open; always drained in the same `handle` turn, so it is never
+    /// observably stale.
+    pending_info: Option<(String, String)>,
     /// The latest `AgentEvent::Todo` list, cached for `/verify` (a client-side
     /// render of the event — never `Session::todo()`, whose own-session write the
     /// agent's in-memory entries never see).
@@ -1272,6 +1340,8 @@ impl Surface {
             context_used: None,
             plan_pending: None,
             btw_pending: false,
+            usage_pending: false,
+            pending_info: None,
             last_todos: None,
             scroll: 0,
             max_scroll: 0,
@@ -1710,6 +1780,7 @@ impl Surface {
             AgentEvent::Error { message } => {
                 self.flush_live();
                 self.btw_pending = false; // a /btw reply that errored is no longer pending
+                self.usage_pending = false; // nor a /usage one — a failed reply must not leave the flag set
                 // A run failure (the loop emits `Error` before `AgentEnd`) marks the
                 // member failed; an idle reply error (SetModel/Compact/…) does not.
                 // `failed` is never cleared here — only `AgentStart` clears it.
@@ -1902,9 +1973,16 @@ impl Surface {
     }
 
     /// Render a `GetHistory` reply as a one-line usage summary.
+    ///
+    /// A reply the user asked for (`/usage` set [`Surface::usage_pending`]) parks a
+    /// ` usage ` modal request in [`Surface::pending_info`] for [`App::handle`] to
+    /// drain — this is a `Surface` method with no path to the `App`'s overlay. Any
+    /// other reply (a startup `GetHistory` replay, a stray one) stays a transient
+    /// line (the defensive branch).
     fn render_usage(&mut self, messages: &[AgentMessage]) {
         let stats = session_stats(messages);
-        // Keep the live context-fullness readout the status line consumes.
+        // Keep the live context-fullness readout the status line consumes — both
+        // paths.
         if let Some(used) = stats.last_input_tokens {
             self.context_used = Some(used);
         }
@@ -1914,10 +1992,22 @@ impl Surface {
         if let (Some(used), Some(limit)) = (stats.last_input_tokens, self.status.context_limit) {
             line.push_str(&format!(", context {used}/{limit}"));
         }
-        // `/usage` replies OUTSIDE the command frame (the answer arrives later as
-        // `AgentEvent::History`), so it is transient here rather than at a call
-        // site in `run_command`.
-        self.push_transient(line);
+        if self.usage_pending {
+            // The reply the user asked for: open the modal, push no transient.
+            self.usage_pending = false;
+            self.pending_info = Some((String::from("usage"), line));
+        } else {
+            // Defensive: a stray reply the user did not ask for stays a line, so a
+            // startup `GetHistory` replay cannot pop a modal.
+            self.push_transient(line);
+        }
+    }
+
+    /// Hand the owner any modal this surface has asked to open — `(title, body)`
+    /// — clearing the slot. [`App::handle`] drains it right after `apply` returns,
+    /// so a surface can open a modal without reaching the [`App`].
+    fn take_pending_info(&mut self) -> Option<(String, String)> {
+        self.pending_info.take()
     }
 
     /// The text of the most recent assistant reply, if any.
@@ -2242,6 +2332,14 @@ pub struct App {
     /// size its rows — `/changes` right-aligns its `+a −r` stats into the modal
     /// (D36). `0` before the first frame.
     terminal_width: u16,
+    /// The full terminal height from the last draw — the mirror of
+    /// [`App::terminal_width`] above, and the input to the info modal's scroll
+    /// clamp (the visible body row count depends on how tall the terminal is:
+    /// `info_visible_rows(body_len, terminal_height)`). `0` before the first
+    /// frame, which [`App::info_scroll`] treats as "nothing visible, nothing to
+    /// scroll". Written by `ui::draw` via [`App::set_terminal_height`], beside the
+    /// width.
+    terminal_height: u16,
     /// Last-seen `theme::generation()`; `sync_theme` bumps `block_revs` on a change.
     theme_gen: u64,
     should_quit: bool,
@@ -2337,6 +2435,7 @@ impl App {
             completion: None,
             dirty: true,
             terminal_width: 0,
+            terminal_height: 0,
             theme_gen: 0,
             should_quit: false,
             force_quit: false,
@@ -2517,6 +2616,78 @@ impl App {
     fn open_help(&mut self) {
         self.overlay = Some(Overlay::Help);
         self.dirty = true;
+    }
+
+    /// Open an informational modal — the `/`-command twin of [`App::open_help`]
+    /// directly above, and the ONLY door to [`Overlay::Info`].
+    ///
+    /// `title` is the bare lowercase word (`"help"`, `"verify"`, `"usage"`,
+    /// `"tasks"`, `"team"`); the renderer pads it into ` title `. `text` is the
+    /// whole body (`\n`-separated). Scroll always resets to the top on open.
+    ///
+    /// # Contracts
+    /// - Replaces whatever overlay is open. A `/`-command typed under a modal is
+    ///   unreachable ([`App::on_key`] gates on `overlay.is_some()`), so this can
+    ///   only ever replace the overlay it is opening over in tests.
+    /// - Touches neither the transcript nor the input: the echoed `/<cmd>`
+    ///   transient from [`App::command`] is already pushed (Q4).
+    /// - Marks the frame dirty; never sends a `Request`.
+    /// - # Panics: never.
+    fn open_info(&mut self, title: impl Into<String>, text: impl Into<String>) {
+        self.overlay = Some(Overlay::Info {
+            title: title.into(),
+            text: text.into(),
+            scroll: 0,
+        });
+        self.dirty = true;
+    }
+
+    /// Scroll the open info modal by `delta` body rows: `-1` = up (toward row 0),
+    /// `+1` = down. The `isize` is what makes one method serve both the arrow
+    /// keys and the wheel (`WHEEL_LINES`).
+    ///
+    /// Clamped to `0 ..= (body_lines - info_visible_rows(body_lines,
+    /// self.terminal_height))`.
+    ///
+    /// # Contracts
+    /// - A no-op when no [`Overlay::Info`] is open (so the caller may dispatch
+    ///   blindly), and a no-op while `terminal_height == 0` (no frame has been
+    ///   drawn, so nothing is visible — `info_visible_rows` returns `0` and the
+    ///   clamp cannot be computed honestly).
+    /// - Never scrolls past the last row, never above the first; a body shorter
+    ///   than the panel pins `scroll` at `0`.
+    /// - Direction is INVERTED relative to [`Surface::scroll_up`], which counts up
+    ///   from the tail. Here `scroll` counts DOWN from the top — do not copy that
+    ///   convention (the composition of the two would be a silent sign bug).
+    /// - Sets `dirty`; # Panics: never.
+    fn info_scroll(&mut self, delta: isize) {
+        let height = self.terminal_height;
+        let Some(Overlay::Info { text, scroll, .. }) = self.overlay.as_mut() else {
+            return;
+        };
+        let lines = text.lines().count();
+        let visible = info_visible_rows(lines, height);
+        let max = lines.saturating_sub(visible) as isize;
+        let next = (*scroll as isize).saturating_add(delta).clamp(0, max) as u16;
+        if next != *scroll {
+            *scroll = next;
+            self.dirty = true;
+        }
+    }
+
+    /// One page of the info modal — the step PgUp/PgDn take. Private helper so
+    /// [`App::on_overlay_key`]'s `Info` arm stays one line per key.
+    fn info_page(&self) -> usize {
+        info_visible_rows(self.info_lines(), self.terminal_height)
+    }
+
+    /// Body line count of the open modal (`Info{text}` → `text.lines().count()`),
+    /// `0` when none is open. Pairs with [`App::info_page`]; both are pure reads.
+    fn info_lines(&self) -> usize {
+        match &self.overlay {
+            Some(Overlay::Info { text, .. }) => text.lines().count(),
+            _ => 0,
+        }
     }
 
     /// Ctrl-A: move the cursor to the start of the input.
@@ -3337,10 +3508,17 @@ impl App {
             AppEvent::Agent(id, event) => {
                 // Route to the surface that owns this session; an unknown id is
                 // ignored (a stray/duplicate event must not panic).
-                if let Some(idx) = self.surface_index(&id)
-                    && self.surfaces[idx].apply(event)
-                {
-                    self.dirty = true;
+                if let Some(idx) = self.surface_index(&id) {
+                    if self.surfaces[idx].apply(event) {
+                        self.dirty = true;
+                    }
+                    // The drain site for `Surface::pending_info` — the only way a
+                    // surface may ask for a modal. A `/usage` reply arrives OUT of
+                    // the command frame, so the modal opens here, not in
+                    // `run_command`: the reply the user asked for, seconds later.
+                    if let Some((title, text)) = self.surfaces[idx].take_pending_info() {
+                        self.open_info(title, text); // sets `dirty` itself
+                    }
                 }
             }
             AppEvent::Tick => {}
@@ -3621,8 +3799,21 @@ impl App {
                 surface.status.plan = on;
                 self.actions.push(Action::Ask(Request::SetPlanMode { on }));
             }
-            "verify" => self.transient(self.verify_text()),
-            "usage" => self.actions.push(Action::Ask(Request::GetHistory)),
+            // The five informational commands open `Overlay::Info` instead of
+            // pushing a reply transient: title = the bare lowercase word (Q5; for
+            // `/team roster` that is `"team"`, the command not the arg), body = the
+            // same text builder as before. The echoed `/<cmd>` transient pushed
+            // generically by `command()` is kept (Q4) and still retired by
+            // `Surface::retire_transient` at the next submit. Hints stay lines
+            // (§2 non-scope): `/effort`, `/width`, `/btw`, a bad `/plan`/`/reload`
+            // arg, an unknown command, and the action confirmations.
+            "verify" => self.open_info("verify", self.verify_text()),
+            "usage" => {
+                // `/usage` replies OUT of this frame (a later `AgentEvent::History`),
+                // so raise the flag; `render_usage` opens the modal.
+                self.focused_mut().usage_pending = true;
+                self.actions.push(Action::Ask(Request::GetHistory));
+            }
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
             "reload" => match arg {
@@ -3633,12 +3824,12 @@ impl App {
             "copy" => self.copy_last(true),
             "team" => match arg {
                 None => self.open_team_picker(),
-                Some("roster") => self.transient(team_text(&self.member_rows())),
+                Some("roster") => self.open_info("team", team_text(&self.member_rows())),
                 Some(name) => self.request_team(name),
             },
-            "tasks" => self.transient(tasks_text(&self.tasks)),
+            "tasks" => self.open_info("tasks", tasks_text(&self.tasks)),
             "surface" => self.open_surface_picker(),
-            "help" => self.transient(help_text()),
+            "help" => self.open_info("help", help_text()),
             // Unreachable: every [`COMMANDS`] name is matched above. A debug
             // assert keeps a table entry from silently shadowing a real arm.
             _ => debug_assert!(
@@ -4227,6 +4418,25 @@ impl App {
             }
             return;
         }
+        // The info modal: `Esc` closes; the scroll chords move the body; every
+        // other key is swallowed. The `return` is load-bearing — without it a
+        // `Key::Enter` would reach `Key::Enter => self.accept_picker()` below,
+        // whose `.take()` clears the overlay *before* the `let-else` returns, so
+        // the modal would be silently destroyed.
+        if matches!(self.overlay, Some(Overlay::Info { .. })) {
+            match key {
+                Key::Esc => self.overlay = None, // the only close key (Q2)
+                Key::Up => self.info_scroll(-1),
+                Key::Down => self.info_scroll(1),
+                Key::PageUp => self.info_scroll(-(self.info_page() as isize)),
+                Key::PageDown => self.info_scroll(self.info_page() as isize),
+                Key::ScrollUp => self.info_scroll(-(WHEEL_LINES as isize)),
+                Key::ScrollDown => self.info_scroll(WHEEL_LINES as isize),
+                _ => {} // swallowed, not acted on
+            }
+            self.dirty = true;
+            return;
+        }
         match key {
             Key::Esc => self.overlay = None,
             Key::Up => self.map_picker(|p| p.move_selection(-1)),
@@ -4308,6 +4518,22 @@ impl App {
     /// The open modal, if any (read by the renderer).
     pub fn overlay(&self) -> Option<&Overlay> {
         self.overlay.as_ref()
+    }
+
+    /// The open info modal's scroll offset — `0` when none is open.
+    pub fn overlay_scroll(&self) -> u16 {
+        match &self.overlay {
+            Some(Overlay::Info { scroll, .. }) => *scroll,
+            _ => 0,
+        }
+    }
+
+    /// The open info modal's title — `""` when none is open.
+    pub fn overlay_title(&self) -> &str {
+        match &self.overlay {
+            Some(Overlay::Info { title, .. }) => title,
+            _ => "",
+        }
     }
 
     /// A per-frame cache-invalidation pass: when the process theme generation
@@ -4416,6 +4642,17 @@ impl App {
     /// later key can size its rows (D36).
     pub(crate) fn set_terminal_width(&mut self, width: u16) {
         self.terminal_width = width;
+    }
+
+    /// Record the terminal height `ui::draw` measured, so the info modal's scroll
+    /// clamp agrees with the panel the renderer just drew. The exact mirror of
+    /// [`App::set_terminal_width`] above (no `dirty` bump: it is called from
+    /// inside `draw`, which is already painting).
+    ///
+    /// # Contracts: called once per frame from `ui::draw`; a test may call it
+    /// directly to size a modal without rendering (the app-side scroll tests do).
+    pub(crate) fn set_terminal_height(&mut self, height: u16) {
+        self.terminal_height = height;
     }
 
     /// The focused surface's changes tree (D36) — the sidebar `changes` section
@@ -4752,6 +4989,15 @@ mod tests {
             .collect()
     }
 
+    /// The body of the open info modal (panics when none is open) — the
+    /// test-side twin of [`App::overlay_title`].
+    fn info_body(app: &App) -> &str {
+        match app.overlay() {
+            Some(Overlay::Info { text, .. }) => text,
+            other => panic!("expected an open info modal, got {other:?}"),
+        }
+    }
+
     /// The headline effect (W014c): a `/`-command's chatter is TRANSIENT — it
     /// survives the submit that produced it, and is gone at the next one, on the
     /// slash→slash AND slash→prompt orderings — while a run event's notice pushed
@@ -4759,11 +5005,12 @@ mod tests {
     #[test]
     fn a_command_notice_is_retired_by_the_next_submit() {
         let mut app = App::new();
-        // `/help` is the synchronous reply: the ECHO then the reply text, so two
-        // transients in one generation.
+        // `/help` no longer pushes a reply transient — it is echo-only now, and it
+        // opens the ` help ` modal (which swallows keys until dismissed).
         submit(&mut app, "/help");
         assert_eq!(chatter(&app)[0], "/help", "the echoed command line: {:?}", chatter(&app));
-        assert_eq!(chatter(&app).len(), 2, "echo + reply: {:?}", chatter(&app));
+        assert_eq!(chatter(&app).len(), 1, "echo only: {:?}", chatter(&app));
+        app.handle(AppEvent::Key(Key::Esc)); // close the help modal to type again
 
         // A run event pushed the very next way is NOT transient.
         app.handle(AppEvent::Agent(
@@ -4788,7 +5035,7 @@ mod tests {
             "only the new generation remains: {:?}",
             chatter(&app)
         );
-        assert_eq!(chatter(&app).len(), 2, "echo + '(no tasks yet)': {:?}", chatter(&app));
+        assert_eq!(chatter(&app).len(), 1, "echo only: {:?}", chatter(&app));
         assert!(
             app.transcript()
                 .iter()
@@ -4796,6 +5043,7 @@ mod tests {
             "the run event survived the submit: {:?}",
             app.transcript()
         );
+        app.handle(AppEvent::Key(Key::Esc)); // close the tasks modal
 
         // slash → prompt: the same cleanup lands with the next generation.
         submit(&mut app, "a normal line");
@@ -4814,9 +5062,9 @@ mod tests {
         );
 
         // W014 §7.2's exact script — `/usage` → `/help` → a real prompt — with the
-        // ASYNC `/usage` reply, which `render_usage` emits when
-        // `AgentEvent::History` lands, OUTSIDE the command frame. One generation
-        // of chatter at each step, none at the end.
+        // ASYNC `/usage` reply, which `render_usage` routes to the ` usage ` modal
+        // when `AgentEvent::History` lands, OUTSIDE the command frame. The reply is
+        // no longer chatter; the echo is, and it dies at the next submit.
         let mut app = App::new();
         submit(&mut app, "/usage");
         app.handle(AppEvent::Agent(
@@ -4826,16 +5074,24 @@ mod tests {
             },
         ));
         assert!(
-            matches!(app.transcript().last(), Some(Block::Transient(t)) if t == "(no usage reported)"),
-            "the async /usage reply is chatter: {:?}",
-            app.transcript().last()
+            matches!(app.overlay(), Some(Overlay::Info { title, .. }) if title == "usage"),
+            "the async /usage reply opens the modal, not a transient: {:?}",
+            app.overlay()
         );
-        submit(&mut app, "/help");
-        assert!(
-            !chatter(&app).iter().any(|t| t == "(no usage reported)"),
-            "the /usage reply is gone by the /help echo: {:?}",
+        assert_eq!(
+            chatter(&app),
+            vec!["/usage".to_string()],
+            "only the echo is chatter: {:?}",
             chatter(&app)
         );
+        app.handle(AppEvent::Key(Key::Esc)); // close the usage modal
+        submit(&mut app, "/help");
+        assert!(
+            !chatter(&app).iter().any(|t| t.contains("usage reported")),
+            "no usage reply transient survives: {:?}",
+            chatter(&app)
+        );
+        app.handle(AppEvent::Key(Key::Esc)); // close the help modal
         submit(&mut app, "a real prompt");
         assert!(chatter(&app).is_empty(), "no generation survives: {:?}", chatter(&app));
     }
@@ -4847,7 +5103,8 @@ mod tests {
         let (mut app, _root, _member) = two_surfaces();
         app.set_focus(0);
         submit(&mut app, "/help");
-        assert_eq!(chatter(&app).len(), 2, "A's chatter: {:?}", chatter(&app));
+        assert_eq!(chatter(&app).len(), 1, "A's chatter: {:?}", chatter(&app));
+        app.handle(AppEvent::Key(Key::Esc)); // dismiss the help modal
 
         // A submit on the OTHER surface, which has no chatter of its own.
         app.set_focus(1);
@@ -4856,7 +5113,7 @@ mod tests {
         app.set_focus(0);
         assert_eq!(
             chatter(&app).len(),
-            2,
+            1,
             "A's chatter is untouched by B's submit: {:?}",
             chatter(&app)
         );
@@ -5108,9 +5365,7 @@ mod tests {
             },
         ));
         submit(&mut app, "/verify");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a verify notice");
-        };
+        let text = info_body(&app);
         assert!(text.contains("[x] step one"), "{text}");
         assert!(text.contains("[ ] step two"), "{text}");
         assert!(text.contains("1/2 done"), "{text}");
@@ -5130,9 +5385,7 @@ mod tests {
             },
         ));
         submit(&mut app, "/verify");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a verify notice");
-        };
+        let text = info_body(&app);
         assert!(text.contains("1/1 done"), "{text}");
         assert!(text.contains("finished"), "{text}");
         assert!(!text.contains("not finished"), "{text}");
@@ -5142,10 +5395,11 @@ mod tests {
     fn verify_without_todos_reports_none() {
         let mut app = App::new();
         submit(&mut app, "/verify");
-        assert!(matches!(
-            app.transcript().last(),
-            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no plan/todos recorded")
-        ));
+        assert!(
+            info_body(&app).contains("no plan/todos recorded"),
+            "{}",
+            info_body(&app)
+        );
     }
 
     #[test]
@@ -6177,10 +6431,8 @@ mod tests {
         // opens the project-team picker; D017.)
         let mut app = App::new();
         submit(&mut app, "/team roster");
-        assert!(matches!(
-            app.transcript().last(),
-            Some(Block::Notice(t) | Block::Transient(t)) if t == "(no team)"
-        ));
+        assert_eq!(info_body(&app), "(no team)");
+        assert_eq!(app.overlay_title(), "team");
 
         // Members list one `label · model · state` line each.
         let mut app = App::new();
@@ -6208,9 +6460,7 @@ mod tests {
         app.handle(AppEvent::Agent(reviewer.clone(), AgentEvent::AgentStart));
         app.handle(AppEvent::Agent(reviewer, AgentEvent::AgentEnd));
         submit(&mut app, "/team roster");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a team notice");
-        };
+        let text = info_body(&app);
         // One `{glyph} {label} · {state}` line each — no model (§2).
         assert!(text.contains("○ explorer · idle"), "{text}");
         assert!(text.contains("✓ reviewer · done"), "{text}");
@@ -6262,10 +6512,8 @@ mod tests {
     fn the_tasks_command_lists_the_plan() {
         let mut app = App::new();
         submit(&mut app, "/tasks");
-        assert!(matches!(
-            app.transcript().last(),
-            Some(Block::Notice(t) | Block::Transient(t)) if t == "(no tasks yet)"
-        ));
+        assert_eq!(info_body(&app), "(no tasks yet)");
+        assert_eq!(app.overlay_title(), "tasks");
 
         let mut app = App::new();
         app.set_tasks(vec![
@@ -6287,9 +6535,7 @@ mod tests {
             },
         ]);
         submit(&mut app, "/tasks");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a tasks notice");
-        };
+        let text = info_body(&app);
         assert!(text.contains("#1 [todo] explore (unassigned)"), "{text}");
         assert!(text.contains("#2 [doing] fix it (w1)"), "{text}");
     }
@@ -6404,10 +6650,11 @@ mod tests {
 
         // `/team roster` reads the added surface too.
         submit(&mut app, "/team roster");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a team notice");
-        };
-        assert!(text.contains("explorer"), "{text}");
+        assert!(
+            info_body(&app).contains("explorer"),
+            "{}",
+            info_body(&app)
+        );
 
         // A duplicate id is a no-op.
         app.add_surface(SurfaceInfo {
@@ -6951,9 +7198,8 @@ mod tests {
     fn help_lists_every_command_and_the_keymap_from_the_tables() {
         let mut app = App::new();
         submit(&mut app, "/help");
-        let Some(Block::Notice(text) | Block::Transient(text)) = app.transcript().last() else {
-            panic!("expected a help notice");
-        };
+        let text = info_body(&app);
+        assert_eq!(app.overlay_title(), "help");
         assert!(
             text.starts_with(
                 "commands: /new /exit /model <id> /theme [name] /effort [level] /compact [text] \
@@ -8146,6 +8392,155 @@ mod tests {
         app.handle(AppEvent::Key(Key::Enter));
         assert_eq!(app.selected(), Some(0), "first match at/after 3 wraps to 0");
         assert_eq!(app.input(), "draft", "still untouched after the jump");
+    }
+
+    /// Each moved command opens the modal and pushes NO reply transient. The echo
+    /// `/<cmd>` from `command()` is still there, so the assertion is "the only
+    /// chatter is the echo" — not "the transcript is empty".
+    #[test]
+    fn an_info_command_opens_a_popup() {
+        for (cmd, title) in [
+            ("/help", "help"),
+            ("/verify", "verify"),
+            ("/tasks", "tasks"),
+            ("/team roster", "team"),
+        ] {
+            let mut app = App::new();
+            submit(&mut app, cmd);
+            assert!(
+                matches!(app.overlay(), Some(Overlay::Info { title: t, scroll: 0, .. }) if t == title),
+                "{cmd} did not open the `{title}` modal: {:?}",
+                app.overlay()
+            );
+            // The echo survives; no reply transient does.
+            assert_eq!(chatter(&app), vec![cmd.to_string()], "{cmd}");
+            assert_eq!(app.overlay_title(), title, "{cmd}");
+            let Some(Overlay::Info { text, .. }) = app.overlay() else {
+                unreachable!()
+            };
+            assert!(!text.is_empty(), "{cmd} opened an empty body");
+        }
+    }
+
+    /// `Esc` clears the modal; any other key is swallowed — the input stays empty
+    /// and the overlay still belongs to the modal.
+    #[test]
+    fn esc_closes_the_info_modal_and_nothing_else_does() {
+        let mut app = App::new();
+        submit(&mut app, "/help");
+        // A Char is swallowed, not typed into the composer.
+        app.handle(AppEvent::Key(Key::Char('x')));
+        assert_eq!(app.input(), "", "a Char must not reach the composer");
+        assert!(matches!(app.overlay(), Some(Overlay::Info { .. })));
+        // Enter is the trap: without the early return it would `take()` the overlay
+        // inside `accept_picker` and silently destroy the modal.
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
+            "Enter must be swallowed, not destroy the modal"
+        );
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.overlay().is_none(), "Esc closes the modal");
+    }
+
+    /// A body longer than the panel: ↓ moves the offset, a long ↓ run clamps at
+    /// the end, ↑ comes back; a SHORT body never scrolls.
+    #[test]
+    fn the_info_modal_scrolls_and_clamps() {
+        let mut app = App::new();
+        app.set_terminal_height(10); // 7 visible rows (10 - 3)
+        let body = (0..50)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.open_info("t", body);
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.overlay_scroll(), 1);
+        for _ in 0..100 {
+            app.handle(AppEvent::Key(Key::Down));
+        }
+        assert_eq!(app.overlay_scroll(), 50 - 7, "clamped at the end");
+        app.handle(AppEvent::Key(Key::PageUp));
+        assert_eq!(app.overlay_scroll(), 50 - 7 - 7);
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.overlay_scroll(), 50 - 7 - 7 - 1);
+
+        // A body shorter than the panel pins `scroll` at the top.
+        let mut app = App::new();
+        app.set_terminal_height(10);
+        app.open_info("t", "one\ntwo");
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.overlay_scroll(), 0, "a short body never scrolls");
+    }
+
+    /// `submit("/usage")` raises the flag; the LATER `History` reply opens the
+    /// ` usage ` modal, pushes no transient, and still sets `context_used`.
+    #[test]
+    fn a_usage_reply_opens_the_usage_modal() {
+        let mut app = App::new();
+        submit(&mut app, "/usage");
+        assert!(
+            app.overlay().is_none(),
+            "nothing opens on submit — the reply has not landed"
+        );
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::History {
+                messages: usage_messages(),
+            },
+        ));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { title, .. }) if title == "usage"),
+            "the /usage reply opens the modal: {:?}",
+            app.overlay()
+        );
+        assert_eq!(app.context_used(), Some(500));
+        assert_eq!(
+            chatter(&app),
+            vec!["/usage".to_string()],
+            "echo only, no reply line"
+        );
+    }
+
+    /// The defensive path: a `History` the user never asked for stays a transient
+    /// line (so a startup `GetHistory` replay cannot pop a modal).
+    #[test]
+    fn a_stray_history_reply_does_not_open_a_modal() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::History {
+                messages: usage_messages(),
+            },
+        ));
+        assert!(app.overlay().is_none());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("1 turn")
+        ));
+    }
+
+    /// A `History` reply carrying usage: one assistant turn with a tool call and
+    /// `input_tokens: 500`. Shared by the usage-modal tests.
+    fn usage_messages() -> Vec<AgentMessage> {
+        vec![AgentMessage::Assistant {
+            content: vec![
+                ContentBlock::Text { text: "x".into() },
+                ContentBlock::ToolCall {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    arguments: "{}".parse().unwrap(),
+                },
+            ],
+            stop_reason: StopReason::Stop,
+            usage: Some(wcode_harness::message::Usage {
+                input_tokens: 500,
+                output_tokens: 20,
+                cache_read_tokens: Some(3),
+                cache_write_tokens: None,
+            }),
+            model: None,
+        }]
     }
 }
 
