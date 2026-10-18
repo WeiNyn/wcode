@@ -19,6 +19,11 @@ mod agents;
 mod config;
 mod frontmatter;
 mod instructions;
+// The judge seam is implemented and unit-tested here; Stage 3b wires it into
+// the scheduler/factory. Until then nothing in the binary references it, so the
+// module-level `allow` keeps `clippy --all-targets` clean.
+#[allow(dead_code)]
+mod judge;
 mod repl;
 mod rtk;
 mod scheduler;
