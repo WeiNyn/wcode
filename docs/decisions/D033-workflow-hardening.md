@@ -1,7 +1,8 @@
 # D033 — Workflow hardening: bounded, observable, resumable headless runs
 
-- **Status:** accepted (the human approved all recommendations for the W028
-  brief; implementation still gated on the sketch review)
+- **Status:** accepted & **shipped** (W028 closed — Phase 1 `d251c40` plus the
+  `5c8fbd4`/`7b86f80`/`dd5fe8b` review fixes, Phase 2a `7b86f80`, Phase 2b this
+  commit; the brief's §12 amendments are all landed)
 - **Date:** this session
 - **Relates to:** [`crates/wcode-cli/src/scheduler.rs`](../../crates/wcode-cli/src/scheduler.rs)
   (`SCRIPT_TIMEOUT`, `edges_admit`, `dispatch_one`, `Scheduler::run`),

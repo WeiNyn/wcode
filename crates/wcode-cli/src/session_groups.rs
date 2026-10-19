@@ -83,17 +83,13 @@ impl SessionGroup {
     pub fn plan_path(&self) -> PathBuf {
         self.dir.join("plan.ndjson")
     }
-    // ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
-    // W028 §4.1 / §11 A2 — the launch sidecar, alongside `plan.ndjson`. NOT a
-    // widened `manifest.json` (its doc scopes it to "team topology, written as a
-    // fast path only (D5)", session_groups.rs:346-347): a task text + config +
-    // timeout are RUN-LAUNCH parameters, a different concern.
-    //
-    // /// `<dir>/run.json` — the headless run's launch record (task/config/timeout).
-    // pub fn run_path(&self) -> PathBuf {
-    //     self.dir.join("run.json")
-    // }
-    // ==== /SKETCH ====
+    /// `<dir>/run.json` — the headless run's LAUNCH record (task / config /
+    /// timeout). A sidecar, deliberately NOT a widened `manifest.json`: the
+    /// manifest's contract is team topology, written as a fast path only (D5),
+    /// while these are run-launch parameters — a different concern (W028 §11 A2).
+    pub fn run_path(&self) -> PathBuf {
+        self.dir.join("run.json")
+    }
     /// `<members>/<name>.jsonl` — the transcript for member `name`.
     pub fn member_path(&self, name: &str) -> PathBuf {
         self.members_dir.join(format!("{name}.jsonl"))
@@ -469,51 +465,83 @@ pub fn write_manifest(group: &SessionGroup, manifest: &Manifest) -> io::Result<(
     serde_json::to_writer_pretty(file, manifest).map_err(io::Error::from)
 }
 
-// ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
-// W028 §4.1 / §11 A2 / D033 — the `run.json` launch record, mirroring the
-// `Manifest` read/write pair just above (session_groups.rs:448-459).
-//
-// ```json
-// { "task": "smoke test", "config": "/tmp/wf.toml", "timeout_secs": 120 }
-// ```
-//
-// /// `<groupdir>/run.json`: what launched a headless `--task` run. All but
-// /// `task` optional; unknown keys ignored (future-proof, like `Manifest`).
-// #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-// pub struct RunRecord {
-//     /// The raw `--task`/`WCODE_TASK` text (the thing a resume must NOT lose).
-//     pub task: String,
-//     /// The `--config`/`WCODE_CONFIG` overlay the run used, if any.
-//     #[serde(default, skip_serializing_if = "Option::is_none")]
-//     pub config: Option<String>,
-//     /// The effective total-run cap (flag → `[workflow] timeout_secs`), if any.
-//     #[serde(default, skip_serializing_if = "Option::is_none")]
-//     pub timeout_secs: Option<u64>,
-// }
-//
-// /// Read `<dir>/run.json`; `None` when absent or unparseable (best-effort —
-// /// a resume line is a nicety, never a hard failure). Mirrors `load_manifest`.
-// pub fn load_run(group: &SessionGroup) -> Option<RunRecord> {
-//     let raw = fs::read_to_string(group.run_path()).ok()?;
-//     serde_json::from_str(&raw).ok()
-// }
-//
-// /// Write `<dir>/run.json` (create-on-missing). Called ONCE at run start.
-// /// Mirrors `write_manifest`.
-// pub fn write_run(group: &SessionGroup, run: &RunRecord) -> io::Result<()> {
-//     fs::create_dir_all(&group.dir)?;
-//     let file = fs::File::create(group.run_path())?;
-//     serde_json::to_writer_pretty(file, run).map_err(io::Error::from)
-// }
-//
-// #[cfg(test)]
-// mod run_record_tests {
-//     use super::*;
-//     /// A written record round-trips; an absent file is `None`.
-//     #[test]
-//     fn run_json_round_trips() { todo!() }
-// }
-// ==== /SKETCH ====
+/// `<groupdir>/run.json`: what LAUNCHED a headless `--task` run. Everything but
+/// `task` is optional; unknown keys are ignored (future-proof, like
+/// [`Manifest`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunRecord {
+    /// The raw `--task`/`WCODE_TASK` text — the one thing a resume must not lose.
+    pub task: String,
+    /// The `--config`/`WCODE_CONFIG` overlay the run used, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
+    /// The effective total-run cap (flag → `[workflow] timeout_secs`), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Read `<dir>/run.json`; `None` when absent or unparseable. Best-effort: a
+/// resume line is a convenience, never a hard failure. Mirrors [`load_manifest`].
+///
+/// Only the launch-record gate reads it today (the printed `resume:` line is
+/// built from the live args); kept public as the reader a resumed run / a future
+/// `--status` extension needs — hence the same `allow` as the default-cap
+/// `TaskList::load` convenience ctors.
+#[allow(dead_code)]
+pub fn load_run(group: &SessionGroup) -> Option<RunRecord> {
+    let raw = fs::read_to_string(group.run_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Write `<dir>/run.json` (create-on-missing). Called ONCE at run start, after
+/// the empty-plan guard — a plan that never loaded records nothing.
+pub fn write_run(group: &SessionGroup, run: &RunRecord) -> io::Result<()> {
+    fs::create_dir_all(&group.dir)?;
+    let file = fs::File::create(group.run_path())?;
+    serde_json::to_writer_pretty(file, run).map_err(io::Error::from)
+}
+
+#[cfg(test)]
+mod run_record_tests {
+    use super::*;
+
+    /// W028 §7.1: a written launch record round-trips through `run.json`; the
+    /// optional fields may be absent, and a missing file is `None`.
+    #[test]
+    fn run_json_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = SessionGroup {
+            root_path: dir.path().join("root.jsonl"),
+            members_dir: dir.path().join("members"),
+            dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(load_run(&group), None, "absent ⇒ None, not an error");
+
+        let full = RunRecord {
+            task: "resume me".into(),
+            config: Some("/tmp/wf.toml".into()),
+            timeout_secs: Some(120),
+        };
+        write_run(&group, &full).unwrap();
+        assert_eq!(load_run(&group), Some(full.clone()));
+        assert!(group.run_path().ends_with("run.json"));
+
+        // A bare record omits the optional keys entirely.
+        let bare = RunRecord {
+            task: "just the task".into(),
+            ..Default::default()
+        };
+        write_run(&group, &bare).unwrap();
+        let raw = fs::read_to_string(group.run_path()).unwrap();
+        assert!(!raw.contains("config"), "an absent option is not written: {raw}");
+        assert_eq!(load_run(&group), Some(bare));
+
+        // A torn file is `None`, never a panic.
+        fs::write(group.run_path(), "{").unwrap();
+        assert_eq!(load_run(&group), None);
+    }
+}
+
 
 /// The launch spec for member `name`: the manifest record (`fast path`),
 /// else [`WorkerSpec::default()`] (inherit the *current* template — see the

@@ -227,6 +227,18 @@ turn errors. `--task` requires `[workflow]` and
 is a boot error. `-p` is unaffected (it stays a single root turn), and a pure
 `[team]` (no `[workflow]`) remains the interactive, per-task path.
 
+Two more flags serve a headless run. `--quiet` silences the per-event log (stderr)
+while the final per-node summary — and any `resume:` line — still print.
+`--status [group|latest]` is the read-only counterpart: it prints a finished (or
+in-flight) run's plan, `#id [state] title` per node, straight from the group's
+`plan.ndjson` — no model, no socket, and provably no write (the reader never
+reconciles). Every bound is configurable and `0` disables it: `[workflow]
+timeout_secs` (total run, when `--timeout` is absent), `[[workflow.node]]
+timeout_secs` (default 300 s) and `[[workflow.edge]] condition.timeout_secs`
+(default 30 s, for both `script` and `judge` edges). A non-zero exit from a run
+that started prints a copy-pasteable `resume: …` line; the task text lives in
+`<groupdir>/run.json`.
+
 ```toml
 [orchestrator]
 # Root-only workflow guidance (requires --agents), folded into the system prompt
@@ -344,6 +356,8 @@ placeholder bearer token so `--base-url http://localhost:11434/v1` just works.
 wcode                        # interactive TUI (REPL when piped)
 wcode -p "explain this repo" # one-shot: run, print reply, exit
 wcode --agents --task "fix bug 123" --timeout 600   # headless [workflow] run
+wcode --agents --task "fix bug 123" --quiet         # …without the per-event log
+wcode --status latest                               # read-only plan dump, no model
 wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit

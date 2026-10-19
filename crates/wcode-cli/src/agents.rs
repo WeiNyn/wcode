@@ -601,6 +601,12 @@ pub struct Orchestrator {
     /// is non-empty (the marker `"[config]"`), and by a successful live `team`
     /// apply (the team's name). The `team` tool refuses when `Some`.
     team_applied: TeamApplied,
+    /// The run's cancel token — the OWNER a headless `--task` run needs (W028):
+    /// `spawn_scheduler` takes a clone by value, so without a second clone reachable
+    /// from `dispatch` nothing could ever cancel an in-flight `Script` node or a
+    /// worker turn. Defaults to a fresh (never-cancelled) token, so a test-built
+    /// `Orchestrator` keeps working.
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl Orchestrator {
@@ -622,7 +628,22 @@ impl Orchestrator {
             tasks,
             pool: AgentPool::default(),
             team_applied: TeamApplied::default(),
+            cancel: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Builder: hand the orchestrator the run's cancel token, so `dispatch` can
+    /// reach a clone (the scheduler holds its own). Called once in
+    /// `build_runtime`; the default is a never-cancelled token.
+    pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// The run's cancel token (a live handle — `cancel()` on a clone stops the
+    /// scheduler's in-flight `Script` nodes and worker turns).
+    pub fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancel
     }
 
     /// Builder over [`Self::with_tasks`]: set the resolved md pool and whether

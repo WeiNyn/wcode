@@ -85,6 +85,21 @@ fn session_deadline(tasks: &[Task], id: u32) -> Option<Duration> {
     workflow_bound(*timeout_secs, NODE_TIMEOUT)
 }
 
+/// When node `id`'s deadline FIRES, dispatching at `at`, or `None` when it has no
+/// bound — or when `at + bound` cannot be represented.
+///
+/// The `checked_add` is not paranoia (W028 N2): an absurd `timeout_secs` such as
+/// `u64::MAX` overflows `Instant`, and an `at + d` panic would silently kill the
+/// scheduler task. An unrepresentable deadline is treated exactly like "no
+/// deadline".
+fn node_deadline(
+    tasks: &[Task],
+    id: u32,
+    at: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    session_deadline(tasks, id).and_then(|d| at.checked_add(d))
+}
+
 /// Await the earliest deadline, or forever when there is none, and hand back the
 /// node whose deadline fired.
 ///
@@ -273,11 +288,7 @@ impl Scheduler {
             let next = self
                 .started
                 .iter()
-                .filter_map(|(id, at)| {
-                    session_deadline(&snap, *id)
-                        .and_then(|d| at.checked_add(d))
-                        .map(|when| (*id, when))
-                })
+                .filter_map(|(id, at)| node_deadline(&snap, *id, *at).map(|when| (*id, when)))
                 .min_by_key(|(_, when)| *when);
             tokio::select! {
                 changed = updates.changed() => {
@@ -629,25 +640,18 @@ impl Scheduler {
                         &format!("script-{id}"),
                     )
                     .await;
-                    // ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
-                    // The CANCEL-SAFE EARLY RETURN (A4) arrives with the cancel
-                    // owner. `run_command` returns `(None, "cancelled")` on cancel
-                    // and `(None, "timed out …")` on a timeout; the `match (code,
-                    // gate)` below fails the node on ANY `None`, but a
-                    // cancel-induced `Failed` is PERMANENT (`reconcile` only
-                    // repairs `Doing`) and WEDGES the resume. So, once the token
-                    // has an owner, check it FIRST:
-                    //
-                    //       if cancel.is_cancelled() {
-                    //           // Leave the node `Doing` — the resume reconciles
-                    //           // Doing→Todo and re-runs it. Do NOT fail.
-                    //           return;
-                    //       }
-                    //
-                    // The discrimination is `cancel.is_cancelled()`, NOT the code
-                    // (a cancel and a timeout both return `None`); a genuine
-                    // TIMEOUT still fails the node.
-                    // ==== /SKETCH ====
+                    // A4 — the CANCEL-SAFE EARLY RETURN, the load-bearing one for
+                    // the resume. `run_command` returns `(None, "cancelled")` on a
+                    // cancel and `(None, "timed out …")` on a timeout; the
+                    // `match (code, gate)` below fails the node on ANY `None`. A
+                    // cancel-induced `Failed` is PERMANENT (`reconcile` only repairs
+                    // `Doing`), so it would WEDGE the resume. Check the TOKEN, not
+                    // the code (both cases return `None`): a cancelled node is left
+                    // `Doing`, which the next `load_at` reconciles to `Todo` and
+                    // re-runs; a genuine TIMEOUT still fails it.
+                    if cancel.is_cancelled() {
+                        return;
+                    }
                     let tail = tail_chars(&output, PREVIEW_TAIL_CHARS);
                     match (code, gate) {
                         (Some(0), false) => {
@@ -802,6 +806,112 @@ mod tests {
         // The two defaults are the historical ones.
         assert_eq!(EDGE_TIMEOUT, Duration::from_secs(30));
         assert_eq!(NODE_TIMEOUT, Duration::from_secs(300));
+    }
+
+    /// A4, the resume's load-bearing rule: cancelling the run token leaves a
+    /// `Script` node **`Doing`**, never `Failed`. `reconcile` only repairs
+    /// `Doing → Todo`, so a cancel-induced `Fail` would wedge every later resume.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_script_node_stays_doing() {
+        let tasks = TaskList::new();
+        let id = tasks.create("runaway", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                id,
+                RunSpec::Script {
+                    command: "sleep 30".into(),
+                    timeout_secs: None, // the 300 s default: only the cancel stops it
+                },
+                false,
+            )
+            .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        tokio::spawn(
+            Scheduler::new(
+                Registry::new(),
+                SessionId::agent("orchestrator"),
+                tasks.clone(),
+                SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                cancel.clone(),
+                Arc::new(crate::judge::FakeJudge::new(vec![])),
+            )
+            .run(),
+        );
+
+        // It starts (and the detached `run_command` is in flight) …
+        for _ in 0..200 {
+            if tasks.snapshot()[0].state == TaskState::Doing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(tasks.snapshot()[0].state, TaskState::Doing, "dispatched");
+        // … then the token is cancelled: the node must NOT be failed.
+        cancel.cancel();
+        for _ in 0..200 {
+            if tasks.snapshot()[0].state != TaskState::Doing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            tasks.snapshot()[0].state,
+            TaskState::Doing,
+            "a cancelled Script node stays `Doing` so the resume re-runs it"
+        );
+        assert!(tasks.snapshot()[0].feedback.is_none(), "no failure reason");
+    }
+
+    /// N2: an over-representable `timeout_secs` yields "no deadline" rather than
+    /// an `Instant` overflow panic that would silently kill the scheduler task.
+    #[test]
+    fn an_over_representable_deadline_is_no_deadline() {
+        let tasks = TaskList::new();
+        let id = tasks.create("absurd", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                id,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(u64::MAX),
+                },
+                false,
+            )
+            .unwrap();
+        let snap = tasks.snapshot();
+        // The configured bound is read back verbatim …
+        assert_eq!(session_deadline(&snap, id), Some(Duration::from_secs(u64::MAX)));
+        // … but the absolute instant cannot be represented, so the arm is skipped
+        // instead of panicking (`u64::MAX` seconds overflows `Instant`).
+        assert_eq!(node_deadline(&snap, id, tokio::time::Instant::now()), None);
+
+        // A sane bound does compute, and "disabled" (`Some(0)`) is no deadline.
+        tasks
+            .configure(
+                id,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(1),
+                },
+                false,
+            )
+            .unwrap();
+        let snap = tasks.snapshot();
+        assert!(node_deadline(&snap, id, tokio::time::Instant::now()).is_some());
+        tasks
+            .configure(
+                id,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(0),
+                },
+                false,
+            )
+            .unwrap();
+        let snap = tasks.snapshot();
+        assert_eq!(node_deadline(&snap, id, tokio::time::Instant::now()), None);
     }
 
     /// A `judge` that never decides — for the edge-deadline gate. No model.

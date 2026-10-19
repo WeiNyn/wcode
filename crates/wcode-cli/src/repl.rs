@@ -636,6 +636,31 @@ pub fn relaunch_line(args: &[String]) -> String {
     line
 }
 
+/// Print a headless `--task` run's resume line on stderr — a thin wrapper over
+/// [`workflow_resume_line`], mirroring `print_relaunch`/`relaunch_line` (W028).
+pub(crate) fn print_workflow_resume(group: &Path, task: &str, config: Option<&str>) {
+    eprintln!("resume: {}", workflow_resume_line(group, task, config));
+}
+
+/// The resume command as a copy-pasteable shell line:
+/// `--agents [--config <config>] --resume <groupdir> --task <task>`, rendered
+/// through [`relaunch_line`] so every argument is shell-quoted exactly once.
+///
+/// Pure and testable as a STRING (no test in this repo captures stderr): the
+/// `--task` text is the run's RAW text, recovered from `<groupdir>/run.json`.
+pub(crate) fn workflow_resume_line(group: &Path, task: &str, config: Option<&str>) -> String {
+    let mut args = vec!["--agents".to_string()];
+    if let Some(config) = config {
+        args.push("--config".to_string());
+        args.push(config.to_string());
+    }
+    args.push("--resume".to_string());
+    args.push(group.display().to_string());
+    args.push("--task".to_string());
+    args.push(task.to_string());
+    relaunch_line(&args)
+}
+
 /// POSIX-shell-safe `arg`: as-is when it is already safe, else single-quoted
 /// (escaping any embedded `'`).
 fn shell_quote(arg: &str) -> String {
@@ -1760,6 +1785,37 @@ mod workflow_log_tests {
             content: "all green".into(),
         })
         .unwrap();
+    }
+
+    /// W028 §7.1: the resume line round-trips through `relaunch_line` — the task
+    /// text (arbitrary prose, with quotes in it) survives shell-quoting, and the
+    /// config overlay is optional.
+    #[test]
+    fn resume_line_round_trips_through_relaunch_line() {
+        let group = "/tmp/sessions/1730000000000_9f3c1a7b";
+        let task = "resume me: it's a 'hard' one";
+        let line = workflow_resume_line(Path::new(group), task, Some("/tmp/wf.toml"));
+        // `relaunch_line` prefixes the program (`argv[0]`, run-dependent), so
+        // assert the ARGUMENT TAIL only.
+        let args = line
+            .split_once(' ')
+            .map(|(_, rest)| rest)
+            .expect("a program and at least one argument");
+        let quoted = shell_quote(task);
+        assert_eq!(
+            quoted, "'resume me: it'\\''s a '\\''hard'\\'' one'",
+            "the text is single-quoted with embedded quotes escaped"
+        );
+        assert_eq!(
+            args,
+            format!("--agents --config /tmp/wf.toml --resume {group} --task {quoted}"),
+            "the full command: {line}"
+        );
+
+        // No config ⇒ no `--config` pair; `--resume` + `--task` remain.
+        let bare = workflow_resume_line(Path::new("/g"), "t", None);
+        let args = bare.split_once(' ').map(|(_, rest)| rest).unwrap();
+        assert_eq!(args, "--agents --resume /g --task t");
     }
 
     /// §7.1 / A3: one line per COMPLETED message — the full text EXACTLY once, not

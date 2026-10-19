@@ -1481,8 +1481,14 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             }
             None => TaskList::with_sink(None, false, cap),
         };
+        // W028: ONE cancel token, minted here and shared three ways — the
+        // scheduler (the in-flight `Script` nodes and worker turns honour it), the
+        // `Orchestrator` (so `dispatch` can reach a clone), and, through both, a
+        // headless run's deadline / Ctrl-C.
+        let cancel = tokio_util::sync::CancellationToken::new();
         crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
             .with_team(std::sync::Arc::new(cfg.team.clone()), !cfg.team.is_empty())
+            .with_cancel(cancel)
     });
 
     // C4 — the verify gate (`VerifyGateHooks`, `crate::verify_gate`): once the
@@ -1670,34 +1676,12 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         o.spawn_scheduler(
             cwd.clone(),
             hooks.clone(),
-            tokio_util::sync::CancellationToken::new(),
+            // A clone of the run's token — cancelling it from `dispatch` (a
+            // deadline, or Ctrl-C) now reaches the scheduler's in-flight work.
+            o.cancel_token().clone(),
             judger,
         );
     }
-    // ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
-    // W028 §4.2 / D033 / §4.4 item 5 — the cancel token gets a REAL OWNER.
-    // Today it is minted inline at `spawn_scheduler(…, CancellationToken::new(),
-    // …)` (just above) and never cancelled (`scheduler.rs:70-72` admits it).
-    //
-    // Mint ONE token early in `build_runtime` and share it three ways:
-    //   let cancel = tokio_util::sync::CancellationToken::new();
-    //   1. `spawn_scheduler(cwd.clone(), hooks.clone(), cancel.clone(), judger)`
-    //      — the scheduler's in-flight `Script` nodes + worker turns now honor it;
-    //   2. `.with_cancel(cancel.clone())` chained onto the `Orchestrator` build
-    //      (main.rs:1441-1443 `with_tasks(…).with_team(…)`) so `dispatch` can
-    //      reach a clone **via the Orchestrator** (agents.rs: new field + setter);
-    //   3. (alternative, less code) a `cancel: CancellationToken` field on
-    //      `Runtime` below — reachable from `dispatch`'s `rt` with NO agents.rs
-    //      edit. Either is fine; the brief names the Orchestrator.
-    //
-    // agents.rs `Orchestrator` gets:
-    //   cancel: CancellationToken,               // default `::new()` in `with_tasks`
-    //   pub fn with_cancel(mut self, t: CancellationToken) -> Self { … }  // builder
-    //   pub fn cancel_token(&self) -> &CancellationToken { &self.cancel }
-    //
-    // A fresh `Orchestrator` built directly by a test (`with_tasks`/`new`) keeps
-    // working: the field defaults to a never-cancelled token.
-    // ==== /SKETCH ====
     Runtime {
         instructions,
         skills,
@@ -1945,7 +1929,26 @@ async fn dispatch(
             args.timeout
                 .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs)),
         );
-        let code = run_workflow(Backend::from(handle), tasks, seed, timeout, args.quiet).await;
+        // The run's cancel token — the same one `spawn_scheduler` holds, so a
+        // deadline (or Ctrl-C) stops an in-flight `Script` node, not just the root.
+        let cancel = rt
+            .orchestrator
+            .as_ref()
+            .expect("--task guard ensured --agents")
+            .cancel_token()
+            .clone();
+        let code = run_workflow(
+            Backend::from(handle),
+            tasks,
+            seed,
+            timeout,
+            cancel,
+            setup.active_group.as_ref(),
+            args.task.as_deref().unwrap_or_default(),
+            args.config.as_deref(),
+            args.quiet,
+        )
+        .await;
         #[cfg(unix)]
         wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
         Background::shutdown_all();
@@ -2535,50 +2538,6 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
-// ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
-// The BOUNDS (steps 6-9) are live. What remains is the CANCEL OWNER and the
-// RESUME (steps 10-11, §5), all centred here:
-//
-// 0. WIRING — `dispatch`'s `--task` branch and this signature gain
-//    `cancel: CancellationToken`, `group: Option<&Path>`, `task: &str`,
-//    `config: Option<&str>` (the `run.json` / `resume:` inputs) beside the
-//    existing `quiet`:
-//        let cancel = rt
-//            .orchestrator.as_ref().expect("--task guard ensured --agents")
-//            .cancel_token().clone();          // minted in `build_runtime`
-//        let code = run_workflow(
-//            Backend::from(handle), tasks, seed, timeout, cancel,
-//            setup.active_group.as_ref().map(|g| g.dir.as_path()),
-//            args.task.as_deref().unwrap_or_default(),
-//            args.config.as_deref(),
-//            args.quiet,
-//        ).await;
-//    Then:
-//
-// 1. PERSIST THE LAUNCH, at the top of `run_workflow`, right after the empty-plan
-//    guard — ONCE, before any turn:
-//       if let Some(group) = group {
-//           let _ = session_groups::write_run(
-//               group,
-//               &RunRecord { task: task.into(), config: config.map(Into::into),
-//                            timeout_secs: timeout.map(|d| d.as_secs()) },
-//           );
-//       }
-//    A `--no-session` run has no group dir: `group: Option<&Path>` degrades to "no
-//    `run.json`, no `resume:` line" rather than panicking.
-//
-// 2. THE SIGINT HANDLER, installed before the first turn (mirror `repl.rs`'s
-//    `ctrl_c` loop): cancel the token, print `crate::repl::print_workflow_resume(
-//    group, task, config)`, exit 130.
-//
-// 3. CANCEL ON BOTH DEADLINE ARMS (the first-turn `select!` and the loop's), so a
-//    Script node stops too — not only `backend.send(Request::Cancel)`.
-//
-// 4. PRINT THE RESUME LINE on any non-zero exit FROM A RUN THAT WAS CREATED (the
-//    empty-plan refusal above is deliberately exempt, C3).
-// ==== /SKETCH ====
-
-
 /// The empty-plan refusal, exit 2 (C3): no `run.json`, no `resume:` line. A const
 /// so the gate can pin the wording.
 const NO_PLAN_ERROR: &str = "error: no plan loaded";
@@ -2596,11 +2555,22 @@ const NO_PLAN_IN_GROUP: &str = "error: no plan in ";
 /// node→root reports and completed message text ([`crate::repl::
 /// print_workflow_events`]) plus every node-state change — while the final
 /// per-node summary stays the stdout result. `quiet` silences the narration only.
+///
+/// Resumability (W028 Phase 2b): the launch is recorded in `<group>/run.json`
+/// once, the run's cancel token is cancelled on both deadline arms (leaving a
+/// cancelled `Script` node `Doing`, so a resume re-runs it), and any non-zero
+/// exit from a CREATED run prints a `resume:` line naming the same task text the
+/// record holds.
+#[allow(clippy::too_many_arguments)]
 async fn run_workflow(
     backend: Backend,
     tasks: crate::tasks::TaskList,
     seed: String,
     timeout: Option<std::time::Duration>,
+    cancel: tokio_util::sync::CancellationToken,
+    group: Option<&crate::session_groups::SessionGroup>,
+    task: &str,
+    config: Option<&str>,
     quiet: bool,
 ) -> i32 {
     // The empty-plan guard is the FIRST statement: an empty plan never seeds the
@@ -2612,6 +2582,64 @@ async fn run_workflow(
         return 2;
     }
 
+    // The launch record (C3): written ONCE, AFTER the guard — a run that was never
+    // created records nothing. A `--no-session` run has no group dir, so it also
+    // has no `run.json` and no `resume:` line (rather than a bogus path).
+    if let Some(group) = group {
+        let record = crate::session_groups::RunRecord {
+            task: task.to_string(),
+            config: config.map(str::to_string),
+            timeout_secs: timeout.map(|d| d.as_secs()),
+        };
+        if let Err(e) = crate::session_groups::write_run(group, &record) {
+            eprintln!("warning: run record not written: {e}");
+        }
+    }
+
+    // Ctrl-C: cancel the run (a cancelled `Script` node is left `Doing`, so a
+    // resume re-runs it), say where to pick it up, and exit. Mirrors the REPL's
+    // `ctrl_c` loop; a headless run has nothing to wait for, so the first signal
+    // is fatal.
+    {
+        let cancel = cancel.clone();
+        let group = group.map(|g| g.dir.clone());
+        let task = task.to_string();
+        let config = config.map(str::to_string);
+        tokio::spawn(async move {
+            // One signal is fatal for a headless run, so there is nothing to
+            // loop over (`exit` ends the process).
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!();
+                cancel.cancel();
+                if let Some(group) = &group {
+                    crate::repl::print_workflow_resume(group, &task, config.as_deref());
+                }
+                std::process::exit(130);
+            }
+        });
+    }
+
+    let code = drive_workflow(backend, tasks, seed, timeout, cancel, quiet).await;
+    // Any non-zero exit from a run that WAS created says how to continue it. The
+    // empty-plan refusal above never reaches here.
+    if code != 0
+        && let Some(group) = group
+    {
+        crate::repl::print_workflow_resume(&group.dir, task, config);
+    }
+    code
+}
+
+/// The run proper (the wrapper above owns the guard, the launch record, Ctrl-C
+/// and the resume line): seed the root, then wait for the plan to settle.
+async fn drive_workflow(
+    backend: Backend,
+    tasks: crate::tasks::TaskList,
+    seed: String,
+    timeout: Option<std::time::Duration>,
+    cancel: tokio_util::sync::CancellationToken,
+    quiet: bool,
+) -> i32 {
     // The event log (A3): the root's reports + completed text, rendered on stderr.
     // Spawned unconditionally — `quiet` is the renderer's own knob — and it drains
     // to `Closed`, NOT to the first `AgentEnd`: a run has MANY root turns and the
@@ -2640,8 +2668,11 @@ async fn run_workflow(
         Some(deadline) => tokio::select! {
             r = backend.ask(Request::Submit { text: seed }) => r,
             _ = tokio::time::sleep_until(deadline) => {
-                // Bound the in-flight turn: cancel the root, then exit 1.
+                // Bound the in-flight turn: cancel the ROOT's turn AND the run
+                // token, so an in-flight `Script` node stops too. A node cut short
+                // this way stays `Doing` (never `Failed`), so the resume re-runs it.
                 let _ = backend.send(Request::Cancel);
+                cancel.cancel();
                 print_workflow_summary(&tasks);
                 return 1;
             }
@@ -2683,8 +2714,10 @@ async fn run_workflow(
                         log_node_transitions(&tasks, &mut seen, quiet);
                     }
                     _ = tokio::time::sleep_until(deadline) => {
-                        // The wait's wall-clock cap elapsed: cancel the root, exit 1.
+                        // The wait's wall-clock cap elapsed: cancel the root's turn
+                        // and the run token (see the first-turn arm), then exit 1.
                         let _ = backend.send(Request::Cancel);
+                        cancel.cancel();
                         break 1;
                     }
                 }
@@ -2820,8 +2853,10 @@ fn workflow_seed(task: &str) -> String {
          (see `task list`). Do NOT create nodes — the scheduler dispatches each \
          ready node to its member. As each worker reports, call \
          `task complete <id>` with the report as `artifact`; for a gate, call \
-         `task reject <id> <reason>` with the reason. Stop when no node is \
-         ready and none is running."
+         `task reject <id> <reason>` with the reason. If an escalation names a \
+         blocked node, call `task reset <id>` to re-evaluate its edge, or stop. \
+         Do not message its member directly. Stop when no node is ready and none \
+         is running."
     )
 }
 
@@ -2843,6 +2878,17 @@ mod workflow_seed_tests {
         );
         assert!(seed.contains("task complete"), "says how to complete: {seed}");
         assert!(seed.contains("task reject"), "says how to reject: {seed}");
+        // The soft fence (W028 soft gap): an Unjudgeable node is not a hard
+        // block, so the seed tells the root how to proceed WITHOUT "solving" it
+        // out of band, which would leave the plan describing nothing.
+        assert!(
+            seed.contains("call `task reset <id>` to re-evaluate its edge, or stop"),
+            "says how to clear a blocked node: {seed}"
+        );
+        assert!(
+            seed.contains("Do not message its member directly"),
+            "forbids solving it out of band: {seed}"
+        );
     }
 }
 
@@ -3043,14 +3089,30 @@ mod tests {
         tasks.create("go", vec![], false).unwrap();
         let timeout = Some(Duration::from_millis(150));
 
+        let cancel = tokio_util::sync::CancellationToken::new();
+
         // The outer guard makes the test FAIL (not hang) if the bound is removed.
         let code = tokio::time::timeout(
             Duration::from_secs(5),
-            run_workflow(backend, tasks, "go".into(), timeout, false),
+            run_workflow(
+                backend,
+                tasks,
+                "go".into(),
+                timeout,
+                cancel.clone(),
+                None,
+                "go",
+                None,
+                false,
+            ),
         )
         .await
         .expect("run_workflow returned before the outer guard");
         assert_eq!(code, 1, "an elapsed --timeout during the first turn exits 1");
+        assert!(
+            cancel.is_cancelled(),
+            "the deadline cancels the RUN token, so an in-flight Script node stops too"
+        );
     }
 
     #[tokio::test]
@@ -3065,6 +3127,10 @@ mod tests {
                 crate::tasks::TaskList::new(),
                 "go".into(),
                 None,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                "go",
+                None,
                 false,
             ),
         )
@@ -3072,6 +3138,52 @@ mod tests {
         .expect("the empty-plan guard returns at once");
         assert_eq!(code, 2, "an empty plan exits 2");
         assert_eq!(NO_PLAN_ERROR, "error: no plan loaded");
+    }
+
+    /// W028 §7.1 (C3/step 11): a run that expires writes `<groupdir>/run.json`
+    /// BEFORE it starts, so a non-zero exit can point at it — and the record
+    /// carries the RAW task text a resume must not lose.
+    #[tokio::test]
+    async fn a_cancelled_run_persists_run_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = crate::session_groups::SessionGroup {
+            root_path: dir.path().join("root.jsonl"),
+            members_dir: dir.path().join("members"),
+            dir: dir.path().to_path_buf(),
+        };
+        let backend = workflow_backend(hanging_stream());
+        let tasks = crate::tasks::TaskList::new();
+        tasks.create("go", vec![], false).unwrap();
+        // An expiring deadline = the "cancelled" run: the first turn never returns.
+        let timeout = Some(Duration::from_millis(150));
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_workflow(
+                backend,
+                tasks,
+                "seed".into(),
+                timeout,
+                tokio_util::sync::CancellationToken::new(),
+                Some(&group),
+                "resume me",
+                Some("/tmp/wf.toml"),
+                true,
+            ),
+        )
+        .await
+        .expect("the deadline returns before the guard");
+        assert_eq!(code, 1);
+
+        let record = crate::session_groups::load_run(&group).expect("run.json was written");
+        assert_eq!(
+            record,
+            crate::session_groups::RunRecord {
+                task: "resume me".into(),
+                config: Some("/tmp/wf.toml".into()),
+                timeout_secs: Some(0), // 150 ms rounds down to 0 s
+            }
+        );
     }
 
     /// Two group dirs in a temp sessions dir; only `old` carries a plan.
