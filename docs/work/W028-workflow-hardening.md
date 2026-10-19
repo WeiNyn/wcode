@@ -311,3 +311,34 @@ The developer must apply **all** of the following. Line numbers are HEAD (commit
 ### Reviewer's not-checked
 
 No live end-to-end headless run; `--status latest` against a real sessions tree (Legacy head, torn journal, absent dir); whether `--dump-config` prints the new keys; a served session's cancel owner; the judge's cancellability beyond the existing spawn shape.
+
+## 13. Phase-1 live verification (orchestrator, real provider)
+
+The second-layer review could not run the `--task` narration (no model reachable from a read-only sandbox). The orchestrator ran it against the real provider in `~/.config/wcode/config.toml` (opencode Zen, `deepseek-v4.1-flash`), with a 2-node `work → gate` fixture satisfying D002 R′:
+
+```
+$ wcode --agents --no-project-config --config /tmp/wf.toml --task "smoke test" --timeout 180
+# stderr
+provider: chat · base_url https://opencode.ai/zen/go/v1 · model deepseek-v4.1-flash · key config
+workflow: 2 nodes
+#1 [doing] Reply with exactly the word ALPHA and nothing else. Do not use any tools.
+#2 [todo] Confirm node #1 produced ALPHA. Reply OK.
+I'll start by checking the instantiated workflow.
+«w1» ALPHA
+… root narration …
+«w1» OK
+#1 [done] Reply with exactly the word ALPHA and nothing else. Do not use any tools.
+#2 [done] Confirm node #1 produced ALPHA. Reply OK.
+# stdout
+#1 [done] …
+#2 [done] …
+EXIT=0
+```
+
+- **`#1 [doing]` precedes the root's first-turn text** — B1 (`5c8fbd4`) is observable, not merely reasoned. Pre-fix, that publish was already "seen" by the fresh watch receiver and never logged.
+- **`«w1» ALPHA` / `«w1» OK`** — the node→root reports render on stderr. This is §8's first deliverable, observed.
+- **`--quiet`**: stderr is the three startup lines only; the stdout summary is unchanged. exit 0.
+- **`--status <group>`**: printed both nodes, exit 0; `md5sum` `86ddbb67…`, size 441, and mtime **identical** before and after, no file created — the `load_at`/`reconcile` write hazard (`tasks.rs:577`) is empirically closed.
+- **A first fixture without a gate failed correctly**: the root was refused `task complete 1` by `verify_gate` ("task #1 is a work node with no gate depending on it", D002 R′), and it stopped rather than creating nodes. Not a defect — the R′ rule working, and the seed's "do NOT create nodes" holding under pressure.
+
+**Observed limitation (to be confirmed by the reviewer, not silently accepted):** `#2` went `todo → doing → done`, but the log printed `#2 [todo]` then `#2 [done]` — no `[doing]`. The `watch`-diff log coalesces two transitions landing between wakes. This is the consequence the review accepted in the abstract; it is now observed. The stdout summary is the authoritative final state.
