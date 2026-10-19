@@ -227,10 +227,11 @@ blank pane.
   behind. **Run events are permanent** —
   `⋯ compacted N messages`, `⋯ compaction skipped: <reason>`,
   `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, the `dropped N
-  queued message` an idle `Esc` leaves when it discards a queue (W029), and the
-  `⋯ N earlier message(s)` divider stay for the session: they are the record of
-  what the run did. The seeded hint has its own retirement (`clear_hint` at the
-  first block) and is in neither list.
+  queued message(s)` an idle `Esc` leaves when it discards a queue (W029 — the
+  notice is pluralized, so it reads `dropped 1 queued message` / `dropped 2
+  queued messages`), and the `⋯ N earlier message(s)` divider stay for the
+  session: they are the record of what the run did. The seeded hint has its own
+  retirement (`clear_hint` at the first block) and is in neither list.
 
 - **Header** (D010; amended by D023) — a **pinned top band**, not a transcript
   block: ONE bare row, no rule, carrying the running
@@ -415,10 +416,10 @@ transcript, `↑ N` on the composer's foot line while scrolled ·
 `Esc`/`Ctrl-C` cancel a run, quit when idle — an `Enter` while a run is in flight
 **queues** the prompt instead of discarding it, `Esc` cancels the run but keeps
 the queue, and an idle `Esc` drops a pending queue with a `dropped N queued
-message` notice (W029) · `Ctrl-Y` (`/copy`) copies the last
-reply (OSC-52) · `Ctrl-T` expands/collapses every tool's **output** (params stay
-visible — inlined on a collapsed tool's single row, as `key  value` rows when
-expanded; a failed tool always shows its error) ·
+message(s)` notice, pluralized to match the count (W029) · `Ctrl-Y` (`/copy`)
+copies the last reply (OSC-52) · `Ctrl-T` expands/collapses every tool's
+**output** (params stay visible — inlined on a collapsed tool's single row, as
+`key  value` rows when expanded; a failed tool always shows its error) ·
 `Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`, in the same two-column style) ·

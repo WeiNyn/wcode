@@ -595,8 +595,15 @@ async fn event_loop(
                         let _ = backend.send(Request::Submit { text });
                     }
                     // A surface retired between the emit and the dispatch has
-                    // nowhere to run the prompt, so it is dropped — nothing is
-                    // waiting on an answer, unlike `AskTo`'s collector.
+                    // nowhere to run the prompt, so it is dropped. Unlike
+                    // `AskTo` (which synthesises an `Error` so no collector
+                    // hangs) nothing is waiting on an answer — but the App is
+                    // left ARMED: `begin_run` already popped the prompt and set
+                    // `running = true`, so that surface would show `⠹ running`
+                    // with no `AgentEnd` ever coming. Dead code today (the
+                    // `backends` vec is append-only and the App never removes a
+                    // surface); named here so a future retirement path does not
+                    // rediscover it.
                 }
                 Action::Cancel => {
                     let _ = backend.send(Request::Cancel);

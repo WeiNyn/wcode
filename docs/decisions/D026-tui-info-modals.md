@@ -30,7 +30,9 @@ commands become modals rather than inventing a second reading surface.
 - **Which stay lines.** Bare usage hints and errors (`/width` with no argument or
   out of range, an unknown command, …), the `/copy` reply, action confirmations
   (`theme: <name>`, `width: N cols`), and the submit-time
-  `a turn is already running` guard remain transient. They are hints, not
+  `a turn is already running` guard remain transient (**W029 retired that
+  guard** — a mid-run submit now queues and confirms with `queued · N waiting`).
+  They are hints, not
   reports; a modal is the wrong weight, and model/effort already ride the header
   and the width the foot.
 - **The modal.** A `Clear`ed, centered, rounded-border panel — §2's `overlay

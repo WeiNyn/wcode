@@ -87,7 +87,10 @@ is W014a — a harness change with no presentation surface):
   usage-hint, and error line the `/`-command path emits (`/help`, `/usage`,
   `/copy`, `/verify`, `/tasks`, `/team roster`, …), plus the submit-time
   `a turn is already running` guard — a rejected submit is chatter, not a run
-  event. A transient row renders exactly like a `Notice`; retirement removes
+  event. (**W029 retired that guard**: a mid-run submit now queues and confirms
+  with `queued · N waiting`; see
+  [`W029`](../work/W029-queue-input-while-running.md).)
+  A transient row renders exactly like a `Notice`; retirement removes
   it and clamps the browse selection onto the same block.
 - **Permanent**: `⋯ compacted N messages`, `⋯ compaction skipped: <reason>`,
   `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, and the
