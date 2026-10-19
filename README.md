@@ -221,7 +221,8 @@ Passing `--task <text>` (or the `WCODE_TASK` env) turns a `[workflow]` run
 **headless** (no TUI): wcode seeds the root with the task, drives the plan to a
 terminal state, and exits — `0` once every node is `Done`, `1` if any node is
 `Failed`, if the `--timeout <secs>` **wall-clock** cap elapses (`0`/absent = no
-cap), or if the root's first turn errors (the cap starts after that turn). `--task` requires `[workflow]` and
+cap) — including mid-turn, when it cancels the root — or if the root's first
+turn errors. `--task` requires `[workflow]` and
 `--agents`, and cannot be combined with `-p`; a `{{task}}` template without a task
 is a boot error. `-p` is unaffected (it stays a single root turn), and a pure
 `[team]` (no `[workflow]`) remains the interactive, per-task path.

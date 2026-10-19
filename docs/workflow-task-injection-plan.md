@@ -197,12 +197,16 @@ Body contract:
 
 1. Spawn the drain (borrow `one_shot`'s drain, `main.rs:TTtdK`) so the
    subscription stays live across turns; **do not join** it.
-2. `Submit` the seed text to the root (`backend.ask(Request::Submit { … })`,
-   `main.rs:mAZx6`) so the root runs its first turn.
+2. Compute ONE wall-clock deadline (`let deadline = timeout.map(|d| …)`) BEFORE
+   the first turn, then `Submit` the seed text to the root
+   (`backend.ask(Request::Submit { … })`, `main.rs:mAZx6`) inside a
+   `tokio::select!` with that deadline, so a root looping in tool calls cannot
+   outlast it — on expiry, `send(Request::Cancel)`, then `return 1`.
 3. `let mut updates = tasks.subscribe();` (`tasks.rs:zNEtE`).
 4. Loop, reading `tasks.snapshot()` (`tasks.rs:SCzgm`) via the pure predicate
    `terminal_code()` (§4.7): `Some(code)` → break; `None` → wait on
-   `updates.changed()` or, when `timeout` is `Some`, a `tokio::select!` sleep.
+   `updates.changed()` or, when `timeout` is `Some`, a `tokio::select!` sleep —
+   on expiry, `send(Request::Cancel)` the root, then `break 1`.
 5. Print a per-node summary (`#id [state] title`), then `flush_all`
    (`main.rs:3dbBW`) + `Background::shutdown_all` (`main.rs:QETJA`) +
    `process::exit(code)` (`main.rs:PscEk`).
@@ -340,6 +344,8 @@ transitions, `terminal_code()` stays `None`, and with no `--timeout` the loop
 waits forever, violating §2 ("drive it headless to a terminal status").
 **Required:** match the first reply exactly as `one_shot` does and `return 1` on
 any of those three; the locked exit-code policy already says "1 … or timeout".
+The `--timeout` deadline ALSO bounds this first turn (`tokio::select!`): on a
+mid-turn expiry, cancel the root and `return 1`, so a tool-looping root trips it.
 
 **A3 — the drain is whole-run, not `one_shot`'s.**
 §4.6 step 1 says "borrow `one_shot`'s drain (`TTtdK`) … the subscription stays

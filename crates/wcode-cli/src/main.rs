@@ -1392,6 +1392,14 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         hooks.push(std::sync::Arc::new(
             crate::verify_gate::VerifyGateHooks::new(o.tasks().clone()),
         ));
+        // (b) Root-only: refuse a bare `sleep` from the root, so it ENDS its turn
+        // instead of polling — a worker's report is a `Wake` that only lands once
+        // the root's turn ends. Pushed after the `WorkerTemplate` cloned `hooks`
+        // (main.rs:1346), so a WORKER (built from `t.hooks.clone()`, agents.rs)
+        // never gets it.
+        hooks.push(std::sync::Arc::new(
+            wcode_harness::hooks::SleepRefusalHooks::new(),
+        ));
     }
     // Register remote peers (`--peer name=socket`): a served session becomes an
     // addressable A2A peer reachable over its socket (S4-4).
@@ -2391,9 +2399,28 @@ async fn run_workflow(
     let mut rx = backend.subscribe();
     tokio::spawn(async move { while rx.recv().await.is_ok() {} });
 
-    // The root's first turn (A2): if it errors or exhausts turns, no node
-    // transitions, and without a `--timeout` the wait below would never end.
-    match backend.ask(Request::Submit { text: seed }).await {
+    // ONE wall-clock deadline for the whole run (F1), computed BEFORE the first
+    // turn so it ALSO bounds the in-flight turn. A per-`changed()` timer would
+    // reset on every publish, so a continuous rework storm would never trip it.
+    let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
+
+    // The root's first turn (A2), now BOUNDED by the deadline: a root that only
+    // loops in tool calls would otherwise never return from `ask`, so the
+    // `--timeout` cap could never trip. If it errors or exhausts turns, no node
+    // transitions; on a mid-turn deadline we cancel the root, then exit 1.
+    let first = match deadline {
+        Some(deadline) => tokio::select! {
+            r = backend.ask(Request::Submit { text: seed }) => r,
+            _ = tokio::time::sleep_until(deadline) => {
+                // Bound the in-flight turn: cancel the root, then exit 1.
+                let _ = backend.send(Request::Cancel);
+                print_workflow_summary(&tasks);
+                return 1;
+            }
+        },
+        None => backend.ask(Request::Submit { text: seed }).await,
+    };
+    match first {
         Ok(AgentEvent::Stopped {
             stop_reason: StopReason::Error | StopReason::MaxTurns,
         })
@@ -2404,10 +2431,6 @@ async fn run_workflow(
         Ok(_) => {}
     }
 
-    // ONE wall-clock deadline for the whole wait (F1): a per-`changed()` timer
-    // would reset on every publish, so a continuous rework storm would never
-    // trip it.
-    let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
     let mut updates = tasks.subscribe();
     let code = loop {
         if let Some(code) = tasks.terminal_code() {
@@ -2422,7 +2445,11 @@ async fn run_workflow(
                             break tasks.terminal_code().unwrap_or(1);
                         }
                     }
-                    _ = tokio::time::sleep_until(deadline) => break 1,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        // The wait's wall-clock cap elapsed: cancel the root, exit 1.
+                        let _ = backend.send(Request::Cancel);
+                        break 1;
+                    }
                 }
             }
             None => {
@@ -2616,6 +2643,52 @@ fn task_items(orchestrator: &Option<crate::agents::Orchestrator>) -> Vec<wcode_t
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    use std::time::Duration;
+    use wcode_harness::agent::AgentConfig;
+    use wcode_harness::event::LlmStreamEvent;
+    use wcode_harness::hooks::{HooksSet, PlanModeHandle};
+    use wcode_harness::loop_::DEFAULT_MAX_TURNS;
+    use wcode_harness::streamfn::{LlmStream, StreamFn};
+
+    /// A stream that NEVER completes: the root's first turn blocks forever, so
+    /// ONLY the new deadline arm can make `run_workflow` return. Use `pending`,
+    /// NOT `empty` (empty ends the turn at once, defeating the test).
+    fn hanging_stream() -> StreamFn {
+        Arc::new(|_c, _s, _t, _o| {
+            Box::pin(futures::stream::pending::<LlmStreamEvent>()) as LlmStream
+        })
+    }
+
+    #[tokio::test]
+    async fn run_workflow_bounds_the_in_flight_turn() {
+        let handle = SessionActor::spawn(Agent::new(AgentConfig {
+            system: "sys".into(),
+            tools: Vec::new(),
+            llm: LlmOpts::default(),
+            stream_fn: hanging_stream(),
+            hooks: HooksSet::default(),
+            session: None,
+            context: Vec::new(),
+            working_dir: std::env::temp_dir(),
+            max_turns: DEFAULT_MAX_TURNS,
+            parallel_tools: true,
+            compaction: CompactionPolicy::default(),
+            plan_mode: PlanModeHandle::new(),
+        }));
+        let backend = Backend::from(handle);
+        let tasks = crate::tasks::TaskList::new();
+        let timeout = Some(Duration::from_millis(150));
+
+        // The outer guard makes the test FAIL (not hang) if the bound is removed.
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_workflow(backend, tasks, "go".into(), timeout),
+        )
+        .await
+        .expect("run_workflow returned before the outer guard");
+        assert_eq!(code, 1, "an elapsed --timeout during the first turn exits 1");
+    }
 
     // --- D003: `[[team]] file = "<path>"` ------------------------------------
 

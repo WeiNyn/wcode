@@ -293,6 +293,58 @@ impl Hooks for BashRiskHooks {
     }
 }
 
+/// ROOT-ONLY guard: refuses a bare `sleep` (a polling wait) issued by the
+/// workflow orchestrator. A worker's report lands as a `Wake` only once the
+/// root ENDS its turn, so a `sleep` blocks the very message it is waiting for.
+/// Mirrors `BashRiskHooks` — stateless, a unit struct is the whole type.
+pub struct SleepRefusalHooks;
+
+impl SleepRefusalHooks {
+    /// Kept for symmetry with `BashRiskHooks::new`, so the wiring in the CLI
+    /// reads `Arc::new(SleepRefusalHooks::new())` like every other built-in.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SleepRefusalHooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Hooks for SleepRefusalHooks {
+    /// `Some(reason)` iff this is a `bash` call whose first non-empty
+    /// `scan_segments` segment leads with `sleep`; `None` (allow) otherwise.
+    /// A missing / non-string `command` => allow (the same extraction as
+    /// `ReadOnlyHooks` / `BashRiskHooks`).
+    async fn before_tool_call(&self, call: &ToolCall) -> Option<String> {
+        if call.name != "bash" {
+            return None; // every non-bash tool is untouched
+        }
+        let cmd = call.arguments.get("command").and_then(|c| c.as_str())?;
+        sleep_poll_reason(cmd)
+    }
+}
+
+/// The first non-empty `scan_segments` segment's lead token == `sleep` -> the
+/// refusal reason; `None` to allow. The reason is generic (no `Wake` proper
+/// noun) and must NOT start with `refused: ` — the loop prefixes `blocked: `.
+/// It tells the model to END ITS TURN: the `Wake` a poll waits for can only
+/// arrive once the turn ends, so sleeping blocks the very message it waits for.
+fn sleep_poll_reason(cmd: &str) -> Option<String> {
+    let lead = scan_segments(cmd).into_iter().next()?.into_iter().next()?;
+    if lead != "sleep" {
+        return None;
+    }
+    Some(
+        "sleep-polling is not allowed — end your turn now; \
+         the next message will wake you when it arrives"
+            .to_string(),
+    )
+}
+
 /// `/dev/` device-name prefixes. A write *target* — `dd of=<dev>`, a `>`/`>>`
 /// redirect into a device, or an `mkfs*`/`wipefs`/`shred` operand — whose
 /// basename starts with one of these is catastrophic. Deliberately blunt:
@@ -882,6 +934,38 @@ mod tests {
             assert!(
                 hooks.before_tool_call(&bash_call(cmd)).await.is_none(),
                 "`{cmd}` should be allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sleep_poll_blocks_bare_sleep() {
+        let hooks = SleepRefusalHooks::new();
+        for cmd in ["sleep 5", "sleep 30", "sleep 5 && echo done"] {
+            let reason = hooks.before_tool_call(&bash_call(cmd)).await;
+            assert!(reason.is_some(), "`{cmd}` should be blocked");
+            let r = reason.unwrap();
+            // The loop prefixes `blocked: `, so the reason itself must NOT.
+            assert!(
+                r.starts_with("sleep") && !r.starts_with("refused: "),
+                "`{cmd}` reason contract: {r}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sleep_poll_allows_benign_and_non_bash() {
+        let hooks = SleepRefusalHooks::new();
+        for cmd in ["ls", "cargo build", "echo hi", "echo sleep"] {
+            assert!(
+                hooks.before_tool_call(&bash_call(cmd)).await.is_none(),
+                "`{cmd}` should be allowed"
+            );
+        }
+        for name in ["read", "edit", "task"] {
+            assert!(
+                hooks.before_tool_call(&tool_call(name)).await.is_none(),
+                "{name}"
             );
         }
     }
