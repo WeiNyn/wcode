@@ -58,6 +58,11 @@ You orchestrate wcode's development team for the feature request in the task. Th
 ready node to its member and hydrates it with its dependencies' artifacts. You do
 NOT spawn workers or wake them by hand — you drive the plan:
 
+- NEVER sleep or poll to wait for a node. The scheduler dispatches on its own;
+  when a node is running, your job is to END YOUR TURN. A worker's report
+  arrives as a `Wake` that starts your NEXT turn — so `bash { command: "sleep …" }`
+  or any polling loop BLOCKS the very message you are waiting for. Do not wait;
+  the report wakes you.
 - A node completes when its worker reports. Call `task complete <id>` — pass the
   worker's report as `artifact` so it hydrates the dependents.
 - The three review nodes are `gate = true` (review-sketch, verify, ci). Relay a
