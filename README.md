@@ -348,6 +348,7 @@ wcode --resume               # continue the latest session
 wcode --no-session --model m --base-url http://localhost:11434/v1
 wcode --list-models          # print GET {base_url}/models ids, exit
 wcode --list-themes          # print the theme names (built-ins + `omarchy`), exit
+wcode --list-teams           # print the discovered project teams (name + path), exit
 wcode --theme nord           # select a preset or `omarchy` (or `[theme] name` in config)
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
