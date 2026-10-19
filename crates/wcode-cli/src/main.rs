@@ -76,12 +76,12 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --task <text>      run a [workflow] headless on <text> (requires [workflow]
                      and --agents; WCODE_TASK is the fallback)
-  --timeout <secs>   cap the headless run (0/absent = no cap; falls back to
-                     `[workflow] timeout_secs`)
+  --timeout <secs>   cap the headless run (0/absent = no cap)
   --quiet            headless run: suppress the per-event log (the final
                      summary and any `resume:` line still print)
   --status [group|latest]  read-only: print <group>'s plan (#id [state] title),
-                     or the latest group; exit 0. Needs no model.
+                     or the latest group; exit 0. Needs no model, and no --task —
+                     refused when a task is set (including via WCODE_TASK).
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
    -V, --version      show version
    -h, --help         show this help
@@ -1940,7 +1940,10 @@ async fn dispatch(
         // ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
         // The `--task` call site still owes its Phase-2 wiring (the `quiet` flag
         // and the empty-plan guard are LIVE now):
-        //   1. TIME default (precedence flag → `[workflow]` → unbounded, §4.3):
+        //   1. TIME default (precedence flag → `[workflow]` → unbounded, §4.3) —
+        //      and with it, restore the `--help` line's
+        //      "falls back to `[workflow] timeout_secs`" clause (dropped now: an
+        //      absent behaviour must not be promised by `USAGE`):
         //        let timeout = args
         //            .timeout
         //            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
@@ -2661,6 +2664,14 @@ async fn run_workflow(
         Ok(_) => {}
     }
 
+    // B1: the first turn is not inert — the scheduler dispatches (and may even
+    // finish a node) CONCURRENTLY with it, yet a fresh `subscribe()` starts its
+    // receiver at the watch's CURRENT version (`scheduler.rs`), so every
+    // `publish()` made during that turn would never produce a `changed()`. Log
+    // once more HERE, before the watch starts, so no `[doing]` (nor a whole
+    // finished wave) is silently collapsed into the initial `todo` map — or lost
+    // entirely when the plan is already terminal.
+    log_node_transitions(&tasks, &mut seen, quiet);
     let mut updates = tasks.subscribe();
     let code = loop {
         if let Some(code) = tasks.terminal_code() {

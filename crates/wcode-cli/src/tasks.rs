@@ -559,7 +559,6 @@ impl TaskList {
                     if Some(i) == last_non_empty {
                         break; // torn final write; rest is blank
                     }
-                    let _ = applied;
                     return Err(format!("plan {} line {}: {e}", path.display(), i + 1));
                 }
             }

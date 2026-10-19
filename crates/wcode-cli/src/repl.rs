@@ -1719,8 +1719,13 @@ mod workflow_log_tests {
         }
     }
 
-    /// Feed one STREAMING message (`MessageStart` + two `MessageUpdate`s + the
-    /// `MessageEnd`) plus a node→root report, then close the channel.
+    /// Feed TWO streaming messages (`MessageStart` + two `MessageUpdate`s + the
+    /// `MessageEnd` each) plus a node→root report, then close the channel.
+    ///
+    /// The SECOND message is the load-bearing one: it has DIFFERENT text, so a
+    /// regression to a `MessagePrinter` SHARED across messages shows up as a lost
+    /// or tail-only second line — with one message the first delta is identical
+    /// either way and the bug would hide.
     fn feed(tx: &broadcast::Sender<AgentEvent>) {
         tx.send(AgentEvent::MessageStart {
             message: assistant(""),
@@ -1736,6 +1741,18 @@ mod workflow_log_tests {
         .unwrap();
         tx.send(AgentEvent::MessageEnd {
             message: assistant("half a report"),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageStart {
+            message: assistant(""),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageUpdate {
+            message: assistant("a second"),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageEnd {
+            message: assistant("a second message"),
         })
         .unwrap();
         tx.send(AgentEvent::MessageReceived {
@@ -1761,8 +1778,16 @@ mod workflow_log_tests {
             1,
             "the completed text prints exactly once (never the stream): {log:?}"
         );
+        // The SECOND message proves the printer is FRESH per message: a shared
+        // one would emit only the tail (`message`) or nothing at all.
+        assert_eq!(
+            log.matches("a second message").count(),
+            1,
+            "each message is logged in full (a fresh `MessagePrinter` per one): {log:?}"
+        );
+        assert!(!log.contains("\na second\n"), "never a tail-only line: {log:?}");
         assert!(log.contains("«w1» all green"), "the node report: {log:?}");
-        assert_eq!(log.lines().count(), 2, "one line per completed event: {log:?}");
+        assert_eq!(log.lines().count(), 3, "one line per completed event: {log:?}");
 
         let (tx, mut rx) = broadcast::channel(8);
         feed(&tx);
