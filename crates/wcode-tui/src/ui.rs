@@ -6055,5 +6055,24 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             "the header stays one row wide"
         );
     }
+
+    /// W027: the ordering rule (`merged_order`) is All-only — a member's growth
+    /// must never disturb the Focus frame (Focus renders the focused transcript in
+    /// index order, not by the arrival ordinal).
+    #[test]
+    fn focus_frame_is_byte_identical_when_a_member_grows() {
+        let mut app = App::new();
+        add_member(&mut app, "w1");
+        app.set_cwd(Some("proj".into()));
+        push_assistant(&mut app, "root prose");
+        let before = buffer_text(&render(&mut app, 80, 20));
+        // The member's transcript grows — in All it would interleave; Focus is
+        // untouched.
+        append_notice(&mut app, SessionId::agent("w1"), 22);
+        let after = buffer_text(&render(&mut app, 80, 20));
+        assert_eq!(before, after, "Focus is byte-identical when a member grows");
+        assert!(after.contains("root prose"));
+        assert!(!after.contains("compacted 22"), "Focus never merges a member");
+    }
 }
 

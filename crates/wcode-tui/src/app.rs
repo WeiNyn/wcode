@@ -3885,10 +3885,17 @@ impl App {
                         // `before` one PAST the append and no-op the stamp.
                         self.surfaces[idx].clear_hint();
                         let before = self.surfaces[idx].transcript.len();
+                        // Snapshot the OPEN turn's rev BEFORE `apply` grows it in
+                        // place (a `Turn` appends no block), so a turn that changes
+                        // is re-stamped to the tail (W027: order by last activity).
+                        let open = self.surfaces[idx].open_turn.and_then(|i| {
+                            self.surfaces[idx].block_revs.get(i).map(|r| (i, *r))
+                        });
                         if self.surfaces[idx].apply(event) {
                             self.dirty = true;
                         }
                         self.stamp_new(idx, before);
+                        self.touch_open_turn(idx, open);
                     }
                 }
             }
@@ -4626,6 +4633,36 @@ impl App {
     /// ordinal < every live ordinal.
     fn stamp_replayed(&mut self, idx: usize) {
         self.stamp_new(idx, 0);
+    }
+
+    /// Re-stamp a surface's **open turn** with a fresh ordinal when it GREW in
+    /// place, so the merged (All) view orders a turn by its **last activity**, not
+    /// its open (W027/D032). `open` is the snapshot `(index, rev)` taken from the
+    /// surface BEFORE the event was applied.
+    ///
+    /// # Contracts
+    /// - Fires ONLY when the OPEN turn's `rev` changed since `open` — a push that
+    ///   appends without touching the turn (a `Todo`/`Notice`, which returns `true`
+    ///   from `apply`) never moves it.
+    /// - Fires only while the turn is STILL open (`open_turn == Some(i)`): an
+    ///   `AgentEnd` seals it (`seal_turn`), so the notices it appends keep their own
+    ///   later ordinals instead of the sealed turn jumping past them.
+    /// - `next_seq` is monotone, so the re-stamp only ever increases the ordinal —
+    ///   it can never collide with a later block.
+    /// - Appends nothing and never renumbers: only `seqs[i]` and the counter move.
+    fn touch_open_turn(&mut self, idx: usize, open: Option<(usize, u64)>) {
+        let Some((i, rev)) = open else {
+            return;
+        };
+        if self.surfaces[idx].open_turn != Some(i) {
+            return; // sealed (an `AgentEnd`) — the turn keeps its ordinal
+        }
+        if self.surfaces[idx].block_revs.get(i).copied() == Some(rev) {
+            return; // the turn did not grow
+        }
+        self.surfaces[idx].seqs[i] = self.next_seq;
+        self.next_seq += 1;
+        self.dirty = true;
     }
 
     /// Render block `bi` of surface `si` into `out`, matching what
@@ -9820,6 +9857,122 @@ mod tests {
             matches!(app.transcript().last(), Some(Block::Transient(t)) if t.contains("sideways")),
             "the error names the token: {:?}",
             app.transcript().last()
+        );
+    }
+
+    // ---- W027: order a merged turn by its LAST activity, not its open ---------
+
+    #[test]
+    fn a_growing_turn_is_re_stamped_so_all_orders_it_last() {
+        let (mut app, root_id, member) = two_surfaces();
+        // The root opens a turn (its first committed message) → ordinal 0.
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageEnd {
+                message: assistant("first"),
+            },
+        ));
+        // A member block arrives AFTER → ordinal 1 (it is genuinely newer).
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        // The root's turn GROWS in place (its final reply) → it re-stamps last.
+        app.handle(AppEvent::Agent(
+            root_id,
+            AgentEvent::MessageEnd {
+                message: assistant("second"),
+            },
+        ));
+        assert_eq!(
+            app.merged_order(),
+            vec![(1, 0), (0, 0)],
+            "the grown turn sorts last: {:?}",
+            app.merged_order()
+        );
+        assert_eq!(app.focused().seqs, vec![2], "the turn carries the fresh ordinal");
+    }
+
+    #[test]
+    fn a_turn_that_does_not_grow_keeps_its_ordinal() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageEnd {
+                message: assistant("first"),
+            },
+        )); // root turn → seq 0
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 })); // seq 1
+        // A Compaction `Notice` on the ROOT returns `true` but does NOT grow the
+        // turn — the idle turn must keep its ordinal (not leapfrog the notice).
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 7, kept: 0 }));
+        assert_eq!(
+            app.merged_order(),
+            vec![(0, 0), (1, 0), (0, 1)],
+            "the idle turn keeps its ordinal: {:?}",
+            app.merged_order()
+        );
+    }
+
+    #[test]
+    fn a_todo_push_does_not_move_an_open_turn() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageEnd {
+                message: assistant("first"),
+            },
+        )); // root turn → seq 0
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 })); // seq 1
+        // A `Todo` push returns `true` from `apply` but bumps no TURN rev — the
+        // open turn must not move.
+        app.handle(AppEvent::Agent(
+            root_id,
+            AgentEvent::Todo {
+                todos: vec![TodoItem {
+                    content: "step one".into(),
+                    status: TodoStatus::Pending,
+                }],
+            },
+        ));
+        assert_eq!(
+            app.merged_order(),
+            vec![(0, 0), (1, 0), (0, 1)],
+            "the Todo push does not move the turn: {:?}",
+            app.merged_order()
+        );
+    }
+
+    #[test]
+    fn a_sealed_turn_does_not_jump_past_the_run_end_notices() {
+        let (mut app, root_id, _member) = two_surfaces();
+        app.handle(AppEvent::Agent(root_id.clone(), AgentEvent::AgentStart));
+        // The run opens a turn (seq 0) ...
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageEnd {
+                message: assistant("first"),
+            },
+        ));
+        // ... a further message is still streaming (live) ...
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageStart {
+                message: assistant("final"),
+            },
+        ));
+        // ... and a change makes `AgentEnd` append a summary notice after the turn.
+        app.surfaces[0].changes.push(Change {
+            path: "x.rs".into(),
+            added: 1,
+            removed: 0,
+            diff: "+1".into(),
+        });
+        app.handle(AppEvent::Agent(root_id, AgentEvent::AgentEnd));
+        // `flush_live` GROWS the turn, but `AgentEnd` SEALS it (`open_turn = None`):
+        // the turn keeps its ordinal, and the notice appended after sorts last.
+        assert_eq!(
+            app.merged_order(),
+            vec![(0, 0), (0, 1)],
+            "the sealed turn precedes the run-end notice: {:?}",
+            app.merged_order()
         );
     }
 }
