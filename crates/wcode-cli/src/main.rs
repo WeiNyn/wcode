@@ -46,7 +46,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>] [--quiet] [--status [group|latest]]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -76,7 +76,12 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --task <text>      run a [workflow] headless on <text> (requires [workflow]
                      and --agents; WCODE_TASK is the fallback)
-  --timeout <secs>   cap the headless run (0/absent = no cap)
+  --timeout <secs>   cap the headless run (0/absent = no cap; falls back to
+                     `[workflow] timeout_secs`)
+  --quiet            headless run: suppress the per-event log (the final
+                     summary and any `resume:` line still print)
+  --status [group|latest]  read-only: print <group>'s plan (#id [state] title),
+                     or the latest group; exit 0. Needs no model.
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
    -V, --version      show version
    -h, --help         show this help
@@ -134,17 +139,12 @@ struct Args {
     task: Option<String>,
     /// `--timeout <secs>`: cap the headless run; 0/absent = disabled.
     timeout: Option<u64>,
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §4.2 / §4.3 — two new headless flags. `status` mirrors `resume`'s
-    // `Option<Option<_>>` shape (`resume`, below): None = flag absent;
-    // Some(None) = latest; Some(Some(<group|dir>)) = that group.
-    //
-    // /// `--quiet`: suppress the per-event headless log (the summary + any
-    // /// `resume:` line still print).
-    // quiet: bool,
-    // /// `--status [group|latest]`: read-only plan dump; exit 0. Needs no model.
-    // status: Option<Option<String>>,
-    // ==== /SKETCH ====
+    /// `--quiet`: suppress the per-event headless log (the final summary and any
+    /// `resume:` line still print).
+    quiet: bool,
+    /// `--status [group|latest]`: read-only plan dump; exit 0. Needs no model.
+    /// None = flag absent; Some(None) = latest; Some(Some(<group|dir>)) = that one.
+    status: Option<Option<String>>,
     prompt: Option<String>,
     /// None = flag absent; Some(None) = latest; Some(Some(path)) = that file.
     resume: Option<Option<String>>,
@@ -247,20 +247,17 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 );
                 i += 1;
             }
-            // ==== SKETCH (review-only, not real code) ====
-            // W028 §4.2 — two parse arms. `--status` takes an OPTIONAL value
-            // (mirror the `--resume` arm just below: consume the next token only
-            // if it does not start with '-').
-            //
-            // "--quiet" => a.quiet = true,
-            // "--status" => {
-            //     let sel = args.get(i).filter(|v| !v.starts_with('-')).cloned();
-            //     if sel.is_some() {
-            //         i += 1;
-            //     }
-            //     a.status = Some(sel);
-            // }
-            // ==== /SKETCH ====
+            "--quiet" => a.quiet = true,
+            "--status" => {
+                // Mirrors `--resume`: consume the next token only if it is not a
+                // flag, so `--status --quiet` means "latest, quiet" not a group
+                // named `--quiet`.
+                let sel = args.get(i).filter(|v| !v.starts_with('-')).cloned();
+                if sel.is_some() {
+                    i += 1;
+                }
+                a.status = Some(sel);
+            }
             "--resume" => {
                 let path = args.get(i).filter(|v| !v.starts_with('-')).cloned();
                 if path.is_some() {
@@ -1409,32 +1406,28 @@ fn check_task_args(
     if args.timeout.is_some() && args.task.is_none() {
         return Err("--timeout requires --task".into());
     }
+    // `--serve` owns the session and diverges before `dispatch`, so a `--task`
+    // beside it was silently swallowed; refuse it instead (W028).
+    //
+    // The `--status` combination guard is NOT here: `check_task_args` runs from
+    // `build_runtime`, AFTER `load_config_raw`, while `--status` early-exits
+    // BEFORE it — a guard here could never fire. It lives in
+    // [`check_status_args`], called by that early exit.
+    if args.serve && args.task.is_some() {
+        return Err("--task cannot be combined with serve".into());
+    }
     Ok(())
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / §4.4 item 6 — two more guards in `check_task_args` (the same
-// `Err(String)` → eprintln + exit 2 shape at the call site, main.rs:1475-1478):
-//
-//   // `--serve` owns the session and diverges at main.rs:2211-2215 BEFORE
-//   // `dispatch`; a `--task` there is silently swallowed today (§4.4 item 6).
-//   if args.serve && args.task.is_some() {
-//       return Err("--task cannot be combined with serve".into());
-//   }
-//   // `--status` needs no model and no run; refuse a prompt/run/serve.
-//   if args.status.is_some()
-//       && (args.prompt.is_some() || args.task.is_some() || args.serve)
-//   {
-//       return Err("--status cannot be combined with -p/--task/serve".into());
-//   }
-//
-// FRICTION: `check_task_args` runs from `build_runtime` (main.rs:1475), which is
-// AFTER `load_config_raw` (main.rs:2149). But `--status` must early-exit BEFORE
-// `load_config_raw` (§4.2). So the `--status` combination guard above can NEVER
-// fire on the `--status` path — it exits first. The `--status` guard must be
-// lifted into a PURE predicate called by the early-exit itself (see the main()
-// block). Only the `--serve`+`--task` guard genuinely belongs here.
-// ==== /SKETCH ====
+/// Pure: `--status` is a standalone read-only command, so it refuses a prompt, a
+/// headless run, or a served session. Called only by `main`'s `--status` early
+/// exit — [`check_task_args`] runs too late to see it.
+fn check_status_args(args: &Args) -> Result<(), String> {
+    if args.prompt.is_some() || args.task.is_some() || args.serve {
+        return Err("--status cannot be combined with -p/--task/serve".into());
+    }
+    Ok(())
+}
 
 fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup) -> Runtime {
     let cwd = &setup.cwd;
@@ -1676,7 +1669,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             judger,
         );
     }
-    // ==== SKETCH (review-only, not real code) ====
+    // ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
     // W028 §4.2 / D033 / §4.4 item 5 — the cancel token gets a REAL OWNER.
     // Today it is minted inline at `spawn_scheduler(…, CancellationToken::new(),
     // …)` (just above) and never cancelled (`scheduler.rs:70-72` admits it).
@@ -1943,23 +1936,23 @@ async fn dispatch(
             .timeout
             .filter(|&s| s > 0)
             .map(std::time::Duration::from_secs);
-        let code = run_workflow(Backend::from(handle), tasks, seed, timeout).await;
-        // ==== SKETCH (review-only, not real code) ====
-        // W028 §4.2 — the `--task` call site changes in three ways:
+        let code = run_workflow(Backend::from(handle), tasks, seed, timeout, args.quiet).await;
+        // ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
+        // The `--task` call site still owes its Phase-2 wiring (the `quiet` flag
+        // and the empty-plan guard are LIVE now):
         //   1. TIME default (precedence flag → `[workflow]` → unbounded, §4.3):
         //        let timeout = args
         //            .timeout
         //            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
         //            .filter(|&s| s > 0)                       // 0 = disabled
         //            .map(std::time::Duration::from_secs);
-        //   2. the CANCEL token, cloned off the orchestrator (see build_runtime)
+        //   2. the CANCEL token, cloned off the orchestrator (see `build_runtime`)
         //        let cancel = rt
         //            .orchestrator.as_ref().expect("--task guard ensured --agents")
         //            .cancel_token().clone();
-        //   3. the GROUP dir + raw task text + quiet flag — the resume/run.json
-        //      inputs. `setup.active_group` is the running group (None when
-        //      `--no-session`); `args.task` is the raw text; `args.quiet` the log
-        //      knob.
+        //   3. the GROUP dir + raw task text + config path — the `run.json` /
+        //      `resume:` inputs. `setup.active_group` is the running group (None
+        //      when `--no-session`); `args.task` is the raw text.
         //        let code = run_workflow(
         //            Backend::from(handle), tasks, seed, timeout, cancel,
         //            setup.active_group.as_ref().map(|g| g.dir.as_path()),
@@ -2241,43 +2234,16 @@ async fn main() {
             .ok()
             .filter(|s| !s.trim().is_empty());
     }
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §4.2 / §5 step 2 / D033 — `--status` is a FILE-BASED read-only
-    // early exit, placed HERE (after WCODE_TASK resolution, BEFORE
-    // `load_config_raw`) so it needs NO model and NO session. `session_dir()` is
-    // pure (repl.rs:278-282).
-    //
-    //   if let Some(sel) = &args.status {
-    //       // The combination guard CANNOT live in `check_task_args` (that runs
-    //       // later, in build_runtime). Guard here, then exit.
-    //       if let Err(m) = check_status_args(&args) {
-    //           eprintln!("error: {m}");
-    //           std::process::exit(2);
-    //       }
-    //       std::process::exit(run_status(sel.as_deref()));
-    //   }
-    //
-    // /// Pure: `--status` refuses -p/--task/serve (the guard `check_task_args`
-    // /// would apply too late to matter).
-    // fn check_status_args(args: &Args) -> Result<(), String> {
-    //     if args.prompt.is_some() || args.task.is_some() || args.serve {
-    //         return Err("--status cannot be combined with -p/--task/serve".into());
-    //     }
-    //     Ok(())
-    // }
-    //
-    // /// Resolve the group (None = latest = `list_groups(&session_dir())` head,
-    // /// which is DESCENDING, session_groups.rs:267), read its `plan.ndjson`
-    // /// through the replay-only `TaskList::read_at` (NOT `load_at` — that
-    // /// writes), and print `#id [state] title` per node (reuse
-    // /// `print_workflow_summary`'s shape, main.rs:2536). Exit 0 on success, 1 on
-    // /// a missing plan / unreadable group.
-    // fn run_status(selector: Option<&str>) -> i32 { todo!() }
-    //
-    // FRICTION: `read_at(path, cap)` wants a rework cap, but `--status` runs
-    // BEFORE `load_config_raw`, so `[workflow] max_attempts` is unread — pass the
-    // built-in default `3`. Harmless: a read-only list never reopens.
-    // ==== /SKETCH ====
+    // `--status` is a FILE-BASED read-only command: it early-exits HERE, before
+    // `load_config_raw`, so it needs no model, no session and no provider.
+    // `session_dir()` is pure.
+    if let Some(sel) = &args.status {
+        if let Err(m) = check_status_args(&args) {
+            eprintln!("error: {m}");
+            std::process::exit(2);
+        }
+        std::process::exit(run_status(sel.as_deref()));
+    }
     // Phase 2: load config raw (flags applied, `to_llm_opts` not yet run), then
     // optional endpoint detection, the provider diagnostic, and finally the
     // launch provider. Detection runs HERE so `to_llm_opts` captures the
@@ -2586,83 +2552,82 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / §5 step 9-11 / D033 — the NEW `run_workflow` shape. It grows
-// five parameters (cancel, group dir, task text, config path, quiet) and loses
-// the discard-drain.
+// ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
+// Steps 10-11 (§5) are NOT implemented in Phase 1. `run_workflow` gains the
+// cancel token, the group dir / task / config (the resume inputs) and `quiet`
+// first (`quiet` and the empty-plan guard are LIVE above). What remains:
 //
-// async fn run_workflow(
-//     backend: Backend,
-//     tasks: crate::tasks::TaskList,
-//     seed: String,
-//     timeout: Option<std::time::Duration>,   // flag → [workflow] → None
-//     cancel: tokio_util::sync::CancellationToken, // the real owner (build_runtime)
-//     group: Option<&std::path::Path>,        // the run's group dir (run.json home)
-//     task: &str,                             // raw task text (resume line + run.json)
-//     config: Option<&str>,                   // --config for the resume line
-//     quiet: bool,                            // --quiet suppresses the log
-// ) -> i32
-//
-// # Contract (rewritten §4.6/§11 body)
-// - GUARD FIRST (before the drain, before the deadline — §4.4 item 1 / A3):
-//       if tasks.snapshot().is_empty() {
-//           eprintln!("error: no plan loaded");
-//           return 2;
+// 1. PERSIST THE LAUNCH, at the top of `run_workflow`, right after the empty-plan
+//    guard — ONCE, before any turn:
+//       if let Some(group) = group {
+//           let _ = session_groups::write_run(
+//               group,
+//               &RunRecord { task: task.into(), config: config.map(Into::into),
+//                            timeout_secs: timeout.map(|d| d.as_secs()) },
+//           );
 //       }
-//   This must be the FIRST statement so an empty plan never seeds the root,
-//   never touches the deadline. It is what flips the existing
-//   `run_workflow_bounds_the_in_flight_turn` fixture (empty TaskList) from 1 to 2.
-// - Write `<group>/run.json` (session_groups::write_run) at the TOP, once —
-//   the launch record `{task, config, timeout_secs}`.
-// - Install the SIGINT handler BEFORE the first turn (mirror repl.rs:769-779):
-//       let cancel_sig = cancel.clone();
-//       tokio::spawn(async move {
-//           while tokio::signal::ctrl_c().await.is_ok() {
-//               cancel_sig.cancel();
-//               // then: print_workflow_resume(group, task, config); exit(130)
-//           }
-//       });
-// - Replace the discard-drain (main.rs:2467-2468 `let mut rx = backend.subscribe();
-//   tokio::spawn(async move { while rx.recv().await.is_ok() {} });`) with:
-//       let mut rx = backend.subscribe();
-//       tokio::spawn(async move {   // render, don't discard — unless quiet
-//           if !quiet { crate::repl::print_workflow_events(&mut rx, quiet).await; }
-//           else { while rx.recv().await.is_ok() {} }
-//       });
-// - The node-transition log comes from the `TaskList` WATCH the driver already
-//   holds (main.rs:2502 `let mut updates = tasks.subscribe();`): on each
-//   `changed()`, diff the snapshot and `eprintln!("#{id} [{state}] {title}")`
-//   for a state change (skip under `quiet`).
-// - The first-turn deadline (main.rs:2479-2500) is UNCHANGED in shape but its
-//   two `return 1` / `break 1` arms ALSO `cancel.cancel()` (not just
-//   `backend.send(Request::Cancel)`), so a Script node stops too.
-// - On ANY non-zero exit (including the deadline arms), print
-//   `crate::repl::print_workflow_resume(group, task, config)`.
+//    A `--no-session` run has no group dir: `group: Option<&Path>` degrades to "no
+//    `run.json`, no `resume:` line" rather than panicking.
 //
-// # Friction
-// The resume line + run.json need the group dir, but `dispatch` only has
-// `setup.active_group` (None under `--no-session`). A `--no-session` headless
-// run has nowhere to write run.json and no dir to resume — the signature keeps
-// `group: Option<&Path>` so those paths degrade to "no resume line" rather than
-// panic.
+// 2. THE SIGINT HANDLER, installed before the first turn (mirror `repl.rs`'s
+//    `ctrl_c` loop): cancel the token, print `crate::repl::print_workflow_resume(
+//    group, task, config)`, exit 130.
+//
+// 3. CANCEL ON BOTH DEADLINE ARMS (the first-turn `select!` and the loop's), so a
+//    Script node stops too — not only `backend.send(Request::Cancel)`.
+//
+// 4. PRINT THE RESUME LINE on any non-zero exit FROM A RUN THAT WAS CREATED (the
+//    empty-plan refusal above is deliberately exempt, C3).
 // ==== /SKETCH ====
+
+
+/// The empty-plan refusal, exit 2 (C3): no `run.json`, no `resume:` line. A const
+/// so the gate can pin the wording.
+const NO_PLAN_ERROR: &str = "error: no plan loaded";
+/// `--status`'s "the group has no node to show" message (prefix; the group path
+/// is appended).
+const NO_PLAN_IN_GROUP: &str = "error: no plan in ";
 
 /// The headless `--task` run: the plan is already seeded by boot instantiation;
 /// this seeds the root and waits for the plan to reach a terminal state.
-/// Exit: 0 once every node is `Done`, 1 for a `Failed` node (fail-fast) or a
-/// timeout.
+///
+/// Exit: 0 once the plan is terminal-and-successful, 1 for a `Failed` node
+/// (fail-fast) or a timeout, 2 when no plan was loaded at all.
+///
+/// Observability (W028 Phase 1): the run narrates itself on STDERR — the root's
+/// node→root reports and completed message text ([`crate::repl::
+/// print_workflow_events`]) plus every node-state change — while the final
+/// per-node summary stays the stdout result. `quiet` silences the narration only.
 async fn run_workflow(
     backend: Backend,
     tasks: crate::tasks::TaskList,
     seed: String,
     timeout: Option<std::time::Duration>,
+    quiet: bool,
 ) -> i32 {
-    // A whole-run drain (A3): unlike `one_shot`'s, it does NOT stop at the first
-    // `AgentEnd`, so the subscription stays live across the run's many root
-    // turns. Non-load-bearing otherwise — `ask` replies over a oneshot and a
-    // broadcast with no reader never blocks the actor.
+    // The empty-plan guard is the FIRST statement: an empty plan never seeds the
+    // root and never touches the deadline. It is a client-side refusal, so it
+    // writes no `run.json` and prints no `resume:` line — a resume whose plan
+    // never loaded would otherwise promise a continuation that cannot exist.
+    if tasks.snapshot().is_empty() {
+        eprintln!("{NO_PLAN_ERROR}");
+        return 2;
+    }
+
+    // The event log (A3): the root's reports + completed text, rendered on stderr.
+    // Spawned unconditionally — `quiet` is the renderer's own knob — and it drains
+    // to `Closed`, NOT to the first `AgentEnd`: a run has MANY root turns and the
+    // subscription must stay live for all of them.
     let mut rx = backend.subscribe();
-    tokio::spawn(async move { while rx.recv().await.is_ok() {} });
+    tokio::spawn(async move {
+        crate::repl::print_workflow_events(&mut rx, quiet).await;
+    });
+
+    // C6: the node-transition log. The initial snapshot prints once, here; the
+    // loop below prints each subsequent CHANGE against this map.
+    let mut seen: std::collections::HashMap<u32, crate::tasks::TaskState> =
+        std::collections::HashMap::new();
+    log_node_transitions(&tasks, &mut seen, quiet);
 
     // ONE wall-clock deadline for the whole run (F1), computed BEFORE the first
     // turn so it ALSO bounds the in-flight turn. A per-`changed()` timer would
@@ -2709,6 +2674,7 @@ async fn run_workflow(
                         if changed.is_err() {
                             break tasks.terminal_code().unwrap_or(1);
                         }
+                        log_node_transitions(&tasks, &mut seen, quiet);
                     }
                     _ = tokio::time::sleep_until(deadline) => {
                         // The wait's wall-clock cap elapsed: cancel the root, exit 1.
@@ -2721,6 +2687,7 @@ async fn run_workflow(
                 if updates.changed().await.is_err() {
                     break 1;
                 }
+                log_node_transitions(&tasks, &mut seen, quiet);
             }
         }
     };
@@ -2729,11 +2696,105 @@ async fn run_workflow(
     code
 }
 
+/// The node-transition log (C6): `#id [state] title` on stderr for every node
+/// whose state CHANGED since the last call — an empty `seen` prints the whole
+/// initial snapshot, which is exactly the "print it once, right after the
+/// empty-plan guard" rule. `quiet` suppresses it. Not a diff of `attempts`: the
+/// state is the observable the operator needs.
+fn log_node_transitions(
+    tasks: &crate::tasks::TaskList,
+    seen: &mut std::collections::HashMap<u32, crate::tasks::TaskState>,
+    quiet: bool,
+) {
+    if quiet {
+        return;
+    }
+    for task in tasks.snapshot() {
+        if seen.get(&task.id) == Some(&task.state) {
+            continue;
+        }
+        seen.insert(task.id, task.state);
+        eprintln!("#{} [{}] {}", task.id, task.state.label(), task.title);
+    }
+}
+
 /// The headless run's final per-node summary: `#id [state] title`, in id order.
 fn print_workflow_summary(tasks: &crate::tasks::TaskList) {
     for task in tasks.snapshot() {
         println!("#{} [{}] {}", task.id, task.state.label(), task.title);
     }
+}
+
+/// `wcode --status [group|latest]`: print a run's plan, read-only (W028).
+///
+/// Resolution (C5), in order: an EXISTING directory named by `selector` is the
+/// group; else `session_dir()/selector`; else exit 1 `no such group`. No selector
+/// (or `latest`) takes the head of [`session_groups::list_groups`], which sorts
+/// name-DESCENDING — so the head is the newest; an empty sessions dir exits 1.
+///
+/// The read itself goes through the replay-only
+/// [`crate::tasks::TaskList::read_at`] and NEVER `load_at`: the latter journals a
+/// `Restart` per `Doing` node, mutating the very file being inspected.
+///
+/// A `GroupEntry::Legacy` head (a pre-group flat `.jsonl`) has no `plan.ndjson`:
+/// `read_at` takes its NotFound path, so this exits 1 without creating a file.
+fn run_status(selector: Option<&str>) -> i32 {
+    run_status_in(&crate::repl::session_dir(), selector)
+}
+
+/// [`run_status`] over an explicit sessions dir — the resolver and the reader,
+/// separated from the home-dir lookup so the selector rules are unit-testable.
+fn run_status_in(sessions: &Path, selector: Option<&str>) -> i32 {
+    let group = match selector {
+        None | Some("latest") => {
+            let entries = match session_groups::list_groups(sessions) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    eprintln!("error: {}: {e}", sessions.display());
+                    return 1;
+                }
+            };
+            match entries.first() {
+                Some(entry) => entry.path().to_path_buf(),
+                None => {
+                    eprintln!("error: no sessions in {}", sessions.display());
+                    return 1;
+                }
+            }
+        }
+        Some(sel) => {
+            let direct = PathBuf::from(sel);
+            if direct.is_dir() {
+                direct
+            } else {
+                let joined = sessions.join(sel);
+                if joined.is_dir() {
+                    joined
+                } else {
+                    eprintln!("error: no such group: {sel}");
+                    return 1;
+                }
+            }
+        }
+    };
+    // The rework cap is irrelevant to a read-only list, and `--status` runs before
+    // the config load, so the built-in default (`load_at`'s) is passed.
+    const STATUS_MAX_ATTEMPTS: u32 = 3;
+    let tasks = match crate::tasks::TaskList::read_at(&group.join("plan.ndjson"), STATUS_MAX_ATTEMPTS)
+    {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    if tasks.snapshot().is_empty() {
+        // No `plan.ndjson` (a legacy group) or a plan that never recorded a node.
+        eprintln!("{NO_PLAN_IN_GROUP}{}", group.display());
+        return 1;
+    }
+    print_workflow_summary(&tasks);
+    0
 }
 
 /// The root's opening seed: the plan is ALREADY instantiated, so its one job is
@@ -2925,13 +2986,13 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn run_workflow_bounds_the_in_flight_turn() {
-        let handle = SessionActor::spawn(Agent::new(AgentConfig {
+    /// A root agent over `stream_fn`, wrapped as the backend `run_workflow` drives.
+    fn workflow_backend(stream_fn: StreamFn) -> Backend {
+        Backend::from(SessionActor::spawn(Agent::new(AgentConfig {
             system: "sys".into(),
             tools: Vec::new(),
             llm: LlmOpts::default(),
-            stream_fn: hanging_stream(),
+            stream_fn,
             hooks: HooksSet::default(),
             session: None,
             context: Vec::new(),
@@ -2940,48 +3001,145 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: PlanModeHandle::new(),
-        }));
-        let backend = Backend::from(handle);
+        })))
+    }
+
+    #[tokio::test]
+    async fn run_workflow_bounds_the_in_flight_turn() {
+        let backend = workflow_backend(hanging_stream());
         let tasks = crate::tasks::TaskList::new();
+        // The empty-plan guard would return 2 before ANY deadline, so the plan
+        // must hold a node for the deadline arm to be what returns (C7).
+        tasks.create("go", vec![], false).unwrap();
         let timeout = Some(Duration::from_millis(150));
 
         // The outer guard makes the test FAIL (not hang) if the bound is removed.
         let code = tokio::time::timeout(
             Duration::from_secs(5),
-            run_workflow(backend, tasks, "go".into(), timeout),
+            run_workflow(backend, tasks, "go".into(), timeout, false),
         )
         .await
         .expect("run_workflow returned before the outer guard");
         assert_eq!(code, 1, "an elapsed --timeout during the first turn exits 1");
     }
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §7.1 — the run_workflow / status / flag gates. NOTE the REQUIRED edit
-    // to the test ABOVE (A3): it builds `let tasks = crate::tasks::TaskList::new();`
-    // (empty) and asserts `code == 1`. The empty-plan guard makes it return 2
-    // BEFORE the deadline, so it MUST seed one node first (e.g.
-    // `tasks.create("go", vec![], false).unwrap();`) and pass the new
-    // `run_workflow(…, cancel, None, "go", None, false)` arguments, THEN still
-    // assert `code == 1` for the elapsed timeout.
-    //
-    // #[tokio::test]
-    // /// §7.1: an empty TaskList returns 2 and prints `no plan loaded`.
-    // async fn run_workflow_refuses_an_empty_plan() { todo!() }
-    //
-    // #[test]
-    // /// §7.1: `list_groups` head (descending, session_groups.rs:267) is chosen
-    // /// for `--status latest`.
-    // fn status_latest_picks_the_newest_group() { todo!() }
-    //
-    // #[test]
-    // /// §7.1: `--quiet`, `--status`, `--status g1` parse; `--status` with `-p`
-    // /// errors (via `check_status_args`).
-    // fn parse_quiet_and_status() { todo!() }
-    //
-    // #[test]
-    // /// §7.1: `--task`+`serve` → `Err("--task cannot be combined with serve")`.
-    // fn task_guards_reject_serve_task() { todo!() }
-    // ==== /SKETCH ====
+    #[tokio::test]
+    async fn run_workflow_refuses_an_empty_plan() {
+        // An EMPTY plan: the guard returns 2 before the root is ever seeded, so
+        // the deadline is never armed and the turns never start (C3).
+        let backend = workflow_backend(hanging_stream());
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_workflow(
+                backend,
+                crate::tasks::TaskList::new(),
+                "go".into(),
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("the empty-plan guard returns at once");
+        assert_eq!(code, 2, "an empty plan exits 2");
+        assert_eq!(NO_PLAN_ERROR, "error: no plan loaded");
+    }
+
+    /// Two group dirs in a temp sessions dir; only `old` carries a plan.
+    fn two_groups() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["0000000000001_aaaaaaaa", "0000000000002_bbbbbbbb"] {
+            std::fs::create_dir_all(dir.path().join(id).join("members")).unwrap();
+        }
+        let plan = crate::tasks::TaskList::with_journal_at(
+            dir.path().join("0000000000001_aaaaaaaa").join("plan.ndjson"),
+            3,
+        );
+        plan.create("only node", vec![], false).unwrap();
+        drop(plan);
+        dir
+    }
+
+    #[test]
+    fn status_latest_picks_the_newest_group() {
+        let dir = two_groups();
+        // `latest` resolves to the DESCENDING head (the newest group), which has
+        // no plan — so it exits 1, while the OLDER group by name still prints.
+        // That asymmetry is the selection proof.
+        assert_eq!(run_status_in(dir.path(), None), 1);
+        assert_eq!(run_status_in(dir.path(), Some("latest")), 1);
+        assert_eq!(run_status_in(dir.path(), Some("0000000000001_aaaaaaaa")), 0);
+        // An existing directory by path works too (C5 rule 1).
+        let older = dir.path().join("0000000000001_aaaaaaaa");
+        assert_eq!(run_status_in(dir.path(), Some(older.to_str().unwrap())), 0);
+        // Rule 3: neither an existing dir nor a child ⇒ `no such group`, exit 1.
+        assert_eq!(run_status_in(dir.path(), Some("nope")), 1);
+        // `read_at` underneath never created anything for the newest group.
+        assert!(!dir.path().join("0000000000002_bbbbbbbb/plan.ndjson").exists());
+    }
+
+    #[test]
+    fn parse_quiet_and_status() {
+        let a = parsed(&["--quiet"]);
+        assert!(a.quiet);
+        assert_eq!(a.status, None, "the flag alone is not `--status`");
+        let a = parsed(&["--status"]);
+        assert_eq!(a.status, Some(None), "bare `--status` means latest");
+        let a = parsed(&["--status", "g1"]);
+        assert_eq!(a.status, Some(Some("g1".into())));
+        // The `--resume` rule: a flag-looking token is not consumed as the value.
+        let a = parsed(&["--status", "--quiet"]);
+        assert_eq!(a.status, Some(None));
+        assert!(a.quiet);
+    }
+
+    #[test]
+    fn check_status_args_rejects_a_run_or_a_serve() {
+        assert_eq!(
+            check_status_args(&parsed(&["--status", "-p", "x"])),
+            Err("--status cannot be combined with -p/--task/serve".into())
+        );
+        assert_eq!(
+            check_status_args(&parsed(&["--status", "--task", "x"])),
+            Err("--status cannot be combined with -p/--task/serve".into())
+        );
+        // NB: `serve` must come FIRST — after `--status` a bare word is taken as
+        // the group selector, not the subcommand.
+        assert_eq!(
+            check_status_args(&parsed(&["serve", "--status"])),
+            Err("--status cannot be combined with -p/--task/serve".into())
+        );
+        assert!(check_status_args(&parsed(&["--status"])).is_ok());
+    }
+
+    #[test]
+    fn task_guards_reject_serve_task() {
+        use crate::config::Workflow;
+        // A `--task` beside `serve` was silently swallowed; it is refused now.
+        assert_eq!(
+            check_task_args(
+                &parsed(&["serve", "--task", "x"]),
+                Some(&Workflow::default()),
+                true
+            ),
+            Err("--task cannot be combined with serve".into())
+        );
+    }
+
+    #[test]
+    fn log_node_transitions_prints_a_change_once() {
+        let tasks = crate::tasks::TaskList::new();
+        let a = tasks.create("a", vec![], false).unwrap();
+        let mut seen = std::collections::HashMap::new();
+        // The initial call seeds the map (and prints); the same state is not
+        // re-printed; a change is; `quiet` prints nothing.
+        log_node_transitions(&tasks, &mut seen, true);
+        assert!(seen.is_empty(), "`quiet` records nothing");
+        log_node_transitions(&tasks, &mut seen, false);
+        assert_eq!(seen.get(&a.id), Some(&crate::tasks::TaskState::Todo));
+        tasks.start(a.id).unwrap();
+        log_node_transitions(&tasks, &mut seen, false);
+        assert_eq!(seen.get(&a.id), Some(&crate::tasks::TaskState::Doing));
+    }
 
     // --- D003: `[[team]] file = "<path>"` ------------------------------------
 

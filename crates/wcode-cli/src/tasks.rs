@@ -508,46 +508,67 @@ impl TaskList {
         Ok(list)
     }
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §4.1 / D033 — `TaskList::read_at`: the `--status` REPLAY-ONLY reader.
-    //
-    // It is `load_at` (`tasks.rs:439-473`) minus the two write hazards:
-    //   1. the journal sink is `None`, so `Inner::record` is a hard no-op
-    //      (`tasks.rs:314` `let Some(journal) = &self.journal else { return Ok(()); }`);
-    //   2. it NEVER calls `reconcile()`, whose `PlanOp::Restart` write
-    //      (`tasks.rs:577` `let _ = self.inner.record(&PlanOp::Restart { id });`)
-    //      is exactly what a live journal must not gain from being observed.
-    //
-    // Contract: replay each NDJSON `PlanOp` via the private `apply`, then STOP.
-    // The file at `path` is BYTE-IDENTICAL after the call; a `Doing` node reads
-    // back `doing` (no `Doing → Todo` flip — the reconcile the TUI relies on is
-    // deliberately skipped here, `tasks.rs:564-580`).
-    //
-    // pub(crate) fn read_at(path: &Path, max_attempts: u32) -> Result<TaskList, String> {
-    //     // Build with `with_sink(None, _, max_attempts)` — a null sink ⇒ no
-    //     // writes possible. Replay lines into `apply(op)`. Do NOT reconcile.
-    //     todo!()
-    // }
-    //
-    // # Errors
-    // Identical shape to `load_at`: a torn final line is tolerated, any other
-    // parse error is `plan {path} line {n}: {e}`; `NotFound` ⇒ an empty list
-    // (and NO file is created).
-    //
-    // # Does NOT promise
-    // No reconcile, no compaction, no file creation, no readiness rework. The
-    // `max_attempts` argument is accepted for signature parity with `load_at`
-    // but the rework cap is unreachable on a read-only list.
-    //
-    // #[cfg(test)]
-    // mod read_at_tests {
-    //     use super::*;
-    //     /// §7.1 `read_at_never_writes`: the plan file's bytes are identical
-    //     /// before/after `read_at`, and a `Doing` node reads back `doing`.
-    //     #[test]
-    //     fn read_at_never_writes() { todo!() }
-    // }
-    // ==== /SKETCH ====
+    /// Replay `path` READ-ONLY: the `--status` loader (W028). It is
+    /// [`TaskList::load_at`] minus the two write hazards, deliberately:
+    ///
+    /// 1. the journal sink is `None`, so `Inner::record` is a hard no-op — no
+    ///    file can be created or appended;
+    /// 2. it NEVER calls `reconcile()`, whose `PlanOp::Restart` write
+    ///    (`let _ = self.inner.record(&PlanOp::Restart { id });` inside
+    ///    `reconcile`) is exactly what a live journal must not gain from being
+    ///    OBSERVED. A naive reader would mutate the journal it monitors.
+    ///
+    /// So the file at `path` is BYTE-IDENTICAL after the call, and a `Doing`
+    /// node reads back `doing` — not the `todo` a crash-reconcile would show.
+    /// The last line is replayed verbatim; a torn FINAL line is tolerated exactly
+    /// like `load_at`.
+    ///
+    /// # Errors
+    /// `plan {path}: {e}` for an unreadable file; `plan {path} line {n}: {e}` for
+    /// a parse error other than a torn tail. `NotFound` ⇒ an EMPTY list, and no
+    /// file is created (the `--status` path over a legacy `.jsonl` head needs
+    /// this: it has no `plan.ndjson`).
+    ///
+    /// The `max_attempts` argument exists for signature parity with `load_at`;
+    /// the rework cap is unreachable on a no-write list.
+    pub(crate) fn read_at(path: &Path, max_attempts: u32) -> Result<Self, String> {
+        // A null sink, replaying ON (belt and braces: `record` is already a
+        // no-op without a journal).
+        let list = Self::with_sink(None, true, max_attempts);
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                list.inner.replaying.store(false, Ordering::Relaxed);
+                return Ok(list);
+            }
+            Err(e) => return Err(format!("plan {}: {e}", path.display())),
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let last_non_empty = lines.iter().rposition(|l| !l.trim().is_empty());
+        let mut applied = 0u64;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<PlanOp>(line) {
+                Ok(op) => {
+                    list.apply(op);
+                    applied += 1;
+                }
+                Err(e) => {
+                    if Some(i) == last_non_empty {
+                        break; // torn final write; rest is blank
+                    }
+                    let _ = applied;
+                    return Err(format!("plan {} line {}: {e}", path.display(), i + 1));
+                }
+            }
+        }
+        list.inner.lines.store(applied, Ordering::Relaxed);
+        list.inner.replaying.store(false, Ordering::Relaxed);
+        // NO `reconcile()`: see the doc above.
+        Ok(list)
+    }
 
     /// Apply one replayed op. `Create`/`Snapshot` bypass the public methods so a
     /// replay keeps ids verbatim (Blocker A); everything else goes through them
@@ -1668,6 +1689,42 @@ fn plan_op_and_task_serde_round_trip() {
 
         let r = TaskList::load(&path).unwrap();
         assert_eq!(r.snapshot(), l.snapshot());
+    }
+
+    /// W028 `--status` gate: the replay-only reader leaves the journal
+    /// BYTE-IDENTICAL (no reconcile, no `Restart`, no file) and reports a `Doing`
+    /// node as `doing` — the state a monitor actually wants.
+    #[test]
+    fn read_at_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let journal = TaskList::with_journal(path.clone());
+        let a = journal.create("a", vec![], false).unwrap();
+        let _b = journal.create("b", vec![], false).unwrap();
+        journal.start(a.id).unwrap(); // a `Doing` node, journaled
+        drop(journal);
+
+        let before = std::fs::read(&path).unwrap();
+        let read = TaskList::read_at(&path, 3).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "`read_at` must never write to the journal it observes (`load_at`'s \
+             reconcile journals a `Restart` per `Doing` node)"
+        );
+        assert_eq!(read.snapshot().len(), 2);
+        let node = read.snapshot().into_iter().find(|t| t.id == a.id).unwrap();
+        assert_eq!(
+            node.state,
+            TaskState::Doing,
+            "no reconcile: a `Doing` node reads back `doing`, not `todo`"
+        );
+
+        // NotFound ⇒ an empty list, and NO file is created (a legacy group).
+        let missing = dir.path().join("absent.ndjson");
+        let empty = TaskList::read_at(&missing, 3).unwrap();
+        assert!(empty.snapshot().is_empty());
+        assert!(!missing.exists(), "`read_at` creates nothing");
     }
 
     /// Blocker A: a `Create` after a `Snapshot` gets a FRESH, non-colliding id.

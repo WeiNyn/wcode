@@ -1637,60 +1637,141 @@ fn out(s: &str) {
     let _ = io::stdout().flush();
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / D033 — the headless-run log + resume line. Both go on the
-// composition root's stderr/stdout split: the LOG is stderr, the SUMMARY is
-// stdout (`print_workflow_summary`, main.rs:2536-2539).
-//
-// pub(crate) async fn print_workflow_events(
-//     rx: &mut broadcast::Receiver<AgentEvent>,
-//     quiet: bool,
-// ) {
-//     // Render until `RecvError::Closed` — NOT until `AgentEnd` (a run has MANY
-//     // root turns; `print_events` stops at AgentEnd, repl.rs:1511/1573).
-//     // A7 BINDING: one line per COMPLETED message, never a stream:
-//     //   AgentEvent::MessageReceived { from, content }  (event.rs:133-136)
-//     //       => eprintln!("«{}» {}", crate::agents::short_name(&from), content)
-//     //   AgentEvent::MessageEnd { message }             (event.rs:70-72)
-//     //       => eprintln! the message text, ONE block per turn.
-//     // `quiet` suppresses ALL of it (the summary + resume line still print
-//     // elsewhere). Ignore MessageStart/MessageUpdate (the stream).
-//     todo!()
-// }
-//
-// pub(crate) fn print_workflow_resume(group: &Path, task: &str, config: Option<&str>) {
-//     // Mirror `print_relaunch` (repl.rs:607-621): build a relaunch arg vector
-//     // and `eprintln!("resume: {}", relaunch_line(&args))`, reusing
-//     // `relaunch_line`/`shell_quote` (repl.rs:625-652). The arg vector is
-//     // `--agents [--config <config>] --resume <group> --task <task>` (task
-//     // shell-quoted). Rewriting through `relaunch_line` is what makes the line
-//     // round-trip through `shell_quote`.
-//     todo!()
-// }
-//
-// FRICTION (design fights the code): §4.2 says "reuse `MessagePrinter`/`emit`/
-// `close_blocks`". Those write MESSAGE TEXT to STDOUT — `out` above is
-// `print!` (repl.rs:1636) and `close_blocks` `println!`s the text
-// (repl.rs:1595-1598) — while the brief demands ALL log output on STDERR.
-// `emit` also emits interim MessageUpdate partials (a stream), which A7 forbids.
-// Resolution: do NOT reuse the streaming renderer for output. Reuse only the
-// text EXTRACTOR — `MessagePrinter::default().update(&message)` → `(text,
-// thinking)` — and print the final `text` with `eprintln!` on the
-// `MessageEnd` arm. The renderer stays untouched (no `out`-sink refactor).
-//
-// #[cfg(test)]
-// mod workflow_log_tests {
-//     use super::*;
-//     /// §7.1 gate: a `MessageReceived` renders under `quiet=false` and not
-//     /// under `quiet=true` (drive it over a fed `broadcast`, like
-//     /// `print_events_caches_the_latest_todo_event`, repl.rs:2548).
-//     #[tokio::test]
-//     async fn print_workflow_events_shows_node_reports_and_quiet_suppresses() { todo!() }
-//     /// §7.1 gate: the resume line round-trips through `relaunch_line`.
-//     #[test]
-//     fn resume_line_round_trips_through_relaunch_line() { todo!() }
-// }
-// ==== /SKETCH ====
+/// The headless `--task` run's per-event log (W028), rendered on **stderr**: the
+/// node→root reports (`«<from>» <content>`) and the root's own COMPLETED message
+/// text. One line per event, never a stream (A7) — `MessageStart`/
+/// `MessageUpdate` are ignored, so a long turn prints once, when it ends.
+///
+/// It runs to `RecvError::Closed`, not to the first `AgentEnd`: a run has many
+/// root turns, and the subscription must stay live across all of them. `Lagged`
+/// drops the missed events and continues, exactly like [`print_events`].
+///
+/// `quiet` drains without printing — it must NOT return early, because the
+/// actor's broadcast stays healthy only while a receiver exists.
+pub(crate) async fn print_workflow_events(rx: &mut broadcast::Receiver<AgentEvent>, quiet: bool) {
+    let mut err = io::stderr();
+    write_workflow_events(rx, quiet, &mut err).await;
+}
+
+/// The testable core of [`print_workflow_events`]: the same loop, over any sink,
+/// so a test can assert exactly what the log says without touching process stderr.
+async fn write_workflow_events<W: Write>(
+    rx: &mut broadcast::Receiver<AgentEvent>,
+    quiet: bool,
+    w: &mut W,
+) {
+    loop {
+        let event = match rx.recv().await {
+            Ok(event) => event,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+        if quiet {
+            continue;
+        }
+        for line in workflow_event_lines(&event) {
+            let _ = writeln!(w, "{line}");
+            let _ = w.flush();
+        }
+    }
+}
+
+/// The lines one event contributes to the headless log; empty means "print
+/// nothing". Pure, so the rendering rule is stated once.
+///
+/// `MessageEnd` uses a FRESH [`MessagePrinter`] and calls `update` exactly ONCE:
+/// `update` returns a DELTA against what the printer already saw, so a fresh
+/// printer makes that delta the whole message (A3 — a shared printer would print
+/// only the tail, and a per-delta call would print a stream).
+fn workflow_event_lines(event: &AgentEvent) -> Vec<String> {
+    match event {
+        AgentEvent::MessageReceived { from, content } => vec![format!(
+            "«{}» {}",
+            crate::agents::short_name(from),
+            content.trim_end()
+        )],
+        AgentEvent::MessageEnd { message } => {
+            let mut printer = MessagePrinter::default();
+            let (text, _thinking) = printer.update(message);
+            let text = text.trim_end();
+            if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![text.to_string()]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod workflow_log_tests {
+    use super::*;
+    use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+    use wcode_harness::protocol::SessionId;
+
+    fn assistant(text: &str) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: vec![ContentBlock::Text { text: text.into() }],
+            stop_reason: StopReason::Stop,
+            usage: None,
+            model: None,
+        }
+    }
+
+    /// Feed one STREAMING message (`MessageStart` + two `MessageUpdate`s + the
+    /// `MessageEnd`) plus a node→root report, then close the channel.
+    fn feed(tx: &broadcast::Sender<AgentEvent>) {
+        tx.send(AgentEvent::MessageStart {
+            message: assistant(""),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageUpdate {
+            message: assistant("half a "),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageUpdate {
+            message: assistant("half a report"),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageEnd {
+            message: assistant("half a report"),
+        })
+        .unwrap();
+        tx.send(AgentEvent::MessageReceived {
+            from: SessionId::agent("w1"),
+            content: "all green".into(),
+        })
+        .unwrap();
+    }
+
+    /// §7.1 / A3: one line per COMPLETED message — the full text EXACTLY once, not
+    /// the streamed deltas — plus the `«from» content` report; `quiet` prints
+    /// nothing at all.
+    #[tokio::test]
+    async fn print_workflow_events_shows_node_reports_and_quiet_suppresses() {
+        let (tx, mut rx) = broadcast::channel(8);
+        feed(&tx);
+        drop(tx);
+        let mut log = Vec::new();
+        write_workflow_events(&mut rx, false, &mut log).await;
+        let log = String::from_utf8(log).unwrap();
+        assert_eq!(
+            log.matches("half a report").count(),
+            1,
+            "the completed text prints exactly once (never the stream): {log:?}"
+        );
+        assert!(log.contains("«w1» all green"), "the node report: {log:?}");
+        assert_eq!(log.lines().count(), 2, "one line per completed event: {log:?}");
+
+        let (tx, mut rx) = broadcast::channel(8);
+        feed(&tx);
+        drop(tx);
+        let mut log = Vec::new();
+        write_workflow_events(&mut rx, true, &mut log).await;
+        assert!(log.is_empty(), "`quiet` suppresses the whole log");
+    }
+}
 
 #[cfg(test)]
 mod tests {
