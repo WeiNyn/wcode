@@ -19,6 +19,7 @@ mod agents;
 mod config;
 mod frontmatter;
 mod instructions;
+mod judge;
 mod repl;
 mod rtk;
 mod scheduler;
@@ -1525,6 +1526,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         && let Some(workflow) = &cfg.workflow
     {
         let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
+        register_adjacency(o.registry(), workflow);
         eprintln!("workflow: {n} nodes");
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
@@ -1536,10 +1538,20 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // runtime is present. A served `--owner` worker (no orchestrator) spawns
     // nothing.
     if let Some(o) = &orchestrator {
+        // The single distinct `judge` name across the workflow's edges (A12
+        // guarantees ≤1), resolved from the folded `[team]`; absent → `None` →
+        // the root template's model + the built-in judge contract.
+        let judger = cfg.workflow.as_ref().and_then(|w| {
+            let name = w.edges.iter().find_map(|e| {
+                e.condition.as_ref().and_then(|c| c.judge.as_deref())
+            })?;
+            cfg.team.iter().find(|m| m.name == name)
+        });
         o.spawn_scheduler(
             cwd.clone(),
             hooks.clone(),
             tokio_util::sync::CancellationToken::new(),
+            judger,
         );
     }
     Runtime {
@@ -2480,8 +2492,37 @@ fn should_instantiate_workflow(
     !resuming_group && has_workflow && has_task
 }
 
-/// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so a
-/// `depends_on` may name a later-authored sibling — Blocker 1), mapping each
+/// Register workflow-edge adjacency in the registry: for each edge whose BOTH
+/// endpoints are `member` (session) nodes, `allow_pair` their addresses, so the
+/// two may `message` each other (A1). A `script` node has no address, so such an
+/// edge contributes no pair. Call once at boot, right after
+/// [`instantiate_workflow`], before the scheduler spawns.
+fn register_adjacency(reg: &wcode_protocol::Registry, w: &crate::config::Workflow) {
+    for e in &w.edges {
+        let (Some(a), Some(b)) = (member_of(w, &e.from), member_of(w, &e.to)) else {
+            continue; // a script endpoint has no session address
+        };
+        // Adjacency is keyed by the MEMBER/SESSION ADDRESS (`agent:<member>`,
+        // `tools/message.rs::address`), NOT by the node id: a node id
+        // (`explore`) deliberately differs from a member name (`explorer`) —
+        // `instantiate_workflow` already maps `member` → `address(m)` for the
+        // node's owner, so the pair must use the SAME mapping or `deliver` would
+        // target `agent:explore`, which is not a registered session.
+        reg.allow_pair(
+            &crate::tools::message::address(a),
+            &crate::tools::message::address(b),
+        );
+    }
+}
+
+/// The `member` name of the node with id `id`, or `None` for a `script` node
+/// (or an unknown id, which load validation rules out).
+fn member_of<'a>(w: &'a crate::config::Workflow, id: &str) -> Option<&'a str> {
+    w.nodes.iter().find(|n| n.id == id)?.member.as_deref()
+}
+
+/// Materialize a `[workflow]` template onto `tasks` in TOPOLOGICAL order (so an
+/// edge's `from` may name a later-authored node — Blocker 1), mapping each
 /// string id to its numeric task id before resolving deps. Returns the count.
 fn instantiate_workflow(
     tasks: &crate::tasks::TaskList,
@@ -2494,15 +2535,25 @@ fn instantiate_workflow(
     let n = order.len();
     let mut ids: HashMap<&str, u32> = HashMap::new();
     for node in order {
-        let mut deps: Vec<u32> = Vec::with_capacity(node.depends_on.len());
-        for d in &node.depends_on {
-            match ids.get(d.as_str()) {
-                Some(&id) => deps.push(id),
-                None => workflow_fail(&format!(
-                    "node `{}`: depends_on `{d}` was not created",
-                    node.id
-                )),
-            }
+        let incoming: Vec<&crate::config::WorkflowEdge> =
+            workflow.incoming_edges(&node.id).collect();
+        let mut deps: Vec<crate::tasks::Dep> = Vec::with_capacity(incoming.len());
+        for e in incoming {
+            // `e.from` is already created: `topo_order` over `edges` guarantees
+            // every source precedes its target (Blocker 1).
+            let Some(&src) = ids.get(e.from.as_str()) else {
+                workflow_fail(&format!(
+                    "node `{}`: edge from `{}` was not created",
+                    node.id, e.from
+                ))
+            };
+            deps.push(match &e.condition {
+                None => crate::tasks::Dep::Id(src),
+                Some(c) => crate::tasks::Dep::Edged {
+                    id: src,
+                    condition: Some(c.clone()),
+                },
+            });
         }
         let t = match tasks.create(crate::config::node_title(node, task), deps, node.gate) {
             Ok(t) => t,
@@ -2539,6 +2590,7 @@ fn workflow_fail(msg: &str) -> ! {
     std::process::exit(2);
 }
 
+
 /// Map a task-list entry to the TUI's view type (owner shortened to `w1`).
 fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
     wcode_tui::TaskItem {
@@ -2546,7 +2598,7 @@ fn task_item(task: &crate::tasks::Task) -> wcode_tui::TaskItem {
         title: task.title.clone(),
         owner: task.owner.as_ref().map(crate::agents::short_name),
         state: task.state.label().to_string(),
-        deps: task.deps.clone(),
+        deps: task.deps.iter().map(|d| d.id()).collect(),
         attempts: task.attempts,
     }
 }
@@ -3198,6 +3250,7 @@ mod tests {
         // the regression the fence is about (D001).
         let templated = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "a".into(),
                 title: Some("Explore: {{task}}".into()),
@@ -3240,6 +3293,7 @@ mod tests {
         assert_eq!(team.len(), 1, "the md member was discovered");
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
                 member: Some("judge".into()),
@@ -3257,17 +3311,21 @@ mod tests {
 
     #[test]
     fn instantiate_workflow_handles_a_later_authored_dependency() {
-        use crate::config::{Workflow, WorkflowNode};
+        use crate::config::{Workflow, WorkflowEdge, WorkflowNode};
         // `b` (authored first) depends on `a` (authored second) — author order is
-        // NOT topological, so a naive `ids[d]` would panic (Blocker 1).
+        // NOT topological, so a naive `ids[from]` would panic (Blocker 1).
         let w = Workflow {
             max_attempts: None,
+            edges: vec![WorkflowEdge {
+                from: "a".into(),
+                to: "b".into(),
+                condition: None,
+            }],
             nodes: vec![
                 WorkflowNode {
                     id: "b".into(),
                     member: Some("w1".into()),
                     script: None,
-                    depends_on: vec!["a".into()],
                     gate: false,
                     title: None,
                 },
@@ -3275,7 +3333,6 @@ mod tests {
                     id: "a".into(),
                     member: Some("w1".into()),
                     script: None,
-                    depends_on: vec![],
                     gate: false,
                     title: None,
                 },
@@ -3286,7 +3343,11 @@ mod tests {
         let snap = tasks.snapshot();
         assert_eq!(snap.len(), 2);
         let b = snap.iter().find(|t| t.title == "b").unwrap();
-        assert_eq!(b.deps, vec![1], "b depends on a's assigned (numeric) id");
+        assert_eq!(
+            b.deps.iter().map(|d| d.id()).collect::<Vec<_>>(),
+            vec![1],
+            "b depends on a's assigned (numeric) id"
+        );
         assert_eq!(b.owner.as_ref().map(|o| o.as_str()), Some("agent:w1"));
     }
 
@@ -3295,6 +3356,7 @@ mod tests {
         use crate::config::{Workflow, WorkflowNode};
         let w = Workflow {
             max_attempts: None,
+            edges: vec![],
             nodes: vec![
                 WorkflowNode {
                     id: "explore".into(),

@@ -278,20 +278,27 @@ member = "explorer"         # references a [[team]] member
 [[workflow.node]]
 id = "implement"
 member = "builder"
-depends_on = ["explore"]
 [[workflow.node]]
 id = "verify"
-depends_on = ["implement"]
 gate = true
 script = "cargo test --workspace"   # physical gate (or `member = "reviewer"`)
+
+[[workflow.edge]]
+from = "explore"
+to = "implement"
+[[workflow.edge]]
+from = "implement"
+to = "verify"
+# optional: condition = { script = "test -f x" } | { judge = "judger", criterion = "…" }
 ```
 
 Instantiated at boot (the `[team]` startup loop is the model — `main.rs`, anchor
-`KQsCE`), after the team and before the scheduler. **Validated at load** — ids
-unique, every `depends_on` names a sibling, **acyclic** (a topological sort; a
-back-edge or self-edge is a loud `ConfigError`), exactly one of `member`/`script`
-per node, `member` names a `[team]` member, and a `gate` has at least one dep.
-Instantiation creates nodes in topological order, so author order is free.
+`KQsCE`), after the team and before the scheduler. **Validated at load** — node ids
+unique, every `edge.from`/`edge.to` names a node with no self-edge and no duplicate
+`(from, to)` pair, **acyclic** (a topological sort; a back-edge is a loud
+`ConfigError`), exactly one of `member`/`script` per node, `member` names a
+`[team]` member, and a `gate` has at least one incoming edge. Instantiation creates
+nodes in topological order, so author order is free.
 
 **Task injection & headless runs.** A template is task-agnostic by itself; the
 run's task is a *run input*, not plan state. `--task <text>` (or `WCODE_TASK`)
@@ -311,7 +318,7 @@ builder / `Hooks`. The config is sugar over this.
 | axis | where | default |
 |---|---|---|
 | per-node worker (model / role / tools / read_only / effort / provider) | reuse `TeamMember` fields verbatim | inherit |
-| edges | `deps` / `depends_on` | none |
+| edges | `[[workflow.edge]]` (`from`/`to`, optional `condition`) | none |
 | gate vs. work | `gate: bool` | work |
 | judgment vs. physical | `member` xor `script` | `member` |
 | rework cap | `max_attempts` | 3 |

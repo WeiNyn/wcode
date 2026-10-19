@@ -13,7 +13,7 @@
 //! given the sender's scope. The future **group** mode widens only the permitted
 //! set (§10.1) — nothing else here changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
@@ -82,6 +82,11 @@ struct Inner {
     /// `register`/`register_remote` so a socket server can fan a session that
     /// appears after it started. Read via [`Registry::subscribe`].
     roster: watch::Sender<Vec<(SessionId, SessionHandle)>>,
+    /// Explicit workflow-edge adjacencies: `(a, b)` means `a` and `b` may
+    /// message each other (both directions stored). NOT a mesh — only
+    /// edge-joined workflow nodes are inserted ([`Registry::allow_pair`],
+    /// sign-off rev-2 #6).
+    allows: Mutex<HashSet<(SessionId, SessionId)>>,
 }
 
 impl Default for Inner {
@@ -95,6 +100,7 @@ impl Default for Inner {
             windows: Mutex::new(HashMap::new()),
             catalog: Mutex::new(Vec::new()),
             roster: watch::channel(Vec::new()).0,
+            allows: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -232,6 +238,20 @@ impl Registry {
         self.inner.owners.lock().unwrap().insert(worker, owner);
     }
 
+    /// Allow `from` ↔ `to` to address each other — a workflow edge's adjacency
+    /// (A1). Inserts BOTH directions, so either node may open the conversation.
+    /// Idempotent. Explicit, not a mesh: only edge-joined workflow nodes are
+    /// ever registered here; a plain `[team]` registers none, so its permitted
+    /// set is today's exact star (non-scope: no mesh, no `[team]` widening).
+    ///
+    /// Does NOT re-publish the roster (like [`Registry::set_owner`]) — adjacency
+    /// names no session metadata.
+    pub fn allow_pair(&self, from: &SessionId, to: &SessionId) {
+        let mut allows = self.inner.allows.lock().unwrap();
+        allows.insert((from.clone(), to.clone()));
+        allows.insert((to.clone(), from.clone()));
+    }
+
     /// Record a session's effective model id, so the roster this registry feeds
     /// (a socket server's `Sessions` push) can name it. Mirrors [`Self::set_owner`]
     /// — a plain metadata write, no effect on routing; it RE-PUBLISHES the roster.
@@ -302,10 +322,25 @@ impl Registry {
 
     /// Whether `from` may address `to` (§10.1): the pair must be joined by an
     /// ownership edge in either direction — an orchestrator and one of its
-    /// workers. There are no lateral (worker → worker) edges.
+    /// workers — OR by an explicit [`Registry::allow_pair`] adjacency: the
+    /// workflow-scoped lateral exception (W025 / D030), which amends
+    /// `task-dag-plan.md` §11 #1. A plain `[team]` registers no pair, so its
+    /// permitted set stays today's exact star.
     pub fn permitted(&self, from: &SessionId, to: &SessionId) -> bool {
-        let owners = self.inner.owners.lock().unwrap();
-        owners.get(from) == Some(to) || owners.get(to) == Some(from)
+        // A7: take-and-drop the `owners` lock FIRST, then lock `allows` — never
+        // hold both at once (both are leaf mutexes, but this keeps the order
+        // trivially deadlock-free).
+        let owned = {
+            let owners = self.inner.owners.lock().unwrap();
+            owners.get(from) == Some(to) || owners.get(to) == Some(from)
+        };
+        owned
+            || self
+                .inner
+                .allows
+                .lock()
+                .unwrap()
+                .contains(&(from.clone(), to.clone()))
     }
 
     /// Resolve `to` for `from`, enforcing the permitted set. Fails
@@ -447,8 +482,34 @@ mod tests {
         }
     }
 
+    /// `allow_pair(w1, w2)` → `w1` may `deliver` to `w2`, and the reverse — the
+    /// workflow-scoped adjacency (A1 / D030).
     #[tokio::test]
-    async fn lateral_message_between_workers_is_refused() {
+    async fn an_adjacent_pair_may_message() {
+        let reg = Registry::new();
+        let w1 = SessionId::agent("w1");
+        let w2 = SessionId::agent("w2");
+        for id in [&w1, &w2] {
+            reg.register(id.clone(), session());
+        }
+        reg.allow_pair(&w1, &w2);
+        assert!(reg.permitted(&w1, &w2));
+        assert!(reg.permitted(&w2, &w1), "both directions stored");
+        reg.deliver(
+            &w1,
+            &w2,
+            Request::Notify {
+                content: "psst".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// Without `allow_pair`, the star bound survives (this REPLACES
+    /// `lateral_message_between_workers_is_refused`): w1/w2 both owned by `orch`,
+    /// neither paired → `NotPermitted`.
+    #[tokio::test]
+    async fn a_non_adjacent_pair_is_still_refused() {
         let reg = Registry::new();
         let orch = SessionId::agent("orch");
         let w1 = SessionId::agent("w1");

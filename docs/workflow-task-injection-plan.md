@@ -420,8 +420,10 @@ title = "Explore: {{task}}"
 [[workflow.node]]
 id = "implement"
 member = "developer"
-depends_on = ["explore"]
 title = "Implement: {{task}}"
+[[workflow.edge]]
+from = "explore"
+to = "implement"
 ```
 
 Run:
@@ -470,26 +472,35 @@ title = "Explore: {{task}}"
 [[workflow.node]]
 id = "sketch"
 member = "sketcher"
-depends_on = ["explore"]
 title = "Sketch: {{task}}"
 
 [[workflow.node]]
 id = "review-sketch"
 member = "reviewer"
-depends_on = ["sketch"]
 gate = true
 
 [[workflow.node]]
 id = "implement"
 member = "developer"
-depends_on = ["review-sketch"]
 title = "Implement: {{task}}"
 
 [[workflow.node]]
 id = "verify"
 member = "reviewer"
-depends_on = ["implement"]
 gate = true
+
+[[workflow.edge]]
+from = "explore"
+to = "sketch"
+[[workflow.edge]]
+from = "sketch"
+to = "review-sketch"
+[[workflow.edge]]
+from = "review-sketch"
+to = "implement"
+[[workflow.edge]]
+from = "implement"
+to = "verify"
 ```
 
 Run:

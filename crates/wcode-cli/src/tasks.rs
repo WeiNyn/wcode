@@ -35,10 +35,11 @@ use wcode_harness::protocol::SessionId;
 
 /// A task's lifecycle state.
 ///
-/// Four values. `Failed` is **terminal**: the rework cap was hit, so `reopen`
+/// Five values. `Failed` is **terminal**: the rework cap was hit, so `reopen`
 /// set it instead of looping (§6). P0 never resets it — a dependent seeing a
 /// `Failed` (not `Done`) dep stays blocked, deliberately (§3: there is no
 /// `Stale` state; stall detection + escalation + a reset land in P2).
+/// `Skipped` is the fifth (W025, D029): an incoming edge's condition was false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -52,20 +53,27 @@ pub enum TaskState {
     /// looping. The scheduler never dispatches it again; a dependent seeing a
     /// `Failed` (not `Done`) dep stays blocked.
     Failed,
+    /// Terminal: an incoming edge's condition was false (a script's non-zero
+    /// exit, or a judge `SKIP`). Satisfied for readiness (dependents still
+    /// become ready), success for `terminal_code`, and re-`Todo`ed by a
+    /// `reopen` of any ancestor — exactly like `Done` for those three readers.
+    Skipped,
 }
 
 impl TaskState {
     /// The lowercase label shown by the TUI / `task list` (`todo` / `doing` /
-    /// `done` / `failed`).
+    /// `done` / `failed` / `skipped`).
     pub fn label(self) -> &'static str {
         match self {
             TaskState::Todo => "todo",
             TaskState::Doing => "doing",
             TaskState::Done => "done",
             TaskState::Failed => "failed",
+            TaskState::Skipped => "skipped",
         }
     }
 }
+
 
 /// The outcome of a [`TaskList::reopen`] — so a caller can journal `reopened`
 /// vs. `failed` per node (§7).
@@ -101,6 +109,37 @@ pub enum RunSpec {
     Script { command: String },
 }
 
+/// One blocked-by edge: the dep's numeric id plus its optional edge condition.
+/// UNTAGGED so a legacy journal line `"deps":[1,2]` still decodes to `Dep::Id`
+/// (the journal is byte-compatible for unconditional edges).
+///
+/// `Dep` reaches `Task`/`PlanOp`, both `Serialize`, so it derives `Serialize`
+/// too — hence `config::EdgeCondition` must be `Serialize`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Dep {
+    /// A bare id — the legacy form, and what an unstructured edge serializes to.
+    Id(u32),
+    /// An id guarded by an edge condition.
+    Edged {
+        id: u32,
+        /// `None` = the edge is unconditional (equivalent to `Dep::Id`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<crate::config::EdgeCondition>,
+    },
+}
+
+impl Dep {
+    /// The dep's numeric id — the ONLY thing readiness/`cone`/`complete`/
+    /// `verify_gate` read. Total; no panic.
+    pub fn id(&self) -> u32 {
+        match self {
+            Dep::Id(i) => *i,
+            Dep::Edged { id, .. } => *id,
+        }
+    }
+}
+
 /// One planned task — a node in the root's DAG.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
@@ -113,13 +152,21 @@ pub struct Task {
     pub owner: Option<SessionId>,
     /// Current state (a new task starts [`TaskState::Todo`]).
     pub state: TaskState,
-    /// Blocked-by edge set: run only after every id here is `Done`. Empty = no
-    /// deps (ready at once). The static graph is acyclic (see [`TaskList::depends`]).
+    /// Blocked-by edge set: run only after every dep is `Done` or `Skipped`.
+    /// Empty = no deps (ready at once). The static graph is acyclic (see
+    /// [`TaskList::depends`]). Each entry is a [`Dep`] — an id, optionally
+    /// guarded by an edge `condition`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deps: Vec<u32>,
+    pub deps: Vec<Dep>,
     /// Rework rounds; `reopen` bumps it, the cap compares it (§6).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempts: u32,
+    /// Bumped UNCONDITIONALLY by [`TaskList::reset`] (A14/R1): the one signal a
+    /// `task reset` is observable by, even when every other field is already at
+    /// its reset value (an unjudgeable node). A `Snapshot` carries it verbatim;
+    /// the TUI ignores it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reset_epoch: u32,
     /// The latest reject reason — the next run's extra input (§4 hydration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<String>,
@@ -153,6 +200,7 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+
 /// One journaled line per PUBLIC mutation (§7). Tagged like `SessionEntry`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -160,7 +208,7 @@ pub(crate) enum PlanOp {
     Create {
         id: u32,
         title: String,
-        deps: Vec<u32>,
+        deps: Vec<Dep>,
         gate: bool,
     },
     Depends {
@@ -198,6 +246,11 @@ pub(crate) enum PlanOp {
     Fail {
         id: u32,
         reason: String,
+    },
+    /// An edge condition was false (script exit ≠ 0, or judge `SKIP`): `id`
+    /// becomes `Skipped`. No `reason` field (nothing went wrong).
+    Skip {
+        id: u32,
     },
     Restart {
         id: u32,
@@ -320,7 +373,7 @@ fn cone(tasks: &[Task], id: u32) -> Vec<u32> {
     let mut frontier = vec![id];
     while let Some(cur) = frontier.pop() {
         for t in tasks {
-            if t.id != id && t.deps.contains(&cur) && !out.contains(&t.id) {
+            if t.id != id && t.deps.iter().any(|d| d.id() == cur) && !out.contains(&t.id) {
                 out.push(t.id);
                 frontier.push(t.id);
             }
@@ -440,6 +493,7 @@ impl TaskList {
                             state: TaskState::Todo,
                             deps,
                             attempts: 0,
+                            reset_epoch: 0,
                             feedback: None,
                             artifact: None,
                             gate,
@@ -483,11 +537,19 @@ impl TaskList {
             PlanOp::Fail { id, reason } => {
                 let _ = self.fail(id, reason);
             }
+            PlanOp::Skip { id } => {
+                // A3: replay is model-free — `skip` only flips state, and it is
+                // idempotent (a replayed skip on a `Skipped` node is a no-op).
+                let _ = self.skip(id);
+            }
             PlanOp::Restart { id } => {
                 {
                     let mut tasks = self.inner.tasks.lock().unwrap();
                     if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
                         t.state = TaskState::Todo;
+                        // Harmless epoch bump (A14): a crash reset is observable
+                        // to the same diff as an operator `reset`.
+                        t.reset_epoch += 1;
                     }
                 }
                 self.publish();
@@ -537,15 +599,15 @@ impl TaskList {
     pub fn create(
         &self,
         title: impl Into<String>,
-        deps: Vec<u32>,
+        deps: Vec<Dep>,
         gate: bool,
     ) -> Result<Task, String> {
         let title = title.into();
         let task = {
             let mut tasks = self.inner.tasks.lock().unwrap();
-            for &d in &deps {
-                if !tasks.iter().any(|t| t.id == d) {
-                    return Err(format!("no task #{d}"));
+            for d in &deps {
+                if !tasks.iter().any(|t| t.id == d.id()) {
+                    return Err(format!("no task #{}", d.id()));
                 }
             }
             let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -556,6 +618,7 @@ impl TaskList {
                 state: TaskState::Todo,
                 deps: deps.clone(),
                 attempts: 0,
+                reset_epoch: 0,
                 feedback: None,
                 artifact: None,
                 gate,
@@ -618,7 +681,7 @@ impl TaskList {
             if tasks
                 .iter()
                 .find(|t| t.id == id)
-                .is_some_and(|t| t.deps.contains(&on))
+                .is_some_and(|t| t.deps.iter().any(|d| d.id() == on))
             {
                 return Err(format!("task #{id} already depends on #{on}"));
             }
@@ -633,7 +696,7 @@ impl TaskList {
                 .find(|t| t.id == id)
                 .expect("id checked to exist above")
                 .deps
-                .push(on);
+                .push(Dep::Id(on));
         }
         self.publish();
         Ok(())
@@ -691,9 +754,9 @@ impl TaskList {
     /// Flip `id` to [`TaskState::Done`], storing `artifact` — a model/external
     /// acceptance (§4).
     ///
-    /// Guard: refuses while blocked (some dep not `Done`) so an out-of-order
-    /// complete cannot corrupt the DAG. Err `"no task #<id>"` or
-    /// `"#<id> is blocked by #<dep>"` (first non-Done dep). Publishes on Ok.
+    /// Guard: refuses while blocked (some dep not `Done` or `Skipped`) so an
+    /// out-of-order complete cannot corrupt the DAG. Err `"no task #<id>"` or
+    /// `"#<id> is blocked by #<dep>"` (first unsatisfied dep). Publishes on Ok.
     pub fn complete(&self, id: u32, artifact: Option<String>) -> Result<(), String> {
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
@@ -703,12 +766,11 @@ impl TaskList {
                 .ok_or_else(|| format!("no task #{id}"))?;
             let deps = tasks[idx].deps.clone();
             for d in &deps {
-                let done = tasks
-                    .iter()
-                    .find(|t| t.id == *d)
-                    .is_some_and(|t| t.state == TaskState::Done);
+                let done = tasks.iter().find(|t| t.id == d.id()).is_some_and(|t| {
+                    matches!(t.state, TaskState::Done | TaskState::Skipped)
+                });
                 if !done {
-                    return Err(format!("#{id} is blocked by #{d}"));
+                    return Err(format!("#{id} is blocked by #{}", d.id()));
                 }
             }
             self.inner.record(&PlanOp::Complete {
@@ -781,10 +843,12 @@ impl TaskList {
     /// human/model escape hatch for a cap hit that should NOT end the plan (§6).
     ///
     /// Resets `id` ALONE: `state = Todo`, `attempts = 0`, `feedback = None`,
-    /// `artifact = None`. The downstream cone is left untouched — a capped node
-    /// never invalidated it (`reopen`'s cap branch); `reject`'s gate fix is what
-    /// makes the gate re-runnable. `reset` on a non-`Failed` node is allowed (it
-    /// just clears the counters). Err `"no task #<id>"`. Publishes on Ok.
+    /// `artifact = None`, and bumps `reset_epoch` UNCONDITIONALLY (A14) — so a
+    /// reset of an otherwise-unchanged node (an unjudgeable `Todo`) is still
+    /// observable to the scheduler. The downstream cone is left untouched — a
+    /// capped node never invalidated it (`reopen`'s cap branch); `reject`'s gate
+    /// fix is what makes the gate re-runnable. `reset` on a non-`Failed` node is
+    /// allowed (it just clears the counters). Err `"no task #<id>"`. Publishes on Ok.
     pub fn reset(&self, id: u32) -> Result<(), String> {
         {
             let mut tasks = self.inner.tasks.lock().unwrap();
@@ -797,6 +861,7 @@ impl TaskList {
             task.attempts = 0;
             task.feedback = None;
             task.artifact = None;
+            task.reset_epoch += 1;
         }
         self.publish();
         Ok(())
@@ -826,6 +891,29 @@ impl TaskList {
         self.publish();
         Ok(())
     }
+    /// Mark `id` `Skipped` — an edge condition was false (a script's non-zero
+    /// exit, or a judge `SKIP`). Terminal-ish: never dispatched again, counts as
+    /// **satisfied** for dependents' readiness and as **success** for
+    /// `terminal_code`; a `reopen` of any ancestor re-`Todo`s it (`reopen_inner`
+    /// resets the whole cone unconditionally — no change there).
+    ///
+    /// Unlike `fail` it sets NO `feedback` (nothing went wrong) and does not
+    /// touch `attempts`. Idempotent: skipping an already-`Skipped` node is a
+    /// no-op success (replay-safe). Err `"no task #<id>"`. Publishes on Ok.
+    pub fn skip(&self, id: u32) -> Result<(), String> {
+        {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            let task = tasks
+                .iter_mut()
+                .find(|t| t.id == id)
+                .ok_or_else(|| format!("no task #{id}"))?;
+            self.inner.record(&PlanOp::Skip { id })?;
+            task.state = TaskState::Skipped;
+        }
+        self.publish();
+        Ok(())
+    }
+
     /// A gate's rejection (§5): `gate_id` must be a gate; re-open each of its
     /// `deps` (via [`TaskList::reopen`]) and return `(dep_id, outcome)` per dep —
     /// so the caller can journal `reopen` vs. `fail` (§7). A dep that hit the cap
@@ -861,8 +949,8 @@ impl TaskList {
         })?;
         let mut reopened = Vec::with_capacity(deps.len());
         for dep in deps {
-            let outcome = self.reopen_inner(dep, &reason)?;
-            reopened.push((dep, outcome));
+            let outcome = self.reopen_inner(dep.id(), &reason)?;
+            reopened.push((dep.id(), outcome));
         }
         // §6: a gate does not "finish" when it rejects — return it to `Todo`.
         {
@@ -876,8 +964,10 @@ impl TaskList {
         Ok(reopened)
     }
 
+
     /// The ready frontier, in creation order: every `Todo` node all of whose
-    /// deps are `Done` (derived, never stored, §3). Read-only — no publish.
+    /// deps are `Done` or `Skipped` (derived, never stored, §3). Read-only — no
+    /// publish.
     // Called by the scheduler's `frontier` (P1).
     pub fn ready_ids(&self) -> Vec<u32> {
         let tasks = self.inner.tasks.lock().unwrap();
@@ -888,8 +978,10 @@ impl TaskList {
                     && t.deps.iter().all(|d| {
                         tasks
                             .iter()
-                            .find(|x| x.id == *d)
-                            .is_some_and(|x| x.state == TaskState::Done)
+                            .find(|x| x.id == d.id())
+                            .is_some_and(|x| {
+                                matches!(x.state, TaskState::Done | TaskState::Skipped)
+                            })
                     })
             })
             .map(|t| t.id)
@@ -903,15 +995,18 @@ impl TaskList {
     }
 
     /// The headless driver's terminal verdict. `Some(0)` once every node is
-    /// `Done`; `Some(1)` as soon as any node is `Failed` — FAIL-FAST, because a
-    /// `Failed` node's blocked dependents can never progress, so waiting for
-    /// "all terminal" would hang. `None` = still running. Read-only; no publish.
+    /// `Done` or `Skipped`; `Some(1)` as soon as any node is `Failed` — FAIL-FAST,
+    /// because a `Failed` node's blocked dependents can never progress, so waiting
+    /// for "all terminal" would hang. `None` = still running. Read-only; no publish.
     pub fn terminal_code(&self) -> Option<i32> {
         let tasks = self.inner.tasks.lock().unwrap();
         if tasks.iter().any(|t| t.state == TaskState::Failed) {
             return Some(1);
         }
-        if tasks.iter().all(|t| t.state == TaskState::Done) {
+        if tasks
+            .iter()
+            .all(|t| matches!(t.state, TaskState::Done | TaskState::Skipped))
+        {
             return Some(0);
         }
         None
@@ -959,7 +1054,7 @@ mod tests {
     #[test]
     fn create_rejects_an_unknown_dep() {
         let list = TaskList::new();
-        let err = list.create("t", vec![7], false).unwrap_err();
+        let err = list.create("t", vec![Dep::Id(7)], false).unwrap_err();
         assert!(err.contains('7'), "names the bad dep: {err}");
         assert!(list.snapshot().is_empty(), "nothing is created");
     }
@@ -1004,7 +1099,7 @@ mod tests {
     fn complete_stores_the_artifact_and_respects_blocking() {
         let list = TaskList::new();
         let a = list.create("a", vec![], false).unwrap();
-        let b = list.create("b", vec![a.id], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
 
         // b is blocked by a.
         let err = list.complete(b.id, None).unwrap_err();
@@ -1042,7 +1137,7 @@ mod tests {
     fn depends_rejects_a_cycle() {
         let list = TaskList::new();
         let a = list.create("a", vec![], false).unwrap();
-        let b = list.create("b", vec![a.id], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
 
         // b already depends on a: closing a→b would make the cycle a→b→a.
         let err = list.depends(a.id, b.id).unwrap_err();
@@ -1053,7 +1148,7 @@ mod tests {
         );
         assert_eq!(
             list.snapshot()[0].deps,
-            Vec::<u32>::new(),
+            Vec::<Dep>::new(),
             "a's deps are unchanged"
         );
 
@@ -1069,7 +1164,7 @@ mod tests {
     fn ready_ids_tracks_the_frontier() {
         let list = TaskList::new();
         let a = list.create("a", vec![], false).unwrap();
-        let b = list.create("b", vec![a.id], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
 
         assert_eq!(list.ready_ids(), vec![a.id], "only the root is ready");
         list.complete(a.id, None).unwrap();
@@ -1085,8 +1180,8 @@ mod tests {
     fn reopen_resets_the_transitive_cone() {
         let list = TaskList::new();
         let t1 = list.create("one", vec![], false).unwrap();
-        let t2 = list.create("two", vec![t1.id], false).unwrap();
-        let t3 = list.create("three", vec![t2.id], false).unwrap();
+        let t2 = list.create("two", vec![Dep::Id(t1.id)], false).unwrap();
+        let t3 = list.create("three", vec![Dep::Id(t2.id)], false).unwrap();
         list.complete(t1.id, Some("A₁".into())).unwrap();
         list.complete(t2.id, Some("A₂".into())).unwrap();
         list.complete(t3.id, Some("A₃".into())).unwrap();
@@ -1110,6 +1205,144 @@ mod tests {
         assert_eq!(list.descendants(t2.id), vec![t3.id]);
     }
 
+    /// A `Skipped` dep counts as satisfied: the dependent becomes ready, and
+    /// `complete` accepts it (W025 §3/B3).
+    #[test]
+    fn ready_ids_treats_a_skipped_dep_as_satisfied() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
+        assert!(list.ready_ids().contains(&a.id));
+        list.skip(a.id).unwrap();
+        assert_eq!(list.snapshot()[0].state, TaskState::Skipped);
+        assert_eq!(list.ready_ids(), vec![b.id], "a skipped dep unblocks b");
+        list.complete(b.id, None).unwrap();
+        assert_eq!(list.snapshot()[1].state, TaskState::Done);
+    }
+
+    /// `complete` on a node whose only dep is `Skipped` succeeds.
+    #[test]
+    fn complete_accepts_a_skipped_dep() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
+        // While a is not terminal, b is blocked.
+        assert!(list.complete(b.id, None).is_err());
+        list.skip(a.id).unwrap();
+        assert!(list.complete(b.id, Some("ok".into())).is_ok());
+    }
+
+    /// Every node `Done` or `Skipped` → `Some(0)`; any `Failed` → `Some(1)`;
+    /// otherwise `None`.
+    #[test]
+    fn terminal_code_is_zero_when_all_done_or_skipped() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![], false).unwrap();
+        assert_eq!(list.terminal_code(), None, "still running");
+        list.complete(a.id, None).unwrap();
+        list.skip(b.id).unwrap();
+        assert_eq!(list.terminal_code(), Some(0), "Done + Skipped is success");
+
+        let c = list.create("c", vec![], false).unwrap();
+        list.fail(c.id, "boom").unwrap();
+        assert_eq!(list.terminal_code(), Some(1), "a Failed node fails the run");
+    }
+
+    /// `reopen` of an ancestor re-`Todo`s a `Skipped` descendant (its cone).
+    #[test]
+    fn reopen_re_evaluates_a_skipped_descendant() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
+        list.complete(a.id, None).unwrap();
+        list.skip(b.id).unwrap();
+        assert_eq!(list.snapshot()[1].state, TaskState::Skipped);
+
+        // A reopen of the ancestor resets the whole cone, skipped b included.
+        list.reopen(a.id, "redo").unwrap();
+        assert_eq!(list.snapshot()[0].state, TaskState::Todo);
+        assert_eq!(
+            list.snapshot()[1].state,
+            TaskState::Todo,
+            "a skipped descendant is re-evaluated by an ancestor reopen"
+        );
+    }
+
+    /// A legacy `{"op":"create","deps":[1,2]}` journal line decodes into
+    /// `Dep::Id`s (journal back-compat, W025 §5.2), and a bare `[1,2]` decodes
+    /// the same way.
+    #[test]
+    fn reference_journal_line_still_decodes() {
+        let inline: Vec<Dep> = serde_json::from_str("[1,2]").unwrap();
+        assert_eq!(inline, vec![Dep::Id(1), Dep::Id(2)]);
+        let op: PlanOp = serde_json::from_str(
+            r#"{"op":"create","id":3,"title":"c","deps":[1,2],"gate":false}"#,
+        )
+        .unwrap();
+        match op {
+            PlanOp::Create { deps, .. } => assert_eq!(deps, vec![Dep::Id(1), Dep::Id(2)]),
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    /// A `Dep::Edged` round-trips through serde (and the `create` journal line),
+    /// condition included — the untagged `Dep` keeps one source of truth (§4.1
+    /// #4). An unconditional edge still serializes to a bare id.
+    #[test]
+    fn an_edged_dep_round_trips_through_the_journal() {
+        use crate::config::EdgeCondition;
+        let op = PlanOp::Create {
+            id: 4,
+            title: "d".into(),
+            deps: vec![
+                Dep::Id(1),
+                Dep::Edged {
+                    id: 2,
+                    condition: Some(EdgeCondition {
+                        script: Some("test -f x".into()),
+                        judge: None,
+                        criterion: None,
+                    }),
+                },
+            ],
+            gate: false,
+        };
+        let line = serde_json::to_string(&op).unwrap();
+        let back: PlanOp = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, op, "an edged dep round-trips through the journal line");
+        // An unconditional edge is a bare id, byte-for-byte (no table form).
+        assert_eq!(serde_json::to_string(&Dep::Id(2)).unwrap(), "2");
+        assert_eq!(serde_json::to_string(&vec![Dep::Id(1), Dep::Id(2)]).unwrap(), "[1,2]");
+    }
+
+    /// `skip` is idempotent, sets no `feedback`, and never touches `attempts`.
+    #[test]
+    fn skip_is_idempotent_and_records_state_only() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        list.skip(a.id).unwrap();
+        list.skip(a.id).unwrap(); // no-op success
+        let t = &list.snapshot()[0];
+        assert_eq!(t.state, TaskState::Skipped);
+        assert_eq!(t.attempts, 0);
+        assert_eq!(t.feedback, None, "a skip records no reason");
+    }
+
+    /// A14: `reset` bumps `reset_epoch` even when every other field is already
+    /// at its reset value (an unjudgeable `Todo` node) — the scheduler's only
+    /// signal that a `task reset` happened.
+    #[test]
+    fn reset_bumps_the_epoch_unconditionally() {
+        let list = TaskList::new();
+        let a = list.create("a", vec![], false).unwrap();
+        assert_eq!(list.snapshot()[0].reset_epoch, 0);
+        list.reset(a.id).unwrap(); // already Todo/0 — still observable
+        assert_eq!(list.snapshot()[0].reset_epoch, 1);
+        list.reset(a.id).unwrap();
+        assert_eq!(list.snapshot()[0].reset_epoch, 2);
+    }
+
     /// `reopen` past the cap sets `Failed` (terminal) and — the regression guard
     /// — leaves the downstream cone untouched: a capped node does not invalidate
     /// its dependents. (P2 reworks this branch.)
@@ -1118,7 +1351,7 @@ mod tests {
         let list = TaskList::new();
         assert_eq!(list.max_attempts(), 3);
         let t = list.create("t", vec![], false).unwrap();
-        let child = list.create("child", vec![t.id], false).unwrap();
+        let child = list.create("child", vec![Dep::Id(t.id)], false).unwrap();
 
         // Three successful reopens, each invalidating the cone (child → Todo).
         for _ in 0..3 {
@@ -1157,7 +1390,7 @@ mod tests {
     fn reject_reopens_the_gated_dep_and_the_cone() {
         let list = TaskList::new();
         let work = list.create("work", vec![], false).unwrap();
-        let gate = list.create("verify", vec![work.id], false).unwrap();
+        let gate = list.create("verify", vec![Dep::Id(work.id)], false).unwrap();
         list.configure(
             gate.id,
             RunSpec::Session {
@@ -1215,7 +1448,7 @@ mod tests {
     fn reject_unsticks_the_gate_on_a_cap() {
         let list = TaskList::new();
         let work = list.create("work", vec![], false).unwrap();
-        let gate = list.create("verify", vec![work.id], true).unwrap();
+        let gate = list.create("verify", vec![Dep::Id(work.id)], true).unwrap();
         list.complete(work.id, Some("A".into())).unwrap();
 
         // Three reworks, then the gate is on it (Doing) when the cap hits.
@@ -1290,6 +1523,7 @@ fn plan_op_and_task_serde_round_trip() {
             state: TaskState::Todo,
             deps: vec![],
             attempts: 0,
+            reset_epoch: 0,
             feedback: None,
             artifact: None,
             gate: false,
@@ -1321,7 +1555,7 @@ fn plan_op_and_task_serde_round_trip() {
         let path = dir.path().join("plan.ndjson");
         let l = TaskList::with_journal(path.clone());
         let a = l.create("a", vec![], false).unwrap();
-        let b = l.create("b", vec![a.id], false).unwrap();
+        let b = l.create("b", vec![Dep::Id(a.id)], false).unwrap();
         l.assign(b.id, SessionId::agent("w1")).unwrap();
         l.complete(a.id, Some("A".into())).unwrap();
         l.configure(b.id, RunSpec::Session { member: Some("rev".into()) }, true)
@@ -1405,7 +1639,7 @@ fn plan_op_and_task_serde_round_trip() {
         let path = dir.path().join("plan.ndjson");
         let l = TaskList::with_journal(path.clone());
         let work = l.create("work", vec![], false).unwrap();
-        let gate = l.create("verify", vec![work.id], true).unwrap();
+        let gate = l.create("verify", vec![Dep::Id(work.id)], true).unwrap();
         l.complete(work.id, Some("A".into())).unwrap();
         l.reject(gate.id, "redo").unwrap();
 
@@ -1489,7 +1723,7 @@ mod terminal_code_tests {
     fn zero_when_all_done() {
         let list = TaskList::new();
         let a = list.create("a", vec![], false).unwrap();
-        let b = list.create("b", vec![a.id], false).unwrap();
+        let b = list.create("b", vec![Dep::Id(a.id)], false).unwrap();
         list.complete(a.id, None).unwrap();
         list.complete(b.id, None).unwrap();
         assert_eq!(list.terminal_code(), Some(0));
@@ -1508,7 +1742,7 @@ mod terminal_code_tests {
     fn rework_reopens_a_dep_and_clears_the_verdict() {
         let list = TaskList::new();
         let work = list.create("work", vec![], false).unwrap();
-        let gate = list.create("gate", vec![work.id], true).unwrap();
+        let gate = list.create("gate", vec![Dep::Id(work.id)], true).unwrap();
         list.complete(work.id, None).unwrap();
         list.complete(gate.id, None).unwrap();
         assert_eq!(list.terminal_code(), Some(0), "all Done before rework");

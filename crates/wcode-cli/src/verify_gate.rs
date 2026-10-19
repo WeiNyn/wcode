@@ -175,7 +175,7 @@ fn ungated_work_node(tasks: &[Task], id: u32) -> Option<String> {
     }
     // Already gated: some gate consumes this node (any such `t` has `id` among
     // its deps, so it is a real gate) → allow.
-    if tasks.iter().any(|t| t.gate && t.deps.contains(&id)) {
+    if tasks.iter().any(|t| t.gate && t.deps.iter().any(|d| d.id() == id)) {
         return None;
     }
     Some(GATE_REASON.replace("{id}", &id.to_string()))
@@ -184,6 +184,7 @@ fn ungated_work_node(tasks: &[Task], id: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::Dep;
 
     /// A raw `task` call, shaped like `tools/task.rs` builds them.
     fn task_call(op: &str, id: Option<u32>) -> ToolCall {
@@ -217,7 +218,7 @@ mod tests {
     /// #1 work, #2 a judgment gate (`gate:true`) depending on #1.
     fn work_plus_gate() -> TaskList {
         let list = work_only();
-        list.create("verify", vec![1], true).unwrap();
+        list.create("verify", vec![Dep::Id(1)], true).unwrap();
         list
     }
 
@@ -259,7 +260,7 @@ mod tests {
         let list = TaskList::new();
         list.create("a", vec![], false).unwrap(); // #1 — ungated
         list.create("b", vec![], false).unwrap(); // #2
-        list.create("verify-b", vec![2], true).unwrap(); // #3 — gate on #2 only
+        list.create("verify-b", vec![Dep::Id(2)], true).unwrap(); // #3 — gate on #2 only
         let hooks = VerifyGateHooks::new(list);
         assert!(
             hooks
