@@ -123,13 +123,6 @@ pub enum RunSpec {
     },
 }
 
-
-/// One blocked-by edge: the dep's numeric id plus its optional edge condition.
-/// UNTAGGED so a legacy journal line `"deps":[1,2]` still decodes to `Dep::Id`
-/// (the journal is byte-compatible for unconditional edges).
-///
-/// `Dep` reaches `Task`/`PlanOp`, both `Serialize`, so it derives `Serialize`
-/// too — hence `config::EdgeCondition` must be `Serialize`.
 impl RunSpec {
     /// The node's own wall-clock deadline in seconds, whichever variant carries
     /// it (`None` = the `NODE_TIMEOUT` default; `Some(0)` = disabled).
@@ -142,6 +135,12 @@ impl RunSpec {
     }
 }
 
+/// One blocked-by edge: the dep's numeric id plus its optional edge condition.
+/// UNTAGGED so a legacy journal line `"deps":[1,2]` still decodes to `Dep::Id`
+/// (the journal is byte-compatible for unconditional edges).
+///
+/// `Dep` reaches `Task`/`PlanOp`, both `Serialize`, so it derives `Serialize`
+/// too — hence `config::EdgeCondition` must be `Serialize`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Dep {

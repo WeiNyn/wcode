@@ -44,21 +44,29 @@ const EDGE_TIMEOUT: Duration = Duration::from_secs(30);
 /// historical 300 s — a build/test can run far longer than an edge.
 const NODE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Map a config `timeout_secs` to an actual bound — the ONE rule every bound
-/// site shares (W028 A2):
+/// The ONE rule a config `timeout_secs` follows (W028 A2/N1), WITHOUT a site
+/// default:
 ///
-/// * `None` — the key is absent, so the site's own default applies;
-/// * `Some(0)` — DISABLED (mirrors `--timeout 0`), i.e. `None` = no timer;
-/// * `Some(n)` — `n` seconds.
+/// * `None` (the key is absent) or `Some(0)` (DISABLED, mirroring `--timeout 0`)
+///   → `None` = no timer;
+/// * `Some(n)` → `n` seconds.
 ///
 /// The `None` return means UNBOUNDED, which [`run_command`] accepts directly. It
 /// must never be spelled `Some(Duration::ZERO)`: that fires on the first poll and
 /// would kill the command instantly instead of never bounding it.
+///
+/// This is the run-TOTAL knob's form (`dispatch`), where an absent key has no
+/// default and "disabled" is unbounded.
+pub(crate) fn workflow_bound_opt(secs: Option<u64>) -> Option<Duration> {
+    secs.filter(|&s| s > 0).map(Duration::from_secs)
+}
+
+/// [`workflow_bound_opt`] plus a SITE default, for the per-node / per-edge knobs:
+/// an absent key takes `default`; `0` and `n` follow the same rule.
 fn workflow_bound(secs: Option<u64>, default: Duration) -> Option<Duration> {
     match secs {
         None => Some(default),
-        Some(0) => None,
-        Some(n) => Some(Duration::from_secs(n)),
+        Some(_) => workflow_bound_opt(secs),
     }
 }
 
@@ -258,10 +266,18 @@ impl Scheduler {
             // The earliest SESSION deadline. A `Script` node yields `None` by
             // construction (`session_deadline`), so it can never be booked here
             // twice — its bound is its own `run_command` timeout (A6).
+            // N2: `at + d` can PANIC on an absurd `timeout_secs` (`u64::MAX` s
+            // overflows `Instant`), which would silently kill this task. A
+            // deadline that cannot be represented is treated as "no deadline"
+            // (`checked_add` → `None`), matching the disabled case.
             let next = self
                 .started
                 .iter()
-                .filter_map(|(id, at)| session_deadline(&snap, *id).map(|d| (*id, *at + d)))
+                .filter_map(|(id, at)| {
+                    session_deadline(&snap, *id)
+                        .and_then(|d| at.checked_add(d))
+                        .map(|when| (*id, when))
+                })
                 .min_by_key(|(_, when)| *when);
             tokio::select! {
                 changed = updates.changed() => {
@@ -276,7 +292,9 @@ impl Scheduler {
                 fired = sleep_until_opt(next) => {
                     if let Some(id) = fired {
                         self.started.remove(&id);
-                        self.fire_node_deadline(id);
+                        // The bool only exists for the A8 gate; the loop has
+                        // nothing to do with it either way.
+                        let _ = self.fire_node_deadline(id);
                     }
                 }
             }
@@ -776,6 +794,11 @@ mod tests {
             "0 = disabled, NOT an instant kill"
         );
         assert_eq!(workflow_bound(Some(7), NODE_TIMEOUT), Some(Duration::from_secs(7)));
+        // The run-TOTAL form has no site default: absent and `0` are BOTH
+        // unbounded, `n` is `n` seconds (N1 — one rule, two entry points).
+        assert_eq!(workflow_bound_opt(None), None);
+        assert_eq!(workflow_bound_opt(Some(0)), None);
+        assert_eq!(workflow_bound_opt(Some(7)), Some(Duration::from_secs(7)));
         // The two defaults are the historical ones.
         assert_eq!(EDGE_TIMEOUT, Duration::from_secs(30));
         assert_eq!(NODE_TIMEOUT, Duration::from_secs(300));

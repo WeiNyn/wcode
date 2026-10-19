@@ -1492,9 +1492,13 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // The set rides `Runtime.hooks` (`V5hC5`) into the root agent
     // (`build_agent_for`, `XEp0a`) and `repl::run`'s rebuild set (`kywRV` ->
     // repl.rs 813/969/1018), so it survives `/new`/`/resume`. `spawn_scheduler`
-    // gets a clone too (`WFtxI`/`kDC4A`): a harmless no-op (it only ever pipes
-    // `bash`). A run with no `--agents`, or a socket client (`Qr5L7`, no
-    // orchestrator), never gets it.
+    // gets a clone too (`WFtxI`/`kDC4A`), and it is NOT a no-op there:
+    // `VerifyGateHooks` passes a `Script` command through untouched, but the
+    // `SleepRefusalHooks` below refuses any `sleep`-LEADING command BEFORE
+    // `run_command` runs — so a `sleep`-leading script EDGE or script NODE is
+    // impossible by design (the guard's rationale, an edge runs on the loop
+    // thread, is right; it is simply visible here too). A run with no
+    // `--agents`, or a socket client (`Qr5L7`, no orchestrator), never gets it.
     if let Some(o) = &orchestrator {
         // `agents.rs:IueNb` (the `Orchestrator`); `n9aLi` = `Orchestrator::tasks()`.
         hooks.push(std::sync::Arc::new(
@@ -1935,12 +1939,12 @@ async fn dispatch(
         let seed = workflow_seed(args.task.as_deref().unwrap_or_default());
         // The total-run deadline, W028 §4.3 precedence: `--timeout`, then
         // `[workflow] timeout_secs`, then unbounded. `0` at EITHER level means
-        // disabled (mirrors `--timeout 0`).
-        let timeout = args
-            .timeout
-            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
-            .filter(|&s| s > 0)
-            .map(std::time::Duration::from_secs);
+        // disabled — the SAME rule as the per-node/per-edge knobs, through the
+        // one default-free entry point (`workflow_bound_opt`).
+        let timeout = crate::scheduler::workflow_bound_opt(
+            args.timeout
+                .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs)),
+        );
         let code = run_workflow(Backend::from(handle), tasks, seed, timeout, args.quiet).await;
         #[cfg(unix)]
         wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;

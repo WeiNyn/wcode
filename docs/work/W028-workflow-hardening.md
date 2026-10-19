@@ -180,7 +180,9 @@ title = "Say done for: {{task}}"
 [[workflow.edge]]
 from = "a"
 to = "b"
-condition = { script = "sleep 5", timeout_secs = 1 }   # (phase 2) bounded edge
+# (phase 2) bounded edge — NOT bare `sleep 5`: a `sleep`-leading command is
+# refused by `SleepRefusalHooks` before it runs, so the bound never fires.
+condition = { script = "sh -c 'sleep 5'", timeout_secs = 1 }
 [[team]]
 name = "w1"
 ```
@@ -342,3 +344,26 @@ EXIT=0
 - **A first fixture without a gate failed correctly**: the root was refused `task complete 1` by `verify_gate` ("task #1 is a work node with no gate depending on it", D002 R′), and it stopped rather than creating nodes. Not a defect — the R′ rule working, and the seed's "do NOT create nodes" holding under pressure.
 
 **Observed limitation (to be confirmed by the reviewer, not silently accepted):** `#2` went `todo → doing → done`, but the log printed `#2 [todo]` then `#2 [done]` — no `[doing]`. The `watch`-diff log coalesces two transitions landing between wakes. This is the consequence the review accepted in the abstract; it is now observed. The stdout summary is the authoritative final state.
+
+## 14. Phase-2a live verification — a bounded edge blocks (correction)
+
+The first attempt used `condition = { script = "sleep 5", timeout_secs = 1 }` and
+appeared to pass (`0 skip`, `0 fail`, `#2 [todo]`). It proved nothing: `sleep`-leading
+script edges are refused by `SleepRefusalHooks` **before** `run_command` runs, so the
+bound was never consulted — the same `Unjudgeable` signature as a real timeout. The
+reviewer caught it. Re-run with a reachable form:
+
+`condition = { script = "sh -c 'sleep 5'", timeout_secs = 1 }`
+
+```
+«scheduler» scheduler: node #2 … is blocked — an edge condition could not be decided.
+reset it (task op: reset id:2) to re-evaluate the edge.
+last output: timed out after 1s (command killed)
+```
+
+- The tail **`timed out after 1s (command killed)`** is the discriminator: the bound
+  fired at 1 s against a 5 s sleep. (A policy refusal would have read
+  `sleep-polling is not allowed …`.)
+- `#1 [done]`, `#2 [todo]` — blocked, **not** `skipped`; journal `0 skip`, `0 fail`,
+  `1 start`, `2 configure`; exit 1 on the run cap.
+- The root again messaged `w1` out of band (`«w1» BETA`) — see the tracked soft gap.
