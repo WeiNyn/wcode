@@ -64,8 +64,10 @@ pub type Verdict = Option<bool>;
 /// - Returns `Some(true)` = take the edge, `Some(false)` = skip the target,
 ///   `None` = unparseable → the scheduler records the node `unjudgeable`, leaves
 ///   it `Todo`, and escalates once. `None` NEVER means "skip".
-/// - **Does not promise** a bounded latency — a stalled judge is bounded only by
-///   the run's `--timeout` (`main.rs`).
+/// - **Latency is bounded by the EDGE**, not by this trait: the scheduler wraps
+///   `decide` in the edge's `timeout_secs` (default 30 s; `0` = disabled) and
+///   maps an elapsed deadline onto `None` — block-and-escalate, never a skip
+///   (W028). An implementation need not bound itself.
 ///
 /// # Errors
 ///

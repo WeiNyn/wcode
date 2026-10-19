@@ -340,6 +340,7 @@ mod tests {
             1,
             RunSpec::Script {
                 command: "cargo test".into(),
+                timeout_secs: None,
             },
             false,
         )

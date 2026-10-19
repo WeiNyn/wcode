@@ -76,7 +76,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --task <text>      run a [workflow] headless on <text> (requires [workflow]
                      and --agents; WCODE_TASK is the fallback)
-  --timeout <secs>   cap the headless run (0/absent = no cap)
+  --timeout <secs>   cap the headless run (0/absent = no cap; falls back to
+                     `[workflow] timeout_secs`)
   --quiet            headless run: suppress the per-event log (the final
                      summary and any `resume:` line still print)
   --status [group|latest]  read-only: print <group>'s plan (#id [state] title),
@@ -1932,40 +1933,15 @@ async fn dispatch(
             .tasks()
             .clone();
         let seed = workflow_seed(args.task.as_deref().unwrap_or_default());
+        // The total-run deadline, W028 §4.3 precedence: `--timeout`, then
+        // `[workflow] timeout_secs`, then unbounded. `0` at EITHER level means
+        // disabled (mirrors `--timeout 0`).
         let timeout = args
             .timeout
+            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
             .filter(|&s| s > 0)
             .map(std::time::Duration::from_secs);
         let code = run_workflow(Backend::from(handle), tasks, seed, timeout, args.quiet).await;
-        // ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
-        // The `--task` call site still owes its Phase-2 wiring (the `quiet` flag
-        // and the empty-plan guard are LIVE now):
-        //   1. TIME default (precedence flag → `[workflow]` → unbounded, §4.3) —
-        //      and with it, restore the `--help` line's
-        //      "falls back to `[workflow] timeout_secs`" clause (dropped now: an
-        //      absent behaviour must not be promised by `USAGE`):
-        //        let timeout = args
-        //            .timeout
-        //            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
-        //            .filter(|&s| s > 0)                       // 0 = disabled
-        //            .map(std::time::Duration::from_secs);
-        //   2. the CANCEL token, cloned off the orchestrator (see `build_runtime`)
-        //        let cancel = rt
-        //            .orchestrator.as_ref().expect("--task guard ensured --agents")
-        //            .cancel_token().clone();
-        //   3. the GROUP dir + raw task text + config path — the `run.json` /
-        //      `resume:` inputs. `setup.active_group` is the running group (None
-        //      when `--no-session`); `args.task` is the raw text.
-        //        let code = run_workflow(
-        //            Backend::from(handle), tasks, seed, timeout, cancel,
-        //            setup.active_group.as_ref().map(|g| g.dir.as_path()),
-        //            args.task.as_deref().unwrap_or_default(),
-        //            args.config.as_deref(),
-        //            args.quiet,
-        //        ).await;
-        // The existing `flush_all` + `shutdown_all` + `exit(code)` tail is
-        // unchanged.
-        // ==== /SKETCH ====
         #[cfg(unix)]
         wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
         Background::shutdown_all();
@@ -2555,10 +2531,25 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
-// ==== SKETCH (review-only, not real code) — W028 PHASE 2 ONLY ====
-// Steps 10-11 (§5) are NOT implemented in Phase 1. `run_workflow` gains the
-// cancel token, the group dir / task / config (the resume inputs) and `quiet`
-// first (`quiet` and the empty-plan guard are LIVE above). What remains:
+// ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
+// The BOUNDS (steps 6-9) are live. What remains is the CANCEL OWNER and the
+// RESUME (steps 10-11, §5), all centred here:
+//
+// 0. WIRING — `dispatch`'s `--task` branch and this signature gain
+//    `cancel: CancellationToken`, `group: Option<&Path>`, `task: &str`,
+//    `config: Option<&str>` (the `run.json` / `resume:` inputs) beside the
+//    existing `quiet`:
+//        let cancel = rt
+//            .orchestrator.as_ref().expect("--task guard ensured --agents")
+//            .cancel_token().clone();          // minted in `build_runtime`
+//        let code = run_workflow(
+//            Backend::from(handle), tasks, seed, timeout, cancel,
+//            setup.active_group.as_ref().map(|g| g.dir.as_path()),
+//            args.task.as_deref().unwrap_or_default(),
+//            args.config.as_deref(),
+//            args.quiet,
+//        ).await;
+//    Then:
 //
 // 1. PERSIST THE LAUNCH, at the top of `run_workflow`, right after the empty-plan
 //    guard — ONCE, before any turn:
@@ -2703,6 +2694,9 @@ async fn run_workflow(
         }
     };
 
+    // The last-wake belt: a publish between the pre-subscribe log / the loop's
+    // final wake and `terminal_code()` is otherwise never diffed.
+    log_node_transitions(&tasks, &mut seen, quiet);
     print_workflow_summary(&tasks);
     code
 }
@@ -2712,6 +2706,11 @@ async fn run_workflow(
 /// initial snapshot, which is exactly the "print it once, right after the
 /// empty-plan guard" rule. `quiet` suppresses it. Not a diff of `attempts`: the
 /// state is the observable the operator needs.
+///
+/// CAVEAT — the log SAMPLES, it does not stream: `watch` coalesces, so a node
+/// whose `doing → done` both land between two wakes prints only `done`. Nothing
+/// is lost (the next wake carries the newest state) and the stdout summary is
+/// authoritative for the final states; see D033 "Known limitations".
 fn log_node_transitions(
     tasks: &crate::tasks::TaskList,
     seen: &mut std::collections::HashMap<u32, crate::tasks::TaskState>,
@@ -2929,12 +2928,28 @@ fn instantiate_workflow(
                 if let Err(e) = tasks.assign(t.id, crate::tools::message::address(m)) {
                     workflow_fail(&format!("node `{}`: {e}", node.id));
                 }
+                // A1: the OWNER comes from `assign`, but the per-node DEADLINE has
+                // no other way in — without this `configure` the knob is dead for
+                // every `member` node. `member: None` is status quo: `RunSpec::
+                // Session.member` is read nowhere (dispatch uses `task.owner`),
+                // so writing it would be journal churn.
+                if let Err(e) = tasks.configure(
+                    t.id,
+                    crate::tasks::RunSpec::Session {
+                        member: None,
+                        timeout_secs: node.timeout_secs,
+                    },
+                    node.gate,
+                ) {
+                    workflow_fail(&format!("node `{}`: {e}", node.id));
+                }
             }
             (None, Some(cmd)) => {
                 if let Err(e) = tasks.configure(
                     t.id,
                     crate::tasks::RunSpec::Script {
                         command: cmd.clone(),
+                        timeout_secs: node.timeout_secs,
                     },
                     node.gate,
                 ) {
@@ -3785,6 +3800,7 @@ mod tests {
         // the regression the fence is about (D001).
         let templated = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "a".into(),
@@ -3828,6 +3844,7 @@ mod tests {
         assert_eq!(team.len(), 1, "the md member was discovered");
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
@@ -3851,6 +3868,7 @@ mod tests {
         // NOT topological, so a naive `ids[from]` would panic (Blocker 1).
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![WorkflowEdge {
                 from: "a".into(),
                 to: "b".into(),
@@ -3863,6 +3881,7 @@ mod tests {
                     script: None,
                     gate: false,
                     title: None,
+                    timeout_secs: None,
                 },
                 WorkflowNode {
                     id: "a".into(),
@@ -3870,6 +3889,7 @@ mod tests {
                     script: None,
                     gate: false,
                     title: None,
+                    timeout_secs: None,
                 },
             ],
         };
@@ -3891,6 +3911,7 @@ mod tests {
         use crate::config::{Workflow, WorkflowNode};
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![
                 WorkflowNode {

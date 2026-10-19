@@ -83,7 +83,7 @@ impl SessionGroup {
     pub fn plan_path(&self) -> PathBuf {
         self.dir.join("plan.ndjson")
     }
-    // ==== SKETCH (review-only, not real code) ====
+    // ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
     // W028 §4.1 / §11 A2 — the launch sidecar, alongside `plan.ndjson`. NOT a
     // widened `manifest.json` (its doc scopes it to "team topology, written as a
     // fast path only (D5)", session_groups.rs:346-347): a task text + config +
@@ -469,7 +469,7 @@ pub fn write_manifest(group: &SessionGroup, manifest: &Manifest) -> io::Result<(
     serde_json::to_writer_pretty(file, manifest).map_err(io::Error::from)
 }
 
-// ==== SKETCH (review-only, not real code) ====
+// ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
 // W028 §4.1 / §11 A2 / D033 — the `run.json` launch record, mirroring the
 // `Manifest` read/write pair just above (session_groups.rs:448-459).
 //

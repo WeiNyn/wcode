@@ -1779,7 +1779,7 @@ mod workflow_log_tests {
             "the completed text prints exactly once (never the stream): {log:?}"
         );
         // The SECOND message proves the printer is FRESH per message: a shared
-        // one would emit only the tail (`message`) or nothing at all.
+        // one would emit only the tail (`age`) or nothing at all.
         assert_eq!(
             log.matches("a second message").count(),
             1,

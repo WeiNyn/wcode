@@ -34,26 +34,64 @@ use wcode_protocol::Registry;
 use crate::tasks::{Dep, RunSpec, Task, TaskList, TaskState};
 use crate::tools::bash::{PREVIEW_TAIL_CHARS, run_command, tail_chars};
 
-/// The wall-clock cap for a `Script` node: a build/test can run far longer than
-/// the `bash` tool's 30 s default. P5 makes it configurable.
-const SCRIPT_TIMEOUT: Duration = Duration::from_secs(300);
+/// The per-EDGE wall-clock bound, used when the edge sets no `timeout_secs`.
+/// 30 s = the `bash` tool's default: an edge runs SYNCHRONOUSLY on the loop
+/// thread, so a generous default would block the whole frontier.
+const EDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / D033 — `SCRIPT_TIMEOUT` becomes two named consts, both
-// per-node/edge overridable. `0` at the config level = disabled (the caller
-// maps `Some(0)` → "no bound" before it reaches `run_command`, which cannot
-// express "infinite" via `Duration::ZERO` — see the edges_admit friction).
-//
-// /// Per-EDGE bound (both `script` and `judge`). 30 s = bash's own default: an
-// /// edge runs SYNCHRONOUSLY on the loop thread (`edges_admit`, scheduler.rs:332),
-// /// so a generous default would block the whole frontier.
-// const EDGE_TIMEOUT: Duration = Duration::from_secs(30);
-// /// Per-NODE bound (a `Script` node's `run_command`, and a `Session` node's
-// /// timer arm). Keeps today's 300 s.
-// const NODE_TIMEOUT: Duration = Duration::from_secs(300);
-//
-// `SCRIPT_TIMEOUT` is then unused and deleted.
-// ==== /SKETCH ====
+/// The per-NODE wall-clock bound, used when the node sets no `timeout_secs`: a
+/// `Script` node's `run_command` and a `Session` node's timer arm. Keeps the
+/// historical 300 s — a build/test can run far longer than an edge.
+const NODE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Map a config `timeout_secs` to an actual bound — the ONE rule every bound
+/// site shares (W028 A2):
+///
+/// * `None` — the key is absent, so the site's own default applies;
+/// * `Some(0)` — DISABLED (mirrors `--timeout 0`), i.e. `None` = no timer;
+/// * `Some(n)` — `n` seconds.
+///
+/// The `None` return means UNBOUNDED, which [`run_command`] accepts directly. It
+/// must never be spelled `Some(Duration::ZERO)`: that fires on the first poll and
+/// would kill the command instantly instead of never bounding it.
+fn workflow_bound(secs: Option<u64>, default: Duration) -> Option<Duration> {
+    match secs {
+        None => Some(default),
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
+    }
+}
+
+/// A node's deadline, if it is a `Session` node: its
+/// `RunSpec::Session.timeout_secs` through [`workflow_bound`] (default
+/// [`NODE_TIMEOUT`], `Some(0)` = disabled).
+///
+/// `None` for a `Script` node — deliberately structural (W028 A6) — so the
+/// timer arm can never double-book a node whose bound already lives in its
+/// `run_command` timeout.
+fn session_deadline(tasks: &[Task], id: u32) -> Option<Duration> {
+    let task = tasks.iter().find(|t| t.id == id)?;
+    let RunSpec::Session { timeout_secs, .. } = &task.run else {
+        return None;
+    };
+    workflow_bound(*timeout_secs, NODE_TIMEOUT)
+}
+
+/// Await the earliest deadline, or forever when there is none, and hand back the
+/// node whose deadline fired.
+///
+/// `pending()` for `None` — NOT a `FAR` sentinel `Instant` (W028 C1): there is no
+/// safe "infinitely far" `Instant + Duration` to compute, and `sleep_until` on
+/// one would need overflow handling for no gain.
+async fn sleep_until_opt(when: Option<(u32, tokio::time::Instant)>) -> Option<u32> {
+    match when {
+        Some((id, at)) => {
+            tokio::time::sleep_until(at).await;
+            Some(id)
+        }
+        None => std::future::pending().await,
+    }
+}
 
 /// The root's DAG executor: watches the plan and wakes the ready frontier.
 ///
@@ -109,26 +147,15 @@ pub struct Scheduler {
     /// records the `Task.reset_epoch` seen at mark time, so a `TaskList::reset`
     /// (which bumps that epoch) is observable. EXCLUDED from `frontier` until then.
     unjudgeable: std::collections::HashMap<u32, u32>,
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §4.2 / §11 A6 — the per-node deadline bookkeeping. IN-MEMORY ONLY,
-    // deliberately (A6): `reconcile` flips `Doing → Todo` on load
-    // (tasks.rs:564-580), so a crash RESTARTS the deadline — correct, since "a
-    // crash is not the node's fault". A journaled deadline would survive the
-    // crash and time out a node that never ran. Store a `tokio::time::Instant`
-    // (what `sleep_until` wants) — NOT `std::time::Instant`.
-    //
-    // /// When a `Session` node was dispatched (`self.tasks.start` Ok), for the
-    // /// `run` loop's timer arm. Pruned AGAINST THE SNAPSHOT every iteration
-    // /// (a complete/reject/reset/reopen leaves a stale entry that would fire a
-    // /// bogus deadline) — see `run`.
-    // started: std::collections::HashMap<u32, tokio::time::Instant>,
-    //
-    // FRICTION (A6): `dispatch_one` is `&self` (scheduler.rs:415), so it cannot
-    // write `started`. Step 9 changes it to `&mut self`. Its two callers are
-    // already `&mut self` — `dispatch` (scheduler.rs:294) and `on_verdict`
-    // (scheduler.rs:241) — so the change is local. `frontier`/`prune_unjudgeable`
-    // stay as-is.
-    // ==== /SKETCH ====
+    /// When a `Session` node was dispatched (`tasks.start` succeeded), for
+    /// `run`'s timer arm. IN-MEMORY ONLY, deliberately (W028 A6): `reconcile`
+    /// flips `Doing → Todo` on load, so a crash RESTARTS the deadline — correct,
+    /// because a crash is not the node's fault. A journaled deadline would
+    /// survive the crash and time out a node that never ran.
+    ///
+    /// Pruned against the snapshot every `run` iteration: a complete / reject /
+    /// reset / reopen leaves a stale entry that would fire a bogus deadline.
+    started: std::collections::HashMap<u32, tokio::time::Instant>,
 }
 
 
@@ -159,6 +186,7 @@ impl Scheduler {
             judge_rx: std::sync::Mutex::new(Some(judge_rx)),
             judging: std::collections::HashSet::new(),
             unjudgeable: std::collections::HashMap::new(),
+            started: std::collections::HashMap::new(),
         }
     }
 
@@ -221,6 +249,20 @@ impl Scheduler {
                     last_escalated = failed;
                 }
             }
+            // A6: the deadline map must be PRUNED against the live snapshot every
+            // iteration — a node that completed, was rejected, reset or reopened
+            // leaves a stale entry that would otherwise fire a bogus deadline.
+            let snap = self.tasks.snapshot();
+            self.started
+                .retain(|id, _| snap.iter().any(|t| t.id == *id && t.state == TaskState::Doing));
+            // The earliest SESSION deadline. A `Script` node yields `None` by
+            // construction (`session_deadline`), so it can never be booked here
+            // twice — its bound is its own `run_command` timeout (A6).
+            let next = self
+                .started
+                .iter()
+                .filter_map(|(id, at)| session_deadline(&snap, *id).map(|d| (*id, *at + d)))
+                .min_by_key(|(_, when)| *when);
             tokio::select! {
                 changed = updates.changed() => {
                     if changed.is_err() {
@@ -229,53 +271,15 @@ impl Scheduler {
                 }
                 // The ONLY place an async judge result mutates the plan.
                 Some((id, verdict)) = judge_rx.recv() => self.on_verdict(id, verdict).await,
+                // The node deadline (W028). `sleep_until_opt(None)` is `pending()`,
+                // so this arm is simply never ready when every node is unbounded.
+                fired = sleep_until_opt(next) => {
+                    if let Some(id) = fired {
+                        self.started.remove(&id);
+                        self.fire_node_deadline(id);
+                    }
+                }
             }
-            // ==== SKETCH (review-only, not real code) ====
-            // W028 §5 step 9 / §4.4 item 4 — a THIRD `select!` arm: the node
-            // deadline (the loop has none today, scheduler.rs:187-195 selects
-            // only on `updates.changed()` + `judge_rx.recv()`).
-            //
-            // The arm cannot live INSIDE `select!` cleanly (its deadline is
-            // recomputed every iteration), so the shape is:
-            //
-            //   // 1. PRUNE `started` against the snapshot (A6): keep only nodes
-            //   //    still Doing. A completed/rejected/reset/reopened node drops out.
-            //   let snap = self.tasks.snapshot();
-            //   self.started.retain(|id, _| {
-            //       snap.iter().any(|t| t.id == *id && t.state == TaskState::Doing)
-            //   });
-            //   // 2. Earliest deadline across SESSION nodes only (a Script node's
-            //   //    bound is its `run_command` timeout in `dispatch_one`; do NOT
-            //   //    double-book it here — see the edges_admit/dispatch_one friction).
-            //   let next = self.started.iter()
-            //       .filter_map(|(id, at)| session_deadline(&snap, *id).map(|d| (*id, *at + d)))
-            //       .min_by_key(|(_, when)| *when);
-            //   // 3. select on the two existing arms PLUS `next`:
-            //   tokio::select! {
-            //       changed = updates.changed() => { if changed.is_err() { break; } }
-            //       Some((id, verdict)) = judge_rx.recv() => self.on_verdict(id, verdict).await,
-            //       _ = sleep_until(next.map_or(FAR, |(_, when)| when)), if next.is_some() => {
-            //           let (id, _) = next.unwrap();
-            //           self.started.remove(&id);
-            //           let secs = session_deadline(&snap, id).map_or(0, |d| d.as_secs());
-            //           // A node timeout is `fail`, terminal — reuses the EXISTING
-            //           // escalation arm (scheduler.rs:179-186) with NO new code:
-            //           // a Failed node leaves `failed_ids()` non-empty and the
-            //           // escalate-once guard fires on the next loop top.
-            //           let _ = self.tasks.fail(id, format!("node timeout: exceeded {secs}s"));
-            //       }
-            //   }
-            //
-            // `session_deadline(snap, id)` = the node's `RunSpec::Session.timeout_secs`
-            // mapped to `Duration` (default `NODE_TIMEOUT`; `Some(0)` = disabled →
-            // `None` so it is skipped).
-            //
-            // FRICTION: the two `select!`s above cannot both exist — this REPLACES
-            // the current single `select!` (adding a conditional timer arm). The
-            // `sleep_until(…), if next.is_some()` guard is the standard way to
-            // express an OPTIONAL timer in `tokio::select!`; a bare
-            // `sleep_until(Instant::now() + huge)` risks overflow, hence the guard.
-            // ==== /SKETCH ====
         }
     }
 
@@ -304,6 +308,31 @@ impl Scheduler {
                 })
             })
             .collect()
+    }
+
+    /// The timer arm's effect for node `id` (W028): `fail` it if it is STILL
+    /// `Doing`, re-checked on a FRESH snapshot.
+    ///
+    /// A8 — the re-check is load-bearing: `TaskList::fail` has NO state guard, so
+    /// a `complete` landing in the same instant the deadline fires would be
+    /// flipped `Done → Failed` and a `Fail` journalled into the plan, poisoning
+    /// the resume for good. Returns whether the node was failed.
+    ///
+    /// A node timeout is `fail`, TERMINAL: the EXISTING escalation arm picks it
+    /// up at the next loop top (`failed_ids()` is now non-empty). The worker's
+    /// in-flight turn is deliberately NOT cancelled — D033 reuses the escalation
+    /// path unchanged.
+    fn fire_node_deadline(&mut self, id: u32) -> bool {
+        let fresh = self.tasks.snapshot();
+        let Some(task) = fresh.iter().find(|t| t.id == id) else {
+            return false;
+        };
+        if task.state != TaskState::Doing {
+            return false;
+        }
+        let secs = session_deadline(&fresh, id).map_or(0, |d| d.as_secs());
+        let _ = self.tasks.fail(id, format!("node timeout: exceeded {secs}s"));
+        true
     }
 
     /// A14/R1: drop `unjudgeable` entries whose `reset_epoch` has moved — a
@@ -443,43 +472,18 @@ impl Scheduler {
                         return EdgeGate::Unjudgeable(reason);
                     }
                     let label = format!("edge-{id}");
+                    // The edge's OWN bound (default 30 s; `0` = disabled, which
+                    // `run_command` takes as `None` = unbounded).
+                    let bound = workflow_bound(cond.timeout_secs, EDGE_TIMEOUT);
                     let (code, output) = run_command(
                         cmd,
                         &self.working_dir,
-                        SCRIPT_TIMEOUT,
+                        bound,
                         &self.cancel,
                         None,
                         &label,
                     )
                     .await;
-                    // ==== SKETCH (review-only, not real code) ====
-                    // W028 §4.2 / §5 step 8 — the edge bound is per-edge, not
-                    // the const. Replace the `SCRIPT_TIMEOUT` argument with the
-                    // condition's own timeout, defaulting to `EDGE_TIMEOUT`:
-                    //
-                    //   let bound = cond.timeout_secs
-                    //       .map(Duration::from_secs)
-                    //       .filter(|d| !d.is_zero())   // Some(0) = disabled
-                    //       .unwrap_or(EDGE_TIMEOUT);
-                    //
-                    // FRICTION: "disabled" (`Some(0)`) cannot be passed to
-                    // `run_command` — it `tokio::time::sleep(timeout)`s and
-                    // `Duration::ZERO` fires immediately (tools/bash.rs:457). For
-                    // `Some(0)` the edge must instead run UNBOUNDED: either pass a
-                    // far-future `Duration` or await `run_command` with a
-                    // `None`-timeout variant. Simplest: keep the `.filter(!is_zero)`
-                    // and fall through to a very large duration (e.g.
-                    // `Duration::from_secs(u64::MAX/2)` is unsafe for the sleep
-                    // math — prefer a documented `EDGE_TIMEOUT`-when-zero or a
-                    // small code branch that calls `run_command` with a huge but
-                    // safe bound).
-                    //
-                    // The `match code` below is UNCHANGED: a timed-out script
-                    // edge returns `None` (tools/bash.rs:457-460 "timed out
-                    // after …") → the `None => Unjudgeable` arm (scheduler.rs:378-380)
-                    // fires. A timed-out edge MUST stay `Unjudgeable`, NEVER `Skip`
-                    // (§3 design): only `Some(nonzero)` is `Skip`.
-                    // ==== /SKETCH ====
                     match code {
                         // Exit 0: this edge is taken; continue the AND-fold.
                         Some(0) => {}
@@ -503,43 +507,27 @@ impl Scheduler {
                     let judge = self.judge.clone();
                     let tx = self.judge_tx.clone();
                     let criterion = criterion.to_string();
+                    // The edge's bound, COPIED into the `'static` task (`Option<u64>`
+                    // is `Copy`; the `&cond` is not). `None` = disabled = unbounded.
+                    let bound = workflow_bound(cond.timeout_secs, EDGE_TIMEOUT);
                     // The borrow of `criterion` is internal to the spawned block,
                     // so the task is `'static` (no fight with `Judge::decide<'a>`).
                     tokio::spawn(async move {
-                        let verdict = judge.decide(&criterion, upstream.as_deref()).await;
+                        let decided = judge.decide(&criterion, upstream.as_deref());
+                        // A stalled judge is bounded by the EDGE, not the run's
+                        // `--timeout` (W028). An elapsed deadline maps onto the
+                        // EXISTING `Verdict::None` path — "no verdict" — so it
+                        // blocks-and-escalates and is never a silent `Skip`.
+                        let verdict: crate::judge::Verdict = match bound {
+                            // An elapsed deadline IS "no verdict" — the existing
+                            // block-and-escalate path.
+                            Some(bound) => tokio::time::timeout(bound, decided)
+                                .await
+                                .unwrap_or_default(),
+                            None => decided.await,
+                        };
                         let _ = tx.send((id, verdict));
                     });
-                    // ==== SKETCH (review-only, not real code) ====
-                    // W028 §4.2 / §5 step 8 — the judge is now BOUNDED by the
-                    // edge's `timeout_secs` (default `EDGE_TIMEOUT`), a fix to
-                    // `judge.rs:67-68` whose doc says "bounded only by the run's
-                    // --timeout" (now false — doc-only change there).
-                    //
-                    // Wrap the `decide` await in `tokio::time::timeout`, mapping
-                    // ELAPSED to the EXISTING `Verdict::None` path (which already
-                    // means "unparseable" → block-and-escalate, scheduler.rs:248-265):
-                    //
-                    //   tokio::spawn(async move {
-                    //       let bound = cond.timeout_secs   // captured, not borrowed
-                    //           .map(Duration::from_secs)
-                    //           .filter(|d| !d.is_zero())
-                    //           .unwrap_or(EDGE_TIMEOUT);
-                    //       let verdict = match tokio::time::timeout(
-                    //           bound, judge.decide(&criterion, upstream.as_deref()),
-                    //       ).await {
-                    //           Ok(v) => v,
-                    //           Err(_elapsed) => None,   // == the existing None path
-                    //       };
-                    //       let _ = tx.send((id, verdict));
-                    //   });
-                    //
-                    // FRICTION: `cond` is borrowed from `deps` (the cloned
-                    // snapshot) via `dep`; the spawned block is `'static`, so
-                    // `cond.timeout_secs` (a `Copy` `Option<u64>`) must be COPIED
-                    // into the block — fine, it is `Option<u64>`, not the `&cond`.
-                    // A `Some(0)` "disabled" judge bound must skip the `timeout`
-                    // wrapper entirely (an unbounded await), not wrap in zero.
-                    // ==== /SKETCH ====
                     return EdgeGate::Pending;
                 }
                 // Unreachable after load validation; block-and-escalate.
@@ -549,37 +537,16 @@ impl Scheduler {
         EdgeGate::Admit
     }
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §5 step 9 / §11 A6 — `dispatch_one` becomes `&mut self` so it can
-    // write `self.started` on a successful `Session` dispatch. Only the
-    // signature + two `started.insert` calls change; the body is otherwise
-    // identical.
-    //
-    // async fn dispatch_one(&mut self, id: u32) {
-    //     ...
-    //     RunSpec::Session { .. } => {
-    //         ...
-    //         if self.registry.deliver(&self.root, owner, Request::Wake { content }).is_ok() {
-    //             let _ = self.tasks.start(id);
-    //             // NEW: start the wall clock only after the node is Doing.
-    //             self.started.insert(id, tokio::time::Instant::now());
-    //         }
-    //     }
-    //     RunSpec::Script { command, timeout_secs } => {   // NOTE: pattern gains the field
-    //         ... (see the Script-arm cancel sketch below)
-    //         // A Script node's deadline is `run_command`'s own timeout, so it
-    //         // does NOT need `started` — omit the insert OR insert and let the
-    //         // timer arm skip Script nodes (see the run-loop friction).
-    //     }
-    // }
-    // ==== /SKETCH ====
 
     /// Wake one node. A `Session` node gets a hydrated [`Request::Wake`]
     /// (delivered only if it has an owner) and — on success — flips `Doing`. A
     /// `Script` node (worker-less) runs its command detached: `before_tool_call`
     /// first (a refusal `fail`s it *without running*), then `run_command`, whose
     /// exit code is the verdict (§5).
-    async fn dispatch_one(&self, id: u32) {
+    /// `&mut self` for ONE reason (W028 A6): the `Session` arm records the
+    /// dispatch instant in `self.started`, so `run`'s timer arm can bound the
+    /// node. Both callers are already `&mut self`.
+    async fn dispatch_one(&mut self, id: u32) {
         let snapshot = self.tasks.snapshot();
         let Some(task) = snapshot.iter().find(|t| t.id == id) else {
             return;
@@ -601,9 +568,14 @@ impl Scheduler {
                     .is_ok()
                 {
                     let _ = self.tasks.start(id);
+                    // A6: enter the deadline map ONLY here (a `Session` node) and
+                    // only once the node is really `Doing`. A `Script` node's
+                    // bound is its `run_command` timeout, so it is never
+                    // double-booked by the timer arm.
+                    self.started.insert(id, tokio::time::Instant::now());
                 }
             }
-            RunSpec::Script { command } => {
+            RunSpec::Script { command, .. } => {
                 // (a) policy first — the SAME gate the `bash` tool runs under.
                 let call = ToolCall {
                     id: format!("script-{id}"),
@@ -618,6 +590,10 @@ impl Scheduler {
                 // `Script` can outlast the loop's turn, so blocking here would
                 // stall every other ready node. The task holds only clones.
                 let _ = self.tasks.start(id);
+                // The node's OWN bound (default 300 s; `0` = disabled = unbounded).
+                // A `Script` node's deadline is this `run_command` timeout, so it
+                // is deliberately NOT entered into `self.started` (A6).
+                let bound = workflow_bound(task.run.timeout_secs(), NODE_TIMEOUT);
                 let (tasks, dir, cancel, gate, command) = (
                     self.tasks.clone(),
                     self.working_dir.clone(),
@@ -629,52 +605,30 @@ impl Scheduler {
                     let (code, output) = run_command(
                         &command,
                         &dir,
-                        SCRIPT_TIMEOUT,
+                        bound,
                         &cancel,
                         None,
                         &format!("script-{id}"),
                     )
                     .await;
-                    // ==== SKETCH (review-only, not real code) ====
-                    // W028 §4.2 / §4.4 item 2 / §11 A4 / D033 — TWO changes to
-                    // this detached Script task:
-                    //
-                    // (1) The `SCRIPT_TIMEOUT` argument becomes the node's own
-                    //     deadline:
-                    //       let bound = run_timeout_secs            // RunSpec::Script field
-                    //           .map(Duration::from_secs)
-                    //           .filter(|d| !d.is_zero())
-                    //           .unwrap_or(NODE_TIMEOUT);
-                    //     (`run_timeout_secs` is the new field, destructured
-                    //     from `task.run` before the spawn — the tuple above
-                    //     gains it.)
-                    //
-                    // (2) CANCEL-SAFE EARLY RETURN — the load-bearing one (A4).
-                    //     `run_command` returns `(None, "cancelled")` on cancel
-                    //     (tools/bash.rs:453-456) AND `(None, "timed out …")` on a
-                    //     timeout. The `match (code, gate)` below fails the node on
-                    //     ANY `None` — but a cancel-induced `Failed` is PERMANENT
-                    //     (`reconcile` only repairs `Doing`, tasks.rs:564-580) and
-                    //     WEDGES the resume. So check the token FIRST:
+                    // ==== SKETCH (review-only, not real code) — W028 PHASE 2b ONLY ====
+                    // The CANCEL-SAFE EARLY RETURN (A4) arrives with the cancel
+                    // owner. `run_command` returns `(None, "cancelled")` on cancel
+                    // and `(None, "timed out …")` on a timeout; the `match (code,
+                    // gate)` below fails the node on ANY `None`, but a
+                    // cancel-induced `Failed` is PERMANENT (`reconcile` only
+                    // repairs `Doing`) and WEDGES the resume. So, once the token
+                    // has an owner, check it FIRST:
                     //
                     //       if cancel.is_cancelled() {
-                    //           // Leave the node `Doing` — the operator's resume
-                    //           // reconciles Doing→Todo and re-runs it. Do NOT fail.
+                    //           // Leave the node `Doing` — the resume reconciles
+                    //           // Doing→Todo and re-runs it. Do NOT fail.
                     //           return;
                     //       }
-                    //       let tail = tail_chars(&output, PREVIEW_TAIL_CHARS);
-                    //       match (code, gate) { … }   // unchanged: a TIMEOUT
-                    //                                  // (token NOT cancelled) still fails
                     //
-                    // The discrimination is `cancel.is_cancelled()`, NOT the code:
-                    // both a cancel and a timeout return `code == None`.
-                    //
-                    // FRICTION: a node TIMEOUT here `fail`s the node → its
-                    // `failed_ids()` triggers the existing escalation arm — but
-                    // the run-loop timer arm ALSO watches `started`; if the Script
-                    // node is in `started` it would double-fire. Resolution: the
-                    // Script node is NOT entered into `started` (its bound is this
-                    // `run_command` timeout), so the timer arm never sees it.
+                    // The discrimination is `cancel.is_cancelled()`, NOT the code
+                    // (a cancel and a timeout both return `None`); a genuine
+                    // TIMEOUT still fails the node.
                     // ==== /SKETCH ====
                     let tail = tail_chars(&output, PREVIEW_TAIL_CHARS);
                     match (code, gate) {
@@ -810,32 +764,330 @@ mod tests {
 
     use tokio::sync::broadcast;
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 §7.1 — the scheduler gates. All drive a `Scheduler` over a seeded
-    // `TaskList` with a `Script`/`Session` node configured with a short
-    // `timeout_secs`, then assert the OUTCOME (never just that it compiled).
-    //
-    // #[tokio::test]
-    // /// §7.1: a `script` edge whose command sleeps past `cond.timeout_secs`
-    // /// leaves the target `Unjudgeable`-blocked and escalates — NEVER `Skip`.
-    // async fn a_timed_out_script_edge_blocks_and_escalates() { todo!() }
-    //
-    // #[tokio::test]
-    // /// §7.1: a `judge` edge whose `decide` never returns past the bound maps
-    // /// to `Verdict::None` → block-and-escalate.
-    // async fn a_timed_out_judge_blocks_and_escalates() { todo!() }
-    //
-    // #[tokio::test]
-    // /// §7.1: the timer arm `fail`s a `Doing` Session node past its deadline;
-    // /// the reason names the limit (`node timeout: exceeded {n}s`); dependents
-    // /// stay blocked (Todo, dep not Done).
-    // async fn a_session_node_past_its_deadline_fails() { todo!() }
-    //
-    // #[tokio::test]
-    // /// §7.1 / A4: on `cancel.cancel()` a `Script` node is left `Doing` (NOT
-    // /// Failed) — the resume depends on it.
-    // async fn a_cancelled_script_node_stays_doing() { todo!() }
-    // ==== /SKETCH ====
+    /// W028 A2: the ONE bound rule — absent → the site's default, `0` → disabled
+    /// (`None` = unbounded, never a zero-length kill), `n` → `n` seconds.
+    #[test]
+    fn the_bound_maps_zero_to_disabled() {
+        assert_eq!(workflow_bound(None, EDGE_TIMEOUT), Some(EDGE_TIMEOUT));
+        assert_eq!(workflow_bound(None, NODE_TIMEOUT), Some(NODE_TIMEOUT));
+        assert_eq!(
+            workflow_bound(Some(0), NODE_TIMEOUT),
+            None,
+            "0 = disabled, NOT an instant kill"
+        );
+        assert_eq!(workflow_bound(Some(7), NODE_TIMEOUT), Some(Duration::from_secs(7)));
+        // The two defaults are the historical ones.
+        assert_eq!(EDGE_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(NODE_TIMEOUT, Duration::from_secs(300));
+    }
+
+    /// A `judge` that never decides — for the edge-deadline gate. No model.
+    struct HangingJudge;
+    impl crate::judge::Judge for HangingJudge {
+        fn decide<'a>(
+            &'a self,
+            _criterion: &'a str,
+            _upstream: Option<&'a str>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::judge::Verdict> + Send + 'a>>
+        {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Poll the plan until `id` reaches `want`, advancing the VIRTUAL clock (the
+    /// tests run `start_paused`). A wall-clock `timeout` is unusable there: it
+    /// would elapse the moment every task parks, before the timer arm runs.
+    async fn wait_for_paused(tasks: &TaskList, id: u32, want: TaskState) {
+        for _ in 0..2_000 {
+            let hit = tasks
+                .snapshot()
+                .iter()
+                .any(|t| t.id == id && t.state == want);
+            if hit {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "node {id} never reached {want:?}: {:?}",
+            tasks.snapshot()
+        );
+    }
+
+    /// Read the next `MessageReceived` under a PAUSED clock: `next_message`'s
+    /// inner wall-clock `timeout` cannot be used there (the runtime would advance
+    /// the virtual clock past it while the real work — a killed child, an actor
+    /// turn — is still settling). Polls instead, letting the clock tick in steps.
+    async fn next_message_paused(rx: &mut broadcast::Receiver<AgentEvent>) -> String {
+        for _ in 0..2_000 {
+            loop {
+                match rx.try_recv() {
+                    Ok(AgentEvent::MessageReceived { content, .. }) => return content,
+                    Ok(_) => continue,
+                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::TryRecvError::Closed) => panic!("channel closed"),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("no escalation Wake arrived");
+    }
+
+    /// A `script` edge whose command outlives the edge's own `timeout_secs` is
+    /// `Unjudgeable` → the target stays `Todo` and the run blocks-and-escalates.
+    /// NEVER `Skip` (only a genuine non-zero exit skips).
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_script_edge_blocks_and_escalates() {
+        let (registry, root, _worker, worker_id) = wiring();
+        let (root_handle, self_addr) = escalate_edge(&registry, &root);
+        let tasks = TaskList::new();
+        let a = tasks.create("a", vec![], false).unwrap().id;
+        tasks.assign(a, worker_id.clone()).unwrap();
+        let mut cond = script_cond("sleep 30");
+        cond.timeout_secs = Some(1); // 1 s bound on a 30 s command
+        let b = tasks
+            .create("b", vec![Dep::Edged { id: a, condition: Some(cond) }], false)
+            .unwrap()
+            .id;
+        tasks.assign(b, worker_id.clone()).unwrap();
+
+        let mut root_rx = root_handle.subscribe();
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root.clone(),
+                tasks.clone(),
+                self_addr,
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(crate::judge::FakeJudge::new(vec![])),
+            )
+            .run(),
+        );
+
+        tasks.complete(a, None).unwrap();
+        let content = next_message_paused(&mut root_rx).await;
+        assert!(
+            content.contains(&format!("id:{b}")),
+            "the escalation names the blocked target: {content}"
+        );
+        assert_eq!(
+            tasks.snapshot().into_iter().find(|t| t.id == b).unwrap().state,
+            TaskState::Todo,
+            "a timed-out edge blocks-and-escalates; it is never Skipped"
+        );
+    }
+
+    /// A `judge` edge whose `decide` never returns is bounded by the EDGE (not
+    /// the run's `--timeout`): elapsed maps onto the existing `Verdict::None`
+    /// path → block-and-escalate, never `Skip`.
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_judge_blocks_and_escalates() {
+        let (registry, root, _worker, worker_id) = wiring();
+        let (root_handle, self_addr) = escalate_edge(&registry, &root);
+        let tasks = TaskList::new();
+        let a = tasks.create("a", vec![], false).unwrap().id;
+        tasks.assign(a, worker_id.clone()).unwrap();
+        let mut cond = judge_cond("forever?");
+        cond.timeout_secs = Some(1);
+        let b = tasks
+            .create("b", vec![Dep::Edged { id: a, condition: Some(cond) }], false)
+            .unwrap()
+            .id;
+        tasks.assign(b, worker_id.clone()).unwrap();
+
+        let mut root_rx = root_handle.subscribe();
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root.clone(),
+                tasks.clone(),
+                self_addr,
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(HangingJudge),
+            )
+            .run(),
+        );
+
+        tasks.complete(a, None).unwrap();
+        let content = next_message_paused(&mut root_rx).await;
+        assert!(
+            content.contains(&format!("id:{b}")),
+            "the escalation names the blocked target: {content}"
+        );
+        assert_eq!(
+            tasks.snapshot().into_iter().find(|t| t.id == b).unwrap().state,
+            TaskState::Todo,
+            "a timed-out judge blocks-and-escalates; it is never Skipped"
+        );
+    }
+
+    /// A `Script` node's own `timeout_secs` bounds its `run_command`, and the
+    /// resulting `fail` names the limit — the same shape the `bash` tool's own
+    /// timeout produces.
+    #[tokio::test(start_paused = true)]
+    async fn a_script_node_timeout_names_the_limit() {
+        let tasks = TaskList::new();
+        let id = tasks.create("slow", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                id,
+                RunSpec::Script {
+                    command: "sleep 30".into(),
+                    timeout_secs: Some(1),
+                },
+                false,
+            )
+            .unwrap();
+
+        spawn_scheduler(&tasks, HooksSet::default());
+        wait_for_paused(&tasks, id, TaskState::Failed).await;
+        let t = &tasks.snapshot()[0];
+        assert_eq!(t.state, TaskState::Failed);
+        assert!(
+            t.feedback.as_deref().unwrap_or_default().contains("timed out after 1s"),
+            "the reason names the limit: {:?}",
+            t.feedback
+        );
+    }
+
+    /// A `Session` node past its own deadline is `fail`ed by the timer arm, the
+    /// reason names the limit, and its dependent is never dispatched.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_node_past_its_deadline_fails() {
+        let (registry, root, _worker, worker_id) = wiring();
+        let tasks = TaskList::new();
+        let a = tasks.create("slow", vec![], false).unwrap().id;
+        tasks.assign(a, worker_id.clone()).unwrap();
+        tasks
+            .configure(
+                a,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(1),
+                },
+                false,
+            )
+            .unwrap();
+        let b = tasks.create("after", vec![Dep::Id(a)], false).unwrap().id;
+        tasks.assign(b, worker_id.clone()).unwrap();
+
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root.clone(),
+                tasks.clone(),
+                SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(crate::judge::FakeJudge::new(vec![])),
+            )
+            .run(),
+        );
+
+        wait_for_paused(&tasks, a, TaskState::Failed).await;
+        let node = |id: u32| tasks.snapshot().into_iter().find(|t| t.id == id).unwrap();
+        assert!(
+            node(a)
+                .feedback
+                .as_deref()
+                .unwrap_or_default()
+                .contains("node timeout: exceeded 1s"),
+            "the reason names the limit: {:?}",
+            node(a).feedback
+        );
+        assert_eq!(
+            node(b).state,
+            TaskState::Todo,
+            "a dependent of a failed node stays blocked"
+        );
+    }
+
+    /// A8, as its own gate: a node that COMPLETED is never failed by its stale
+    /// deadline — `TaskList::fail` has no state guard, so the re-check is the
+    /// only thing standing between a same-instant `complete` and a `Fail` line
+    /// journalled into the plan (which would poison the resume).
+    #[tokio::test]
+    async fn a_completed_node_is_never_failed_by_its_stale_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let (registry, root, _worker, worker_id) = wiring();
+        let tasks = TaskList::with_journal_at(path.clone(), 3);
+        let mut sched = Scheduler::new(
+            registry,
+            root,
+            tasks.clone(),
+            SessionId::agent("scheduler"),
+            std::env::temp_dir(),
+            HooksSet::default(),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(crate::judge::FakeJudge::new(vec![])),
+        );
+
+        // Dispatched (so it has a `started` entry) …
+        let done = tasks.create("done", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                done,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(1),
+                },
+                false,
+            )
+            .unwrap();
+        tasks.assign(done, worker_id.clone()).unwrap();
+        tasks.start(done).unwrap();
+        sched
+            .started
+            .insert(done, tokio::time::Instant::now());
+        // … then COMPLETED before the deadline is serviced.
+        tasks.complete(done, Some("ok".into())).unwrap();
+
+        assert!(
+            !sched.fire_node_deadline(done),
+            "a completed node must not be failed by its stale deadline"
+        );
+        assert_eq!(
+            tasks.snapshot().into_iter().find(|t| t.id == done).unwrap().state,
+            TaskState::Done
+        );
+        let journal = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !journal.contains(r#" "fail" "#) && !journal.contains(r#""op":"fail""#),
+            "no `Fail` op was journalled: {journal}"
+        );
+
+        // … and the arm DOES fire for a node that is still `Doing`.
+        let doing = tasks.create("doing", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                doing,
+                RunSpec::Session {
+                    member: None,
+                    timeout_secs: Some(2),
+                },
+                false,
+            )
+            .unwrap();
+        tasks.start(doing).unwrap();
+        assert!(sched.fire_node_deadline(doing), "a `Doing` node IS failed");
+        let node = tasks.snapshot().into_iter().find(|t| t.id == doing).unwrap();
+        assert_eq!(node.state, TaskState::Failed);
+        assert!(
+            node.feedback
+                .as_deref()
+                .unwrap_or_default()
+                .contains("node timeout: exceeded 2s"),
+            "the reason names the limit: {:?}",
+            node.feedback
+        );
+    }
 
     use wcode_harness::actor::{SessionActor, SessionHandle};
     use wcode_harness::agent::{Agent, AgentConfig};
@@ -861,7 +1113,10 @@ mod tests {
             feedback: None,
             artifact: None,
             gate: false,
-            run: RunSpec::Session { member: None },
+            run: RunSpec::Session {
+                member: None,
+                timeout_secs: None,
+            },
         }
     }
 
@@ -1305,7 +1560,10 @@ mod tests {
         let tasks = TaskList::new();
         let id = tasks.create("build", vec![], false).unwrap().id;
         tasks
-            .configure(id, RunSpec::Script { command: "echo ok".into() }, false)
+            .configure(id, RunSpec::Script {
+                command: "echo ok".into(),
+                timeout_secs: None,
+            }, false)
             .unwrap();
         spawn_scheduler(&tasks, HooksSet::default());
         wait_for(&tasks, id, TaskState::Done).await;
@@ -1325,7 +1583,14 @@ mod tests {
         let tasks = TaskList::new();
         let id = tasks.create("build", vec![], false).unwrap().id;
         tasks
-            .configure(id, RunSpec::Script { command: "false".into() }, false)
+            .configure(
+                id,
+                RunSpec::Script {
+                    command: "false".into(),
+                    timeout_secs: None,
+                },
+                false,
+            )
             .unwrap();
         spawn_scheduler(&tasks, HooksSet::default());
         wait_for(&tasks, id, TaskState::Failed).await;
@@ -1340,7 +1605,14 @@ mod tests {
         let work = tasks.create("work", vec![], false).unwrap().id;
         let gate = tasks.create("verify", vec![Dep::Id(work)], true).unwrap().id;
         tasks
-            .configure(gate, RunSpec::Script { command: "false".into() }, true)
+            .configure(
+                gate,
+                RunSpec::Script {
+                    command: "false".into(),
+                    timeout_secs: None,
+                },
+                true,
+            )
             .unwrap();
         spawn_scheduler(&tasks, HooksSet::default());
 
@@ -1359,7 +1631,14 @@ mod tests {
 
         // A passing gate completes.
         tasks
-            .configure(gate, RunSpec::Script { command: "true".into() }, true)
+            .configure(
+                gate,
+                RunSpec::Script {
+                    command: "true".into(),
+                    timeout_secs: None,
+                },
+                true,
+            )
             .unwrap();
         tasks.complete(work, Some("A2".into())).unwrap();
         wait_for(&tasks, gate, TaskState::Done).await;
@@ -1379,6 +1658,7 @@ mod tests {
                 id,
                 RunSpec::Script {
                     command: format!("echo BLOCK; touch {}", marker.display()),
+                    timeout_secs: None,
                 },
                 false,
             )
@@ -1750,7 +2030,14 @@ mod tests {
         let tasks = TaskList::new();
         let script = tasks.create("build", vec![], false).unwrap().id;
         tasks
-            .configure(script, RunSpec::Script { command: "true".into() }, false)
+            .configure(
+                script,
+                RunSpec::Script {
+                    command: "true".into(),
+                    timeout_secs: None,
+                },
+                false,
+            )
             .unwrap();
         let _orphan = tasks.create("orphan", vec![], false).unwrap();
         let scheduler = Scheduler::new(

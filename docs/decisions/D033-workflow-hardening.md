@@ -120,6 +120,19 @@ is refused rather than silently serving without running.
 
 ## Known limitations (out of scope)
 
+- **The transition log samples, it does not stream.** `watch::Receiver::changed()`
+  coalesces: it reports that the version advanced, not how many times, and the
+  driver then diffs the *current* snapshot against what it last printed. So a
+  node whose `doing → done` both land between two wakes prints only `done` — the
+  normal shape for a fast gate node that becomes ready only after its dependency
+  completes. Observed live (`#2` printed `[todo]` then `[done]`, no `[doing]`).
+  Nothing is lost: the next wake always reflects the newest state, and the
+  stdout summary is authoritative for final states. Recovering the intermediate
+  would need an op-level broadcast instead of the state watch — a different
+  seam, not a fix. (Contrast B1, which *was* a blocking bug: the driver was not
+  observing during the first turn at all, and a fresh `watch` receiver starts at
+  the current version, so a state reached and held in that window was lost
+  permanently.)
 - **Per-worker tool streams** are not in the headless log:
   `Backend::from(root_handle).subscribe()` yields the root's events only. A
   per-worker view needs one subscription per worker.

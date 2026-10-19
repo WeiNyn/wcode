@@ -433,7 +433,14 @@ mod tests {
             ctx(),
         )
         .await;
-        list.configure(2, RunSpec::Session { member: None }, true)
+        list.configure(
+            2,
+            RunSpec::Session {
+                member: None,
+                timeout_secs: None,
+            },
+            true,
+        )
             .unwrap();
         list.complete(1, Some("A₁".into())).unwrap();
 
@@ -554,7 +561,10 @@ mod tests {
             feedback: None,
             artifact: None,
             gate: false,
-            run: RunSpec::Session { member: None },
+            run: RunSpec::Session {
+                member: None,
+                timeout_secs: None,
+            },
         };
         assert_eq!(render(&[plain]), "#1 [todo] do it (unassigned)");
 
@@ -571,6 +581,7 @@ mod tests {
             gate: true,
             run: RunSpec::Session {
                 member: Some("reviewer".into()),
+                timeout_secs: None,
             },
         };
         assert_eq!(render(&[busy]), "#3 [todo] verify (reviewer) ← #2 ×1");

@@ -243,20 +243,14 @@ pub struct Workflow {
     /// (`overlay_replaces_arrays_wholesale`).
     #[serde(rename = "edge", default)]
     pub edges: Vec<WorkflowEdge>,
+    /// Total-run wall-clock deadline (seconds) used when `--timeout` is absent.
+    /// `None` = unbounded; `Some(0)` = disabled (mirrors `--timeout 0`). This is
+    /// the WHOLE-RUN default, NOT a node default — a node keeps its own
+    /// [`WorkflowNode::timeout_secs`] (W028 / D033).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / §11 A1 / D033 — TOTAL-RUN default (flag → this → unbounded). NOT
-// a node default (the node default stays the 300 s const). `0` = disabled.
-// `Workflow` derives `Deserialize` only (no `Serialize`), so an old config that
-// omits the key needs `#[serde(default)]` — add the field:
-//
-// impl-side: `pub timeout_secs: Option<u64>` on `struct Workflow`, with
-//     /// Total-run wall-clock default (used when `--timeout` is absent). `None`
-//     /// = unbounded; `Some(0)` = disabled (mirrors `--timeout 0`).
-//     #[serde(default)]
-//     pub timeout_secs: Option<u64>,
-// ==== /SKETCH ====
 
 // W025 (B1): the workflow is a node/edge graph. An edge carries an optional
 // condition; `WorkflowNode.depends_on` is gone. See
@@ -296,35 +290,79 @@ pub struct EdgeCondition {
     /// The judge's question. REQUIRED (non-empty) iff `judge` is set.
     #[serde(default)]
     pub criterion: Option<String>,
+    /// Per-edge wall-clock bound (seconds): `None` = the 30 s `EDGE_TIMEOUT`,
+    /// `Some(0)` = disabled. Applies to BOTH a `script` and a `judge` edge (W028
+    /// / D033); journaled via `tasks::Dep::Edged`, so `#[serde(default)]` keeps
+    /// an old journal line decodable.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / D033 — the PER-EDGE bound, shared by `script` AND `judge` edges
-// (default 30 s = `EDGE_TIMEOUT`). `EdgeCondition` is already `Serialize`
-// (config.rs:273) and `deny_unknown_fields` STAYS: journaled via
-// `tasks::Dep::Edged` (tasks.rs:124-129 `condition: Option<EdgeCondition>`), so
-// an OLD journal line with no `timeout_secs` MUST still decode — `#[serde(default)]`
-// gives `None`. Add the field:
-//
-//     /// Per-edge wall-clock bound (seconds). `None` = `EDGE_TIMEOUT` (30 s);
-//     /// `Some(0)` = disabled. Applies to both a `script` and a `judge` edge.
-//     #[serde(default)]
-//     pub timeout_secs: Option<u64>,
-//
-// `validate_workflow_structure` (config.rs:969) needs NO new rejection: `0` is a
-// VALID "disabled" (mirrors `--timeout 0`, main.rs:135) and a `u64` cannot be
-// negative.
-//
-// #[cfg(test)]
-// mod w028_config_tests {
-//     use super::*;
-//     /// §7.1 `old_config_and_old_journal_still_parse`: a `[workflow]` with no
-//     /// `timeout_secs` and an `EdgeCondition` line with no `timeout_secs` both
-//     /// decode (to `None`).
-//     #[test]
-//     fn old_config_and_old_journal_still_parse() { todo!() }
-// }
-// ==== /SKETCH ====
+
+#[cfg(test)]
+mod w028_config_tests {
+    use super::*;
+
+    /// W028 §7.1: an OLD config (no `timeout_secs` on `[workflow]`, a node, or an
+    /// edge condition) still parses — the new keys are optional, and `0` is a
+    /// valid "disabled" at every level.
+    #[test]
+    fn old_config_and_old_journal_still_parse() {
+        let old: Workflow = toml::from_str(
+            r#"
+            [[node]]
+            id = "a"
+            member = "w1"
+            [[node]]
+            id = "b"
+            member = "w1"
+            [[edge]]
+            from = "a"
+            to = "b"
+            condition = { script = "true" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(old.timeout_secs, None);
+        assert!(old.nodes.iter().all(|n| n.timeout_secs.is_none()));
+        assert_eq!(
+            old.edges[0].condition.as_ref().unwrap().timeout_secs,
+            None,
+            "an old edge line decodes to `None` (= the 30 s default)"
+        );
+
+        let new: Workflow = toml::from_str(
+            r#"
+            timeout_secs = 120
+            [[node]]
+            id = "a"
+            member = "w1"
+            timeout_secs = 0
+            [[edge]]
+            from = "a"
+            to = "b"
+            condition = { script = "true", timeout_secs = 1 }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(new.timeout_secs, Some(120));
+        assert_eq!(new.nodes[0].timeout_secs, Some(0));
+        assert_eq!(new.edges[0].condition.as_ref().unwrap().timeout_secs, Some(1));
+
+        // An OLD JOURNAL line: `Dep::Edged` carries the condition, so the same
+        // omission must decode through serde_json too.
+        // (`Dep` is `#[serde(untagged)]`: an edged dep is the flat object.)
+        let dep: crate::tasks::Dep =
+            serde_json::from_str(r#"{"id":1,"condition":{"script":"true"}}"#).unwrap();
+        let crate::tasks::Dep::Edged {
+            condition: Some(c), ..
+        } = dep
+        else {
+            panic!("expected an edged dep with a condition: {dep:?}");
+        };
+        assert_eq!(c.timeout_secs, None);
+    }
+}
 
 /// The single validated mode of an [`EdgeCondition`] — one source of truth for
 /// the validator, the scheduler's `dispatch`, and
@@ -406,20 +444,12 @@ pub struct WorkflowNode {
     /// A gate (judgment or physical): its `reject` re-opens its deps (§5).
     #[serde(default)]
     pub gate: bool,
+    /// Per-node wall-clock deadline (seconds): `None` = the 300 s `NODE_TIMEOUT`,
+    /// `Some(0)` = disabled. Journaled on the node's `RunSpec` (W028 / D033).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / D033 — the PER-NODE deadline (default 300 s = the `NODE_TIMEOUT`
-// const). `deny_unknown_fields` STAYS (config.rs:352): a new OPTIONAL field is
-// back-compat for an old config that omits it; `#[serde(default)]` makes the
-// omission decode to `None`.
-//
-// impl-side: `pub timeout_secs: Option<u64>` on `struct WorkflowNode`, with
-//     /// Per-node wall-clock deadline (seconds). `None` = `NODE_TIMEOUT` (300 s);
-//     /// `Some(0)` = disabled.
-//     #[serde(default)]
-//     pub timeout_secs: Option<u64>,
-// ==== /SKETCH ====
 
 /// The one placeholder v1 recognizes in a node title.
 pub const TASK_PLACEHOLDER: &str = "{{task}}";
@@ -2027,6 +2057,7 @@ name = "reviewer"
         };
         let wf = |nodes: Vec<WorkflowNode>, edges: Vec<WorkflowEdge>| Workflow {
             max_attempts: None,
+            timeout_secs: None,
             nodes,
             edges,
         };
@@ -2052,6 +2083,7 @@ name = "reviewer"
         // check: membership is deferred to the FINAL team.
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
@@ -2069,6 +2101,7 @@ name = "reviewer"
         // regression that proves membership runs on the FINAL team (amendment 4).
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![WorkflowNode {
                 id: "review".into(),
@@ -2102,6 +2135,7 @@ name = "reviewer"
         let bad_member = validate_workflow_members(
             &Workflow {
                 max_attempts: None,
+            timeout_secs: None,
                 edges: vec![],
                 nodes: vec![WorkflowNode {
                     id: "a".into(),
@@ -2290,6 +2324,7 @@ name = "reviewer"
     fn uses_task_detects_a_title_only() {
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![wf_node("a", Some("Explore: {{task}}"))],
         };
@@ -2297,6 +2332,7 @@ name = "reviewer"
         // A placeholder in a `script` (not a title) does not count.
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![WorkflowNode {
                 script: Some("echo {{task}}".into()),
@@ -2307,6 +2343,7 @@ name = "reviewer"
         // A title carrying *other* brace syntax is not the placeholder.
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![wf_node("a", Some("Explore: {task} {{foo}}"))],
         };
@@ -2314,6 +2351,7 @@ name = "reviewer"
         // A plain title with no placeholder is not a use of the task.
         let w = Workflow {
             max_attempts: None,
+            timeout_secs: None,
             edges: vec![],
             nodes: vec![wf_node("a", Some("Explore the codebase"))],
         };

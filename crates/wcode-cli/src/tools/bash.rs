@@ -372,10 +372,15 @@ async fn kill_group(child: &mut tokio::process::Child) {
 /// "bash"). The scheduler passes `None`. `cancel` kills the group and returns
 /// here cleanly, so the tool finishes on its own — the loop's race is only a
 /// backstop for a tool that ignores the token.
+///
+/// `timeout` is `Option<Duration>`: `None` means UNBOUNDED (the timer arm is not
+/// armed at all). W028 needs the distinction because a config `timeout_secs = 0`
+/// means "disabled", and `Duration::ZERO` here would kill the command instantly
+/// instead of never.
 pub(crate) async fn run_command(
     command: &str,
     working_dir: &Path,
-    timeout: Duration,
+    timeout: Option<Duration>,
     cancel: &tokio_util::sync::CancellationToken,
     events: Option<&tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     label: &str,
@@ -448,15 +453,25 @@ pub(crate) async fn run_command(
     tokio::pin!(drained);
     // Timeout/cancel kills the whole process group (see kill_group), so a
     // daemonized grandchild can't survive and hold the pipes open.
+    // `None` = unbounded: `pending()` never resolves, so only cancel or the drain
+    // can win. (A `sleep` of `Duration::ZERO` would fire on the first poll.)
+    let timer = async {
+        match timeout {
+            Some(t) => tokio::time::sleep(t).await,
+            None => std::future::pending::<()>().await,
+        }
+        timeout
+    };
     let (stdout, stderr) = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             kill_group(&mut child).await;
             return (None, "cancelled".to_string());
         }
-        _ = tokio::time::sleep(timeout) => {
+        timed_out = timer => {
             kill_group(&mut child).await;
-            return (None, format!("timed out after {}s (command killed)", timeout.as_secs()));
+            let secs = timed_out.map_or(0, |t| t.as_secs());
+            return (None, format!("timed out after {secs}s (command killed)"));
         }
         drained_res = &mut drained => drained_res,
     };
@@ -499,7 +514,7 @@ impl TypedTool for Bash {
         let (code, output) = run_command(
             &args.command,
             &ctx.working_dir,
-            timeout,
+            Some(timeout),
             &ctx.cancel,
             Some(&ctx.events),
             &ctx.call_id,
@@ -936,7 +951,7 @@ mod tests {
         let (code, out) = run_command(
             "echo ok",
             dir.path(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             &cancel,
             None,
             "t",
@@ -948,7 +963,7 @@ mod tests {
         let (code, out) = run_command(
             "exit 3",
             dir.path(),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             &cancel,
             None,
             "t",

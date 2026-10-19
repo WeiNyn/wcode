@@ -104,46 +104,25 @@ pub enum RunSpec {
     Session {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
+        /// Per-node wall-clock deadline (seconds). `None` = the `NODE_TIMEOUT`
+        /// const (300 s); `Some(0)` = disabled (mirrors `--timeout 0`).
+        ///
+        /// It lives on the `RunSpec` so it is JOURNALED (`PlanOp::Configure`) and
+        /// survives a resume: `should_instantiate_workflow` is false on resume,
+        /// so node ids come only from the journal and a side-map could not be
+        /// rebuilt (W028 / D033).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
     },
     /// A physical node: a definable action; the exit code IS the verdict (§5, P3).
-    Script { command: String },
+    Script {
+        command: String,
+        /// See [`RunSpec::Session::timeout_secs`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
+    },
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W028 §4.2 / D033 — the per-node deadline lives ON the `RunSpec` so it is
-// JOURNALED (`PlanOp::Configure { run, … }`, `tasks.rs:722`) and survives a
-// resume: `should_instantiate_workflow` is false on resume, so node ids come
-// only from the journal — a side-map could not be rebuilt.
-//
-// The two variants gain an IDENTICAL optional field (back-compat: a serde
-// default decodes an old line that lacks it):
-//
-//   Session {
-//       #[serde(default, skip_serializing_if = "Option::is_none")]
-//       member: Option<String>,
-//       /// Per-node wall-clock deadline (seconds). `None` = the `NODE_TIMEOUT`
-//       /// const (300 s). `Some(0)` = disabled (mirrors `--timeout 0`).
-//       #[serde(default, skip_serializing_if = "Option::is_none")]
-//       timeout_secs: Option<u64>,
-//   },
-//   Script {
-//       command: String,
-//       #[serde(default, skip_serializing_if = "Option::is_none")]
-//       timeout_secs: Option<u64>,
-//   },
-//
-// FRICTION (§4.4 item 7 undercounts): adding a field to an enum VARIANT breaks
-// EVERY struct-literal `RunSpec::Session { member: … }`, not just the ~13 the
-// brief lists. Beyond `tools/task.rs:436,557,572`, `main.rs:2668`,
-// `scheduler.rs:1073,1093,1108,1127,1145,1518`, `tasks.rs:1396,1561`,
-// `verify_gate.rs:341`, these ALSO construct the variant and must add
-// `timeout_secs: None`:
-//   - `tasks.rs:500` (production! the `PlanOp::Create` replay default in `apply`);
-//   - `scheduler.rs:629` (a test `Task` builder);
-//   - `tasks.rs:625`, `tasks.rs:1530` (test `Task` literals).
-// The `apply`-at-`tasks.rs:500` default MUST be `None` (a `Create` op carries no
-// deadline; only a later `Configure` does).
-// ==== /SKETCH ====
 
 /// One blocked-by edge: the dep's numeric id plus its optional edge condition.
 /// UNTAGGED so a legacy journal line `"deps":[1,2]` still decodes to `Dep::Id`
@@ -151,6 +130,18 @@ pub enum RunSpec {
 ///
 /// `Dep` reaches `Task`/`PlanOp`, both `Serialize`, so it derives `Serialize`
 /// too — hence `config::EdgeCondition` must be `Serialize`.
+impl RunSpec {
+    /// The node's own wall-clock deadline in seconds, whichever variant carries
+    /// it (`None` = the `NODE_TIMEOUT` default; `Some(0)` = disabled).
+    pub fn timeout_secs(&self) -> Option<u64> {
+        match self {
+            RunSpec::Session { timeout_secs, .. } | RunSpec::Script { timeout_secs, .. } => {
+                *timeout_secs
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Dep {
@@ -594,7 +585,10 @@ impl TaskList {
                             feedback: None,
                             artifact: None,
                             gate,
-                            run: RunSpec::Session { member: None },
+                            run: RunSpec::Session {
+                                member: None,
+                                timeout_secs: None, // the per-node knob is set by `configure`
+                            },
                         });
                     }
                 }
@@ -719,7 +713,11 @@ impl TaskList {
                 feedback: None,
                 artifact: None,
                 gate,
-                run: RunSpec::Session { member: None },
+                // The per-node deadline arrives later, via `configure` (W028).
+                run: RunSpec::Session {
+                    member: None,
+                    timeout_secs: None,
+                },
             };
             self.inner.record(&PlanOp::Create {
                 id,
@@ -828,30 +826,6 @@ impl TaskList {
         Ok(())
     }
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W028 item 6 — `configure` needs NO change: it clones the whole `run:
-    // RunSpec` into `PlanOp::Configure { run: run.clone(), … }` (look up), so a
-    // `RunSpec::{Session,Script}.timeout_secs` is journaled for free. The only
-    // caller that must SET it is `main.rs::instantiate_workflow`, which builds
-    // the `RunSpec` from `WorkflowNode.timeout_secs`:
-    //
-    //   tasks.configure(
-    //       t.id,
-    //       crate::tasks::RunSpec::Script {
-    //           command: cmd.clone(),
-    //           timeout_secs: node.timeout_secs,   // <-- from config (default None)
-    //       },
-    //       node.gate,
-    //   )
-    //
-    // and, for a `Session` node, the equally-missing `RunSpec::Session` is set
-    // only via `assign` today — the deadline must be carried by an explicit
-    // `configure(t.id, RunSpec::Session { member: <same>, timeout_secs }, gate)`
-    // OR the `assign`+`configure` pair reconciled. FRICTION: `instantiate_workflow`
-    // (main.rs:2658-2676) does NOT call `configure` for a `member` node today —
-    // it only `assign`s. Carrying a Session deadline therefore needs a new
-    // `configure` call on the member arm, not just a field on the `Script` arm.
-    // ==== /SKETCH ====
 
     /// Flip `id` to [`TaskState::Doing`] (the scheduler calls this right after
     /// dispatch, §4).
@@ -1425,6 +1399,7 @@ mod tests {
                         script: Some("test -f x".into()),
                         judge: None,
                         criterion: None,
+                        timeout_secs: None,
                     }),
                 },
             ],
@@ -1517,6 +1492,7 @@ mod tests {
             gate.id,
             RunSpec::Session {
                 member: Some("reviewer".into()),
+                timeout_secs: None,
             },
             true,
         )
@@ -1649,7 +1625,10 @@ fn plan_op_and_task_serde_round_trip() {
             feedback: None,
             artifact: None,
             gate: false,
-            run: RunSpec::Session { member: None },
+            run: RunSpec::Session {
+                member: None,
+                timeout_secs: None,
+            },
         }
     }
 
@@ -1680,7 +1659,14 @@ fn plan_op_and_task_serde_round_trip() {
         let b = l.create("b", vec![Dep::Id(a.id)], false).unwrap();
         l.assign(b.id, SessionId::agent("w1")).unwrap();
         l.complete(a.id, Some("A".into())).unwrap();
-        l.configure(b.id, RunSpec::Session { member: Some("rev".into()) }, true)
+        l.configure(
+            b.id,
+            RunSpec::Session {
+                member: Some("rev".into()),
+                timeout_secs: None,
+            },
+            true,
+        )
             .unwrap();
         l.reject(b.id, "redo").unwrap();
         l.reset(a.id).unwrap();
@@ -1688,6 +1674,53 @@ fn plan_op_and_task_serde_round_trip() {
 
         let r = TaskList::load(&path).unwrap();
         assert_eq!(r.snapshot(), l.snapshot());
+    }
+
+    /// W028 §7.1: a node's configured deadline is JOURNALED (`Configure` clones
+    /// the whole `RunSpec`), so it survives a resume — and an OLD journal line
+    /// without the field decodes to `None` (the 300 s default).
+    #[test]
+    fn a_configured_timeout_survives_load_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.ndjson");
+        let l = TaskList::with_journal(path.clone());
+        let a = l.create("a", vec![], false).unwrap();
+        let b = l.create("b", vec![], false).unwrap();
+        l.configure(
+            a.id,
+            RunSpec::Session {
+                member: None,
+                timeout_secs: Some(9),
+            },
+            false,
+        )
+        .unwrap();
+        l.configure(
+            b.id,
+            RunSpec::Script {
+                command: "true".into(),
+                timeout_secs: Some(0),
+            },
+            false,
+        )
+        .unwrap();
+        drop(l);
+
+        let snap = TaskList::load_at(&path, 3).unwrap().snapshot();
+        assert_eq!(snap[0].run.timeout_secs(), Some(9), "a Session deadline survives");
+        assert_eq!(snap[1].run.timeout_secs(), Some(0), "`0` = disabled survives too");
+
+        // An OLD line (no `timeout_secs` anywhere) still decodes: the `Create`
+        // default is `None`.
+        let old = dir.path().join("old.ndjson");
+        std::fs::write(
+            &old,
+            "{\"op\":\"create\",\"id\":1,\"title\":\"old\",\"deps\":[],\"gate\":false}\n",
+        )
+        .unwrap();
+        let old = TaskList::load_at(&old, 3).unwrap().snapshot();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].run.timeout_secs(), None, "an old line decodes to `None`");
     }
 
     /// W028 `--status` gate: the replay-only reader leaves the journal
