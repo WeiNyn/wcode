@@ -18,10 +18,28 @@
 # DAG, and wcode exits 0 once every node is Done (a node that reaches Failed, a
 # --timeout, or a root-turn error exits 1).
 #
+# OPERATOR TOOLS (W028). You do not have to watch it blind:
+#
+#   wcode --status latest          the plan, read-only, no model needed
+#   wcode --status <groupdir>      one specific run
+#   ... --quiet                    with --task: the final summary only (the live
+#                                  log on stderr is on by default)
+#
+# A run that fails, times out, or is Ctrl-C'd prints a copy-pasteable line:
+# `resume: wcode --agents --config … --timeout N --resume <groupdir> --task '…'`.
+# Its launch record lives at `<groupdir>/run.json`. A resume reloads the plan
+# (Doing → Todo), rebuilds the team from the group, and does NOT re-seed.
+#
+#
 # The graph turns a feature request into a PR whose pipeline (CI) passes:
 #
 #   explore → sketch → review-sketch → implement → verify → publish
-#                                         └──────── implement → ci ← publish
+#      └──────────────────┘                       └─ implement → ci ← publish
+#
+# `explore → review-sketch` is not redundancy: R′ below requires every Session
+# work node to be consumed by a gate, and `review-sketch` is the first gate that
+# can consume `explore`. Without that edge `task complete explore` is REFUSED
+# and the pipeline deadlocks at node #1.
 #
 # The graph is nodes + `[[workflow.edge]]` edges. An edge may carry an optional
 # condition (`condition = { script = "…" }` — a shell test, exit 0 = taken — or
@@ -50,6 +68,27 @@
 # them with the reason — up to `max_attempts`, then the node fails and the
 # scheduler escalates. `ci` depends on both `implement` and `publish`, so a red
 # pipeline re-opens `implement` (fix) and `publish` (re-push) and the cone re-runs.
+#
+# R′ — VERIFY GATE AS STRUCTURE (`crates/wcode-cli/src/verify_gate.rs`). Every
+# `gate = false` Session node must have a gate node with a DIRECT dependency on
+# it, or `task complete <id>` is refused with "a work node with no gate depending
+# on it". That is a boot-time guarantee you must respect when editing this file:
+# a bare work node (like `explore` was) is a deadlock, not a soft warning. Check
+# a change with `wcode --status <groupdir>` after one refused-port boot:
+# the journal's `create` lines show each node's `deps` and `gate`.
+#
+# TIMEOUTS (W028). Each node carries `timeout_secs` — a wall-clock BACKSTOP, not
+# a schedule. A node past its limit is `fail`ed with "node timeout: exceeded Ns",
+# its dependents stay blocked, and the scheduler escalates to the root (a
+# `task reset <id>` retries). The built-in default is 300 s, which is far too
+# short for a real build; the values below are sized to the work. `0` disables a
+# node's bound. A `script` EDGE carries its own `condition.timeout_secs`
+# (default 30 s); a `sleep`-leading script cannot be used as an edge or node at
+# all — `SleepRefusalHooks` refuses it before it runs.
+#
+# `[workflow] timeout_secs` (the TOTAL-run cap) is deliberately UNSET here. A
+# feature pipeline legitimately takes hours, and a total cap that fires mid-flight
+# throws away resumable work; pass `--timeout <secs>` when you want one.
 #
 # D002 — a gate is SHAPE, not verification: it proves the step ran, not that the
 # work is correct. A Session gate's verdict is the root model's, and a node
@@ -107,11 +146,13 @@ max_attempts = 3
 
 [[workflow.node]]
 id = "explore"                      # map the ground truth for the request
+timeout_secs = 900                  # recon over a large tree; a backstop only
 member = "explorer"
 title = "Explore the repo for the feature request: {{task}}"
 
 [[workflow.node]]
 id = "sketch"                       # sketch the interface before coding
+timeout_secs = 900
 member = "sketcher"
 title = "Sketch the interface for: {{task}}"
 
@@ -119,28 +160,36 @@ title = "Sketch the interface for: {{task}}"
 id = "review-sketch"                # first-layer gate: approve the sketch, or
 member = "reviewer"                 # reject it and re-open `sketch`
 gate = true
+timeout_secs = 1200                 # a reading review, not a build
 title = "First-layer review of the sketch"
 
 [[workflow.node]]
 id = "implement"                    # the developer fills the approved sketch on
 member = "developer"                # a feature branch it creates or reuses
+timeout_secs = 3600                 # a cold build + edits; the longest work node
 title = "Create/reuse a feature branch, then implement the feature: {{task}}"
 
 [[workflow.node]]
 id = "verify"                       # second-layer gate: approve the diff (after
 member = "reviewer"                 # running cargo test/clippy), or re-open it
 gate = true
+timeout_secs = 3600                 # it RUNS the suite: give it implement's budget
 title = "Second-layer review: read the diff, run cargo test --workspace and cargo clippy --workspace --all-targets, then approve or reject"
 
 [[workflow.node]]
 id = "publish"                      # commit + push the branch + open/update the PR
 member = "developer"
+timeout_secs = 1800
 title = "Commit all changes, push the branch, and open or update the PR (gh pr create --fill, or gh pr view when it already exists)"
 
 [[workflow.node]]
 id = "ci"                           # the pipeline gate: wait for the PR checks
 member = "developer"                # (gh pr checks --watch) and report the result
 gate = true
+# Two different bounds, both real: the node deadline caps the WHOLE node (the
+# worker may poll/wait), while the `timeout_secs` in the title is the `bash`
+# tool's own cap on a single `gh pr checks --watch` call. Keep node > bash.
+timeout_secs = 7200
 title = "Wait for the PR checks to finish (gh pr checks --watch, run via bash with a long timeout_secs such as 900), then report PASS or FAIL"
 
 # The DAG as explicit edges (a `depends_on` on a node is gone). One edge per
@@ -158,6 +207,13 @@ to = "implement"
 [[workflow.edge]]
 from = "implement"
 to = "verify"
+# R′ consumption: `explore` needs a gate with a DIRECT dep on it, or its
+# `task complete` is refused. `review-sketch` is that gate (it already ran after
+# `explore` transitively, so this adds no waiting — it only makes the dependency
+# explicit to the verify-gate policy).
+[[workflow.edge]]
+from = "explore"
+to = "review-sketch"
 [[workflow.edge]]
 from = "verify"
 to = "publish"

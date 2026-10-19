@@ -2276,11 +2276,35 @@ name = "reviewer"
         let file: FileConfig = toml::from_str(&text).expect("the workflow file parses");
         let w = file.workflow.expect("it declares a [workflow]");
         assert_eq!(w.nodes.len(), 7, "seven nodes");
-        assert_eq!(w.edges.len(), 7, "seven edges");
+        assert_eq!(w.edges.len(), 8, "eight edges");
         assert!(
             !text.contains("depends_on ="),
             "the migrated file carries no `depends_on =` config"
         );
+        // R′ (`verify_gate.rs`): a `gate = false` Session node with no gate node
+        // DIRECTLY depending on it cannot be completed — `task complete` is
+        // refused and the pipeline deadlocks there. A count assertion cannot see
+        // that (W028 found the shipped `explore` node uncovered), so the
+        // structure is pinned as a property: every Session work node has an edge
+        // into a gate.
+        for n in &w.nodes {
+            if n.gate || n.script.is_some() {
+                continue; // a real gate's `complete` IS the approval; a `Script` node's verdict is its exit code
+            }
+            let consumed = w.edges.iter().any(|e| {
+                e.from == n.id
+                    && w.nodes
+                        .iter()
+                        .find(|t| t.id == e.to)
+                        .is_some_and(|t| t.gate)
+            });
+            assert!(
+                consumed,
+                "work node `{}` has no gate consuming it: R′ would refuse its \
+                 `task complete` and the pipeline would deadlock",
+                n.id
+            );
+        }
         validate_workflow_structure(&w).expect("the migrated graph is structurally valid");
     }
 
