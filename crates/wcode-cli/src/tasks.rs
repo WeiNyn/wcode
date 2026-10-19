@@ -109,6 +109,42 @@ pub enum RunSpec {
     Script { command: String },
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / D033 — the per-node deadline lives ON the `RunSpec` so it is
+// JOURNALED (`PlanOp::Configure { run, … }`, `tasks.rs:722`) and survives a
+// resume: `should_instantiate_workflow` is false on resume, so node ids come
+// only from the journal — a side-map could not be rebuilt.
+//
+// The two variants gain an IDENTICAL optional field (back-compat: a serde
+// default decodes an old line that lacks it):
+//
+//   Session {
+//       #[serde(default, skip_serializing_if = "Option::is_none")]
+//       member: Option<String>,
+//       /// Per-node wall-clock deadline (seconds). `None` = the `NODE_TIMEOUT`
+//       /// const (300 s). `Some(0)` = disabled (mirrors `--timeout 0`).
+//       #[serde(default, skip_serializing_if = "Option::is_none")]
+//       timeout_secs: Option<u64>,
+//   },
+//   Script {
+//       command: String,
+//       #[serde(default, skip_serializing_if = "Option::is_none")]
+//       timeout_secs: Option<u64>,
+//   },
+//
+// FRICTION (§4.4 item 7 undercounts): adding a field to an enum VARIANT breaks
+// EVERY struct-literal `RunSpec::Session { member: … }`, not just the ~13 the
+// brief lists. Beyond `tools/task.rs:436,557,572`, `main.rs:2668`,
+// `scheduler.rs:1073,1093,1108,1127,1145,1518`, `tasks.rs:1396,1561`,
+// `verify_gate.rs:341`, these ALSO construct the variant and must add
+// `timeout_secs: None`:
+//   - `tasks.rs:500` (production! the `PlanOp::Create` replay default in `apply`);
+//   - `scheduler.rs:629` (a test `Task` builder);
+//   - `tasks.rs:625`, `tasks.rs:1530` (test `Task` literals).
+// The `apply`-at-`tasks.rs:500` default MUST be `None` (a `Create` op carries no
+// deadline; only a later `Configure` does).
+// ==== /SKETCH ====
+
 /// One blocked-by edge: the dep's numeric id plus its optional edge condition.
 /// UNTAGGED so a legacy journal line `"deps":[1,2]` still decodes to `Dep::Id`
 /// (the journal is byte-compatible for unconditional edges).
@@ -472,6 +508,47 @@ impl TaskList {
         Ok(list)
     }
 
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 §4.1 / D033 — `TaskList::read_at`: the `--status` REPLAY-ONLY reader.
+    //
+    // It is `load_at` (`tasks.rs:439-473`) minus the two write hazards:
+    //   1. the journal sink is `None`, so `Inner::record` is a hard no-op
+    //      (`tasks.rs:314` `let Some(journal) = &self.journal else { return Ok(()); }`);
+    //   2. it NEVER calls `reconcile()`, whose `PlanOp::Restart` write
+    //      (`tasks.rs:577` `let _ = self.inner.record(&PlanOp::Restart { id });`)
+    //      is exactly what a live journal must not gain from being observed.
+    //
+    // Contract: replay each NDJSON `PlanOp` via the private `apply`, then STOP.
+    // The file at `path` is BYTE-IDENTICAL after the call; a `Doing` node reads
+    // back `doing` (no `Doing → Todo` flip — the reconcile the TUI relies on is
+    // deliberately skipped here, `tasks.rs:564-580`).
+    //
+    // pub(crate) fn read_at(path: &Path, max_attempts: u32) -> Result<TaskList, String> {
+    //     // Build with `with_sink(None, _, max_attempts)` — a null sink ⇒ no
+    //     // writes possible. Replay lines into `apply(op)`. Do NOT reconcile.
+    //     todo!()
+    // }
+    //
+    // # Errors
+    // Identical shape to `load_at`: a torn final line is tolerated, any other
+    // parse error is `plan {path} line {n}: {e}`; `NotFound` ⇒ an empty list
+    // (and NO file is created).
+    //
+    // # Does NOT promise
+    // No reconcile, no compaction, no file creation, no readiness rework. The
+    // `max_attempts` argument is accepted for signature parity with `load_at`
+    // but the rework cap is unreachable on a read-only list.
+    //
+    // #[cfg(test)]
+    // mod read_at_tests {
+    //     use super::*;
+    //     /// §7.1 `read_at_never_writes`: the plan file's bytes are identical
+    //     /// before/after `read_at`, and a `Doing` node reads back `doing`.
+    //     #[test]
+    //     fn read_at_never_writes() { todo!() }
+    // }
+    // ==== /SKETCH ====
+
     /// Apply one replayed op. `Create`/`Snapshot` bypass the public methods so a
     /// replay keeps ids verbatim (Blocker A); everything else goes through them
     /// (writes are suppressed by `replaying`).
@@ -730,6 +807,31 @@ impl TaskList {
         self.publish();
         Ok(())
     }
+
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 item 6 — `configure` needs NO change: it clones the whole `run:
+    // RunSpec` into `PlanOp::Configure { run: run.clone(), … }` (look up), so a
+    // `RunSpec::{Session,Script}.timeout_secs` is journaled for free. The only
+    // caller that must SET it is `main.rs::instantiate_workflow`, which builds
+    // the `RunSpec` from `WorkflowNode.timeout_secs`:
+    //
+    //   tasks.configure(
+    //       t.id,
+    //       crate::tasks::RunSpec::Script {
+    //           command: cmd.clone(),
+    //           timeout_secs: node.timeout_secs,   // <-- from config (default None)
+    //       },
+    //       node.gate,
+    //   )
+    //
+    // and, for a `Session` node, the equally-missing `RunSpec::Session` is set
+    // only via `assign` today — the deadline must be carried by an explicit
+    // `configure(t.id, RunSpec::Session { member: <same>, timeout_secs }, gate)`
+    // OR the `assign`+`configure` pair reconciled. FRICTION: `instantiate_workflow`
+    // (main.rs:2658-2676) does NOT call `configure` for a `member` node today —
+    // it only `assign`s. Carrying a Session deadline therefore needs a new
+    // `configure` call on the member arm, not just a field on the `Script` arm.
+    // ==== /SKETCH ====
 
     /// Flip `id` to [`TaskState::Doing`] (the scheduler calls this right after
     /// dispatch, §4).

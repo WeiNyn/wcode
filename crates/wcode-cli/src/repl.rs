@@ -1637,6 +1637,61 @@ fn out(s: &str) {
     let _ = io::stdout().flush();
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / D033 — the headless-run log + resume line. Both go on the
+// composition root's stderr/stdout split: the LOG is stderr, the SUMMARY is
+// stdout (`print_workflow_summary`, main.rs:2536-2539).
+//
+// pub(crate) async fn print_workflow_events(
+//     rx: &mut broadcast::Receiver<AgentEvent>,
+//     quiet: bool,
+// ) {
+//     // Render until `RecvError::Closed` — NOT until `AgentEnd` (a run has MANY
+//     // root turns; `print_events` stops at AgentEnd, repl.rs:1511/1573).
+//     // A7 BINDING: one line per COMPLETED message, never a stream:
+//     //   AgentEvent::MessageReceived { from, content }  (event.rs:133-136)
+//     //       => eprintln!("«{}» {}", crate::agents::short_name(&from), content)
+//     //   AgentEvent::MessageEnd { message }             (event.rs:70-72)
+//     //       => eprintln! the message text, ONE block per turn.
+//     // `quiet` suppresses ALL of it (the summary + resume line still print
+//     // elsewhere). Ignore MessageStart/MessageUpdate (the stream).
+//     todo!()
+// }
+//
+// pub(crate) fn print_workflow_resume(group: &Path, task: &str, config: Option<&str>) {
+//     // Mirror `print_relaunch` (repl.rs:607-621): build a relaunch arg vector
+//     // and `eprintln!("resume: {}", relaunch_line(&args))`, reusing
+//     // `relaunch_line`/`shell_quote` (repl.rs:625-652). The arg vector is
+//     // `--agents [--config <config>] --resume <group> --task <task>` (task
+//     // shell-quoted). Rewriting through `relaunch_line` is what makes the line
+//     // round-trip through `shell_quote`.
+//     todo!()
+// }
+//
+// FRICTION (design fights the code): §4.2 says "reuse `MessagePrinter`/`emit`/
+// `close_blocks`". Those write MESSAGE TEXT to STDOUT — `out` above is
+// `print!` (repl.rs:1636) and `close_blocks` `println!`s the text
+// (repl.rs:1595-1598) — while the brief demands ALL log output on STDERR.
+// `emit` also emits interim MessageUpdate partials (a stream), which A7 forbids.
+// Resolution: do NOT reuse the streaming renderer for output. Reuse only the
+// text EXTRACTOR — `MessagePrinter::default().update(&message)` → `(text,
+// thinking)` — and print the final `text` with `eprintln!` on the
+// `MessageEnd` arm. The renderer stays untouched (no `out`-sink refactor).
+//
+// #[cfg(test)]
+// mod workflow_log_tests {
+//     use super::*;
+//     /// §7.1 gate: a `MessageReceived` renders under `quiet=false` and not
+//     /// under `quiet=true` (drive it over a fed `broadcast`, like
+//     /// `print_events_caches_the_latest_todo_event`, repl.rs:2548).
+//     #[tokio::test]
+//     async fn print_workflow_events_shows_node_reports_and_quiet_suppresses() { todo!() }
+//     /// §7.1 gate: the resume line round-trips through `relaunch_line`.
+//     #[test]
+//     fn resume_line_round_trips_through_relaunch_line() { todo!() }
+// }
+// ==== /SKETCH ====
+
 #[cfg(test)]
 mod tests {
     use super::*;

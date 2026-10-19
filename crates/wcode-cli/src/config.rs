@@ -245,6 +245,19 @@ pub struct Workflow {
     pub edges: Vec<WorkflowEdge>,
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / §11 A1 / D033 — TOTAL-RUN default (flag → this → unbounded). NOT
+// a node default (the node default stays the 300 s const). `0` = disabled.
+// `Workflow` derives `Deserialize` only (no `Serialize`), so an old config that
+// omits the key needs `#[serde(default)]` — add the field:
+//
+// impl-side: `pub timeout_secs: Option<u64>` on `struct Workflow`, with
+//     /// Total-run wall-clock default (used when `--timeout` is absent). `None`
+//     /// = unbounded; `Some(0)` = disabled (mirrors `--timeout 0`).
+//     #[serde(default)]
+//     pub timeout_secs: Option<u64>,
+// ==== /SKETCH ====
+
 // W025 (B1): the workflow is a node/edge graph. An edge carries an optional
 // condition; `WorkflowNode.depends_on` is gone. See
 // `docs/work/W025-workflow-edges-and-lateral-messaging.md` §4.1.
@@ -284,6 +297,34 @@ pub struct EdgeCondition {
     #[serde(default)]
     pub criterion: Option<String>,
 }
+
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / D033 — the PER-EDGE bound, shared by `script` AND `judge` edges
+// (default 30 s = `EDGE_TIMEOUT`). `EdgeCondition` is already `Serialize`
+// (config.rs:273) and `deny_unknown_fields` STAYS: journaled via
+// `tasks::Dep::Edged` (tasks.rs:124-129 `condition: Option<EdgeCondition>`), so
+// an OLD journal line with no `timeout_secs` MUST still decode — `#[serde(default)]`
+// gives `None`. Add the field:
+//
+//     /// Per-edge wall-clock bound (seconds). `None` = `EDGE_TIMEOUT` (30 s);
+//     /// `Some(0)` = disabled. Applies to both a `script` and a `judge` edge.
+//     #[serde(default)]
+//     pub timeout_secs: Option<u64>,
+//
+// `validate_workflow_structure` (config.rs:969) needs NO new rejection: `0` is a
+// VALID "disabled" (mirrors `--timeout 0`, main.rs:135) and a `u64` cannot be
+// negative.
+//
+// #[cfg(test)]
+// mod w028_config_tests {
+//     use super::*;
+//     /// §7.1 `old_config_and_old_journal_still_parse`: a `[workflow]` with no
+//     /// `timeout_secs` and an `EdgeCondition` line with no `timeout_secs` both
+//     /// decode (to `None`).
+//     #[test]
+//     fn old_config_and_old_journal_still_parse() { todo!() }
+// }
+// ==== /SKETCH ====
 
 /// The single validated mode of an [`EdgeCondition`] — one source of truth for
 /// the validator, the scheduler's `dispatch`, and
@@ -366,6 +407,19 @@ pub struct WorkflowNode {
     #[serde(default)]
     pub gate: bool,
 }
+
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / D033 — the PER-NODE deadline (default 300 s = the `NODE_TIMEOUT`
+// const). `deny_unknown_fields` STAYS (config.rs:352): a new OPTIONAL field is
+// back-compat for an old config that omits it; `#[serde(default)]` makes the
+// omission decode to `None`.
+//
+// impl-side: `pub timeout_secs: Option<u64>` on `struct WorkflowNode`, with
+//     /// Per-node wall-clock deadline (seconds). `None` = `NODE_TIMEOUT` (300 s);
+//     /// `Some(0)` = disabled.
+//     #[serde(default)]
+//     pub timeout_secs: Option<u64>,
+// ==== /SKETCH ====
 
 /// The one placeholder v1 recognizes in a node title.
 pub const TASK_PLACEHOLDER: &str = "{{task}}";

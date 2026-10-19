@@ -134,6 +134,17 @@ struct Args {
     task: Option<String>,
     /// `--timeout <secs>`: cap the headless run; 0/absent = disabled.
     timeout: Option<u64>,
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 §4.2 / §4.3 — two new headless flags. `status` mirrors `resume`'s
+    // `Option<Option<_>>` shape (`resume`, below): None = flag absent;
+    // Some(None) = latest; Some(Some(<group|dir>)) = that group.
+    //
+    // /// `--quiet`: suppress the per-event headless log (the summary + any
+    // /// `resume:` line still print).
+    // quiet: bool,
+    // /// `--status [group|latest]`: read-only plan dump; exit 0. Needs no model.
+    // status: Option<Option<String>>,
+    // ==== /SKETCH ====
     prompt: Option<String>,
     /// None = flag absent; Some(None) = latest; Some(Some(path)) = that file.
     resume: Option<Option<String>>,
@@ -236,6 +247,20 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 );
                 i += 1;
             }
+            // ==== SKETCH (review-only, not real code) ====
+            // W028 §4.2 — two parse arms. `--status` takes an OPTIONAL value
+            // (mirror the `--resume` arm just below: consume the next token only
+            // if it does not start with '-').
+            //
+            // "--quiet" => a.quiet = true,
+            // "--status" => {
+            //     let sel = args.get(i).filter(|v| !v.starts_with('-')).cloned();
+            //     if sel.is_some() {
+            //         i += 1;
+            //     }
+            //     a.status = Some(sel);
+            // }
+            // ==== /SKETCH ====
             "--resume" => {
                 let path = args.get(i).filter(|v| !v.starts_with('-')).cloned();
                 if path.is_some() {
@@ -1387,6 +1412,30 @@ fn check_task_args(
     Ok(())
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / §4.4 item 6 — two more guards in `check_task_args` (the same
+// `Err(String)` → eprintln + exit 2 shape at the call site, main.rs:1475-1478):
+//
+//   // `--serve` owns the session and diverges at main.rs:2211-2215 BEFORE
+//   // `dispatch`; a `--task` there is silently swallowed today (§4.4 item 6).
+//   if args.serve && args.task.is_some() {
+//       return Err("--task cannot be combined with serve".into());
+//   }
+//   // `--status` needs no model and no run; refuse a prompt/run/serve.
+//   if args.status.is_some()
+//       && (args.prompt.is_some() || args.task.is_some() || args.serve)
+//   {
+//       return Err("--status cannot be combined with -p/--task/serve".into());
+//   }
+//
+// FRICTION: `check_task_args` runs from `build_runtime` (main.rs:1475), which is
+// AFTER `load_config_raw` (main.rs:2149). But `--status` must early-exit BEFORE
+// `load_config_raw` (§4.2). So the `--status` combination guard above can NEVER
+// fire on the `--status` path — it exits first. The `--status` guard must be
+// lifted into a PURE predicate called by the early-exit itself (see the main()
+// block). Only the `--serve`+`--task` guard genuinely belongs here.
+// ==== /SKETCH ====
+
 fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup) -> Runtime {
     let cwd = &setup.cwd;
     // Instruction ("reference") files: discover the configured candidates
@@ -1627,6 +1676,30 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             judger,
         );
     }
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 §4.2 / D033 / §4.4 item 5 — the cancel token gets a REAL OWNER.
+    // Today it is minted inline at `spawn_scheduler(…, CancellationToken::new(),
+    // …)` (just above) and never cancelled (`scheduler.rs:70-72` admits it).
+    //
+    // Mint ONE token early in `build_runtime` and share it three ways:
+    //   let cancel = tokio_util::sync::CancellationToken::new();
+    //   1. `spawn_scheduler(cwd.clone(), hooks.clone(), cancel.clone(), judger)`
+    //      — the scheduler's in-flight `Script` nodes + worker turns now honor it;
+    //   2. `.with_cancel(cancel.clone())` chained onto the `Orchestrator` build
+    //      (main.rs:1441-1443 `with_tasks(…).with_team(…)`) so `dispatch` can
+    //      reach a clone **via the Orchestrator** (agents.rs: new field + setter);
+    //   3. (alternative, less code) a `cancel: CancellationToken` field on
+    //      `Runtime` below — reachable from `dispatch`'s `rt` with NO agents.rs
+    //      edit. Either is fine; the brief names the Orchestrator.
+    //
+    // agents.rs `Orchestrator` gets:
+    //   cancel: CancellationToken,               // default `::new()` in `with_tasks`
+    //   pub fn with_cancel(mut self, t: CancellationToken) -> Self { … }  // builder
+    //   pub fn cancel_token(&self) -> &CancellationToken { &self.cancel }
+    //
+    // A fresh `Orchestrator` built directly by a test (`with_tasks`/`new`) keeps
+    // working: the field defaults to a never-cancelled token.
+    // ==== /SKETCH ====
     Runtime {
         instructions,
         skills,
@@ -1871,6 +1944,32 @@ async fn dispatch(
             .filter(|&s| s > 0)
             .map(std::time::Duration::from_secs);
         let code = run_workflow(Backend::from(handle), tasks, seed, timeout).await;
+        // ==== SKETCH (review-only, not real code) ====
+        // W028 §4.2 — the `--task` call site changes in three ways:
+        //   1. TIME default (precedence flag → `[workflow]` → unbounded, §4.3):
+        //        let timeout = args
+        //            .timeout
+        //            .or(cfg.workflow.as_ref().and_then(|w| w.timeout_secs))
+        //            .filter(|&s| s > 0)                       // 0 = disabled
+        //            .map(std::time::Duration::from_secs);
+        //   2. the CANCEL token, cloned off the orchestrator (see build_runtime)
+        //        let cancel = rt
+        //            .orchestrator.as_ref().expect("--task guard ensured --agents")
+        //            .cancel_token().clone();
+        //   3. the GROUP dir + raw task text + quiet flag — the resume/run.json
+        //      inputs. `setup.active_group` is the running group (None when
+        //      `--no-session`); `args.task` is the raw text; `args.quiet` the log
+        //      knob.
+        //        let code = run_workflow(
+        //            Backend::from(handle), tasks, seed, timeout, cancel,
+        //            setup.active_group.as_ref().map(|g| g.dir.as_path()),
+        //            args.task.as_deref().unwrap_or_default(),
+        //            args.config.as_deref(),
+        //            args.quiet,
+        //        ).await;
+        // The existing `flush_all` + `shutdown_all` + `exit(code)` tail is
+        // unchanged.
+        // ==== /SKETCH ====
         #[cfg(unix)]
         wcode_protocol::flush_all(wcode_protocol::FLUSH_TIMEOUT).await;
         Background::shutdown_all();
@@ -2142,6 +2241,43 @@ async fn main() {
             .ok()
             .filter(|s| !s.trim().is_empty());
     }
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 §4.2 / §5 step 2 / D033 — `--status` is a FILE-BASED read-only
+    // early exit, placed HERE (after WCODE_TASK resolution, BEFORE
+    // `load_config_raw`) so it needs NO model and NO session. `session_dir()` is
+    // pure (repl.rs:278-282).
+    //
+    //   if let Some(sel) = &args.status {
+    //       // The combination guard CANNOT live in `check_task_args` (that runs
+    //       // later, in build_runtime). Guard here, then exit.
+    //       if let Err(m) = check_status_args(&args) {
+    //           eprintln!("error: {m}");
+    //           std::process::exit(2);
+    //       }
+    //       std::process::exit(run_status(sel.as_deref()));
+    //   }
+    //
+    // /// Pure: `--status` refuses -p/--task/serve (the guard `check_task_args`
+    // /// would apply too late to matter).
+    // fn check_status_args(args: &Args) -> Result<(), String> {
+    //     if args.prompt.is_some() || args.task.is_some() || args.serve {
+    //         return Err("--status cannot be combined with -p/--task/serve".into());
+    //     }
+    //     Ok(())
+    // }
+    //
+    // /// Resolve the group (None = latest = `list_groups(&session_dir())` head,
+    // /// which is DESCENDING, session_groups.rs:267), read its `plan.ndjson`
+    // /// through the replay-only `TaskList::read_at` (NOT `load_at` — that
+    // /// writes), and print `#id [state] title` per node (reuse
+    // /// `print_workflow_summary`'s shape, main.rs:2536). Exit 0 on success, 1 on
+    // /// a missing plan / unreadable group.
+    // fn run_status(selector: Option<&str>) -> i32 { todo!() }
+    //
+    // FRICTION: `read_at(path, cap)` wants a rework cap, but `--status` runs
+    // BEFORE `load_config_raw`, so `[workflow] max_attempts` is unread — pass the
+    // built-in default `3`. Harmless: a read-only list never reopens.
+    // ==== /SKETCH ====
     // Phase 2: load config raw (flags applied, `to_llm_opts` not yet run), then
     // optional endpoint detection, the provider diagnostic, and finally the
     // launch provider. Detection runs HERE so `to_llm_opts` captures the
@@ -2450,6 +2586,67 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
     }
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W028 §4.2 / §5 step 9-11 / D033 — the NEW `run_workflow` shape. It grows
+// five parameters (cancel, group dir, task text, config path, quiet) and loses
+// the discard-drain.
+//
+// async fn run_workflow(
+//     backend: Backend,
+//     tasks: crate::tasks::TaskList,
+//     seed: String,
+//     timeout: Option<std::time::Duration>,   // flag → [workflow] → None
+//     cancel: tokio_util::sync::CancellationToken, // the real owner (build_runtime)
+//     group: Option<&std::path::Path>,        // the run's group dir (run.json home)
+//     task: &str,                             // raw task text (resume line + run.json)
+//     config: Option<&str>,                   // --config for the resume line
+//     quiet: bool,                            // --quiet suppresses the log
+// ) -> i32
+//
+// # Contract (rewritten §4.6/§11 body)
+// - GUARD FIRST (before the drain, before the deadline — §4.4 item 1 / A3):
+//       if tasks.snapshot().is_empty() {
+//           eprintln!("error: no plan loaded");
+//           return 2;
+//       }
+//   This must be the FIRST statement so an empty plan never seeds the root,
+//   never touches the deadline. It is what flips the existing
+//   `run_workflow_bounds_the_in_flight_turn` fixture (empty TaskList) from 1 to 2.
+// - Write `<group>/run.json` (session_groups::write_run) at the TOP, once —
+//   the launch record `{task, config, timeout_secs}`.
+// - Install the SIGINT handler BEFORE the first turn (mirror repl.rs:769-779):
+//       let cancel_sig = cancel.clone();
+//       tokio::spawn(async move {
+//           while tokio::signal::ctrl_c().await.is_ok() {
+//               cancel_sig.cancel();
+//               // then: print_workflow_resume(group, task, config); exit(130)
+//           }
+//       });
+// - Replace the discard-drain (main.rs:2467-2468 `let mut rx = backend.subscribe();
+//   tokio::spawn(async move { while rx.recv().await.is_ok() {} });`) with:
+//       let mut rx = backend.subscribe();
+//       tokio::spawn(async move {   // render, don't discard — unless quiet
+//           if !quiet { crate::repl::print_workflow_events(&mut rx, quiet).await; }
+//           else { while rx.recv().await.is_ok() {} }
+//       });
+// - The node-transition log comes from the `TaskList` WATCH the driver already
+//   holds (main.rs:2502 `let mut updates = tasks.subscribe();`): on each
+//   `changed()`, diff the snapshot and `eprintln!("#{id} [{state}] {title}")`
+//   for a state change (skip under `quiet`).
+// - The first-turn deadline (main.rs:2479-2500) is UNCHANGED in shape but its
+//   two `return 1` / `break 1` arms ALSO `cancel.cancel()` (not just
+//   `backend.send(Request::Cancel)`), so a Script node stops too.
+// - On ANY non-zero exit (including the deadline arms), print
+//   `crate::repl::print_workflow_resume(group, task, config)`.
+//
+// # Friction
+// The resume line + run.json need the group dir, but `dispatch` only has
+// `setup.active_group` (None under `--no-session`). A `--no-session` headless
+// run has nowhere to write run.json and no dir to resume — the signature keeps
+// `group: Option<&Path>` so those paths degrade to "no resume line" rather than
+// panic.
+// ==== /SKETCH ====
+
 /// The headless `--task` run: the plan is already seeded by boot instantiation;
 /// this seeds the root and waits for the plan to reach a terminal state.
 /// Exit: 0 once every node is `Done`, 1 for a `Failed` node (fail-fast) or a
@@ -2757,6 +2954,34 @@ mod tests {
         .expect("run_workflow returned before the outer guard");
         assert_eq!(code, 1, "an elapsed --timeout during the first turn exits 1");
     }
+
+    // ==== SKETCH (review-only, not real code) ====
+    // W028 §7.1 — the run_workflow / status / flag gates. NOTE the REQUIRED edit
+    // to the test ABOVE (A3): it builds `let tasks = crate::tasks::TaskList::new();`
+    // (empty) and asserts `code == 1`. The empty-plan guard makes it return 2
+    // BEFORE the deadline, so it MUST seed one node first (e.g.
+    // `tasks.create("go", vec![], false).unwrap();`) and pass the new
+    // `run_workflow(…, cancel, None, "go", None, false)` arguments, THEN still
+    // assert `code == 1` for the elapsed timeout.
+    //
+    // #[tokio::test]
+    // /// §7.1: an empty TaskList returns 2 and prints `no plan loaded`.
+    // async fn run_workflow_refuses_an_empty_plan() { todo!() }
+    //
+    // #[test]
+    // /// §7.1: `list_groups` head (descending, session_groups.rs:267) is chosen
+    // /// for `--status latest`.
+    // fn status_latest_picks_the_newest_group() { todo!() }
+    //
+    // #[test]
+    // /// §7.1: `--quiet`, `--status`, `--status g1` parse; `--status` with `-p`
+    // /// errors (via `check_status_args`).
+    // fn parse_quiet_and_status() { todo!() }
+    //
+    // #[test]
+    // /// §7.1: `--task`+`serve` → `Err("--task cannot be combined with serve")`.
+    // fn task_guards_reject_serve_task() { todo!() }
+    // ==== /SKETCH ====
 
     // --- D003: `[[team]] file = "<path>"` ------------------------------------
 
