@@ -56,6 +56,7 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --config <path>    overlay config file, deep-merged over the global config (also WCODE_CONFIG)
    --team <name>      use ./.wcode/teams/<name>.toml as the overlay (a named project team;
                       mutually exclusive with --config)
+   --list-teams       list ./.wcode/teams/*.toml (name and path) and exit
    --endpoint <e>     override the configured endpoint (chat|responses|auto; auto = derive)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
    --list-models      list models from GET {base_url}/models and exit
@@ -142,6 +143,10 @@ struct Args {
     theme: Option<String>,
     /// `--list-themes`: print the catalog names and exit.
     list_themes: bool,
+    /// `--list-teams`: print the discovered project teams (`./.wcode/teams/*.toml`),
+    /// one `<name>\t<path>` line each, and exit. Enumeration only — no session, no
+    /// provider call; it does inherit the phase-2 config load (like `--list-themes`).
+    list_teams: bool,
     base_url: Option<String>,
     /// `--config <path>`: an overlay config file, deep-merged over the global one.
     config: Option<String>,
@@ -241,6 +246,7 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 i += 1;
             }
             "--list-themes" => a.list_themes = true,
+            "--list-teams" => a.list_teams = true,
             "--model" => {
                 a.model = Some(args.get(i).ok_or("--model requires an id")?.clone());
                 i += 1;
@@ -907,6 +913,30 @@ async fn list_models_and_exit(llm: &LlmOpts) -> ! {
             eprintln!("error: list models: {e}");
             std::process::exit(1);
         }
+    }
+    std::process::exit(0)
+}
+
+/// `--list-teams`: the discovered project teams (`./.wcode/teams/*.toml`), one
+/// `"<name>\t<path>"` line each, in `teams::discover` order (sorted by name).
+/// Pure — no printing, no exit.
+///
+/// Two interactions are deliberate, not bugs: `--list-teams --team nope` still
+/// errors before listing (the `--team` check runs in `load_config_raw`), and
+/// `--no-project-config` does NOT empty this list (a directory listing, not
+/// config discovery).
+fn team_lines(root: &Path) -> Vec<String> {
+    teams::discover(root)
+        .into_iter()
+        .map(|t| format!("{}\t{}", t.name, t.path.display()))
+        .collect()
+}
+
+/// P3b one-shot: print `team_lines(Path::new("."))` and `exit(0)`. Touches no
+/// session; it inherits the phase-2 config load, exactly as `--list-themes` does.
+fn list_teams_and_exit() -> ! {
+    for line in team_lines(Path::new(".")) {
+        println!("{line}");
     }
     std::process::exit(0)
 }
@@ -2110,6 +2140,9 @@ async fn main() {
             println!("{name}");
         }
         std::process::exit(0);
+    }
+    if args.list_teams {
+        list_teams_and_exit();
     }
     // Phase 3c: a `--socket` client (no local session). Falls through otherwise.
     if run_socket_client(&args, &cfg, &llm).await {
@@ -3597,6 +3630,38 @@ mod tests {
         };
         assert!(a.list_themes);
         assert!(!Args::default().list_themes);
+    }
+
+    #[test]
+    fn parse_list_teams_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--list-teams"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.list_teams);
+        assert!(!Args::default().list_teams);
+    }
+
+    #[test]
+    fn team_lines_are_name_tab_path_sorted() {
+        let dir = std::env::temp_dir().join(format!("wcode-cli-list-teams-{}", std::process::id()));
+        let teams = dir.join(teams::TEAMS_DIR);
+        std::fs::create_dir_all(&teams).unwrap();
+        std::fs::write(teams.join("scout.toml"), "").unwrap();
+        std::fs::write(teams.join("beta.toml"), "").unwrap();
+        std::fs::write(teams.join("notes.md"), "").unwrap(); // not a team
+        std::fs::write(teams.join(".hidden.toml"), "").unwrap(); // skipped
+        std::fs::create_dir_all(teams.join("adir.toml")).unwrap(); // a dir named *.toml
+
+        assert_eq!(
+            team_lines(&dir),
+            vec![
+                format!("beta\t{}", dir.join(".wcode/teams/beta.toml").display()),
+                format!("scout\t{}", dir.join(".wcode/teams/scout.toml").display()),
+            ],
+            "one <name>\\t<path> line each, sorted by name, noise skipped"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
