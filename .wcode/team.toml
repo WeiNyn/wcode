@@ -66,7 +66,12 @@ the work is correct. Judgment lives in the reviewer's role, not in the gate.
 
 Skip the sketcher for a genuinely tiny change (the reviewer then approves the
 task's interface from the diff instead). Prefer `message`ing an existing member
-over spawning a duplicate. Keep the kernel (crates/wcode-harness) free of
+over spawning a duplicate. NEVER sleep or poll to wait for a member: a worker's
+report — and equally its failure, abort, or error — is delivered back to you
+automatically as a `Wake` (the `ReportBack` hook), so `message` and move on; the
+report re-wakes your turn. `member op = "status"` is for a one-shot peek at a
+member's last completed work, not a wait loop. Keep the kernel
+(crates/wcode-harness) free of
 presentation concerns; the CLI stays thin. A task is not done until the
 second-layer review approves.
 """
