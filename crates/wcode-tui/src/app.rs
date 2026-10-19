@@ -3894,8 +3894,12 @@ impl App {
                         if self.surfaces[idx].apply(event) {
                             self.dirty = true;
                         }
-                        self.stamp_new(idx, before);
+                        // Re-stamp a grown OPEN turn BEFORE stamping appended
+                        // blocks: an in-apply growth precedes any block this same
+                        // event appended (e.g. `Error`'s `flush_live` growth before
+                        // its `Block::Error`), so the turn keeps the lower ordinal.
                         self.touch_open_turn(idx, open);
+                        self.stamp_new(idx, before);
                     }
                 }
             }
@@ -4649,6 +4653,9 @@ impl App {
     ///   later ordinals instead of the sealed turn jumping past them.
     /// - `next_seq` is monotone, so the re-stamp only ever increases the ordinal —
     ///   it can never collide with a later block.
+    /// - Called BEFORE `stamp_new`: an in-apply growth of the open turn precedes
+    ///   any block the same event appended (e.g. `Error`'s `flush_live` growth
+    ///   before its `Block::Error`), so the turn keeps the LOWER ordinal.
     /// - Appends nothing and never renumbers: only `seqs[i]` and the counter move.
     fn touch_open_turn(&mut self, idx: usize, open: Option<(usize, u64)>) {
         let Some((i, rev)) = open else {
@@ -9972,6 +9979,41 @@ mod tests {
             app.merged_order(),
             vec![(0, 0), (0, 1)],
             "the sealed turn precedes the run-end notice: {:?}",
+            app.merged_order()
+        );
+    }
+
+    #[test]
+    fn an_error_after_a_live_growth_keeps_the_turn_before_it() {
+        let (mut app, root_id, _member) = two_surfaces();
+        app.handle(AppEvent::Agent(root_id.clone(), AgentEvent::AgentStart));
+        // A tool call OPENS the turn (bi 0, seq 0).
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::ToolExecutionStart {
+                call_id: "c1".into(),
+                name: "bash".into(),
+            },
+        ));
+        // A live message starts (it will be absorbed when the Error flushes it).
+        app.handle(AppEvent::Agent(
+            root_id.clone(),
+            AgentEvent::MessageStart {
+                message: assistant("partial"),
+            },
+        ));
+        // `Error` flushes the live growth into the turn, then pushes `Block::Error`
+        // (bi 1) — the turn's growth PRECEDES the Error, so the turn must sort first.
+        app.handle(AppEvent::Agent(
+            root_id,
+            AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert_eq!(
+            app.merged_order(),
+            vec![(0, 0), (0, 1)],
+            "the grown turn precedes the same-apply Error: {:?}",
             app.merged_order()
         );
     }
