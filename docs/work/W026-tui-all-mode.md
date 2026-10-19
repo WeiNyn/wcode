@@ -80,7 +80,7 @@ byte-identical to today.
 ## 6. Quality gates
 
 - `cargo build --workspace` → ok.
-- `cargo test --workspace` → 1347 passed (535 cli · 212 harness · 465 tui + suites).
+- `cargo test --workspace` → 1347 passed (535 cli · 212 harness · 471 tui + suites).
 - `cargo clippy --workspace --all-targets` → clean.
 - `grep -rn 'SKETCH\|todo!()' crates/` → none.
 
