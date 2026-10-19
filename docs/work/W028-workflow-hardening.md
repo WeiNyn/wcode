@@ -45,7 +45,7 @@ A headless `[workflow]` run is today an opaque, unbounded, one-shot batch job. F
 
 ### 4.1 Added
 
-- **`<groupdir>/run.json`** — the launch record, written once at the start of a headless run: `{ "task": String, "config": Option<String>, "timeout_secs": Option<u64> }`. Home = the group dir alongside `plan.ndjson` (`session_groups.rs:83-85` `"<dir>/plan.ndjson — the task-DAG journal"`). Read by `--status` and the resume printer. New helper pair in `session_groups.rs` (`write_run`/`load_run`), mirroring `write_manifest`/`load_manifest` (`session_groups.rs:448` `pub fn load_manifest(group: &SessionGroup) -> Option<Manifest>`) — **sidecar confirmed, see §11 A2**.
+- **`<groupdir>/run.json`** — the launch record, written once at the start of a headless run: `{ "task": String, "config": Option<String>, "timeout_secs": Option<u64> }`. Home = the group dir alongside `plan.ndjson` (`session_groups.rs:83-85` `"<dir>/plan.ndjson — the task-DAG journal"`). It is the DURABLE launch record: written once, and its `timeout_secs` is carried into the `resume:` line, so a capped run does not resume unbounded. The printer itself reads the LIVE arguments (the process that just wrote the record needs no file round-trip), and `--status` reads `plan.ndjson`, not this sidecar. New helper pair in `session_groups.rs` (`write_run`/`load_run`), mirroring `write_manifest`/`load_manifest` (`session_groups.rs:448` `pub fn load_manifest(group: &SessionGroup) -> Option<Manifest>`) — **sidecar confirmed, see §11 A2**.
 - **`TaskList::read_at(path, cap) -> Result<TaskList, String>`** — a replay-only loader (sink `None`, **no** `reconcile`), for `--status`.
 - **New `--quiet` and `--status` CLI flags** (see §4.3).
 

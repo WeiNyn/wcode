@@ -2582,6 +2582,10 @@ async fn run_workflow(
         return 2;
     }
 
+    // The run's cap in whole seconds — computed ONCE, so the launch record and the
+    // `resume:` line can never disagree about it.
+    let cap = timeout.map(|d| d.as_secs());
+
     // The launch record (C3): written ONCE, AFTER the guard — a run that was never
     // created records nothing. A `--no-session` run has no group dir, so it also
     // has no `run.json` and no `resume:` line (rather than a bogus path).
@@ -2589,7 +2593,7 @@ async fn run_workflow(
         let record = crate::session_groups::RunRecord {
             task: task.to_string(),
             config: config.map(str::to_string),
-            timeout_secs: timeout.map(|d| d.as_secs()),
+            timeout_secs: cap,
         };
         if let Err(e) = crate::session_groups::write_run(group, &record) {
             eprintln!("warning: run record not written: {e}");
@@ -2600,6 +2604,11 @@ async fn run_workflow(
     // resume re-runs it), say where to pick it up, and exit. Mirrors the REPL's
     // `ctrl_c` loop; a headless run has nothing to wait for, so the first signal
     // is fatal.
+    //
+    // `exit(130)` deliberately skips dispatch's normal tail (`flush_all` +
+    // `Background::shutdown_all`) — the point of Ctrl-C is to stop NOW, and the
+    // actor persists its messages incrementally, so the run stays resumable
+    // without that flush. The normal exit path below still runs the full tail.
     {
         let cancel = cancel.clone();
         let group = group.map(|g| g.dir.clone());
@@ -2612,7 +2621,7 @@ async fn run_workflow(
                 eprintln!();
                 cancel.cancel();
                 if let Some(group) = &group {
-                    crate::repl::print_workflow_resume(group, &task, config.as_deref());
+                    crate::repl::print_workflow_resume(group, &task, config.as_deref(), cap);
                 }
                 std::process::exit(130);
             }
@@ -2625,7 +2634,7 @@ async fn run_workflow(
     if code != 0
         && let Some(group) = group
     {
-        crate::repl::print_workflow_resume(&group.dir, task, config);
+        crate::repl::print_workflow_resume(&group.dir, task, config, cap);
     }
     code
 }
@@ -3119,6 +3128,12 @@ mod tests {
     async fn run_workflow_refuses_an_empty_plan() {
         // An EMPTY plan: the guard returns 2 before the root is ever seeded, so
         // the deadline is never armed and the turns never start (C3).
+        let dir = tempfile::tempdir().unwrap();
+        let group = crate::session_groups::SessionGroup {
+            root_path: dir.path().join("root.jsonl"),
+            members_dir: dir.path().join("members"),
+            dir: dir.path().to_path_buf(),
+        };
         let backend = workflow_backend(hanging_stream());
         let code = tokio::time::timeout(
             Duration::from_secs(5),
@@ -3128,7 +3143,9 @@ mod tests {
                 "go".into(),
                 None,
                 tokio_util::sync::CancellationToken::new(),
-                None,
+                // C3's NEGATIVE half: a real group dir, so a `run.json` write that
+                // drifted ABOVE the guard would create the file and be caught.
+                Some(&group),
                 "go",
                 None,
                 false,
@@ -3138,6 +3155,10 @@ mod tests {
         .expect("the empty-plan guard returns at once");
         assert_eq!(code, 2, "an empty plan exits 2");
         assert_eq!(NO_PLAN_ERROR, "error: no plan loaded");
+        assert!(
+            !group.run_path().exists(),
+            "the guard precedes the launch record: nothing was written"
+        );
     }
 
     /// W028 §7.1 (C3/step 11): a run that expires writes `<groupdir>/run.json`

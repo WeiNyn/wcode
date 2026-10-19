@@ -638,21 +638,43 @@ pub fn relaunch_line(args: &[String]) -> String {
 
 /// Print a headless `--task` run's resume line on stderr — a thin wrapper over
 /// [`workflow_resume_line`], mirroring `print_relaunch`/`relaunch_line` (W028).
-pub(crate) fn print_workflow_resume(group: &Path, task: &str, config: Option<&str>) {
-    eprintln!("resume: {}", workflow_resume_line(group, task, config));
+pub(crate) fn print_workflow_resume(
+    group: &Path,
+    task: &str,
+    config: Option<&str>,
+    timeout_secs: Option<u64>,
+) {
+    eprintln!(
+        "resume: {}",
+        workflow_resume_line(group, task, config, timeout_secs)
+    );
 }
 
 /// The resume command as a copy-pasteable shell line:
-/// `--agents [--config <config>] --resume <groupdir> --task <task>`, rendered
-/// through [`relaunch_line`] so every argument is shell-quoted exactly once.
+/// `--agents [--config <config>] [--timeout <secs>] --resume <groupdir> --task
+/// <task>`, rendered through [`relaunch_line`] so every argument is shell-quoted
+/// exactly once.
 ///
-/// Pure and testable as a STRING (no test in this repo captures stderr): the
-/// `--task` text is the run's RAW text, recovered from `<groupdir>/run.json`.
-pub(crate) fn workflow_resume_line(group: &Path, task: &str, config: Option<&str>) -> String {
+/// Pure and testable as a STRING (no test in this repo captures stderr). The
+/// `--task` text is the run's RAW task, the same value `<groupdir>/run.json`
+/// records. `timeout_secs` is that record's cap: it is CARRIED into the line so a
+/// capped run does not resume unbounded. `None` — and `Some(0)`, a sub-second cap
+/// that rounds to zero — mean "no cap", so the flag is OMITTED rather than
+/// resurrected as a 0-second (instantly expiring) bound.
+pub(crate) fn workflow_resume_line(
+    group: &Path,
+    task: &str,
+    config: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> String {
     let mut args = vec!["--agents".to_string()];
     if let Some(config) = config {
         args.push("--config".to_string());
         args.push(config.to_string());
+    }
+    if let Some(secs) = timeout_secs.filter(|&s| s > 0) {
+        args.push("--timeout".to_string());
+        args.push(secs.to_string());
     }
     args.push("--resume".to_string());
     args.push(group.display().to_string());
@@ -1788,15 +1810,15 @@ mod workflow_log_tests {
     }
 
     /// W028 §7.1: the resume line round-trips through `relaunch_line` — the task
-    /// text (arbitrary prose, with quotes in it) survives shell-quoting, and the
-    /// config overlay is optional.
+    /// text (arbitrary prose, with quotes in it) survives shell-quoting, the config
+    /// overlay is optional, and the run's CAP is carried as `--timeout`.
     #[test]
     fn resume_line_round_trips_through_relaunch_line() {
         let group = "/tmp/sessions/1730000000000_9f3c1a7b";
         let task = "resume me: it's a 'hard' one";
-        let line = workflow_resume_line(Path::new(group), task, Some("/tmp/wf.toml"));
+        let line = workflow_resume_line(Path::new(group), task, Some("/tmp/wf.toml"), Some(120));
         // `relaunch_line` prefixes the program (`argv[0]`, run-dependent), so
-        // assert the ARGUMENT TAIL only.
+        // assert the ARGUMENT TAIL only. `--timeout` sits BEFORE `--resume`.
         let args = line
             .split_once(' ')
             .map(|(_, rest)| rest)
@@ -1808,13 +1830,21 @@ mod workflow_log_tests {
         );
         assert_eq!(
             args,
-            format!("--agents --config /tmp/wf.toml --resume {group} --task {quoted}"),
+            format!(
+                "--agents --config /tmp/wf.toml --timeout 120 --resume {group} --task {quoted}"
+            ),
             "the full command: {line}"
         );
 
-        // No config ⇒ no `--config` pair; `--resume` + `--task` remain.
-        let bare = workflow_resume_line(Path::new("/g"), "t", None);
+        // No cap ⇒ no `--timeout` pair; no config ⇒ no `--config` pair.
+        let bare = workflow_resume_line(Path::new("/g"), "t", None, None);
         let args = bare.split_once(' ').map(|(_, rest)| rest).unwrap();
+        assert_eq!(args, "--agents --resume /g --task t");
+
+        // `Some(0)` is a sub-second cap (test-only): it rounds to "no cap", so the
+        // flag is OMITTED rather than emitted as a 0-second bound.
+        let zero = workflow_resume_line(Path::new("/g"), "t", None, Some(0));
+        let args = zero.split_once(' ').map(|(_, rest)| rest).unwrap();
         assert_eq!(args, "--agents --resume /g --task t");
     }
 
