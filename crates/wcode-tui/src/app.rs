@@ -173,6 +173,9 @@ pub struct SessionHead {
     pub model: String,
     /// The effort id; joins `model` with ` · `; `None` → model alone.
     pub effort: Option<String>,
+    /// The active view mode — `All` draws the ` · ALL` seg; `Focus` draws none
+    /// (ONE rule). Snapshot of `app.view_mode()` (head-threading).
+    pub view: ViewMode,
 }
 
 impl SessionHead {
@@ -182,12 +185,14 @@ impl SessionHead {
     /// (NOT shortened). # Contracts: infallible; a missing session/branch/effort
     /// is `None` (its group is omitted by the renderer).
     pub(crate) fn of(app: &App) -> SessionHead {
+        let status = app.chrome_status();
         SessionHead {
-            session: app.status().session.clone(),
+            session: status.session.clone(),
             project: app.cwd().unwrap_or("wcode").to_string(),
             branch: app.git().map(str::to_string),
-            model: app.status().model.clone(),
-            effort: app.status().effort.clone(),
+            model: status.model.clone(),
+            effort: status.effort.clone(),
+            view: app.view_mode(),
         }
     }
 }
@@ -824,6 +829,12 @@ const COMMANDS: &[Command] = &[
         summary: "set the transcript width",
     },
     Command {
+        name: "view",
+        aliases: &[],
+        args: Some("<all|focus>"),
+        summary: "set the transcript view (all = merged)",
+    },
+    Command {
         name: "team",
         aliases: &[],
         args: Some("[name|roster]"),
@@ -1038,6 +1049,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Alt-1..9", "focus sidebar row N"),
     ("Ctrl-G", "browse the transcript"),
     ("Ctrl-B", "toggle the sidebar"),
+    ("Ctrl-O", "toggle the transcript view (all/focus)"),
     ("Alt-[ / Alt-]", "narrow / widen the transcript"),
     ("j / k · g / G", "browse: next / previous · first / last"),
     ("Esc / q / ? (browse)", "leave / help · F1, Ctrl-C global"),
@@ -1406,6 +1418,10 @@ pub struct Surface {
     /// Per-block revision, bumped at each `Block::Turn`/`Block::Tool` mutation;
     /// `0` = append-only.
     block_revs: Vec<u64>,
+    /// Each committed block's arrival ordinal, index-aligned with `transcript` —
+    /// the order the app saw it. The merged (All) view's merge key. The FOURTH
+    /// parallel vec; every push/insert/remove keeps it in lockstep.
+    seqs: Vec<u64>,
     /// The streamed message's revision; bumped on every `MessageStart` /
     /// `MessageUpdate` (and on a theme change), so the live cache re-renders
     /// once per delta — not once per frame.
@@ -1468,6 +1484,7 @@ impl Surface {
             ranges: Vec::new(),
             cache: Vec::new(),
             block_revs: Vec::new(),
+            seqs: Vec::new(),
             live_rev: 0,
             live_cache: CacheEntry::never(),
             run_elapsed: None,
@@ -1633,6 +1650,9 @@ impl Surface {
         self.transcript.push(block);
         self.block_revs.push(0);
         self.cache.push(CacheEntry::never());
+        // The arrival ordinal is stamped at the App level (`App::stamp_new`);
+        // the placeholder `0` is replaced right after the append.
+        self.seqs.push(0);
     }
 
     /// Seed the D5 empty-state hint when this is a genuinely empty surface (no
@@ -1644,6 +1664,8 @@ impl Surface {
             self.transcript.push(Block::Notice(EMPTY_HINT.into()));
             self.block_revs.push(0);
             self.cache.push(CacheEntry::never());
+            // A direct push (not via `push_block`) — keep `seqs` in lockstep.
+            self.seqs.push(0);
         }
     }
 
@@ -1657,6 +1679,7 @@ impl Surface {
             self.transcript.remove(i);
             self.block_revs.remove(i);
             self.cache.remove(i);
+            self.seqs.remove(i);
         }
     }
 
@@ -1695,6 +1718,7 @@ impl Surface {
             self.transcript.remove(i);
             self.block_revs.remove(i);
             self.cache.remove(i);
+            self.seqs.remove(i);
             if let Some(n) = self.open_turn
                 && i < n
             {
@@ -1726,6 +1750,7 @@ impl Surface {
         self.transcript.insert(at, block);
         self.block_revs.insert(at, 0);
         self.cache.insert(at, CacheEntry::never());
+        self.seqs.insert(at, 0);
         // An insert shifts every later index: keep the open-turn pointer in step
         // (a mid-run divider insert), or `seal_turn` misses the turn.
         if let Some(i) = self.open_turn
@@ -2073,13 +2098,9 @@ impl Surface {
         }
     }
 
-    fn push_notice(&mut self, text: impl Into<String>) {
-        self.push_block(Block::Notice(text.into()));
-    }
-
-    /// Push a [`Block::Transient`] on this surface — the twin of
-    /// [`Surface::push_notice`], and the door for the sites that are not
-    /// `App` methods (`render_usage` is the one that matters).
+    /// Push a [`Block::Transient`] on this surface — the door for the appends
+    /// that are not `App` methods (`render_usage` is the one that matters; the
+    /// App-level appends go through `App::push_on`).
     fn push_transient(&mut self, text: impl Into<String>) {
         self.push_block(Block::Transient(text.into()));
     }
@@ -2310,6 +2331,43 @@ pub enum Mode {
     Browse,
 }
 
+/// The client-local view mode (the VS Code extension's `ViewMode`): `Focus`
+/// renders the focused surface's transcript — **today's behavior**; `All` renders
+/// the MERGED transcript of the root + every member, interleaved by arrival order.
+///
+/// Orthogonal to [`Mode`] (input vs browse) — this is a RENDERING choice, so it is
+/// its own enum. Default `Focus` ⇒ a frame is byte-identical until the user opts
+/// in (the `sidebar: bool` off-by-default precedent).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    #[default]
+    Focus,
+    All,
+}
+
+impl ViewMode {
+    /// Parse a config/CLI/`/view` token: `all` \| `focus` (case-insensitive,
+    /// surrounding whitespace trimmed). # Errors: any other token — the message
+    /// names the value and the two accepted words.
+    pub fn parse(token: &str) -> Result<ViewMode, String> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "all" => Ok(ViewMode::All),
+            "focus" => Ok(ViewMode::Focus),
+            _ => Err(format!("view {token:?} is not one of all|focus")),
+        }
+    }
+
+    /// The header `.seg` label, rendered ONLY in All mode — ONE rule: `ALL` in
+    /// All, `None` in Focus, so Focus draws no seg and its header stays
+    /// byte-identical to today. The seg appears iff `label()` is `Some`.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            ViewMode::Focus => None,
+            ViewMode::All => Some("ALL"),
+        }
+    }
+}
+
 /// The open transcript search prompt (`/` in browse). Browse-owned rather
 /// than an `Overlay` so `n`/`N` can repeat the last jump after the prompt
 /// closes; like a modal it still owns every key while up.
@@ -2474,6 +2532,27 @@ pub struct App {
     /// flips this bit and marks dirty, never touching a surface. The renderer
     /// keys its horizontal split on `App::sidebar()` (see `ui::draw`).
     sidebar: bool,
+    /// The active view mode (All/Focus). View state like `mode`/`sidebar`, NOT
+    /// surface state — `toggle_view` flips it and marks dirty, never touching a
+    /// surface. Read by the transcript renderer, the header `.seg`, and the
+    /// chrome routing (`chrome_surface`).
+    view: ViewMode,
+    /// The next arrival ordinal to stamp on a block at append time. MONOTONIC over
+    /// the whole app — every surface draws from it, so it is the merged view's
+    /// single total order. A replay advances it past every seeded block.
+    next_seq: u64,
+    /// The merged view's scroll offset (lines up from the bottom), in the MERGED
+    /// line space. Owned by `App` (NOT a surface) so a mode flip never leaks merged
+    /// scroll into a surface's `scroll`/`last_total`. Used only in `All` mode.
+    all_scroll: usize,
+    /// The merged view's scroll clamp, viewport height, and last measured
+    /// total/width — the All-mode mirror of `Surface`'s four remaining scroll
+    /// fields, beside `all_scroll` (the mirror of `scroll`). Used only in `All`
+    /// mode; `all_viewport` also feeds `App::page` in All.
+    all_max_scroll: usize,
+    all_viewport: usize,
+    all_last_total: usize,
+    all_last_width: usize,
     /// The transcript's measure (content width) in columns, adjustable at runtime
     /// via `/width` and `Alt-[` / `Alt-]`; clamped to the band at draw time (D011).
     measure: usize,
@@ -2555,6 +2634,13 @@ impl App {
             // OFF by default: the base three-band layout is byte-identical
             // until the user hits Ctrl-B.
             sidebar: false,
+            view: ViewMode::default(),
+            next_seq: 0,
+            all_scroll: 0,
+            all_max_scroll: 0,
+            all_viewport: 0,
+            all_last_total: 0,
+            all_last_width: 0,
             hit: HitMap::default(),
             mouse_down: None,
             mouse_focus: (0, 0),
@@ -2669,6 +2755,10 @@ impl App {
     /// collapses; anything else expands all. Covers both a `Turn`'s ledger and a
     /// standalone `Block::Tool`.
     fn toggle_all_tools(&mut self) {
+        // Tool expansion indexes the focused transcript: a no-op in All mode.
+        if self.view == ViewMode::All {
+            return;
+        }
         let indices: Vec<usize> = self
             .focused()
             .transcript
@@ -3095,6 +3185,10 @@ impl App {
     /// composer draft and cursor are untouched; the completion popup is closed
     /// so browse owns the arrows.
     fn enter_browse(&mut self) {
+        // Browse is Focus-scoped: a no-op in All mode.
+        if self.view == ViewMode::All {
+            return;
+        }
         let last = self.focused().last_selectable();
         self.mode = Mode::Browse;
         self.completion = None;
@@ -3784,10 +3878,17 @@ impl App {
                 if !self.absorb_usage(&id, &event) {
                     // Route to the surface that owns this session; an unknown id
                     // is ignored (a stray/duplicate event must not panic).
-                    if let Some(idx) = self.surface_index(&id)
-                        && self.surfaces[idx].apply(event)
-                    {
-                        self.dirty = true;
+                    if let Some(idx) = self.surface_index(&id) {
+                        // Stamp the arrival ordinal at the reducer's append site.
+                        // Clear the D5 hint FIRST: `apply` appends via `push_block`
+                        // (which clears the hint), so it would otherwise shift
+                        // `before` one PAST the append and no-op the stamp.
+                        self.surfaces[idx].clear_hint();
+                        let before = self.surfaces[idx].transcript.len();
+                        if self.surfaces[idx].apply(event) {
+                            self.dirty = true;
+                        }
+                        self.stamp_new(idx, before);
                     }
                 }
             }
@@ -3872,6 +3973,8 @@ impl App {
             // open completion, and browse — so Ctrl-B is deliberately inert
             // while any of those owns the keyboard.
             Key::Ctrl('b') => self.toggle_sidebar(),
+            // Ctrl-O flips the transcript between Focus and All (the merged view).
+            Key::Ctrl('o') => self.toggle_view(),
             // Tool detail: Ctrl-T toggles every tool at once; the per-block
             // toggle lives in browse mode, where the target is drawn.
             Key::Ctrl('t') => self.toggle_all_tools(),
@@ -3966,14 +4069,15 @@ impl App {
         }
         if self.focused().running {
             // A rejected submit is chatter, not a run event: it dies on the next
-            // submit like the rest. Routed through `push_transient`, so all three
-            // parallel vecs stay in step.
-            self.focused_mut()
-                .push_transient("a turn is already running — Esc to cancel");
+            // submit like the rest. Routed through `push_on`, so all four
+            // parallel vecs stay in step and the block gets a real ordinal.
+            let idx = self.focus;
+            self.push_on(idx, Block::Transient("a turn is already running — Esc to cancel".into()));
             return;
         }
         self.focused_mut().history.push(text.clone());
-        self.focused_mut().push_block(Block::User(text.clone()));
+        let idx = self.focus;
+        self.push_on(idx, Block::User(text.clone()));
         self.focused_mut().running = true;
         self.focused_mut().finished = false;
         self.focused_mut().cancelled = false;
@@ -4040,6 +4144,11 @@ impl App {
                     "width: {} cols (usage: /width <cols>)",
                     self.measure
                 )),
+            },
+            "view" => match arg.map(ViewMode::parse) {
+                Some(Ok(view)) => self.set_view_mode(view),
+                Some(Err(e)) => self.transient(e),
+                None => self.transient("usage: /view <all|focus>"),
             },
             "compact" => self.actions.push(Action::Ask(Request::Compact {
                 instructions: arg.map(str::to_string),
@@ -4305,7 +4414,8 @@ impl App {
     }
 
     fn notice(&mut self, text: impl Into<String>) {
-        self.focused_mut().push_notice(text);
+        let idx = self.focus;
+        self.push_on(idx, Block::Notice(text.into()));
         self.dirty = true;
     }
 
@@ -4313,7 +4423,8 @@ impl App {
     /// [`App::notice`], one word different. Used for `/`-command chatter, which
     /// [`Surface::retire_transient`] clears at the next submit.
     fn transient(&mut self, text: impl Into<String>) {
-        self.focused_mut().push_transient(text);
+        let idx = self.focus;
+        self.push_on(idx, Block::Transient(text.into()));
         self.dirty = true;
     }
 
@@ -4435,6 +4546,143 @@ impl App {
         &self.focused().transcript
     }
 
+    /// A surface's display label for the All-mode origin head (`wcode` for the
+    /// root, `w1`… for members). # Contracts: `si` out of range ⇒ `""`.
+    pub(crate) fn surface_label(&self, si: usize) -> &str {
+        self.surfaces.get(si).map_or("", |s| s.label.as_str())
+    }
+
+    /// The merged view's iteration order: `(surface index, block index)` over EVERY
+    /// surface (root included), sorted by the block's arrival ordinal — ties broken
+    /// by the canonical surface order then block index, for a stable total order.
+    /// Owned (no borrow held), so the render loop can then take
+    /// `append_block_lines_at` per pair. In `Focus` mode the caller uses
+    /// `transcript()` instead and never calls this.
+    pub(crate) fn merged_order(&self) -> Vec<(usize, usize)> {
+        let canonical = self.canonical_order();
+        let mut rank = vec![0usize; self.surfaces.len()];
+        for (r, &si) in canonical.iter().enumerate() {
+            rank[si] = r;
+        }
+        let mut items: Vec<(u64, usize, usize, usize)> = Vec::new();
+        for (si, surface) in self.surfaces.iter().enumerate() {
+            for bi in 0..surface.transcript.len() {
+                let seq = surface.seqs.get(bi).copied().unwrap_or(0);
+                items.push((seq, rank[si], bi, si));
+            }
+        }
+        items.sort_unstable();
+        items.into_iter().map(|(_, _, bi, si)| (si, bi)).collect()
+    }
+
+    /// Append `block` to surface `idx` and stamp it with the next arrival ordinal
+    /// — **THE App-level append chokepoint**. Every `App`-driven append that
+    /// bypasses the `AppEvent::Agent` arm routes through here (`submit`'s
+    /// `Block::User` and the "already running" transient, `show_change`'s
+    /// `Block::Diff`, `notice` and `transient`).
+    ///
+    /// ORDER: clear the empty-state hint FIRST, then measure, then append, then
+    /// stamp — `push_block` clears the hint internally, so the hint would
+    /// otherwise shift `before` one PAST the append on a hint-present surface.
+    /// # Contracts: `idx` out of range ⇒ no-op.
+    fn push_on(&mut self, idx: usize, block: Block) {
+        if idx >= self.surfaces.len() {
+            return;
+        }
+        self.surfaces[idx].clear_hint();
+        let before = self.surfaces[idx].transcript.len();
+        self.surfaces[idx].push_block(block);
+        self.stamp_new(idx, before);
+    }
+
+    /// Stamp the blocks `[before..]` of surface `idx` with fresh ordinals from
+    /// `next_seq`, bumping it past the last. Called from the `AppEvent::Agent` arm
+    /// right after a surface append, and from `App::push_on`.
+    /// # Contracts: stamps EXACTLY the appended tail `[before..]`; a no-op when
+    /// `before >= transcript.len()`; keeps `seqs` aligned with `transcript`.
+    fn stamp_new(&mut self, idx: usize, before: usize) {
+        if idx >= self.surfaces.len() {
+            return;
+        }
+        let len = self.surfaces[idx].transcript.len();
+        if before >= len {
+            return;
+        }
+        if self.surfaces[idx].seqs.len() < len {
+            self.surfaces[idx].seqs.resize(len, 0);
+        }
+        let mut seq = self.next_seq;
+        for i in before..len {
+            self.surfaces[idx].seqs[i] = seq;
+            seq += 1;
+        }
+        self.next_seq = seq;
+    }
+
+    /// Stamp a freshly-SEEDED surface's blocks with ordinals from `next_seq`, in
+    /// index order, advancing `next_seq` past them. A seed is a full replay, so it
+    /// re-stamps the WHOLE surface; used only by `seed_history`, before any live
+    /// block exists. # Contracts: the caller replays ROOT-FIRST, so every seeded
+    /// ordinal < every live ordinal.
+    fn stamp_replayed(&mut self, idx: usize) {
+        self.stamp_new(idx, 0);
+    }
+
+    /// Render block `bi` of surface `si` into `out`, matching what
+    /// `focused_mut().append_block_lines` produces for the focused surface — the
+    /// All-mode render seam. When `origin` is `Some(label)`, a dim origin head row
+    /// is prepended (and IS part of the returned range). Returns the block's line
+    /// range. # Contracts: a no-op `0..0` when `si`/`bi` are out of range; it OWNS
+    /// the leading blank separator — keyed on `out` ALONE (emit one iff `out` is
+    /// non-empty), so a surface's FIRST block (`bi == 0`) rendered after another
+    /// surface's lines still carries its separator. The origin head is appended
+    /// OUTSIDE the `(rev, width)` cache, so a mode flip never shows stale heads.
+    pub(crate) fn append_block_lines_at(
+        &mut self,
+        si: usize,
+        bi: usize,
+        width: usize,
+        origin: Option<&str>,
+        out: &mut Vec<Line<'static>>,
+    ) -> Range<usize> {
+        if si >= self.surfaces.len() {
+            return 0..0;
+        }
+        let surface = &mut self.surfaces[si];
+        if bi >= surface.transcript.len() {
+            return 0..0;
+        }
+        // Defensive parity with `append_block_lines`: a missed push/insert must
+        // re-render, never index out of bounds.
+        if bi >= surface.cache.len() {
+            surface.cache.resize_with(bi + 1, CacheEntry::never);
+        }
+        if bi >= surface.block_revs.len() {
+            surface.block_revs.resize(bi + 1, 0);
+        }
+        let rev = surface.block_revs[bi];
+        if surface.cache[bi].rev != rev || surface.cache[bi].width != width {
+            let rendered = crate::ui::block_lines(&surface.transcript[bi], width);
+            surface.cache[bi] = CacheEntry {
+                rev,
+                width,
+                lines: rendered,
+            };
+        }
+        let block_lines = &surface.cache[bi].lines;
+        let has_content = origin.is_some() || !block_lines.is_empty();
+        if !out.is_empty() && has_content {
+            out.push(Line::default());
+        }
+        let start = out.len();
+        if let Some(label) = origin {
+            out.push(crate::ui::origin_row(label, width));
+        }
+        out.extend(block_lines.iter().cloned());
+        let end = out.len();
+        start..end
+    }
+
     pub fn live(&self) -> Option<&AgentMessage> {
         self.focused().live.as_ref()
     }
@@ -4482,26 +4730,45 @@ impl App {
         self.focused().context_used
     }
 
-    /// A full page of transcript lines, for PgUp/PgDn.
+    /// A full page for the ACTIVE transcript: in All mode the merged viewport
+    /// height, else the focused surface's page.
     fn page(&self) -> usize {
-        self.focused().page()
+        if self.view == ViewMode::All {
+            self.all_viewport.saturating_sub(1).max(1)
+        } else {
+            self.focused().page()
+        }
     }
 
-    /// Scroll up by `lines`, clamped to the top of the transcript.
+    /// Scroll up by `lines` in the ACTIVE transcript (All ⇒ the merged offset,
+    /// else the focused surface), clamped to the top.
     fn scroll_up(&mut self, lines: usize) {
-        self.focused_mut().scroll_up(lines);
+        if self.view == ViewMode::All {
+            self.all_scroll = (self.all_scroll + lines).min(self.all_max_scroll);
+        } else {
+            self.focused_mut().scroll_up(lines);
+        }
         self.dirty = true;
     }
 
-    /// Scroll down by `lines`; `0` is the tail.
+    /// Scroll down by `lines` in the ACTIVE transcript; `0` is the tail.
     fn scroll_down(&mut self, lines: usize) {
-        self.focused_mut().scroll_down(lines);
+        if self.view == ViewMode::All {
+            self.all_scroll = self.all_scroll.saturating_sub(lines);
+        } else {
+            self.focused_mut().scroll_down(lines);
+        }
         self.dirty = true;
     }
 
-    /// Lines scrolled up from the tail (`0` = following).
+    /// Lines scrolled up from the tail of the ACTIVE transcript (`0` = following).
+    /// In All mode the merged offset, else the focused surface's.
     pub fn scroll(&self) -> usize {
-        self.focused().scroll
+        if self.view == ViewMode::All {
+            self.all_scroll
+        } else {
+            self.focused().scroll
+        }
     }
 
     /// The focused surface's committed turn count — the `§N` series, and the
@@ -4510,10 +4777,26 @@ impl App {
         self.focused().turns
     }
 
-    /// Reconcile scroll state with the transcript the renderer just measured:
-    /// keep the view pinned while content grows, then clamp to the top.
+    /// Reconcile the ACTIVE transcript's scroll with what the renderer just
+    /// measured: keep the view pinned while content grows, then clamp to the top.
+    /// In All mode mirror `Surface::sync_scroll` against the MERGED line space via
+    /// the `all_*` fields; in Focus mode today's behavior.
     pub fn sync_scroll(&mut self, total: usize, height: usize, width: usize) {
-        self.focused_mut().sync_scroll(total, height, width);
+        if self.view == ViewMode::All {
+            if self.all_scroll > 0 && width == self.all_last_width {
+                self.all_scroll = self
+                    .all_scroll
+                    .saturating_add(total.saturating_sub(self.all_last_total));
+            }
+            let max = total.saturating_sub(height);
+            self.all_scroll = self.all_scroll.min(max);
+            self.all_max_scroll = max;
+            self.all_viewport = height;
+            self.all_last_total = total;
+            self.all_last_width = width;
+        } else {
+            self.focused_mut().sync_scroll(total, height, width);
+        }
     }
 
     /// Open the `/changes` picker over the files this run changed.
@@ -4582,10 +4865,14 @@ impl App {
         if diff.is_empty() {
             return;
         }
-        self.focused_mut().push_block(Block::Diff {
-            path: path.to_string(),
-            diff,
-        });
+        let idx = self.focus;
+        self.push_on(
+            idx,
+            Block::Diff {
+                path: path.to_string(),
+                diff,
+            },
+        );
         self.dirty = true;
     }
 
@@ -4903,6 +5190,10 @@ impl App {
     /// Seed the focused surface's D5 empty-state hint if it is empty (called by
     /// `ui::draw`; a no-op once real content lands).
     pub(crate) fn seed_empty_hint(&mut self) {
+        // In All mode the hint belongs only when EVERY surface is empty.
+        if self.view == ViewMode::All && !self.merged_order().is_empty() {
+            return;
+        }
         self.focused_mut().seed_hint_if_empty();
     }
 
@@ -4977,6 +5268,30 @@ impl App {
     pub fn sidebar(&self) -> bool {
         self.sidebar
     }
+
+    /// The active view mode (All/Focus).
+    pub fn view_mode(&self) -> ViewMode {
+        self.view
+    }
+
+    /// Set the view mode; marks the frame dirty. A no-op when unchanged. Called at
+    /// startup (from `TuiSpec.view`) and by `/view`.
+    pub fn set_view_mode(&mut self, view: ViewMode) {
+        if view != self.view {
+            self.view = view;
+            self.dirty = true;
+        }
+    }
+
+    /// Flip Focus ⇄ All (`Ctrl-O`). Side-effect-free beyond the bit + `dirty`
+    /// (like `toggle_sidebar`).
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            ViewMode::Focus => ViewMode::All,
+            ViewMode::All => ViewMode::Focus,
+        };
+        self.dirty = true;
+    }
     /// Inject the startup cwd (see [`Options::cwd`]); marks the app dirty.
     pub fn set_cwd(&mut self, cwd: Option<String>) {
         self.cwd = cwd;
@@ -5005,6 +5320,35 @@ impl App {
 
     pub fn running(&self) -> bool {
         self.focused().running
+    }
+
+    /// The surface whose identity/state the CHROME reflects: the ROOT (index 0) in
+    /// All mode — the merged transcript is nobody's particular transcript — else
+    /// the focused surface. # Contracts: infallible (`surfaces` is never empty).
+    fn chrome_surface(&self) -> &Surface {
+        if self.view == ViewMode::All {
+            &self.surfaces[0]
+        } else {
+            self.focused()
+        }
+    }
+
+    /// The chrome surface's `Status` (session/model/effort) — the `SessionHead::of`
+    /// source. The sidebar/loop keep the focused `status()`.
+    pub(crate) fn chrome_status(&self) -> &Status {
+        &self.chrome_surface().status
+    }
+
+    /// True when the CHROME surface is running (the ROOT in All, the focused in
+    /// Focus). Used ONLY by `corner_titles`; the tick guard keeps `App::running()`.
+    pub(crate) fn chrome_running(&self) -> bool {
+        self.chrome_surface().running
+    }
+
+    /// The CHROME surface's run elapsed (the ROOT in All, the focused in Focus).
+    /// Used ONLY by `corner_titles`; the sidebar keeps `App::run_elapsed()`.
+    pub(crate) fn chrome_elapsed(&self) -> Option<std::time::Duration> {
+        self.chrome_surface().run_elapsed
     }
 
     /// A `/btw` side ask is in flight for the focused surface (the status corner
@@ -5044,6 +5388,9 @@ impl App {
         if let Some(idx) = self.surface_index(id)
             && self.surfaces[idx].seed(messages)
         {
+            // A replay does not go through the receipt arm: stamp every seeded
+            // block so the first live ordinal is strictly greater than each.
+            self.stamp_replayed(idx);
             self.dirty = true;
         }
     }
@@ -9125,6 +9472,354 @@ mod tests {
             app.overlay_scroll() as usize,
             body - info_visible_rows(body, 10),
             "clamped to the last row"
+        );
+    }
+
+    // ---- All mode (the merged transcript) -------------------------------------
+
+    /// The focused surface's arrival ordinals (test convenience).
+    fn focused_seqs(app: &App) -> &[u64] {
+        &app.focused().seqs
+    }
+
+    /// The plain text of a rendered line.
+    fn line_text(l: &Line<'_>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn all_mode_is_off_by_default_and_the_frame_is_unchanged() {
+        let app = App::new();
+        assert_eq!(app.view_mode(), ViewMode::Focus, "Focus is the default");
+        assert!(app.view_mode().label().is_none(), "Focus draws no seg");
+        assert!(app.merged_order().is_empty(), "nothing to merge yet");
+    }
+
+    #[test]
+    fn toggle_view_flips_focus_and_all_and_marks_dirty() {
+        let mut app = App::new();
+        app.clear_dirty();
+        app.toggle_view();
+        assert_eq!(app.view_mode(), ViewMode::All);
+        assert!(app.dirty(), "a flip marks the frame dirty");
+        app.clear_dirty();
+        app.toggle_view();
+        assert_eq!(app.view_mode(), ViewMode::Focus);
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn view_mode_parse_accepts_all_and_focus_case_insensitively() {
+        assert_eq!(ViewMode::parse("all").unwrap(), ViewMode::All);
+        assert_eq!(ViewMode::parse("ALL").unwrap(), ViewMode::All);
+        assert_eq!(ViewMode::parse(" focus ").unwrap(), ViewMode::Focus);
+        assert_eq!(ViewMode::parse("Focus").unwrap(), ViewMode::Focus);
+    }
+
+    #[test]
+    fn view_mode_parse_rejects_an_unknown_token_loudly() {
+        let e = ViewMode::parse("wide").unwrap_err();
+        assert!(e.contains("wide"), "names the value: {e}");
+        assert!(e.contains("all") && e.contains("focus"), "names the accepted: {e}");
+    }
+
+    #[test]
+    fn view_mode_label_is_some_all_only_and_none_in_focus() {
+        assert_eq!(ViewMode::All.label(), Some("ALL"));
+        assert_eq!(ViewMode::Focus.label(), None, "no dead FOCUS string");
+    }
+
+    #[test]
+    fn a_block_is_stamped_with_the_next_arrival_ordinal_on_append() {
+        let mut app = App::new();
+        let id = root();
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        assert_eq!(focused_seqs(&app), &[0, 1], "two appends → 0, 1");
+        assert_eq!(app.next_seq, 2, "the counter advanced past the last");
+    }
+
+    #[test]
+    fn a_locally_submitted_user_block_is_stamped_after_the_preceding_turn() {
+        let mut app = App::new();
+        let id = root();
+        // A preceding run event stamps ordinal 0.
+        app.handle(AppEvent::Agent(id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        submit(&mut app, "hi");
+        // The `submit`'s `Block::User` must be ordinal 1, not the placeholder 0.
+        assert_eq!(
+            focused_seqs(&app),
+            &[0, 1],
+            "submit is stamped after the preceding turn: {:?}",
+            focused_seqs(&app)
+        );
+    }
+
+    #[test]
+    fn a_locally_submitted_block_on_a_hint_present_surface_is_stamped() {
+        let (mut app, _root, member) = two_surfaces();
+        // A member block gets ordinal 0 (the counter is now 1).
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        // Focus the empty root and give it the D5 empty-state hint.
+        app.set_focus(0);
+        app.seed_empty_hint();
+        assert_eq!(app.focused().transcript.len(), 1, "the hint is present");
+        submit(&mut app, "hi");
+        assert!(matches!(app.focused().transcript.last(), Some(Block::User(_))));
+        let seq = *focused_seqs(&app).last().unwrap();
+        assert!(seq > 0, "the submit was stamped past the member's ordinal: {seq}");
+    }
+
+    #[test]
+    fn the_agent_arm_stamps_after_clearing_a_present_hint() {
+        let (mut app, root_id, member) = two_surfaces();
+        // A member block gets ordinal 0 (the counter is now 1).
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        // Focus the empty root and give it the D5 hint; the next event must clear
+        // it FIRST so the appended block is stamped (a naive `before = len()`
+        // would count the hint and no-op the stamp, leaving the block at 0).
+        app.set_focus(0);
+        app.seed_empty_hint();
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        assert_eq!(app.focused().seqs, vec![1], "the appended block is stamped");
+        // An event that appends nothing is a clean no-op.
+        let len = app.focused().transcript.len();
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::MessageUpdate {
+                message: assistant("nope"),
+            },
+        ));
+        assert_eq!(app.focused().transcript.len(), len, "no append");
+        assert_eq!(app.focused().seqs, vec![1], "the ordinals are unchanged");
+    }
+
+    #[test]
+    fn merged_order_interleaves_surfaces_by_arrival_ordinal() {
+        let (mut app, root_id, member) = two_surfaces();
+        // root block (seq 0), member block (seq 1), root block (seq 2).
+        app.handle(AppEvent::Agent(root_id.clone(), AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        let order = app.merged_order();
+        assert_eq!(order, vec![(0, 0), (1, 0), (0, 1)], "arrival interleave: {order:?}");
+    }
+
+    #[test]
+    fn merged_order_breaks_seq_ties_by_canonical_surface_then_index() {
+        let (mut app, root_id, _member) = two_surfaces();
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        // Hand-stamp the member's first block at the SAME ordinal (0).
+        app.surfaces[1].transcript.push(Block::Notice("m".into()));
+        app.surfaces[1].block_revs.push(0);
+        app.surfaces[1].cache.push(CacheEntry::never());
+        app.surfaces[1].seqs.push(0);
+        let order = app.merged_order();
+        assert_eq!(order, vec![(0, 0), (1, 0)], "the root wins a seq tie: {order:?}");
+    }
+
+    #[test]
+    fn merged_order_spans_every_surface_root_included() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        let order = app.merged_order();
+        assert_eq!(order.len(), 2);
+        assert!(order.contains(&(0, 0)), "the root is merged: {order:?}");
+        assert!(order.contains(&(1, 0)), "the member is merged: {order:?}");
+    }
+
+    #[test]
+    fn seqs_stay_in_lockstep_across_push_insert_and_retire() {
+        let mut app = App::new();
+        app.focused_mut().push_block(Block::Notice("a".into()));
+        app.focused_mut().push_block(Block::Transient("/x".into()));
+        app.focused_mut().insert_block(0, Block::Notice("z".into()));
+        app.focused_mut().retire_transient();
+        let s = app.focused();
+        assert_eq!(s.seqs.len(), s.transcript.len(), "seqs/transcript in step");
+        assert_eq!(s.block_revs.len(), s.transcript.len());
+        assert_eq!(s.cache.len(), s.transcript.len());
+        // seed-hint lockstep: `seed_hint_if_empty` pushes `transcript` directly,
+        // so it needs its own `seqs.push`.
+        let mut app2 = App::new();
+        app2.focused_mut().seed_hint_if_empty();
+        assert_eq!(app2.focused().seqs.len(), 1, "the hint keeps seqs in step");
+        app2.focused_mut().push_block(Block::Notice("real".into()));
+        let s2 = app2.focused();
+        assert_eq!(s2.seqs.len(), s2.transcript.len(), "in step after a real block");
+        assert_eq!(s2.transcript.len(), 1, "the hint retired, the real block is in");
+    }
+
+    #[test]
+    fn append_block_lines_at_renders_an_arbitrary_surface_with_an_origin_head() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        app.handle(AppEvent::Agent(member, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let r = app.append_block_lines_at(0, 0, 60, Some("wcode"), &mut out);
+        assert_eq!(r.start, 0, "the root block starts the buffer");
+        let after_root = out.len();
+        assert!(after_root >= 2, "origin head + at least one block line");
+        // The member's FIRST block (bi == 0) must STILL carry its leading blank
+        // separator — keyed on `out`, not on the block index.
+        let r2 = app.append_block_lines_at(1, 0, 60, Some("w1"), &mut out);
+        assert_eq!(out[after_root], Line::default(), "a blank separator leads it");
+        assert_eq!(line_text(&out[after_root + 1]), " w1    ", "the origin head names w1");
+        assert_eq!(r2.start, after_root + 1, "the head is part of the range");
+    }
+
+    #[test]
+    fn append_block_lines_at_is_a_noop_for_an_out_of_range_index() {
+        let mut app = App::new();
+        let mut out: Vec<Line<'static>> = Vec::new();
+        assert_eq!(app.append_block_lines_at(9, 0, 60, Some("x"), &mut out), 0..0);
+        assert!(out.is_empty(), "nothing rendered for a bad surface");
+        assert_eq!(app.append_block_lines_at(0, 9, 60, Some("x"), &mut out), 0..0);
+        assert!(out.is_empty(), "nothing rendered for a bad block");
+    }
+
+    #[test]
+    fn the_origin_head_is_not_baked_into_the_block_cache() {
+        let mut app = App::new();
+        app.handle(AppEvent::Agent(root(), AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        let mut focus_out: Vec<Line<'static>> = Vec::new();
+        app.focused_mut().append_block_lines(0, 60, &mut focus_out);
+        let focus_lines = focus_out.len();
+        let mut all_out: Vec<Line<'static>> = Vec::new();
+        app.append_block_lines_at(0, 0, 60, Some("wcode"), &mut all_out);
+        assert_eq!(app.focused().cache[0].lines.len(), focus_lines, "the cache is mode-agnostic");
+        assert_eq!(all_out.len(), focus_lines + 1, "exactly one head row added");
+    }
+
+    #[test]
+    fn seeded_blocks_are_stamped_and_the_first_live_block_does_not_collide() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.seed_history(&root_id, &[assistant("hi")]);
+        app.seed_history(&member, &[assistant("yo")]);
+        let seeded_max = app
+            .surfaces
+            .iter()
+            .flat_map(|s| s.seqs.iter().copied())
+            .max()
+            .expect("seeded blocks");
+        app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
+        let live = *app.focused().seqs.last().unwrap();
+        assert!(live > seeded_max, "the live block is strictly greater: {live} > {seeded_max}");
+    }
+
+    #[test]
+    fn set_view_mode_from_the_spec_seeds_the_initial_mode() {
+        let mut app = App::new();
+        app.set_view_mode(ViewMode::All);
+        assert_eq!(app.view_mode(), ViewMode::All);
+        assert!(SessionHead::of(&app).view == ViewMode::All, "the head carries it");
+    }
+
+    #[test]
+    fn all_mode_does_not_disable_input_and_enter_targets_the_focused_surface() {
+        let (mut app, _root, member) = two_surfaces();
+        app.set_view_mode(ViewMode::All);
+        app.set_focus(1); // the member
+        submit(&mut app, "hi");
+        assert_eq!(app.take_actions(), vec![Action::Submit("hi".into())]);
+        assert!(
+            matches!(app.surfaces[1].transcript.last(), Some(Block::User(t)) if t == "hi"),
+            "the focused (member) surface got the prompt"
+        );
+        assert!(
+            !matches!(app.surfaces[0].transcript.last(), Some(Block::User(_))),
+            "the root did not"
+        );
+        let _ = member;
+    }
+
+    #[test]
+    fn chrome_surface_is_the_root_in_all_and_the_focused_in_focus() {
+        let (mut app, root_id, member) = two_surfaces();
+        app.set_focus(1);
+        assert_eq!(app.chrome_surface().id, member, "Focus → the focused surface");
+        app.set_view_mode(ViewMode::All);
+        assert_eq!(app.chrome_surface().id, root_id, "All → the root");
+    }
+
+    #[test]
+    fn running_and_run_elapsed_reflect_the_root_in_all_mode() {
+        let (mut app, root_id, member) = two_surfaces();
+        // The member is running; the root is idle.
+        app.handle(AppEvent::Agent(member, AgentEvent::AgentStart));
+        app.set_focus(1);
+        assert!(app.chrome_running(), "Focus: the running focused member");
+        app.set_view_mode(ViewMode::All);
+        assert!(!app.chrome_running(), "All: the idle root");
+        assert!(app.running(), "App::running() stays focused (the tick guard)");
+        // The elapsed similarly reflects the chrome surface.
+        app.set_run_elapsed(&root_id, std::time::Duration::from_millis(5));
+        assert_eq!(app.chrome_elapsed(), Some(std::time::Duration::from_millis(5)));
+        assert_eq!(app.run_elapsed(), None, "the focused member has no elapsed");
+    }
+
+    #[test]
+    fn session_head_view_is_the_app_mode() {
+        let mut app = App::new();
+        assert_eq!(SessionHead::of(&app).view, ViewMode::Focus);
+        app.set_view_mode(ViewMode::All);
+        assert_eq!(SessionHead::of(&app).view, ViewMode::All);
+    }
+
+    #[test]
+    fn browse_and_toggle_all_tools_are_noops_in_all_mode() {
+        let mut app = App::new();
+        app.focused_mut().push_block(panel_block("bash"));
+        app.set_view_mode(ViewMode::All);
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Input, "browse stays off in All");
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        let expanded = matches!(app.focused().transcript[0], Block::Tool(ref t) if t.expanded);
+        assert!(!expanded, "Ctrl-T is inert in All");
+    }
+
+    #[test]
+    fn the_all_scroll_offset_does_not_leak_into_a_surface_scroll_on_a_flip() {
+        let mut app = App::new();
+        app.set_view_mode(ViewMode::All);
+        app.all_max_scroll = 100;
+        app.scroll_up(10);
+        assert_eq!(app.scroll(), 10, "the merged offset moved");
+        app.set_view_mode(ViewMode::Focus);
+        assert_eq!(app.scroll(), 0, "the surface scroll was never touched");
+        assert_eq!(app.focused().scroll, 0);
+    }
+
+    #[test]
+    fn all_scroll_pins_on_growth_via_the_all_mirror_fields() {
+        let mut app = App::new();
+        app.set_view_mode(ViewMode::All);
+        // First measure: total 50, height 10 → max 40. Scroll up to 20.
+        app.sync_scroll(50, 10, 60);
+        app.scroll_up(20);
+        assert_eq!(app.scroll(), 20);
+        // Content grows to 55 → the view stays pinned (offset grows by the delta).
+        app.sync_scroll(55, 10, 60);
+        assert_eq!(app.scroll(), 25, "pinned: 20 + (55 - 50)");
+        // Then clamps at the top.
+        app.sync_scroll(1, 10, 60);
+        assert_eq!(app.scroll(), 0, "clamped at the top");
+    }
+
+    #[test]
+    fn run_command_view_sets_the_mode_and_rejects_an_unknown_token() {
+        let mut app = App::new();
+        submit(&mut app, "/view all");
+        assert_eq!(app.view_mode(), ViewMode::All);
+        submit(&mut app, "/view focus");
+        assert_eq!(app.view_mode(), ViewMode::Focus);
+        submit(&mut app, "/view sideways");
+        assert_eq!(app.view_mode(), ViewMode::Focus, "an unknown token leaves the mode");
+        assert!(
+            matches!(app.transcript().last(), Some(Block::Transient(t)) if t.contains("sideways")),
+            "the error names the token: {:?}",
+            app.transcript().last()
         );
     }
 }

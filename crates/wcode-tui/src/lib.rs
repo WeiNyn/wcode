@@ -34,7 +34,7 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::{AskError, Backend};
 
 pub use crate::app::{
-    Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool,
+    Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool, ViewMode,
     DEFAULT_MEASURE, MEASURE_LIMIT, MEASURE_MIN,
 };
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
@@ -45,6 +45,10 @@ pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 pub struct TuiSpec {
     /// The initial transcript measure in columns. `None` = [`DEFAULT_MEASURE`].
     pub width: Option<usize>,
+    /// The initial view mode (All/Focus). `None` = the TUI default
+    /// ([`ViewMode::Focus`]). The view analogue of `width`: the user can toggle it
+    /// live (`Ctrl-O`, `/view`), but the config sets the session's initial mode.
+    pub view: Option<ViewMode>,
 }
 
 /// Validate a `[tui] width` from config, or `Err` outside the allowed range.
@@ -387,6 +391,11 @@ pub async fn run(
     // The configured initial measure (`[tui] width`, D016) — clamped by `set_measure`.
     if let Some(cols) = tui.width {
         app.set_measure(cols);
+    }
+    // The configured initial view mode (`[tui] view` / `--view`), the view
+    // analogue of the width seed above.
+    if let Some(view) = tui.view {
+        app.set_view_mode(view);
     }
     app.set_models(models);
     app.set_sessions(sessions);
@@ -768,6 +777,35 @@ mod tests {
         assert!(validate_measure(MEASURE_LIMIT + 1).is_err(), "above the ceiling");
         let msg = validate_measure(MEASURE_LIMIT + 1).unwrap_err();
         assert!(msg.contains(&MEASURE_MIN.to_string()), "names the range: {msg}");
+    }
+
+    #[test]
+    fn tui_spec_view_seeds_the_app_mode_at_startup() {
+        // `run` seeds the app from `tui.view` (the width-seed analogue) before the
+        // first draw. Exercise that seed directly — no terminal needed.
+        let seed = |spec: &TuiSpec| {
+            let mut app = App::new();
+            if let Some(view) = spec.view {
+                app.set_view_mode(view);
+            }
+            app.view_mode()
+        };
+        assert_eq!(
+            seed(&TuiSpec {
+                width: None,
+                view: Some(ViewMode::All),
+            }),
+            ViewMode::All,
+            "the spec's view seeds the app"
+        );
+        assert_eq!(
+            seed(&TuiSpec {
+                width: None,
+                view: None,
+            }),
+            ViewMode::Focus,
+            "an absent view leaves the default"
+        );
     }
 
     #[test]

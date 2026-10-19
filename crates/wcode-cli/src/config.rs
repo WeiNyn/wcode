@@ -407,6 +407,10 @@ pub struct TuiConfig {
     /// The transcript measure (content width) in columns. Validated against the
     /// TUI's `MEASURE_MIN..=MEASURE_LIMIT`; absent = the TUI default (68).
     pub width: Option<usize>,
+    /// The initial view mode: `"all"` or `"focus"`. Validated loudly (an unknown
+    /// token is a startup error, like an out-of-range `width`); absent = the TUI
+    /// default ([`wcode_tui::ViewMode::Focus`]).
+    pub view: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
@@ -902,6 +906,13 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             .tui
             .width
             .map(wcode_tui::validate_measure)
+            .transpose()
+            .map_err(ConfigError::Tui)?,
+        view: file
+            .tui
+            .view
+            .as_deref()
+            .map(wcode_tui::ViewMode::parse)
             .transpose()
             .map_err(ConfigError::Tui)?,
     };
@@ -2654,6 +2665,33 @@ mod compaction_cfg_tests {
         let msg = err.to_string();
         assert!(msg.contains('5'), "names the value: {msg}");
         assert!(msg.contains(&wcode_tui::MEASURE_MIN.to_string()), "names the floor: {msg}");
+    }
+
+    #[test]
+    fn tui_view_parses_all_and_focus() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"all\"\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.tui.view, Some(wcode_tui::ViewMode::All));
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"focus\"\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.tui.view, Some(wcode_tui::ViewMode::Focus));
+    }
+
+    #[test]
+    fn an_absent_tui_view_leaves_the_default_focus() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nwidth = 100\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.tui.view, None, "None ⇒ the TUI's default (Focus)");
+    }
+
+    #[test]
+    fn an_unknown_tui_view_is_a_loud_config_error() {
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"wide\"\n").unwrap();
+        let err = merge(EnvLike::default(), file).unwrap_err();
+        assert!(matches!(err, ConfigError::Tui(_)), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("wide"), "names the value: {msg}");
+        assert!(msg.contains("all") && msg.contains("focus"), "names the accepted: {msg}");
     }
 
     #[test]

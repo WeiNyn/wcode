@@ -195,6 +195,9 @@ struct Args {
     stdio: bool,
     /// `--tui`: force the full-screen TUI.
     tui: bool,
+    /// `--view all|focus`: force the initial TUI view mode, overriding `[tui] view`.
+    /// Ignored by the line REPL.
+    view: Option<String>,
     /// `--no-tui`: force the line REPL (pipes/CI).
     no_tui: bool,
 }
@@ -313,6 +316,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
                 i += 1;
             }
             "--tui" => a.tui = true,
+            "--view" => {
+                a.view = Some(args.get(i).ok_or("--view requires all|focus")?.clone());
+                i += 1;
+            }
             "--no-tui" => a.no_tui = true,
             other => return Err(format!("unexpected argument: {other}")),
         }
@@ -324,6 +331,19 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
         return Err("--owner reports back over a socket; it cannot be combined with --stdio".into());
     }
     Ok(Parsed::Args(a))
+}
+
+/// Fold `--view <all|focus>` onto the resolved config's `[tui] view` (the flag
+/// wins). A bad token is a loud startup error. `TuiSpec` rides `Options` whole at
+/// both sites (`tui: cfg.tui`), so the view needs no per-site threading.
+fn apply_view_flag(args: &Args, cfg: &mut Config) -> Result<(), String> {
+    match args.view.as_deref() {
+        Some(token) => {
+            cfg.tui.view = Some(wcode_tui::ViewMode::parse(token)?);
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 /// MissingModel rescue: re-run merge() with the parsed file config so env
@@ -488,6 +508,15 @@ fn config_dump(cfg: &Config) -> String {
         cfg.tui
             .width
             .map_or_else(|| format!("(default {})", wcode_tui::DEFAULT_MEASURE), |w| w.to_string())
+    );
+    let _ = writeln!(
+        out,
+        "tui.view: {}",
+        match cfg.tui.view {
+            Some(wcode_tui::ViewMode::All) => "all",
+            Some(wcode_tui::ViewMode::Focus) => "focus",
+            None => "(default focus)",
+        }
     );
     for (id, profile) in &cfg.models {
         let endpoint = profile.endpoint.map(endpoint_label).unwrap_or("(inherit)");
@@ -689,6 +718,12 @@ fn load_config_raw(args: &mut Args) -> Config {
                 std::process::exit(2);
             }
         };
+    }
+    // `--view` > `[tui] view` > the TUI default. The flag wins (the `--tui` rule);
+    // folded here so BOTH `Options` sites pick it up and `--dump-config` reflects it.
+    if let Err(e) = apply_view_flag(args, &mut cfg) {
+        eprintln!("error: {e}");
+        std::process::exit(2);
     }
     // D003: resolve `[[team]] file = "<path>"` members BEFORE the discovery fold
     // (and outside the `--no-project-config` guard), so a file member wins over a
@@ -3630,6 +3665,49 @@ mod tests {
         };
         assert!(a.list_themes);
         assert!(!Args::default().list_themes);
+    }
+
+    #[test]
+    fn the_view_flag_overrides_the_config_value() {
+        // The config sets Focus; `--view all` wins.
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"focus\"\n").unwrap();
+        let mut cfg = merge(EnvLike::default(), file).unwrap();
+        let a = Args {
+            view: Some("all".into()),
+            ..Args::default()
+        };
+        apply_view_flag(&a, &mut cfg).unwrap();
+        assert_eq!(cfg.tui.view, Some(wcode_tui::ViewMode::All), "the flag wins");
+        // No flag: the config value survives.
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"focus\"\n").unwrap();
+        let mut cfg = merge(EnvLike::default(), file).unwrap();
+        apply_view_flag(&Args::default(), &mut cfg).unwrap();
+        assert_eq!(cfg.tui.view, Some(wcode_tui::ViewMode::Focus), "the config survives");
+        // A bad token is a loud error.
+        let a = Args {
+            view: Some("wide".into()),
+            ..Args::default()
+        };
+        let mut cfg = merge(
+            EnvLike::default(),
+            toml::from_str::<FileConfig>("model = \"m\"\n").unwrap(),
+        )
+        .unwrap();
+        assert!(apply_view_flag(&a, &mut cfg).is_err(), "an unknown token is refused");
+    }
+
+    #[test]
+    fn the_view_flag_reaches_both_options_sites() {
+        // Both `Options` sites (the socket client and the local TUI) spell the
+        // carrier identically — `tui: cfg.tui` — so the view needs no per-site
+        // field. `TuiSpec` is `Copy`, so neither site can drop it by moving it;
+        // prove the config→spec view propagation both sites consume.
+        let file: FileConfig = toml::from_str("model = \"m\"\n[tui]\nview = \"all\"\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        let site_socket: wcode_tui::TuiSpec = cfg.tui;
+        let site_local: wcode_tui::TuiSpec = cfg.tui;
+        assert_eq!(site_socket.view, Some(wcode_tui::ViewMode::All));
+        assert_eq!(site_local.view, Some(wcode_tui::ViewMode::All));
     }
 
     #[test]

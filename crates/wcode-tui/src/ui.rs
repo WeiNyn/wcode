@@ -18,7 +18,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
 use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
-use crate::app::{ChangeRow, change_totals, changes_header, info_visible_rows};
+use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
 use crate::markdown;
 use crate::theme;
 
@@ -579,12 +579,25 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // in a second pass. A range starts *after* the separator, so it never spans
     // the blank line above the block.
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    // Length FIRST (immutable), then each index appended through the `&mut` cache:
-    // `append_block_lines` owns the transcript/cache split borrow, so this loop
-    // never holds `transcript().iter()` across a mutable cache borrow.
-    let n = app.transcript().len();
-    for i in 0..n {
-        ranges.push(app.focused_mut().append_block_lines(i, width, &mut lines));
+    // The view branch: All merges EVERY surface's committed blocks by arrival
+    // order with a dim origin head; Focus is today's focused-only path.
+    if app.view_mode() == ViewMode::All {
+        // DISPLAY-ONLY: browse/hit-testing are Focus-scoped — no `ranges`, no
+        // `set_block_ranges`, no hit map. Owned indices, so no borrow is held
+        // across the `&mut` in `append_block_lines_at`; the label is owned too.
+        for (si, bi) in app.merged_order() {
+            let origin = app.surface_label(si).to_string();
+            let _ = app.append_block_lines_at(si, bi, width, Some(&origin), &mut lines);
+        }
+    } else {
+        // Length FIRST (immutable), then each index appended through the `&mut`
+        // cache: `append_block_lines` owns the transcript/cache split borrow, so
+        // this loop never holds `transcript().iter()` across a mutable cache
+        // borrow.
+        let n = app.transcript().len();
+        for i in 0..n {
+            ranges.push(app.focused_mut().append_block_lines(i, width, &mut lines));
+        }
     }
     // The in-flight message trails the committed transcript (it is transient, so
     // it is never a selection target). `append_live_lines` owns the separator and
@@ -593,13 +606,19 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let height = area.height as usize;
     let total = lines.len();
     let grew = total != app.total_lines();
-    app.set_block_ranges(ranges.clone());
+    // `set_block_ranges`/`set_transcript_hit` index the FOCUSED transcript — the
+    // Feedback channel is Focus-only (All is display-only).
+    let all = app.view_mode() == ViewMode::All;
+    if !all {
+        app.set_block_ranges(ranges.clone());
+    }
     // Follow the tail unless the user has scrolled up; the renderer measures
-    // the transcript and reconciles the scroll window.
+    // the transcript and reconciles the scroll window (view-aware).
     app.sync_scroll(total, height, measure);
     // While browsing, re-anchor the view across transcript growth so a run that
     // appends blocks never yanks the view to the tail; a deliberate wheel scroll
-    // is left alone (this fires only when the content changed).
+    // is left alone (this fires only when the content changed). Browse is
+    // Focus-only, so it never runs in All mode.
     if app.mode() == Mode::Browse && app.selected().is_some() && grew {
         app.reveal_selected();
     }
@@ -637,7 +656,11 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    app.set_transcript_hit(col, start, rows_text);
+    // Publish the transcript viewport for hit-testing — Focus-only (All is
+    // display-only; its hit map stays clear for the frame).
+    if !all {
+        app.set_transcript_hit(col, start, rows_text);
+    }
     frame.render_widget(Paragraph::new(window), col);
 }
 
@@ -735,6 +758,19 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
     }
 }
 
+/// One All-mode origin head row: a dim ` {label}` run padded to [`CONTENT_COL`]
+/// (the `user_head` shape without the accent). The label is the owning surface's
+/// label (`wcode` for the root, `w1`… for members). Pinned to CONTENT_COL so the
+/// interleaved blocks still line up under the single content column.
+pub(crate) fn origin_row(label: &str, _width: usize) -> Line<'static> {
+    let filled = 1 + label.chars().count(); // the leading space + the name
+    let pad = CONTENT_COL.saturating_sub(filled);
+    Line::from(vec![
+        Span::styled(format!(" {label}"), dim()),
+        Span::styled(" ".repeat(pad), dim()),
+    ])
+}
+
 /// The user block's head row: a dim ` YOU` run in the gutter, padded so the prompt
 /// lands at [`CONTENT_COL`], then the first wrapped line of `text`. The assistant
 /// carries **no** head — it is the page itself (D012).
@@ -796,6 +832,11 @@ fn session_head_row(head: &SessionHead, width: usize) -> Line<'static> {
 
     let left = |with_session: bool| -> Vec<Span<'static>> {
         let mut spans = vec![Span::styled("WCODE", dim())];
+        // ONE rule: the seg is present in All mode only — no ` · FOCUS` run, so
+        // Focus stays byte-identical to today.
+        if let Some(seg) = head.view.label() {
+            spans.push(Span::styled(format!(" · {seg}"), dim()));
+        }
         if let (true, Some(s)) = (with_session, &session) {
             spans.push(Span::styled(s.clone(), dim()));
         }
@@ -1985,7 +2026,7 @@ fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
     // itself (the predicate reads `content.last()`). ONE word, no new glyph —
     // `⠹` is already the running glyph and `accent()` its style.
     let word = if app.live_thinking() { "thinking" } else { "running" };
-    let (state, state_style) = match (app.running(), app.run_elapsed()) {
+    let (state, state_style) = match (app.chrome_running(), app.chrome_elapsed()) {
         (true, Some(d)) => (
             format!("⠹ {word} {}", format_ms(d.as_millis() as u64)),
             accent(),
@@ -5895,6 +5936,123 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(
             text.contains("esc / F1 to close"),
             "F1's footer drifted:\n{text}"
+        );
+    }
+
+    // ---- All mode (the merged transcript) -------------------------------------
+
+    /// Append a distinguishable notice block to surface `id` (its rendered text
+    /// carries `compacted <n>`).
+    fn append_notice(app: &mut App, id: SessionId, n: usize) {
+        app.handle(AppEvent::Agent(
+            id,
+            wcode_harness::event::AgentEvent::Compaction { summarized: n, kept: 0 },
+        ));
+    }
+
+    /// Add a member surface (`label`) beside the default root (labelled `wcode`).
+    fn add_member(app: &mut App, label: &str) {
+        app.add_surface(crate::SurfaceInfo {
+            id: SessionId::agent(label),
+            label: label.into(),
+            model: "m".into(),
+            is_root: false,
+        });
+    }
+
+    fn line_text(l: &Line<'_>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn focus_mode_renders_the_focused_transcript_byte_identically() {
+        let mut app = App::new();
+        add_member(&mut app, "w1");
+        app.set_cwd(Some("proj".into()));
+        append_notice(&mut app, root(), 11);
+        append_notice(&mut app, SessionId::agent("w1"), 22);
+        // Focus is the root by default: only ITS transcript renders — no merge,
+        // no origin head.
+        let frame = buffer_text(&render(&mut app, 80, 16));
+        assert!(frame.contains("compacted 11"), "the focused transcript renders:\n{frame}");
+        assert!(!frame.contains("compacted 22"), "the member is NOT merged in Focus:\n{frame}");
+        assert!(!frame.contains(" · ALL"), "no seg in Focus:\n{frame}");
+        assert!(!frame.contains("FOCUS"), "no dead FOCUS seg in Focus:\n{frame}");
+        assert!(
+            !frame.lines().any(|l| l.trim_end() == " wcode"),
+            "no origin head in Focus:\n{frame}"
+        );
+        // A second Focus frame is byte-identical (the mode never disturbs it).
+        assert_eq!(buffer_text(&render(&mut app, 80, 16)), frame);
+    }
+
+    #[test]
+    fn all_mode_interleaves_members_with_origin_heads() {
+        let mut app = App::new();
+        add_member(&mut app, "w1");
+        app.set_cwd(Some("proj".into()));
+        // root, member, root — arrival order.
+        append_notice(&mut app, root(), 11);
+        append_notice(&mut app, SessionId::agent("w1"), 22);
+        append_notice(&mut app, root(), 33);
+        app.set_view_mode(ViewMode::All);
+        let frame = buffer_text(&render(&mut app, 80, 24));
+        let a = frame.find("compacted 11").expect("the root's first block");
+        let b = frame.find("compacted 22").expect("the member's block");
+        let c = frame.find("compacted 33").expect("the root's next block");
+        assert!(a < b && b < c, "interleaved by arrival order:\n{frame}");
+        // Every block carries a dim origin head in the gutter.
+        assert!(frame.lines().any(|l| l.trim_end() == " wcode"), "a root origin head:\n{frame}");
+        assert!(frame.lines().any(|l| l.trim_end() == " w1"), "a member origin head:\n{frame}");
+    }
+
+    #[test]
+    fn the_origin_head_names_the_owning_surface() {
+        let mut app = App::new();
+        add_member(&mut app, "w1");
+        app.set_cwd(Some("proj".into()));
+        append_notice(&mut app, SessionId::agent("w1"), 22);
+        app.set_view_mode(ViewMode::All);
+        let frame = buffer_text(&render(&mut app, 80, 16));
+        assert!(
+            frame.lines().any(|l| l.trim_end() == " w1"),
+            "the head names the member:\n{frame}"
+        );
+        assert!(
+            !frame.lines().any(|l| l.trim_end() == " wcode"),
+            "the root has no block, so no root head:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn the_header_seg_shows_all_only_in_all_mode() {
+        let mut app = App::new();
+        let focus = buffer_text(&render(&mut app, 80, 8));
+        assert!(!focus.contains(" · ALL"), "no seg in Focus:\n{focus}");
+        // The one-seg rule: Focus draws NO seg at all — not a dead `FOCUS` one.
+        assert!(!focus.contains("FOCUS"), "no dead FOCUS seg in Focus:\n{focus}");
+        app.set_view_mode(ViewMode::All);
+        let all = buffer_text(&render(&mut app, 80, 8));
+        assert!(all.contains(" · ALL"), "the seg shows in All:\n{all}");
+    }
+
+    #[test]
+    fn the_header_is_byte_identical_in_focus_mode() {
+        let mut app = App::new();
+        let focus = session_head_row(&SessionHead::of(&app), 80);
+        let focus_text = line_text(&focus);
+        assert!(focus_text.starts_with("WCODE"), "the header opens on WCODE: {focus_text:?}");
+        assert!(!focus_text.contains("ALL"), "Focus draws no ALL seg: {focus_text:?}");
+        assert!(!focus_text.contains("FOCUS"), "Focus draws no seg at all: {focus_text:?}");
+        app.set_view_mode(ViewMode::All);
+        let all = session_head_row(&SessionHead::of(&app), 80);
+        let all_text = line_text(&all);
+        assert!(all_text.contains("WCODE · ALL"), "All adds the seg: {all_text:?}");
+        // The `─` fill absorbs the difference, so the row width is unchanged.
+        assert_eq!(
+            focus_text.chars().count(),
+            all_text.chars().count(),
+            "the header stays one row wide"
         );
     }
 }
