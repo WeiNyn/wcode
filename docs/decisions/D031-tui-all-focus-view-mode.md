@@ -10,7 +10,7 @@
 ## Context
 
 The TUI rendered only the **focused** surface's transcript — `ui.rs:597`
-`        let n = app.transcript().len();` over `app.rs:4545`
+`        let n = app.transcript().len();` over `app.rs:4556`
 `    pub fn transcript(&self) -> &[Block] {`; members are separate surfaces
 (`app.rs:2444` `    surfaces: Vec<Surface>,`) seen only in the strip/sidebar. The VS
 Code client already offers **All / Focus** — a client-side merge with no protocol
@@ -26,9 +26,9 @@ the frame is byte-identical until opted in (`app.rs:2534` `    sidebar: bool,`).
 
 Add a client-local `ViewMode { Focus, All }` (`app.rs:2342` `pub enum ViewMode {`),
 **default `Focus`**. The merge key is a monotonic **arrival ordinal** (`app.rs:2543`
-`    next_seq: u64,`) stamped at the append chokepoints — `App::push_on` (`app.rs:4588`)
+`    next_seq: u64,`) stamped at the append chokepoints — `App::push_on` (`app.rs:4599`)
 and the `AppEvent::Agent` arm (both clear the D5 hint BEFORE measuring), plus
-`stamp_replayed` (`app.rs:4627`) for a replay.
+`stamp_replayed` (`app.rs:4638`) for a replay. **Refined by [D032](../decisions/D032-tui-all-turn-order-by-activity.md): a turn orders by its LAST activity, not its open.**
 
 All is **display-only**: browse/mouse/text selection and `Ctrl-T` are Focus-scoped
 no-ops; a dedicated `all_scroll` + four `all_*` mirror fields window the merged view.
@@ -45,6 +45,6 @@ Input targets the **focused** surface. The mode control is a header `.seg` shown
   origin head names every block's owner.
 - **Display-only forecloses cross-surface selection** in v1: in All the hit map is
   empty, so `block_at` returns `None`.
-- Chrome reflects the **root** in All via new `chrome_*`; `running()` (`app.rs:5321`),
-  `run_elapsed()` (`:5225`) and `status()` (`:5312`) keep their **focused** semantics.
+- Chrome reflects the **root** in All via new `chrome_*`; `running()` (`app.rs:5365`),
+  `run_elapsed()` (`:5269`) and `status()` (`:5356`) keep their **focused** semantics.
 - A member's **live** stream is not merged — only the focused surface's trailer rides the tail.
