@@ -90,6 +90,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | team state | `● ○ ✓ ✗` | running / idle / done / failed |
 | branch / plan | `⎇` / `⏻` | dim / accent |
 | idle / running | `⏸` / `⠹` | dim / accent |
+| queued prompts | `⇥` | dim (the composer foot's `⇥ N queued` count, W029; the enqueue notice carries no glyph) |
 | abort / paste chip | `⏹` / `❰ ❱` | dim |
 | context gauge | `used/limit` | plain text (e.g. `14.2k/272k`), flush-left on the foot (D023) |
 
@@ -214,16 +215,19 @@ blank pane.
   `/<command>` line, the bare usage-hint and error lines the `/`-command path
   emits (`/width` with no argument or out of range, an unknown command, …), the
   `/copy` reply, and the action confirmations (`theme: <name>`,
-  `width: N cols`), plus the submit-time `a turn is already running` guard —
-  all retired at the **next submit on that surface** (notices are per-surface;
-  a retire never crosses surfaces). A transient row renders **exactly** like a
+  `width: N cols`), plus the mid-run enqueue confirmation `queued · N waiting`
+  (W029 — it replaces the `a turn is already running` guard, so a prompt typed
+  mid-run is confirmed and kept, never discarded) — all retired at the **next
+  submit on that surface** (a dequeue is one; notices are per-surface, a retire
+  never crosses surfaces). A transient row renders **exactly** like a
   `Notice`; retirement removes it, it is not restyled, and the browse selection
   lands on the same block. A report is **not** chatter, so it gets no transient
   row at all: `/help`, `/verify`, `/usage`, `/tasks`, and `/team roster` open an
   **information modal** (below) and leave only their echoed `/<command>` line
   behind. **Run events are permanent** —
   `⋯ compacted N messages`, `⋯ compaction skipped: <reason>`,
-  `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, and the
+  `⋯ retrying (n/m)`, `⏹ aborted`, the run's changes summary, the `dropped N
+  queued message` an idle `Esc` leaves when it discards a queue (W029), and the
   `⋯ N earlier message(s)` divider stay for the session: they are the record of
   what the run did. The seeded hint has its own retirement (`clear_hint` at the
   first block) and is in neither list.
@@ -348,18 +352,23 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
    (D009): the chrome it carried (`project`/`branch`/`session`, `model`/`effort`)
    now rides the pinned **header** band (above), and the composer keeps
    only the **foot line** — the plain `used/limit` text left and
-   `⏻ plan · ▤ browse · ⏸ idle`/`⠹ running 3.1s`/`⠹ thinking 3.1s`/`⠹ btw…` · `↑ N` `<N>/<M>` right
-   (the `btw…` state while a `/btw` side ask is in flight; `⠹ thinking <t>`
-   replaces `running` while the live message reasons — D018; the **folio**
-   `<N>/<M>` is the surface's turn count, `N == M`, so a first turn reads
-   `1/1`). There is **no box and no corners**, and **no session row, no status
+   `⏻ plan · ▤ browse · ⇥ N queued · ⏸ idle`/`⠹ running 3.1s`/`⠹ thinking 3.1s`/`⠹ btw…` · `↑ N` `<N>/<M>` right
+   (the `⇥ N queued` count, in that exact `⇥ {n} queued` form, while the
+   surface's queue is non-empty — W029; the `btw…` state while a `/btw` side
+   ask is in flight; `⠹ thinking <t>` replaces `running` while the live message
+   reasons — D018; the **folio** `<N>/<M>` is the surface's turn count,
+   `N == M`, so a first turn reads `1/1`). There is **no box and no corners**, and **no session row, no status
    row, and no head row**.
 The context gauge is plain text — `used/limit` (e.g. `14.2k/272k`), all `dim`,
 flush-left on the composer foot (no parallelograms, no colour; D023). The header
 and composer-foot
-titles clip with `…` then drop least-important-first (header: the session
-id, then branch; foot: the `↑ N` scroll, then the gauge text, then
-`⏻ plan`/`▤ browse`). The session id is shortened to 8 chars.
+titles clip with `…` then drop least-important-first. Header: the session
+id, then branch. Foot: the `↑ N` scroll, then the gauge text, then
+`⏻ plan`/`▤ browse`, then the `⇥ N queued` count — the count survives until
+only the `{state}` chip and folio remain, so it outlives every mode token and
+is dropped last. A dropped count is never silent: each enqueue also fires the
+`queued · N waiting` notice (§4 Notices), so a count the width budget sheds has
+already been announced on that surface. The session id is shortened to 8 chars.
 
 **Sidebar** — `Ctrl-B` docks a 30-col left panel (only when the terminal is
 ≥ 80 cols; below that the layout is untouched), **off by default** so the base
@@ -403,7 +412,10 @@ overlay floats over the whole terminal so it covers the panel. *(No `Todos` sect
 atom buffer; a paste chip is one unit, never split) ·
 `PgUp`/`PgDn` page, the mouse wheel nudges (3 lines) — either scrolls the
 transcript, `↑ N` on the composer's foot line while scrolled ·
-`Esc`/`Ctrl-C` cancel a run, quit when idle · `Ctrl-Y` (`/copy`) copies the last
+`Esc`/`Ctrl-C` cancel a run, quit when idle — an `Enter` while a run is in flight
+**queues** the prompt instead of discarding it, `Esc` cancels the run but keeps
+the queue, and an idle `Esc` drops a pending queue with a `dropped N queued
+message` notice (W029) · `Ctrl-Y` (`/copy`) copies the last
 reply (OSC-52) · `Ctrl-T` expands/collapses every tool's **output** (params stay
 visible — inlined on a collapsed tool's single row, as `key  value` rows when
 expanded; a failed tool always shows its error) ·

@@ -577,14 +577,26 @@ async fn event_loop(
             }
         }
 
-        // Actions target the focused surface's backend — except `AskTo`, which
-        // names its target (the `/usage` fan-out asks every surface).
+        // Actions target the focused surface's backend — except `AskTo` and
+        // `SubmitTo`, which name their target (a `/usage` fan-out asks every
+        // surface; a dequeued prompt starts on the surface that queued it).
         let idx = app.focus();
         let (id, backend) = &backends[idx];
         for action in app.take_actions() {
             match action {
                 Action::Submit(text) => {
                     let _ = backend.send(Request::Submit { text });
+                }
+                Action::SubmitTo(target, text) => {
+                    // Resolve by id, like `AskTo` below — never the focused
+                    // backend: `AgentEnd` for a member can fire while the user
+                    // is looking at the root (W029).
+                    if let Some((_, backend)) = backends.iter().find(|(bid, _)| bid == &target) {
+                        let _ = backend.send(Request::Submit { text });
+                    }
+                    // A surface retired between the emit and the dispatch has
+                    // nowhere to run the prompt, so it is dropped — nothing is
+                    // waiting on an answer, unlike `AskTo`'s collector.
                 }
                 Action::Cancel => {
                     let _ = backend.send(Request::Cancel);

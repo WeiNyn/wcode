@@ -5,7 +5,7 @@
 //! app never performs IO; it defers side effects as [`Action`]s the event loop
 //! drains. The loop feeds it [`AppEvent`]s and draws when [`App::dirty`] is set.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -129,6 +129,15 @@ pub enum Action {
     /// `AgentEvent::Error`, never dropped: the collector must finish, or the modal
     /// never opens.
     AskTo(SessionId, Request),
+
+    /// Start a run on the surface with this id — NOT the focused one — with
+    /// `text` as its prompt (W029). The twin of [`Action::AskTo`]: a queued
+    /// prompt starts on the surface that OWNS the queue, and `AgentEnd` for a
+    /// member can fire while the root is focused, so [`Action::Submit`]'s
+    /// focused-target contract is exactly the trap this avoids. A target the
+    /// loop no longer has is dropped (a prompt for a retired surface has
+    /// nowhere to run).
+    SubmitTo(SessionId, String),
     /// Copy this text to the terminal clipboard (OSC-52).
     Copy(String),
 }
@@ -1367,6 +1376,11 @@ pub struct Surface {
     /// Files changed during the current run, in call order; reset when the next
     /// prompt starts a run, kept afterwards so the run stays reviewable.
     changes: Vec<Change>,
+    /// Prompts typed while a run was in flight, FIFO (W029). Each is started as
+    /// a normal run — its `Block::User` is pushed then — when this surface's
+    /// `AgentEnd` fires ([`App::dequeue_next`]), so the queue never renders as
+    /// a block of its own; only the foot line's `⇥ N queued` count shows it.
+    queue: VecDeque<String>,
     running: bool,
     /// A run finished (drives the team strip's `done`).
     finished: bool,
@@ -1463,6 +1477,7 @@ impl Surface {
             open_turn: None,
             turns: 0,
             changes: Vec::new(),
+            queue: VecDeque::new(),
             running: false,
             finished: false,
             failed: false,
@@ -3891,6 +3906,12 @@ impl App {
                         let open = self.surfaces[idx].open_turn.and_then(|i| {
                             self.surfaces[idx].block_revs.get(i).map(|r| (i, *r))
                         });
+                        // A run's END is the dequeue seam (W029). Captured BEFORE
+                        // `apply` consumes the event, and acted on AFTER
+                        // `stamp_new`: `apply`'s `AgentEnd` arm flushes the live
+                        // block and seals the turn, so the dequeued `Block::User`
+                        // must land under the finished exchange, not above it.
+                        let ended = matches!(&event, AgentEvent::AgentEnd);
                         if self.surfaces[idx].apply(event) {
                             self.dirty = true;
                         }
@@ -3900,6 +3921,9 @@ impl App {
                         // its `Block::Error`), so the turn keeps the lower ordinal.
                         self.touch_open_turn(idx, open);
                         self.stamp_new(idx, before);
+                        if ended {
+                            self.dequeue_next(idx);
+                        }
                     }
                 }
             }
@@ -4008,6 +4032,11 @@ impl App {
     /// cancels a run, and is inert when idle (a stray Esc must not kill the
     /// session). A SECOND press while a cancel is still in flight abandons the
     /// run — the escape hatch for a stuck tool that ignores the cancel token.
+    ///
+    /// The queued prompts (W029) outlive a cancel: Esc while running cancels the
+    /// run, not the queue, so the next prompt still starts when it ends. At IDLE,
+    /// a non-empty queue is dropped with a notice — a queue with no run coming
+    /// must never be invisible.
     fn interrupt(&mut self, quit_when_idle: bool) {
         if self.focused().running {
             if !self.focused().cancelled {
@@ -4018,6 +4047,16 @@ impl App {
             }
         } else if quit_when_idle {
             self.should_quit = true;
+        } else if !self.focused().queue.is_empty() {
+            // Idle with a queue: nothing to cancel, so Esc drops what is waiting
+            // and says so. Under auto-dequeue this is nearly unreachable (every
+            // `AgentEnd` drains the queue), which is exactly why it must be
+            // announced if it happens.
+            let idx = self.focus;
+            let n = self.surfaces[idx].queue.len();
+            self.surfaces[idx].queue.clear();
+            let queued = if n == 1 { "message" } else { "messages" };
+            self.push_on(idx, Block::Notice(format!("dropped {n} queued {queued}")));
         } else {
             // Esc at idle: nothing to cancel, and a stray Esc must not kill the session.
             return;
@@ -4079,22 +4118,66 @@ impl App {
             return;
         }
         if self.focused().running {
-            // A rejected submit is chatter, not a run event: it dies on the next
-            // submit like the rest. Routed through `push_on`, so all four
-            // parallel vecs stay in step and the block gets a real ordinal.
+            // A prompt typed MID-RUN is QUEUED, never discarded (W029): the
+            // buffer was already emptied above, so a discard loses the text.
+            // The acknowledgement is a transient (`queued · N waiting`) — it
+            // replaces itself, retired by the next submit like all chatter — and
+            // the persistent state is the foot line's `⇥ N queued` count. The
+            // prompt enters the recall history HERE, at enqueue time, so ↑
+            // finds it before it ever ran.
             let idx = self.focus;
-            self.push_on(idx, Block::Transient("a turn is already running — Esc to cancel".into()));
+            self.surfaces[idx].queue.push_back(text.clone());
+            self.surfaces[idx].history.push(text);
+            let n = self.surfaces[idx].queue.len();
+            self.push_on(idx, Block::Transient(format!("queued · {n} waiting")));
             return;
         }
         self.focused_mut().history.push(text.clone());
         let idx = self.focus;
-        self.push_on(idx, Block::User(text.clone()));
-        self.focused_mut().running = true;
-        self.focused_mut().finished = false;
-        self.focused_mut().cancelled = false;
-        // A new run starts a fresh changeset; the previous one is superseded.
-        self.focused_mut().changes.clear();
+        self.begin_run(idx, text.clone());
         self.actions.push(Action::Submit(text));
+    }
+
+    /// The ONE run-start sequence: retire the surface's `/`-command chatter, push
+    /// the `Block::User`, arm the run, and reset the changeset. Shared by
+    /// `submit`'s idle path and [`App::dequeue_next`] so a queued prompt starts
+    /// exactly like a typed one.
+    ///
+    /// The CALLER emits the action: `submit` targets the focused surface
+    /// ([`Action::Submit`]) while a dequeue names its own (`Action::SubmitTo`).
+    /// The `Block::User` goes through [`App::push_on`], never a raw
+    /// `push_block`, so the `seqs` arrival ordinal is stamped.
+    fn begin_run(&mut self, idx: usize, text: String) {
+        if idx >= self.surfaces.len() {
+            return;
+        }
+        self.surfaces[idx].retire_transient();
+        self.push_on(idx, Block::User(text));
+        let surface = &mut self.surfaces[idx];
+        surface.running = true;
+        surface.finished = false;
+        surface.cancelled = false;
+        // A new run starts a fresh changeset; the previous one is superseded.
+        surface.changes.clear();
+        self.dirty = true;
+    }
+
+    /// Start surface `idx`'s next queued prompt (W029). Called from the
+    /// `AppEvent::Agent` arm on `AgentEnd` — AFTER `apply` has flushed the live
+    /// block and sealed the turn, so the dequeued `Block::User` lands under the
+    /// finished exchange — and from nowhere else, so a queued prompt starts
+    /// exactly once per ended run. A no-op on an empty queue.
+    fn dequeue_next(&mut self, idx: usize) {
+        let Some(text) = self
+            .surfaces
+            .get_mut(idx)
+            .and_then(|surface| surface.queue.pop_front())
+        else {
+            return;
+        };
+        self.begin_run(idx, text.clone());
+        let id = self.surfaces[idx].id.clone();
+        self.actions.push(Action::SubmitTo(id, text));
     }
 
     /// Parse and act on a `/`-command typed at the prompt. Dispatch goes through
@@ -4588,8 +4671,9 @@ impl App {
 
     /// Append `block` to surface `idx` and stamp it with the next arrival ordinal
     /// — **THE App-level append chokepoint**. Every `App`-driven append that
-    /// bypasses the `AppEvent::Agent` arm routes through here (`submit`'s
-    /// `Block::User` and the "already running" transient, `show_change`'s
+    /// bypasses the `AppEvent::Agent` arm routes through here (`begin_run`'s
+    /// `Block::User` — the shared start of `submit`'s idle path and a dequeue —,
+    /// the mid-run `queued · N waiting` enqueue notice, `show_change`'s
     /// `Block::Diff`, `notice` and `transient`).
     ///
     /// ORDER: clear the empty-state hint FIRST, then measure, then append, then
@@ -5366,6 +5450,14 @@ impl App {
         self.focused().running
     }
 
+    /// The focused surface's queued-prompt count — the composer foot's
+    /// `⇥ N queued` segment (W029). Focused, not chrome: the enqueue is a
+    /// keystroke into the focused surface, and the foot's gauge reads the same
+    /// surface.
+    pub fn queued_count(&self) -> usize {
+        self.focused().queue.len()
+    }
+
     /// The surface whose identity/state the CHROME reflects: the ROOT (index 0) in
     /// All mode — the merged transcript is nobody's particular transcript — else
     /// the focused surface. # Contracts: infallible (`surfaces` is never empty).
@@ -5623,18 +5715,191 @@ mod tests {
     }
 
     #[test]
-    fn a_second_submit_while_running_is_refused() {
+    fn a_second_submit_while_running_is_queued() {
         let mut app = App::new();
         submit(&mut app, "first");
         let _ = app.take_actions();
         submit(&mut app, "second");
-        // The guard is CHATTER, not a run event: it is pushed as a transient, so
-        // it dies with the next submit (W014c).
+        // No longer discarded (W029): the prompt is queued and NOTHING starts.
+        // The old "a turn is already running" discard is gone; the mid-run
+        // acknowledgement is a transient that REPLACES itself (A2), not a stack.
+        assert_eq!(app.queued_count(), 1);
+        assert!(app.take_actions().is_empty());
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Transient(t)) if t.contains("already running")
+            Some(Block::Transient(t)) if t == "queued · 1 waiting"
         ));
+        // A third submit re-announces the DEPTH and retires the previous notice.
+        submit(&mut app, "third");
+        assert_eq!(app.queued_count(), 2);
+        assert_eq!(chatter(&app), vec!["queued · 2 waiting".to_string()]);
+    }
+
+    #[test]
+    fn enter_mid_run_queues_and_leaves_the_buffer_empty_but_loses_nothing() {
+        let mut app = App::new();
+        submit(&mut app, "first");
+        assert_eq!(app.take_actions(), vec![Action::Submit("first".into())]);
+        submit(&mut app, "second");
+        // The buffer empties exactly as before — but the text is KEPT.
+        assert_eq!(app.input(), "");
+        assert_eq!(app.queued_count(), 1);
+        assert!(
+            app.take_actions().is_empty(),
+            "a queued prompt must not start a run"
+        );
+        // A1: the text enters the recall history at ENQUEUE time, so ↑ finds it
+        // before it ever ran.
+        app.handle(AppEvent::Key(Key::Up));
+        assert_eq!(app.input(), "second");
+        // The queued prompt is NOT a transcript block until it starts.
+        assert!(!app.transcript().iter().any(|b| matches!(
+            b,
+            Block::User(t) if t == "second"
+        )));
+    }
+
+    #[test]
+    fn enter_mid_run_then_agent_end_runs_the_queued_text_exactly_once() {
+        let mut app = App::new();
+        let id = app.focused_id().clone();
+        submit(&mut app, "first");
+        submit(&mut app, "second");
+        let _ = app.take_actions();
+        // ONLY `AgentEnd` dequeues: any other event leaves the queue alone.
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
         assert!(app.take_actions().is_empty());
+        assert_eq!(app.queued_count(), 1);
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentEnd));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::SubmitTo(id.clone(), "second".into())]
+        );
+        assert_eq!(app.queued_count(), 0);
+        assert!(app.running(), "the dequeued prompt is now the running turn");
+        // Exactly one `Block::User("second")` — pushed at dequeue, never twice.
+        let starts = |app: &App| {
+            app.transcript()
+                .iter()
+                .filter(|b| matches!(b, Block::User(t) if t == "second"))
+                .count()
+        };
+        assert_eq!(starts(&app), 1);
+        // A SECOND `AgentEnd` starts nothing: the queue drained, so it is just
+        // the end of the dequeued run.
+        app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentEnd));
+        assert!(app.take_actions().is_empty());
+        assert_eq!(starts(&app), 1);
+        assert!(!app.running());
+    }
+
+    #[test]
+    fn a_slash_command_mid_run_is_not_queued() {
+        let mut app = App::new();
+        submit(&mut app, "first");
+        let _ = app.take_actions();
+        submit(&mut app, "/help");
+        // The `/` dispatch precedes the running guard (`app.rs` `submit`), so the
+        // command runs NOW and nothing is queued for later.
+        assert_eq!(app.queued_count(), 0);
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Transient(t) if t == "/help")),
+            "the command's echo is present"
+        );
+    }
+
+    #[test]
+    fn esc_keeps_the_queue() {
+        let mut app = App::new();
+        submit(&mut app, "first");
+        submit(&mut app, "second");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.take_actions(), vec![Action::Cancel]);
+        assert_eq!(app.queued_count(), 1, "Esc cancels the run, not the queue");
+    }
+
+    #[test]
+    fn esc_idle_drops_the_queue_with_a_notice() {
+        let mut app = App::new();
+        // Nearly unreachable through keys (every `AgentEnd` drains the queue), so
+        // stage the state directly: an IDLE surface with one queued prompt.
+        app.surfaces[app.focus].queue.push_back("orphan".into());
+        app.handle(AppEvent::Key(Key::Esc));
+        assert_eq!(app.queued_count(), 0);
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t)) if t.contains("dropped 1 queued message")
+        ));
+        assert!(!app.should_quit(), "an idle Esc drops the queue, never quits");
+    }
+
+    #[test]
+    fn dequeue_targets_the_queue_s_own_surface() {
+        let (mut app, _root, member) = two_surfaces();
+        // Queue on the MEMBER through the real keys, then look away at the root.
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 1);
+        submit(&mut app, "first");
+        submit(&mut app, "second");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 0);
+        // The member's run ends while the ROOT is focused: the start must name
+        // the member, not `Submit` the focused surface.
+        app.handle(AppEvent::Agent(member.clone(), AgentEvent::AgentEnd));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::SubmitTo(member.clone(), "second".into())]
+        );
+        assert!(app.surfaces[1].running, "the member's queued prompt started");
+        assert!(!app.running(), "the focused root must not start");
+    }
+
+    #[test]
+    fn a_multi_surface_dequeue_starts_while_another_is_running() {
+        let (mut app, _root, member) = two_surfaces();
+        // The root runs…
+        submit(&mut app, "root prompt");
+        // …while the member also runs and has a second prompt queued behind it.
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        submit(&mut app, "member prompt");
+        submit(&mut app, "member queued");
+        let _ = app.take_actions();
+        app.handle(AppEvent::Agent(member.clone(), AgentEvent::AgentEnd));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::SubmitTo(member.clone(), "member queued".into())]
+        );
+        assert!(app.surfaces[0].running, "the root's run is untouched");
+        assert!(app.surfaces[1].running, "the member's queued prompt started");
+    }
+
+    #[test]
+    fn queued_count_shows_on_the_foot_line() {
+        let mut app = App::new();
+        let id = app.focused_id().clone();
+        submit(&mut app, "first");
+        submit(&mut app, "second");
+        submit(&mut app, "third");
+        assert_eq!(app.queued_count(), 2);
+        let frame = crate::render_plain(&mut app, 120, 40);
+        assert!(
+            frame.contains("⇥ 2 queued"),
+            "the foot line carries the count:\n{frame}"
+        );
+        // Drain the queue: the segment is gone (it renders only while non-empty).
+        for _ in 0..2 {
+            app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentEnd));
+        }
+        assert_eq!(app.queued_count(), 0);
+        let frame = crate::render_plain(&mut app, 120, 40);
+        assert!(
+            !frame.contains("queued"),
+            "no queued segment at an empty queue:\n{frame}"
+        );
     }
 
     /// The `/`-command chatter in a transcript, in order — the shape every

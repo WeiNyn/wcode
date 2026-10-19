@@ -13,7 +13,9 @@
 //! `SurfaceInfo` plus the harness event/message types), mirroring the in-crate
 //! test helpers: a user prompt, a compaction notice, a markdown assistant block,
 //! a collapsed `bash` with long output, an expanded `read`, three surfaces (one
-//! running), a near-full context gauge, and plan mode on.
+//! running), a near-full context gauge, plan mode on, and — W029 — one prompt
+//! queued behind the running turn, so the composer foot renders its
+//! `⇥ 1 queued` segment.
 
 use std::fs;
 use std::path::PathBuf;
@@ -225,6 +227,17 @@ fn fixture() -> App {
     // `wcode` root row plus the badged members. Below `SIDEBAR_MIN_WIDTH` the
     // panel never docks, so the 48x20 frame keeps its base layout.
     app.handle(AppEvent::Key(Key::Ctrl('b')));
+
+    // W029: a prompt typed MID-RUN is queued, not discarded — the root is still
+    // running (no `AgentEnd` above), so this second `Enter` enqueues. The frame
+    // then proves both halves of the design: the composer foot's `⇥ 1 queued`
+    // count, and the `queued · 1 waiting` notice — while the transcript still
+    // holds NO block for the queued prompt (it is pushed only when it starts).
+    for c in "Also add a regression test for the wrap-around case.".chars() {
+        app.handle(AppEvent::Key(Key::Char(c)));
+    }
+    app.handle(AppEvent::Key(Key::Enter));
+    let _ = app.take_actions();
 
     app
 }

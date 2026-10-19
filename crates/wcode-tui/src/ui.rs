@@ -2005,16 +2005,17 @@ fn padded_row(
 }
 
 /// Assemble the composer's foot-line pair (left: the context gauge; right:
-/// `[⏻ plan] · [▤ browse] · {state} · [↑ N] <N>/<M>`), width-budgeted to `area` so
-/// the two titles never overdraw each other. The composer's **head-row pair is
-/// gone** (D009) — the chrome it carried now rides the transcript's session-head
-/// block.
+/// `[⏻ plan] · [▤ browse] · [⇥ N queued] · {state} · [↑ N] <N>/<M>`), width-budgeted
+/// to `area` so the two titles never overdraw each other. The composer's
+/// **head-row pair is gone** (D009) — the chrome it carried now rides the
+/// transcript's session-head block.
 ///
 /// Each title shares the row: `area.width` minus a 1-col gap so they never touch
 /// (there are no border columns — the composer is frameless). Fields are dropped
 /// least-important-first (the `↑ N` scroll, then the gauge, then
-/// `⏻ plan`/`▤ browse`), and a still-too-long title is truncated with a trailing
-/// `…`. The surviving minimum is the mode/state (foot-right).
+/// `⏻ plan`/`▤ browse`, then the `⇥ N queued` count — it outlives every mode
+/// token and is shed last), and a still-too-long title is truncated with a
+/// trailing `…`. The surviving minimum is the mode/state (foot-right).
 fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
     // Title columns available (a 1-col gap between the two titles; the composer
     // is frameless, so there are no border columns to reserve).
@@ -2036,7 +2037,8 @@ fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
         (false, _) if app.asking() => ("⠹ btw…".to_string(), accent()),
         (false, _) => ("⏸ idle".to_string(), dim()),
     };
-    let br = |show_plan: bool, show_browse: bool, show_scroll: bool| -> Vec<Span<'static>> {
+    let queued = app.queued_count();
+    let br = |show_plan: bool, show_browse: bool, show_queued: bool, show_scroll: bool| -> Vec<Span<'static>> {
         let mut spans: Vec<Span<'static>> = Vec::new();
         if show_plan && app.status().plan {
             spans.push(Span::styled("⏻ plan", accent()));
@@ -2046,6 +2048,14 @@ fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
                 spans.push(sep());
             }
             spans.push(Span::styled("▤ browse", accent()));
+        }
+        // W029: prompts queued by a mid-run `Enter`. `dim`, the same role `↑ N`
+        // uses — a count of what is waiting is chrome, not an accent state.
+        if show_queued && queued > 0 {
+            if !spans.is_empty() {
+                spans.push(sep());
+            }
+            spans.push(Span::styled(format!("⇥ {queued} queued"), dim()));
         }
         if !spans.is_empty() {
             spans.push(sep());
@@ -2066,11 +2076,15 @@ fn corner_titles(app: &App, area: Rect) -> (Line<'static>, Line<'static>) {
         spans
     };
     let gauge = token_spans(app).unwrap_or_default();
+    // Fullest → most-dropped. The queued count rides level 4 alone, so it is
+    // shed only when nothing but the state chip and folio remain (the designer's
+    // drop ladder: scroll → gauge → plan/browse → queued).
     let bottom_levels = vec![
-        (gauge.clone(), br(true, true, true)),
-        (gauge.clone(), br(true, true, false)),
-        (Vec::new(), br(true, true, false)),
-        (Vec::new(), br(false, false, false)),
+        (gauge.clone(), br(true, true, true, true)),
+        (gauge.clone(), br(true, true, true, false)),
+        (Vec::new(), br(true, true, true, false)),
+        (Vec::new(), br(false, false, true, false)),
+        (Vec::new(), br(false, false, false, false)),
     ];
     pick_titles(&bottom_levels, avail)
 }
