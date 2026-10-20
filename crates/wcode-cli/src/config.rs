@@ -243,10 +243,10 @@ pub struct Workflow {
     /// (`overlay_replaces_arrays_wholesale`).
     #[serde(rename = "edge", default)]
     pub edges: Vec<WorkflowEdge>,
-    /// Total-run wall-clock deadline (seconds) used when `--timeout` is absent.
-    /// `None` = unbounded; `Some(0)` = disabled (mirrors `--timeout 0`). This is
-    /// the WHOLE-RUN default, NOT a node default — a node keeps its own
-    /// [`WorkflowNode::timeout_secs`] (W028 / D033).
+    /// Total-run wall-clock deadline (seconds), used when `--timeout` is absent.
+    /// `None` (or `0`) = NO bound. This is THE primary bound — the one an
+    /// operator sets at launch — NOT a node default: a node is unbounded unless
+    /// it sets its own [`WorkflowNode::timeout_secs`] (W028 / D033 as amended).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -290,10 +290,12 @@ pub struct EdgeCondition {
     /// The judge's question. REQUIRED (non-empty) iff `judge` is set.
     #[serde(default)]
     pub criterion: Option<String>,
-    /// Per-edge wall-clock bound (seconds): `None` = the 30 s `EDGE_TIMEOUT`,
-    /// `Some(0)` = disabled. Applies to BOTH a `script` and a `judge` edge (W028
-    /// / D033); journaled via `tasks::Dep::Edged`, so `#[serde(default)]` keeps
-    /// an old journal line decodable.
+    /// Per-edge wall-clock bound (seconds). `None` (or `0`) = NO bound; `n` =
+    /// `n` seconds. Applies to BOTH a `script` and a `judge` edge — an OPT-IN
+    /// refinement (a hung edge blocks the frontier synchronously), since the
+    /// primary bound is the whole-run cap (W028, D033 as amended); journaled via
+    /// `tasks::Dep::Edged`, so `#[serde(default)]` keeps an old journal line
+    /// decodable.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }
@@ -328,7 +330,7 @@ mod w028_config_tests {
         assert_eq!(
             old.edges[0].condition.as_ref().unwrap().timeout_secs,
             None,
-            "an old edge line decodes to `None` (= the 30 s default)"
+            "an old edge line decodes to `None` (= no bound)"
         );
 
         let new: Workflow = toml::from_str(
@@ -444,8 +446,10 @@ pub struct WorkflowNode {
     /// A gate (judgment or physical): its `reject` re-opens its deps (§5).
     #[serde(default)]
     pub gate: bool,
-    /// Per-node wall-clock deadline (seconds): `None` = the 300 s `NODE_TIMEOUT`,
-    /// `Some(0)` = disabled. Journaled on the node's `RunSpec` (W028 / D033).
+    /// Per-node wall-clock deadline (seconds). `None` (or `0`) = NO bound; `n` =
+    /// `n` seconds — an OPT-IN refinement for a step known to be slow, not a
+    /// default (the whole-run cap is the primary bound; W028, D033 as amended).
+    /// Journaled on the node's `RunSpec`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
 }

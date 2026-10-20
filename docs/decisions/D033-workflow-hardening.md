@@ -142,3 +142,43 @@ is refused rather than silently serving without running.
   a per-edge timeout bounds the edge that *is* evaluated and neither widens nor
   depends on the fold.
 - No new protocol request and no socket surface: `--status` is file-based.
+
+## Amendment (human sign-off, supersedes the per-node/per-edge defaults)
+
+**The defaults flip: an unset node or edge bound means UNBOUNDED, not a built-in
+const.** The original decision above gave `WorkflowNode.timeout_secs` a 300 s
+default and `EdgeCondition.timeout_secs` a 30 s default. The human's ruling:
+
+> "it needs to be no limit if not set, and there should be a limit for the whole
+> task that can be set when start, condition timeout also should default to no
+> limit."
+
+So `workflow_bound`'s site-default form is **removed**; every bound site uses
+`workflow_bound_opt` (`None` and `Some(0)` → no timer, `Some(n)` → n seconds):
+
+| knob | unset | `= 0` | `= n` |
+|---|---|---|---|
+| `[[workflow.node]] timeout_secs` | **unbounded** | unbounded | n s |
+| `condition.timeout_secs` (edge) | **unbounded** | unbounded | n s |
+| `[workflow] timeout_secs` (run) | unbounded | unbounded | n s |
+| `--timeout` flag | unbounded | unbounded | n s |
+
+**The whole-run cap is the one bound that matters**, and it is set at launch —
+`--timeout <secs>` (flag wins) or `[workflow] timeout_secs` (the default when the
+flag is absent). It is the single knob an operator needs; per-node and per-edge
+bounds are opt-in refinements for a step you know is slow.
+
+**Rationale.** (a) The defaults were a back-compat *regression* in disguise: a
+`Session` node was unbounded before W028, so "absent = 300 s" silently capped
+every member node of a template that never asked for it. (b) One knob is easier
+to reason about than four, and it is the one that survives a resume. (c) The
+shipped `.wcode/workflow.toml` keeps explicit per-node values *and* sets a
+whole-run cap, so the reference shows both the backstop and the refinement.
+
+**Risk accepted, and mitigated.** An unset bound means a wedged worker or a hung
+script edge is caught only by the whole-run cap — an edge runs synchronously on
+the scheduler loop thread, so a hung edge freezes the frontier until that cap
+fires. Mitigation: the cap is settable at start, and a capped run is *resumable*
+(this record's resume contract), so the cost is a bounded stall, not lost work.
+The template therefore sets `[workflow] timeout_secs` explicitly rather than
+relying on the absent-is-unbounded default.

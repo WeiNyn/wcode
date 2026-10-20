@@ -77,26 +77,27 @@
 # a change with `wcode --status <groupdir>` after one refused-port boot:
 # the journal's `create` lines show each node's `deps` and `gate`.
 #
-# TIMEOUTS (W028). Each node carries `timeout_secs` — a wall-clock BACKSTOP, not
-# a schedule. A node past its limit is `fail`ed with "node timeout: exceeded Ns",
-# its dependents stay blocked, and the scheduler escalates to the root (a
-# `task reset <id>` retries). The built-in default is 300 s, which is far too
-# short for a real build; the values below are sized to the work.
+# TIMEOUTS (W028, amended). ABSENT IS UNBOUNDED — a node or edge with no
+# `timeout_secs` simply has no limit; `timeout_secs = 0` says the same thing
+# explicitly. There is no built-in default to trip over.
 #
-# ABSENT IS NOT UNLIMITED. Omitting a node's `timeout_secs` applies the 300 s
-# default; `timeout_secs = 0` is the ONLY way to say "no bound" (it disables the
-# node's deadline outright). Same for an edge's `condition.timeout_secs`, whose
-# absent default is 30 s. The TOTAL-run knob is the one that inverts: an absent
-# `[workflow] timeout_secs` means unbounded. (Before W028 a `Session` node had no
-# bound at all, so a template that omits every key now gets capped at 300 s per
-# member node — set `0` there if you want the old behaviour.)
+# THE BOUND THAT MATTERS IS THE WHOLE-RUN CAP, set at launch: `--timeout <secs>`
+# (the flag wins) or `[workflow] timeout_secs` (the default when the flag is
+# absent). It is set below to 21600 s = 6 h: a feature pipeline legitimately
+# takes hours, and a capped run is RECOVERABLE — it exits non-zero with a
+# `resume:` line, and the resume reloads the plan (Doing → Todo) and continues,
+# so the cap costs a restart, not the work.
+#
+# A PER-NODE `timeout_secs` is an OPT-IN refinement, not a backstop against a
+# default: set it on a step you know is slow so a wedged worker is reported
+# (`node timeout: exceeded Ns`, the node `fail`ed, its dependents blocked, the
+# scheduler escalating — a `task reset <id>` retries) instead of waiting for the
+# run cap. The values below are sized to their node's work. An edge's
+# `condition.timeout_secs` is the same idea, per edge (a hung `script`/`judge`
+# edge blocks the frontier synchronously, so bound the ones you know are slow).
 #
 # A `sleep`-leading script cannot be used as an edge or node at all —
 # `SleepRefusalHooks` refuses it before it runs.
-#
-# `[workflow] timeout_secs` (the TOTAL-run cap) is deliberately UNSET here. A
-# feature pipeline legitimately takes hours, and a total cap that fires mid-flight
-# throws away resumable work; pass `--timeout <secs>` when you want one.
 #
 # D002 — a gate is SHAPE, not verification: it proves the step ran, not that the
 # work is correct. A Session gate's verdict is the root model's, and a node
@@ -151,10 +152,13 @@ done until the second-layer review approves.
 # re-opens the whole implementation cone when the PR pipeline is red.
 [workflow]
 max_attempts = 3
+timeout_secs = 21600                # 6 h: the WHOLE-RUN cap (the primary bound).
+                                    # A capped run exits non-zero with a `resume:`
+                                    # line, so it costs a restart, not the work.
 
 [[workflow.node]]
 id = "explore"                      # map the ground truth for the request
-timeout_secs = 900                  # recon over a large tree; a backstop only
+timeout_secs = 900                  # opt-in: recon over a large tree
 member = "explorer"
 title = "Explore the repo for the feature request: {{task}}"
 
@@ -168,20 +172,20 @@ title = "Sketch the interface for: {{task}}"
 id = "review-sketch"                # first-layer gate: approve the sketch, or
 member = "reviewer"                 # reject it and re-open `sketch`
 gate = true
-timeout_secs = 1200                 # a reading review, not a build
+timeout_secs = 1200                 # opt-in: a reading review, not a build
 title = "First-layer review of the sketch"
 
 [[workflow.node]]
 id = "implement"                    # the developer fills the approved sketch on
 member = "developer"                # a feature branch it creates or reuses
-timeout_secs = 3600                 # a cold build + edits; the longest work node
+timeout_secs = 3600                 # opt-in: a cold build + edits; the longest work node
 title = "Create/reuse a feature branch, then implement the feature: {{task}}"
 
 [[workflow.node]]
 id = "verify"                       # second-layer gate: approve the diff (after
 member = "reviewer"                 # running cargo test/clippy), or re-open it
 gate = true
-timeout_secs = 3600                 # it RUNS the suite: give it implement's budget
+timeout_secs = 3600                 # opt-in: it RUNS the suite; implement's budget
 title = "Second-layer review: read the diff, run cargo test --workspace and cargo clippy --workspace --all-targets, then approve or reject"
 
 [[workflow.node]]

@@ -104,8 +104,9 @@ pub enum RunSpec {
     Session {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
-        /// Per-node wall-clock deadline (seconds). `None` = the `NODE_TIMEOUT`
-        /// const (300 s); `Some(0)` = disabled (mirrors `--timeout 0`).
+        /// Per-node wall-clock deadline (seconds). `None` (or `0`) = NO bound —
+        /// an opt-in refinement, since the whole-run cap is the primary bound
+        /// (D033 as amended).
         ///
         /// It lives on the `RunSpec` so it is JOURNALED (`PlanOp::Configure`) and
         /// survives a resume: `should_instantiate_workflow` is false on resume,
@@ -125,7 +126,7 @@ pub enum RunSpec {
 
 impl RunSpec {
     /// The node's own wall-clock deadline in seconds, whichever variant carries
-    /// it (`None` = the `NODE_TIMEOUT` default; `Some(0)` = disabled).
+    /// it (`None` or `Some(0)` = no bound).
     pub fn timeout_secs(&self) -> Option<u64> {
         match self {
             RunSpec::Session { timeout_secs, .. } | RunSpec::Script { timeout_secs, .. } => {

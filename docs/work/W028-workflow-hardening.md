@@ -1,6 +1,10 @@
 # W028 — workflow hardening — brief
 
-- **Status:** draft — awaiting human sign-off
+- **Status:** draft — awaiting human sign-off → **SHIPPED**, and **superseded in
+  part**: [`D033`'s Amendment](../decisions/D033-workflow-hardening.md) reverses the
+  per-node / per-edge defaults — an unset bound is **UNBOUNDED**, not 300 s / 30 s.
+  Where this brief (esp. §2, §4.3, §8, §12 A2) says "default 300 s/30 s", read
+  "no bound unless set". The whole-run cap is the primary bound.
 - **Work item:** W028
 - **Decisions:** locked by the human (this brief is their contract) → to be recorded as **D033** — "workflow node timeout = `fail`; edges and judge edges share a bound; headless log always on (`--quiet`); `--status` is file-based read-only".
 - **Author:** session `agent:brainstormer`
@@ -100,7 +104,7 @@ A headless `[workflow]` run is today an opaque, unbounded, one-shot batch job. F
                         or the latest group; exit 0. Needs no model.
 ```
 
-Precedence for the total-run deadline: `--timeout` flag → `[workflow] timeout_secs` → unbounded. For a node deadline: `[[workflow.node]] timeout_secs` → 300 s. For an edge: `condition.timeout_secs` → 30 s. `0` = disabled at every level.
+Precedence for the total-run deadline: `--timeout` flag → `[workflow] timeout_secs` → unbounded. For a node deadline: `[[workflow.node]] timeout_secs` → **unbounded unless set** (D033 as amended; this brief first proposed a 300 s default). For an edge: `condition.timeout_secs` → **unbounded unless set** (first proposed 30 s). `0` means no bound at every level.
 
 ### 4.4 Where the design fights the current code (flagged)
 
@@ -229,7 +233,7 @@ Quote the observed line (`«agent:w1» …`, the `resume:` line, the unchanged `
 - A headless `--task` run prints, to stderr, each node→root report (`«agent:<member>» …`), the root's own text, and every `#id [state] title` transition — and `--quiet` silences that while keeping the stdout summary.
 - `wcode --status latest` prints a run's plan and provably does not write (`md5sum` unchanged).
 - An interrupted or failed run prints a `resume: …` line whose task text came from `<groupdir>/run.json`; re-running it continues the plan (no re-seed) from the reconciled state.
-- A hung `script` edge (default 30 s), a hung `judge` edge, a hung `script` node, and a hung `Session` node each hit a configurable bound; a node timeout lands as `fail` naming the limit and blocks its dependents; an edge timeout stays `Unjudgeable`.
+- A hung `script` edge, `judge` edge, `script` node or `Session` node hits its bound **where one is set** (a per-edge/per-node `timeout_secs` is opt-in; unset is unbounded, D033 as amended) and otherwise only the whole-run cap stops it; a node timeout lands as `fail` naming the limit and blocks its dependents; an edge timeout stays `Unjudgeable`.
 - `wcode serve --task x` exits 2 with `--task cannot be combined with serve`; a `--task` run with no plan exits 2 with `no plan loaded`.
 - An old `config.toml` and an old `plan.ndjson` still load unchanged.
 
@@ -287,6 +291,12 @@ The developer must apply **all** of the following. Line numbers are HEAD (commit
 ### The eight frictions — settled
 
 - **A1 (F1) — REQUIRED: `instantiate_workflow` must `configure` the member node.** `main.rs:2658-2671` only `assign`s the member arm, so `RunSpec::Session.timeout_secs` is `None` forever and the per-node knob is **dead for Session nodes**. Add, after the existing `assign`, a `tasks.configure(t.id, RunSpec::Session { member: None, timeout_secs: node.timeout_secs }, node.gate)` with the same `workflow_fail` error shape. Keep `member: None` — `RunSpec::Session.member` is read nowhere (`scheduler.rs:421`, `verify_gate.rs:173`; dispatch uses `task.owner`, `scheduler.rs:422-423`), so `None` is status quo. Safe: runs before `spawn_scheduler` (`main.rs:1593` vs `:1626`), no subscriber.
+> **SUPERSEDED IN PART (D033's Amendment, human sign-off):** A2's helper took a
+> site `default` (`workflow_bound(secs, default)`, `None → Some(default)`). That is
+> reversed — every bound site now calls `workflow_bound_opt(secs)` and an unset
+> node/edge bound is UNBOUNDED. The rest of A2 (the `Option<Duration>` widening and
+> "`0` is not an instant kill") stands.
+
 - **A2 (F2) — REQUIRED: `Some(0)` must mean DISABLED, not instant-kill.** `tools/bash.rs:457` turns `Duration::ZERO` into an immediate kill, and the sketch's `.filter(|d| !d.is_zero()).unwrap_or(EDGE_TIMEOUT)` silently renames "disabled" to 30 s. Add ONE pure helper used by all five bound sites (script node, session node, script edge, judge edge, session timer): `workflow_bound(secs, default) -> Option<Duration>` with `None→Some(default)`, `Some(0)→None`, `Some(n)→Some(n s)`. Widen `run_command`'s `timeout` to `Option<Duration>` with an optional timer arm. Delete the sketch's 30-s-when-zero fallback.
 - **A3 (F3) — renderer vs stderr: confirm the resolution, with a correction.** `out`/`close_blocks`/`emit` are stdout and `emit` streams partials — irreconcilable with A7's stderr. Do **not** touch the sink functions. Correction: `MessagePrinter::update` (`repl.rs:216`) returns a **delta** (`""` when the text did not grow), so it is an extractor ONLY if the printer is **fresh per message** (`MessagePrinter::default()` per `MessageEnd`, or `reset()` first) and `update` is called **once**. State that, and make the gate prove it (feed `MessageStart`+2×`MessageUpdate`+`MessageEnd`; assert the full text appears **exactly once** at `quiet=false`, absent at `quiet=true`). Mirror `print_events`' lag handling (`Lagged→continue`, `Closed→break`). Keep `quiet` on `print_workflow_events`; delete the caller-side `if !quiet` branch in `run_workflow`.
 - **A4 (F4) — confirm: lift the `--status` guard out of `check_task_args`.** `check_task_args` runs at `main.rs:1475` (inside `build_runtime`), after `load_config_raw` (`:2149`), but `--status` early-exits before it — so a guard there is dead code. Add a pure `check_status_args(&Args)` called only by the early exit. Keep **only** `--serve`+`--task` in `check_task_args`.

@@ -34,45 +34,27 @@ use wcode_protocol::Registry;
 use crate::tasks::{Dep, RunSpec, Task, TaskList, TaskState};
 use crate::tools::bash::{PREVIEW_TAIL_CHARS, run_command, tail_chars};
 
-/// The per-EDGE wall-clock bound, used when the edge sets no `timeout_secs`.
-/// 30 s = the `bash` tool's default: an edge runs SYNCHRONOUSLY on the loop
-/// thread, so a generous default would block the whole frontier.
-const EDGE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The per-NODE wall-clock bound, used when the node sets no `timeout_secs`: a
-/// `Script` node's `run_command` and a `Session` node's timer arm. Keeps the
-/// historical 300 s — a build/test can run far longer than an edge.
-const NODE_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// The ONE rule a config `timeout_secs` follows (W028 A2/N1), WITHOUT a site
-/// default:
+/// The ONE rule every bound follows (W028, amended): **no limit unless set.**
 ///
-/// * `None` (the key is absent) or `Some(0)` (DISABLED, mirroring `--timeout 0`)
-///   → `None` = no timer;
+/// * `None` (the key is absent) or `Some(0)` → `None` = NO timer;
 /// * `Some(n)` → `n` seconds.
+///
+/// There is deliberately no site default: an unset node/edge bound is
+/// UNBOUNDED (D033's amendment — a built-in 300 s / 30 s default silently capped
+/// every node of a template that never asked for one). The bound that matters is
+/// the WHOLE-RUN cap, set at launch (`--timeout`, else `[workflow]
+/// timeout_secs`), which this same function maps in `dispatch`.
 ///
 /// The `None` return means UNBOUNDED, which [`run_command`] accepts directly. It
 /// must never be spelled `Some(Duration::ZERO)`: that fires on the first poll and
 /// would kill the command instantly instead of never bounding it.
-///
-/// This is the run-TOTAL knob's form (`dispatch`), where an absent key has no
-/// default and "disabled" is unbounded.
 pub(crate) fn workflow_bound_opt(secs: Option<u64>) -> Option<Duration> {
     secs.filter(|&s| s > 0).map(Duration::from_secs)
 }
 
-/// [`workflow_bound_opt`] plus a SITE default, for the per-node / per-edge knobs:
-/// an absent key takes `default`; `0` and `n` follow the same rule.
-fn workflow_bound(secs: Option<u64>, default: Duration) -> Option<Duration> {
-    match secs {
-        None => Some(default),
-        Some(_) => workflow_bound_opt(secs),
-    }
-}
-
 /// A node's deadline, if it is a `Session` node: its
-/// `RunSpec::Session.timeout_secs` through [`workflow_bound`] (default
-/// [`NODE_TIMEOUT`], `Some(0)` = disabled).
+/// `RunSpec::Session.timeout_secs` through [`workflow_bound_opt`] — so an unset
+/// (or `0`) bound is NO deadline.
 ///
 /// `None` for a `Script` node — deliberately structural (W028 A6) — so the
 /// timer arm can never double-book a node whose bound already lives in its
@@ -82,7 +64,7 @@ fn session_deadline(tasks: &[Task], id: u32) -> Option<Duration> {
     let RunSpec::Session { timeout_secs, .. } = &task.run else {
         return None;
     };
-    workflow_bound(*timeout_secs, NODE_TIMEOUT)
+    workflow_bound_opt(*timeout_secs)
 }
 
 /// When node `id`'s deadline FIRES, dispatching at `at`, or `None` when it has no
@@ -501,9 +483,9 @@ impl Scheduler {
                         return EdgeGate::Unjudgeable(reason);
                     }
                     let label = format!("edge-{id}");
-                    // The edge's OWN bound (default 30 s; `0` = disabled, which
+                    // The edge's OWN bound (`None`/`0` = no bound, which
                     // `run_command` takes as `None` = unbounded).
-                    let bound = workflow_bound(cond.timeout_secs, EDGE_TIMEOUT);
+                    let bound = workflow_bound_opt(cond.timeout_secs);
                     let (code, output) = run_command(
                         cmd,
                         &self.working_dir,
@@ -538,7 +520,7 @@ impl Scheduler {
                     let criterion = criterion.to_string();
                     // The edge's bound, COPIED into the `'static` task (`Option<u64>`
                     // is `Copy`; the `&cond` is not). `None` = disabled = unbounded.
-                    let bound = workflow_bound(cond.timeout_secs, EDGE_TIMEOUT);
+                    let bound = workflow_bound_opt(cond.timeout_secs);
                     // The borrow of `criterion` is internal to the spawned block,
                     // so the task is `'static` (no fight with `Judge::decide<'a>`).
                     tokio::spawn(async move {
@@ -619,10 +601,10 @@ impl Scheduler {
                 // `Script` can outlast the loop's turn, so blocking here would
                 // stall every other ready node. The task holds only clones.
                 let _ = self.tasks.start(id);
-                // The node's OWN bound (default 300 s; `0` = disabled = unbounded).
+                // The node's OWN bound (`None`/`0` = unbounded — no default).
                 // A `Script` node's deadline is this `run_command` timeout, so it
                 // is deliberately NOT entered into `self.started` (A6).
-                let bound = workflow_bound(task.run.timeout_secs(), NODE_TIMEOUT);
+                let bound = workflow_bound_opt(task.run.timeout_secs());
                 let (tasks, dir, cancel, gate, command) = (
                     self.tasks.clone(),
                     self.working_dir.clone(),
@@ -786,26 +768,92 @@ mod tests {
 
     use tokio::sync::broadcast;
 
-    /// W028 A2: the ONE bound rule — absent → the site's default, `0` → disabled
-    /// (`None` = unbounded, never a zero-length kill), `n` → `n` seconds.
+    /// The ONE bound rule (D033, amended): an UNSET bound is no bound. `None` and
+    /// `Some(0)` are both `None` = no timer — never a zero-length kill — and
+    /// `Some(n)` is `n` seconds. There is no site default to fall back to.
     #[test]
-    fn the_bound_maps_zero_to_disabled() {
-        assert_eq!(workflow_bound(None, EDGE_TIMEOUT), Some(EDGE_TIMEOUT));
-        assert_eq!(workflow_bound(None, NODE_TIMEOUT), Some(NODE_TIMEOUT));
+    fn an_unset_or_zero_bound_is_unbounded() {
+        assert_eq!(workflow_bound_opt(None), None, "unset = unbounded");
         assert_eq!(
-            workflow_bound(Some(0), NODE_TIMEOUT),
+            workflow_bound_opt(Some(0)),
             None,
-            "0 = disabled, NOT an instant kill"
+            "0 = unbounded, NOT an instant kill"
         );
-        assert_eq!(workflow_bound(Some(7), NODE_TIMEOUT), Some(Duration::from_secs(7)));
-        // The run-TOTAL form has no site default: absent and `0` are BOTH
-        // unbounded, `n` is `n` seconds (N1 — one rule, two entry points).
-        assert_eq!(workflow_bound_opt(None), None);
-        assert_eq!(workflow_bound_opt(Some(0)), None);
-        assert_eq!(workflow_bound_opt(Some(7)), Some(Duration::from_secs(7)));
-        // The two defaults are the historical ones.
-        assert_eq!(EDGE_TIMEOUT, Duration::from_secs(30));
-        assert_eq!(NODE_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(
+            workflow_bound_opt(Some(7)),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    /// The same rule at the NODE level: `session_deadline` yields no deadline for
+    /// an unset (or `0`) `Session` bound, and the bound itself for `Some(n)`.
+    #[test]
+    fn an_unset_node_bound_yields_no_deadline() {
+        let tasks = TaskList::new();
+        let id = tasks.create("node", vec![], false).unwrap().id;
+        let set = |secs: Option<u64>| {
+            tasks
+                .configure(
+                    id,
+                    RunSpec::Session {
+                        member: None,
+                        timeout_secs: secs,
+                    },
+                    false,
+                )
+                .unwrap();
+            session_deadline(&tasks.snapshot(), id)
+        };
+        assert_eq!(set(None), None, "an unset node bound is unbounded");
+        assert_eq!(set(Some(0)), None, "`0` is unbounded too");
+        assert_eq!(set(Some(5)), Some(Duration::from_secs(5)));
+    }
+
+    /// THE BEHAVIOUR GATE for the amendment: a `Session` node with NO bound, whose
+    /// worker never reports, must NOT be failed by the timer arm — even long after
+    /// the retired 300 s default would have fired. Without this, a future edit
+    /// could silently reintroduce a default and only a live run would notice.
+    #[tokio::test(start_paused = true)]
+    async fn an_unbounded_session_node_is_never_timed_out() {
+        let (registry, root, _worker, worker_id) = wiring();
+        let tasks = TaskList::new();
+        let id = tasks.create("patient", vec![], false).unwrap().id;
+        tasks.assign(id, worker_id.clone()).unwrap();
+        // No `configure`: the node keeps the default `RunSpec::Session` — no bound.
+        assert_eq!(tasks.snapshot()[0].run.timeout_secs(), None);
+
+        tokio::spawn(
+            Scheduler::new(
+                registry,
+                root,
+                tasks.clone(),
+                SessionId::agent("scheduler"),
+                std::env::temp_dir(),
+                HooksSet::default(),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(crate::judge::FakeJudge::new(vec![])),
+            )
+            .run(),
+        );
+
+        // It dispatches and parks Doing (the worker never reports) …
+        for _ in 0..200 {
+            if tasks.snapshot()[0].state == TaskState::Doing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(tasks.snapshot()[0].state, TaskState::Doing, "dispatched");
+        // … and stays Doing past the old 300 s default (plus a generous margin).
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        assert_eq!(
+            tasks.snapshot()[0].state,
+            TaskState::Doing,
+            "an unset node bound must never time out — no default exists"
+        );
+        assert!(tasks.snapshot()[0].feedback.is_none(), "no failure reason");
     }
 
     /// A4, the resume's load-bearing rule: cancelling the run token leaves a
@@ -820,7 +868,7 @@ mod tests {
                 id,
                 RunSpec::Script {
                     command: "sleep 30".into(),
-                    timeout_secs: None, // the 300 s default: only the cancel stops it
+                    timeout_secs: None, // no bound at all: only the cancel stops it
                 },
                 false,
             )

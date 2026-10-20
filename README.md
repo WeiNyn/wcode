@@ -232,12 +232,14 @@ while the final per-node summary — and any `resume:` line — still print.
 `--status [group|latest]` is the read-only counterpart: it prints a finished (or
 in-flight) run's plan, `#id [state] title` per node, straight from the group's
 `plan.ndjson` — no model, no socket, and provably no write (the reader never
-reconciles). Every bound is configurable and `0` disables it: `[workflow]
-timeout_secs` (total run, when `--timeout` is absent), `[[workflow.node]]
-timeout_secs` (default 300 s) and `[[workflow.edge]] condition.timeout_secs`
-(default 30 s, for both `script` and `judge` edges). A non-zero exit from a run
-that started prints a copy-pasteable `resume: …` line; the task text lives in
-`<groupdir>/run.json`.
+reconciles). **A bound exists only where one is set**: an absent (or `0`)
+`timeout_secs` means unbounded at every level. The bound that matters is the
+whole-run cap, set at launch — `--timeout <secs>` (the flag wins) or `[workflow]
+timeout_secs` (the default when the flag is absent). `[[workflow.node]]
+timeout_secs` and `[[workflow.edge]] condition.timeout_secs` (both `script` and
+`judge` edges) are opt-in refinements for a step you know is slow, not defaults.
+A non-zero exit from a run that started prints a copy-pasteable `resume: …` line
+carrying that cap; the task text lives in `<groupdir>/run.json`.
 
 ```toml
 [orchestrator]
