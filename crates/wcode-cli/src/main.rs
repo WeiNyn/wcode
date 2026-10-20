@@ -81,8 +81,9 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --quiet            headless run: suppress the per-event log (the final
                      summary and any `resume:` line still print)
   --status [group|latest]  read-only: print <group>'s plan (#id [state] title),
-                     or the latest group; exit 0. Needs no model, and no --task —
-                     refused when a task is set (including via WCODE_TASK).
+                     or the latest group; exit 0 when a plan prints, 1 when
+                     there is none. Needs no model, and no --task — refused
+                     when a task is set (including via WCODE_TASK).
   --tui | --no-tui   force the full-screen TUI, or the line REPL (default: TUI on a TTY)
    -V, --version      show version
    -h, --help         show this help
@@ -143,7 +144,8 @@ struct Args {
     /// `--quiet`: suppress the per-event headless log (the final summary and any
     /// `resume:` line still print).
     quiet: bool,
-    /// `--status [group|latest]`: read-only plan dump; exit 0. Needs no model.
+    /// `--status [group|latest]`: read-only plan dump; exit 0 when a plan
+    /// prints, 1 on no plan / no sessions / no such group. Needs no model.
     /// None = flag absent; Some(None) = latest; Some(Some(<group|dir>)) = that one.
     status: Option<Option<String>>,
     prompt: Option<String>,

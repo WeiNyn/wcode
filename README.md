@@ -220,8 +220,9 @@ literal, and `script`s are not templated.
 Passing `--task <text>` (or the `WCODE_TASK` env) turns a `[workflow]` run
 **headless** (no TUI): wcode seeds the root with the task, drives the plan to a
 terminal state, and exits — `0` once every node is `Done`, `1` if any node is
-`Failed`, if the `--timeout <secs>` **wall-clock** cap elapses (`0`/absent = no
-cap) — including mid-turn, when it cancels the root — or if the root's first
+`Failed`, if the `--timeout <secs>` **wall-clock** cap elapses (`0` = no cap;
+absent = `[workflow] timeout_secs`, unbounded only when that is unset too) —
+including mid-turn, when it cancels the root — or if the root's first
 turn errors. `--task` requires `[workflow]` and
 `--agents`, and cannot be combined with `-p`; a `{{task}}` template without a task
 is a boot error. `-p` is unaffected (it stays a single root turn), and a pure
