@@ -1678,7 +1678,7 @@ fn plan_op_and_task_serde_round_trip() {
 
     /// W028 §7.1: a node's configured deadline is JOURNALED (`Configure` clones
     /// the whole `RunSpec`), so it survives a resume — and an OLD journal line
-    /// without the field decodes to `None` (the 300 s default).
+    /// without the field decodes to `None` (`None` = no bound).
     #[test]
     fn a_configured_timeout_survives_load_at() {
         let dir = tempfile::tempdir().unwrap();

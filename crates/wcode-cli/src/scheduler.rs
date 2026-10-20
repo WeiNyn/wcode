@@ -44,6 +44,8 @@ use crate::tools::bash::{PREVIEW_TAIL_CHARS, run_command, tail_chars};
 /// every node of a template that never asked for one). The bound that matters is
 /// the WHOLE-RUN cap, set at launch (`--timeout`, else `[workflow]
 /// timeout_secs`), which this same function maps in `dispatch`.
+/// `.wcode/workflow.toml` is the worked example: an explicit 6 h run cap plus a
+/// per-node `timeout_secs` only where the step is known to be slow.
 ///
 /// The `None` return means UNBOUNDED, which [`run_command`] accepts directly. It
 /// must never be spelled `Some(Duration::ZERO)`: that fires on the first poll and
@@ -807,6 +809,51 @@ mod tests {
         assert_eq!(set(None), None, "an unset node bound is unbounded");
         assert_eq!(set(Some(0)), None, "`0` is unbounded too");
         assert_eq!(set(Some(5)), Some(Duration::from_secs(5)));
+    }
+
+    /// The SCRIPT mirror of the Session behaviour gate (N2): a `Script` node with
+    /// no bound runs as long as it needs. Pins `run_command(None)`'s arm end to
+    /// end, which the pure `workflow_bound_opt` test only covers by inference.
+    ///
+    /// The child is real (`sh -c 'sleep 30'`), so its bound is the PROCESS's — the
+    /// assertion window is virtual (400 s), which the runtime crosses in
+    /// microseconds, leaving the node `Doing`; the child exits on its own shortly
+    /// after the test.
+    #[tokio::test(start_paused = true)]
+    async fn an_unbounded_script_node_is_never_timed_out() {
+        let tasks = TaskList::new();
+        let id = tasks.create("patient", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                id,
+                RunSpec::Script {
+                    command: "sh -c 'sleep 30'".into(),
+                    timeout_secs: None,
+                },
+                false,
+            )
+            .unwrap();
+        spawn_scheduler(&tasks, HooksSet::default());
+
+        // It starts …
+        for _ in 0..200 {
+            if tasks.snapshot()[0].state == TaskState::Doing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(tasks.snapshot()[0].state, TaskState::Doing, "dispatched");
+        // … and is still Doing 400 virtual seconds later — past the retired 300 s
+        // default, which no longer exists.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        assert_eq!(
+            tasks.snapshot()[0].state,
+            TaskState::Doing,
+            "an unset Script bound must never time out — no default exists"
+        );
+        assert!(tasks.snapshot()[0].feedback.is_none(), "no failure reason");
     }
 
     /// THE BEHAVIOUR GATE for the amendment: a `Session` node with NO bound, whose

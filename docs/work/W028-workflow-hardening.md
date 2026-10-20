@@ -3,8 +3,8 @@
 - **Status:** draft — awaiting human sign-off → **SHIPPED**, and **superseded in
   part**: [`D033`'s Amendment](../decisions/D033-workflow-hardening.md) reverses the
   per-node / per-edge defaults — an unset bound is **UNBOUNDED**, not 300 s / 30 s.
-  Where this brief (esp. §2, §4.3, §8, §12 A2) says "default 300 s/30 s", read
-  "no bound unless set". The whole-run cap is the primary bound.
+  Where this brief (esp. §2, §4.3, §8, §11 A1, §12 A2) says "default 300 s/30 s",
+  read "no bound unless set". The whole-run cap is the primary bound.
 - **Work item:** W028
 - **Decisions:** locked by the human (this brief is their contract) → to be recorded as **D033** — "workflow node timeout = `fail`; edges and judge edges share a bound; headless log always on (`--quiet`); `--status` is file-based read-only".
 - **Author:** session `agent:brainstormer`
@@ -265,7 +265,7 @@ Quote the observed line (`«agent:w1» …`, the `resume:` line, the unchanged `
 
 All four facts below were re-verified against the tree before recording.
 
-**A1 — `[workflow] timeout_secs` is the TOTAL-RUN default.** The brief's §4.3 precedence stands (flag → `[workflow] timeout_secs` → unbounded); it is **not** a node default. The node default stays the 300 s const, the edge default the 30 s const. The three keys keep the same name `timeout_secs` and differ only in scope, which is the repo's own vocabulary (`bash { timeout_secs }`, `bg { wait, timeout_secs }`, `webfetch { timeout }`) and is already anticipated in the shipped config: `.wcode/workflow.toml:144` "run via bash with a long `timeout_secs` such as 900". Do not rename per-scope — `--dump-config` and the README can disambiguate.
+**A1 — `[workflow] timeout_secs` is the TOTAL-RUN default.** The brief's §4.3 precedence stands (flag → `[workflow] timeout_secs` → unbounded); it is **not** a node default. ~~The node default stays the 300 s const, the edge default the 30 s const.~~ **SUPERSEDED by D033's Amendment: there are no node/edge defaults — an unset bound is UNBOUNDED (`workflow_bound_opt`); only the whole-run cap is a default-and-it-must-be-set.** The three keys keep the same name `timeout_secs` and differ only in scope, which is the repo's own vocabulary (`bash { timeout_secs }`, `bg { wait, timeout_secs }`, `webfetch { timeout }`) and is already anticipated in the shipped config: `.wcode/workflow.toml:144` "run via bash with a long `timeout_secs` such as 900". Do not rename per-scope — `--dump-config` and the README can disambiguate.
 
 **A2 — `run.json` sidecar confirmed**, not a widened `manifest.json`. `Manifest`'s doc scopes it deliberately: `session_groups.rs:346-347` "team topology, written as a fast path only (D5)". A task text, a config path and a timeout are *run launch* parameters, not team topology; folding them in would blunt that doc's contract and every reader of the manifest.
 

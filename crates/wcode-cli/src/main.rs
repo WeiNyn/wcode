@@ -76,8 +76,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
   --socket <path>    connect to a session served elsewhere (with -p; a remote REPL is next)
   --task <text>      run a [workflow] headless on <text> (requires [workflow]
                      and --agents; WCODE_TASK is the fallback)
-  --timeout <secs>   cap the headless run (0/absent = no cap; falls back to
-                     `[workflow] timeout_secs`)
+  --timeout <secs>   cap the headless run (absent = use `[workflow] timeout_secs`;
+                     0 = NO cap, overriding it)
   --quiet            headless run: suppress the per-event log (the final
                      summary and any `resume:` line still print)
   --status [group|latest]  read-only: print <group>'s plan (#id [state] title),

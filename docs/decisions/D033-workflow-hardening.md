@@ -2,8 +2,9 @@
 
 - **Status:** accepted & **shipped** (W028 closed — Phase 1 `d251c40` + the
   `5c8fbd4` review fix; Phase 2a (bounds) `7b86f80` + the `dd5fe8b` review fix;
-  Phase 2b (cancel + resume) `b32deee` + this commit, which carries the recorded
-  cap into the `resume:` line; the brief's §12 amendments are all landed)
+  Phase 2b (cancel + resume) `b32deee` + `d791944`, which carries the recorded cap
+  into the `resume:` line; the boundary reversal in this Amendment is `47dbad0`;
+  the brief's §12 amendments are all landed)
 - **Date:** this session
 - **Relates to:** [`crates/wcode-cli/src/scheduler.rs`](../../crates/wcode-cli/src/scheduler.rs)
   (`SCRIPT_TIMEOUT`, `edges_admit`, `dispatch_one`, `Scheduler::run`),
@@ -182,3 +183,18 @@ fires. Mitigation: the cap is settable at start, and a capped run is *resumable*
 (this record's resume contract), so the cost is a bounded stall, not lost work.
 The template therefore sets `[workflow] timeout_secs` explicitly rather than
 relying on the absent-is-unbounded default.
+
+**The numbers, so the most likely exit path is documented.** The shipped
+template's per-node caps sum to **19,200 s** against its **21,600 s** (6 h) run
+cap: a clean pass fits with ~40 min of slack, but **one** `implement`+`verify`
+rework adds **7,200 s** and hits the cap. That is accepted — the run exits
+non-zero with a `resume:` line and the resume continues from the intact plan — but
+if one full rework should fit inside a single launch, **28,800 s (8 h)** is the
+next round number for `[workflow] timeout_secs`.
+
+**Old journals resume unbounded.** A group journaled *before* this amendment
+carries no per-node `timeout_secs` (the old 300 s default was a const, never
+serialized), so resuming it now runs every such node **unbounded** — the run cap
+is its only bound. Correct by the new rule, but newly true for pre-existing
+groups: set `[workflow] timeout_secs` (or an explicit `--timeout`) before
+resuming one you care about.
