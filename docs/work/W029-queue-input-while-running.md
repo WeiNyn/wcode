@@ -1,6 +1,6 @@
 # W029 — queue input while a turn is running — brief
 
-- **Status:** draft — awaiting human sign-off
+- **Status:** done — landed in `bcb1297`, second-layer APPROVED with the follow-ups folded in `f3ddef9`
 - **Work item:** W029
 - **Decisions:** locked by the human (queue TUI-locally; auto-dequeue on `AgentEnd`; Esc keeps the queue; `/`-commands stay immediate). This brief settles the six design questions.
 - **Author:** session `agent:brainstormer`
