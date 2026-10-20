@@ -81,10 +81,18 @@
 # a schedule. A node past its limit is `fail`ed with "node timeout: exceeded Ns",
 # its dependents stay blocked, and the scheduler escalates to the root (a
 # `task reset <id>` retries). The built-in default is 300 s, which is far too
-# short for a real build; the values below are sized to the work. `0` disables a
-# node's bound. A `script` EDGE carries its own `condition.timeout_secs`
-# (default 30 s); a `sleep`-leading script cannot be used as an edge or node at
-# all — `SleepRefusalHooks` refuses it before it runs.
+# short for a real build; the values below are sized to the work.
+#
+# ABSENT IS NOT UNLIMITED. Omitting a node's `timeout_secs` applies the 300 s
+# default; `timeout_secs = 0` is the ONLY way to say "no bound" (it disables the
+# node's deadline outright). Same for an edge's `condition.timeout_secs`, whose
+# absent default is 30 s. The TOTAL-run knob is the one that inverts: an absent
+# `[workflow] timeout_secs` means unbounded. (Before W028 a `Session` node had no
+# bound at all, so a template that omits every key now gets capped at 300 s per
+# member node — set `0` there if you want the old behaviour.)
+#
+# A `sleep`-leading script cannot be used as an edge or node at all —
+# `SleepRefusalHooks` refuses it before it runs.
 #
 # `[workflow] timeout_secs` (the TOTAL-run cap) is deliberately UNSET here. A
 # feature pipeline legitimately takes hours, and a total cap that fires mid-flight
