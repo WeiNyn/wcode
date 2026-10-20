@@ -57,7 +57,7 @@ config default".
 | # | workstream | value | complexity | risk | why |
 |---|------------|-------|------------|------|-----|
 | P1 | `RunRecord.timeout_flag` + its write site | high | low | low | one optional field with `#[serde(default)]`; old records load as `None`, i.e. today's behaviour |
-| P2 | `workflow_resume_line` emits the raw flag | high | low | med | the renderer plus its two call sites (`print_workflow_resume` at `main.rs:2626`/`:2639`) and three existing renderer tests (`repl.rs:1819`/`:1840`/`:1846`) |
+| P2 | `workflow_resume_line` emits the raw flag | high | low | med | the renderer plus its two call sites (`print_workflow_resume` at `main.rs:2626`/`:2639`) and one existing renderer test (`repl.rs:1816`) with three cases (`:1819`/`:1840`/`:1846`) |
 | P3 | Docs + the test that pins the pair | med | low | low | three prose sites; one test asserting `--timeout 0` survives end to end |
 
 ## 4. Interface & structure
@@ -100,8 +100,12 @@ unbounded".
   not. Rejected.
 - **(iii) Read `run.json` on resume and treat the recorded cap as binding.** The
   only option that makes a resume ignore the *current* config — fuller, and the
-  contract W028 wrote down ("the launch is recorded … so a resume does not
-  resume unbounded", `main.rs:2561-2565`). It changes the meaning of a resume for
+  contract W028 wrote down in two places: `main.rs:2561-2565` "the launch is
+  recorded in `<group>/run.json` once … any non-zero exit from a CREATED run
+  prints a `resume:` line naming the same task text the record holds", and the
+  renderer's half of it at `repl.rs:660-661` "`timeout_secs` is that record's
+  cap: it is CARRIED into the line so a capped run does not resume unbounded".
+  It changes the meaning of a resume for
   every field and needs a rule for records predating the flag. Rejected **for
   this defect**; if "resume exactly as launched" ever becomes the contract it
   deserves its own decision record, and (i) is still its first step.
@@ -116,7 +120,8 @@ unbounded".
 2. **Render it** (`repl.rs:664-684`): the parameter, the push, and the doc
    comment above it rewritten to say "the raw flag, so an explicit `0` survives
    a resume whose config sets a cap". *Deliverable:* `--timeout 0` in the line.
-   *Gate:* the three renderer tests at `repl.rs:1819`/`:1840`/`:1846` updated;
+   *Gate:* one renderer test (`repl.rs:1816`) with three cases
+   (`:1819`/`:1840`/`:1846`) updated;
    a new `resume_line_carries_an_explicit_zero`.
 3. **Pin the agreement** — a test that builds a record with
    `{timeout_flag: Some(0), timeout_secs: None}` and asserts the line carries
