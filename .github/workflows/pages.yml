@@ -1,0 +1,75 @@
+name: Pages
+
+# Publishes the book (docs/book) as the project site.
+#
+# Replaces the old "legacy" Pages build that served `index.html` from the repo
+# root: the site is now assembled from a directory that exists only for it, so
+# the repo root stays a repo root. Enabling this requires the repository's Pages
+# source to be "GitHub Actions" (Settings → Pages → Build and deployment), which
+# is a one-time switch:
+#
+#   gh api -X POST repos/{owner}/{repo}/pages -f build_type=workflow
+#
+# Until that switch, this workflow's deploy step fails with a clear message; it
+# never takes the old site down on its own.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/book/**"
+      - "scripts/check-book.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer commit wins over an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A broken page ships as a broken site, so the book's own validator is the
+      # gate: tags balance, no raw `&`, every link and anchor resolves.
+      - name: Validate the book
+        run: python3 scripts/check-book.py docs/book
+
+      - name: Assemble _site from docs/book
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site
+          cp -R docs/book/. _site/
+          # Belt and braces: Pages serves the artifact as-is, but a stray
+          # underscore directory or a `.md` should never be interpreted.
+          : > _site/.nojekyll
+          test -f _site/index.html
+          test -f _site/style.css
+          printf 'files: '; find _site -type f | wc -l
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

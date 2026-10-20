@@ -1,0 +1,1286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode — workflow mode vs. agent-team mode</title>
+<style>
+  :root {
+    --bg: #0b0e13;
+    --panel: #12161d;
+    --panel-2: #171c25;
+    --line: #232b37;
+    --text: #dce3ed;
+    --muted: #93a0b4;
+    --dim: #6b7788;
+    --accent: #6ea8fe;
+    --gate: #f0b95c;
+    --ok: #6ee7a8;
+    --bad: #f2777a;
+    --code: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--code); font-size: .86em; }
+  :not(pre) > code {
+    background: #1b222c;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: .08em .38em;
+    color: #cfe0ff;
+    white-space: nowrap;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 1.5rem 6rem; }
+
+  /* ---------- hero ---------- */
+  header.hero {
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(700px 300px at 12% -10%, rgba(110,168,254,.14), transparent 70%),
+      radial-gradient(600px 260px at 92% 0%, rgba(240,185,92,.09), transparent 70%);
+  }
+  .hero-in { max-width: 1120px; margin: 0 auto; padding: 4rem 1.5rem 2.4rem; }
+  .kicker {
+    font: 600 .72rem/1 var(--code);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  h1 {
+    font-size: clamp(2rem, 4.6vw, 3.1rem);
+    line-height: 1.08;
+    letter-spacing: -.02em;
+    margin: 1rem 0 .9rem;
+    font-weight: 660;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: 1.1rem; color: var(--muted); max-width: 62ch; margin: 0 0 1.7rem; }
+  .badges { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .badge {
+    font: 500 .74rem/1 var(--code);
+    color: var(--muted);
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 999px;
+    padding: .42rem .7rem;
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+
+  /* ---------- toc ---------- */
+  nav.toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    gap: .5rem;
+    margin-top: 2.2rem;
+  }
+  nav.toc a {
+    display: block;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 9px;
+    padding: .6rem .8rem;
+    color: var(--muted);
+    font-size: .84rem;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  nav.toc a:hover { border-color: #33405a; color: var(--text); background: var(--panel-2); text-decoration: none; }
+  nav.toc a span { font-family: var(--code); color: var(--dim); margin-right: .5rem; }
+
+  /* ---------- sections ---------- */
+  section { padding-top: 3.4rem; }
+  h2 {
+    font-size: 1.45rem;
+    letter-spacing: -.01em;
+    margin: 0 0 1rem;
+    padding-bottom: .7rem;
+    border-bottom: 1px solid var(--line);
+    font-weight: 640;
+  }
+  h2 .num { font: 600 .8rem var(--code); color: var(--accent); margin-right: .7rem; vertical-align: .16em; }
+  h3 { font-size: 1.02rem; margin: 2rem 0 .6rem; font-weight: 620; letter-spacing: .01em; }
+  h3 .hint { font: 400 .8rem var(--code); color: var(--dim); margin-left: .6rem; }
+  p { margin: .8rem 0; }
+  ul, ol { margin: .8rem 0; padding-left: 1.35rem; }
+  li { margin: .35rem 0; }
+  li::marker { color: var(--dim); }
+  strong { font-weight: 620; color: #fff; }
+  .muted { color: var(--muted); }
+  .dim { color: var(--dim); }
+
+  /* ---------- cards ---------- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+  @media (max-width: 860px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1.1rem 1.2rem;
+  }
+  .card h4 {
+    margin: 0 0 .5rem;
+    font: 600 .78rem/1.4 var(--code);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .card.on-a { border-left: 3px solid var(--accent); }
+  .card.on-b { border-left: 3px solid var(--gate); }
+  .card p:last-child { margin-bottom: 0; }
+
+  .callout {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(180deg, rgba(110,168,254,.07), rgba(110,168,254,.02));
+    border-radius: 0 10px 10px 0;
+    padding: .9rem 1.1rem;
+    margin: 1.2rem 0;
+  }
+  .callout.warn { border-left-color: var(--gate); background: linear-gradient(180deg, rgba(240,185,92,.08), rgba(240,185,92,.02)); }
+  .callout p { margin: .3rem 0; }
+  .callout .label {
+    font: 600 .72rem/1 var(--code);
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: block;
+    margin-bottom: .45rem;
+  }
+
+  /* ---------- tables ---------- */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .78rem .95rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    background: var(--panel-2);
+    font: 600 .74rem/1.3 var(--code);
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: rgba(255,255,255,.017); }
+  td:first-child { color: var(--muted); font-size: .86rem; }
+  .col-a { color: #cfe0ff; }
+  .col-b { color: #f5d69b; }
+
+  /* ---------- code ---------- */
+  figure.code {
+    margin: 1.1rem 0;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    overflow: hidden;
+    background: #0d1117;
+  }
+  figure.code figcaption {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    flex-wrap: wrap;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+    padding: .5rem .85rem;
+    font: 500 .75rem/1.4 var(--code);
+    color: var(--dim);
+  }
+  figure.code figcaption .f { color: var(--accent); }
+  figure.code figcaption .tag {
+    margin-left: auto;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .16rem .55rem;
+    font-size: .68rem;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  figure.code pre {
+    margin: 0;
+    padding: .95rem 1rem;
+    overflow-x: auto;
+    font: 400 .825rem/1.62 var(--code);
+    color: #c9d5e4;
+    tab-size: 2;
+  }
+  figure.code .c { color: #5f6d80; font-style: italic; }
+  figure.code .k { color: #c792ea; }
+  figure.code .s { color: #9fe0a8; }
+  figure.code .n { color: #f0b95c; }
+  figure.code .f2 { color: #82aaff; }
+
+  /* ---------- pipeline svg ---------- */
+  figure.diagram {
+    margin: 1.4rem 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  figure.diagram svg { display: block; min-width: 900px; height: auto; }
+  figure.diagram figcaption { font-size: .8rem; color: var(--dim); padding: .4rem .2rem 0; }
+  .legend { display: flex; gap: 1.4rem; flex-wrap: wrap; font-size: .78rem; color: var(--muted); padding: .1rem .2rem .6rem; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .45rem; vertical-align: middle; }
+
+  /* ---------- trace steps ---------- */
+  ol.trace { list-style: none; padding: 0; counter-reset: t; }
+  ol.trace > li {
+    position: relative;
+    padding: 0 0 1.15rem 2.6rem;
+    counter-increment: t;
+    margin: 0;
+  }
+  ol.trace > li::before {
+    content: counter(t);
+    position: absolute;
+    left: 0; top: .1rem;
+    width: 1.6rem; height: 1.6rem;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--accent);
+    font: 600 .74rem/1.55rem var(--code);
+    text-align: center;
+  }
+  ol.trace > li::after {
+    content: "";
+    position: absolute;
+    left: .8rem; top: 1.9rem; bottom: .2rem;
+    width: 1px;
+    background: var(--line);
+  }
+  ol.trace > li:last-child::after { display: none; }
+  ol.trace b { display: block; font-weight: 620; color: #fff; }
+  ol.trace .where { font: 400 .76rem var(--code); color: var(--dim); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    color: var(--dim);
+    font-size: .82rem;
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-in">
+    <div class="kicker">wcode · implementation report · v0.12.0-21-g0be6694</div>
+    <h1>Workflow mode: a <em>pre-seeded DAG</em>,<br>not a conversation the root improvises</h1>
+    <p class="lede">
+      wcode has one orchestration substrate — a shared task list, a registry of worker
+      sessions, a scheduler. What changes between <b>agent-team mode</b> and
+      <b>workflow mode</b> is <em>where the plan comes from</em> and <em>who is allowed to
+      drive it</em>. This report traces both paths through the real code and pins every
+      claim to a <code>file:line</code>.
+    </p>
+    <div class="badges">
+      <span class="badge">crate <b>wcode-cli</b></span>
+      <span class="badge">scheduler <b>2 328 LOC</b></span>
+      <span class="badge">task list <b>1 950 LOC</b></span>
+      <span class="badge">decisions <b>D001 · D002 · D029 · D030 · D033</b></span>
+    </div>
+  </div>
+
+  <nav class="toc hero-in" style="padding:0 1.5rem 3rem">
+    <a href="#one-machine"><span>01</span>Two modes, one machine</a>
+    <a href="#team-mode"><span>02</span>Mode A — the agent team</a>
+    <a href="#workflow-mode"><span>03</span>Mode B — the workflow</a>
+    <a href="#boot"><span>04</span>Boot: config → plan</a>
+    <a href="#loop"><span>05</span>The scheduler loop</a>
+    <a href="#model"><span>06</span>The data model</a>
+    <a href="#gates"><span>07</span>Gates, rework, escalation</a>
+    <a href="#bounds"><span>08</span>Bounds, exit codes, resume</a>
+    <a href="#divergence"><span>09</span>The divergence table</a>
+    <a href="#trace"><span>10</span>Worked trace</a>
+    <a href="#gotchas"><span>11</span>Gotchas by design</a>
+    <a href="#evidence"><span>12</span>Evidence index</a>
+  </nav>
+</header>
+
+<main class="wrap">
+
+<!-- ============================================================ 01 -->
+<section id="one-machine">
+  <h2><span class="num">01</span>Two modes, one machine</h2>
+
+  <p>
+    Both modes run <em>the same code</em>: an <code>Orchestrator</code> (root session +
+    <code>Registry</code> + <code>TaskList</code>), a detached <code>Scheduler</code>, a
+    <code>ReportBack</code> hook that turns a worker's last message into a
+    <code>Wake</code> to the root, and a <code>VerifyGateHooks</code> policy that refuses to
+    close a work node nobody verifies. The scheduler is spawned for <b>any</b> orchestrator —
+    team mode included.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:1668</span><span class="tag">spawned in both modes</span></figcaption>
+<pre>    <span class="c">// Spawn the DAG scheduler here — after the `[team]` loop and before</span>
+    <span class="c">// `Runtime { .. }`, so it is live for one-shot / REPL / TUI alike.</span>
+    <span class="k">if let</span> Some(o) = <span class="f2">&amp;</span>orchestrator {
+        o.<span class="f2">spawn_scheduler</span>(
+            cwd.<span class="f2">clone</span>(),
+            hooks.<span class="f2">clone</span>(),
+            <span class="c">// A clone of the run's token — cancelling it from `dispatch` (a</span>
+            <span class="c">// deadline, or Ctrl-C) now reaches the scheduler's in-flight work.</span>
+            o.<span class="f2">cancel_token</span>().<span class="f2">clone</span>(),
+            judger,
+        );
+    }</pre>
+  </figure>
+
+  <p>So the difference is not "with scheduler" vs. "without". It is three narrower questions:</p>
+
+  <div class="grid3">
+    <div class="card">
+      <h4>Where the plan comes from</h4>
+      <p><b>Team:</b> the root model calls <code>task{op:"create"}</code> turn by turn.<br>
+         <b>Workflow:</b> <code>instantiate_workflow</code> creates every node at boot from TOML.</p>
+    </div>
+    <div class="card">
+      <h4>Who may grow it</h4>
+      <p><b>Team:</b> the root — <code>create</code>/<code>depends</code>/<code>assign</code> are its normal tools.<br>
+         <b>Workflow:</b> nobody, in the default posture; the seed prompt says <i>"Do NOT create nodes"</i>.</p>
+    </div>
+    <div class="card">
+      <h4>How the run ends</h4>
+      <p><b>Team:</b> the human quits the TUI/REPL.<br>
+         <b>Workflow:</b> <code>terminal_code()</code> — the process exits 0/1/2 on its own.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="label">The one-line answer</span>
+    <p>
+      <b>Team mode</b> is an <em>interactive</em> loop where the root authors and completes a
+      plan as work arrives. <b>Workflow mode</b> is a <em>headless</em> run where the plan is
+      declared in TOML up front, the scheduler owns dispatch, and the root is demoted to a
+      verdict relay: <code>task complete</code> / <code>task reject</code>.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ 02 -->
+<section id="team-mode">
+  <h2><span class="num">02</span>Mode A — the agent team (interactive)</h2>
+
+  <p>
+    Entry: <code>wcode</code> (a non-empty <code>[team]</code> auto-enables agents mode,
+    <code>main.rs:799</code>) or <code>wcode --agents</code>. There is <b>no</b>
+    <code>--task</code>, no plan template, typically no graph at all.
+  </p>
+
+  <h3>What boot does <span class="hint">main.rs:1615-1639</span></h3>
+  <p>Each <code>[team]</code> member is spawned as its own session and registered in the phonebook:</p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:1619</span><span class="tag">mode A boot</span></figcaption>
+<pre>    <span class="k">if</span> args.owner.<span class="f2">is_none</span>()
+        <span class="k">&amp;&amp;</span> !setup.resuming_group
+        <span class="k">&amp;&amp; let</span> Some(o) = <span class="f2">&amp;</span>orchestrator
+    {
+        <span class="k">for</span> member <span class="k">in</span> <span class="f2">&amp;</span>cfg.team {
+            <span class="k">let</span> spec = crate::agents::WorkerSpec {
+                name: Some(member.name.<span class="f2">clone</span>()),
+                system: member.role.<span class="f2">clone</span>(),
+                tools: member.tools.<span class="f2">clone</span>(),
+                <span class="c">// …model / base_url / read_only / effort…</span>
+            };
+            <span class="k">if let</span> Err(e) = o.<span class="f2">spawn_worker</span>(spec) {
+                eprintln!(<span class="s">"error: team member `{}`: {e}"</span>, member.name);
+                std::process::<span class="f2">exit</span>(<span class="n">2</span>);
+            }
+        }
+    }</pre>
+  </figure>
+
+  <p>
+    The root's system prompt then gains a roster block — the only "workflow" it knows is
+    prose. Compare with mode B, where the same slot carries a graph-shaped brief.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/repl.rs:71</span><span class="tag">root prompt</span></figcaption>
+<pre>    <span class="k">if</span> !team.<span class="f2">is_empty</span>() {
+        <span class="k">let mut</span> block = String::from(
+            <span class="s">"# Your team\n\n\
+             You orchestrate a team of worker agents. Address a member by name with \
+             `message` (`to: \"&lt;name&gt;\"`); `spawn` adds a worker; `peers` lists them. \
+             Delegate by role and prefer messaging an existing member over spawning a \
+             duplicate.\n\nMembers:"</span>,
+        );</pre>
+  </figure>
+
+  <h3>What the root does, turn by turn</h3>
+  <ul>
+    <li><b>Plans.</b> <code>task{op:"create", title, deps?, gate?}</code> — the tool doc is
+      explicit that <code>create</code> hard-sets <code>run: Session{member:None}</code>, so a
+      plan the model authors is always judgement nodes
+      (<code>crates/wcode-cli/src/tools/task.rs:152</code>).</li>
+    <li><b>Staffs.</b> <code>task{op:"assign", assignee:"explorer"}</code> resolves the name
+      through the <code>Phonebook</code> and writes <code>task.owner</code> — the scheduler's
+      dispatch key.</li>
+    <li><b>Delegates. Sparked or messaged.</b> It may <code>spawn</code> a brand-new worker at
+      any moment, or <code>message</code> an existing one — including a <i>lateral</i> question
+      that has nothing to do with the plan.</li>
+    <li><b>Accepts.</b> A worker's report arrives as a <code>Wake</code>; the root decides
+      <code>complete</code> vs. <code>reject</code> in open prose.</li>
+    <li><b>Improvises the next step</b> — the graph, if there is one, only exists because the
+      model wrote it that way.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="label">Shape, not ceremony</span>
+    <p>
+      Team mode is <em>not</em> a free-for-all: <code>VerifyGateHooks</code> is installed
+      whenever an orchestrator exists (<code>main.rs:1513</code>), so rule <b>R′</b> still
+      refuses closing a work node no gate consumes — in interactive sessions too. The
+      difference is that the root must <i>invent</i> that gate itself.
+    </p>
+  </div>
+
+  <h3>Where it is observed</h3>
+  <p>
+    The TUI: each member is a <b>surface</b> you can switch to (<code>Ctrl-N</code>), the plan
+    shows under <code>/tasks</code>, the sidebar lists the roster. The run never "finishes";
+    you close it.
+  </p>
+</section>
+
+<!-- ============================================================ 03 -->
+<section id="workflow-mode">
+  <h2><span class="num">03</span>Mode B — the workflow (headless)</h2>
+
+  <p>
+    Entry: <code>wcode --agents --config X.toml --task "…"</code>. The <code>[workflow]</code>
+    table is a <b>plan template</b>, and per <b>D001</b> it is <em>inert</em> without a task:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2911</span><span class="tag">the fence</span></figcaption>
+<pre><span class="k">fn</span> <span class="f2">should_instantiate_workflow</span>(
+    resuming_group: <span class="k">bool</span>,
+    has_workflow: <span class="k">bool</span>,
+    has_task: <span class="k">bool</span>,
+) -&gt; <span class="k">bool</span> {
+    !resuming_group <span class="k">&amp;&amp;</span> has_workflow <span class="k">&amp;&amp;</span> has_task
+}</pre>
+  </figure>
+
+  <p>
+    Two of those three conjuncts are load-bearing: <code>has_task</code> means a template with
+    no run exits with the notice <code>"workflow: present but inert (no --task)"</code>
+    (<code>main.rs:1381</code>); <code>!resuming_group</code> means a resume loads the journaled
+    plan instead of re-seeding it — otherwise the plan would <b>double on every resume</b>.
+  </p>
+
+  <h3>The run is a wrapper around a driver</h3>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2582</span><span class="tag">run_workflow</span></figcaption>
+<pre>    <span class="c">// The empty-plan guard is the FIRST statement: an empty plan never seeds the</span>
+    <span class="c">// root and never touches the deadline. It is a client-side refusal, so it</span>
+    <span class="c">// writes no `run.json` and prints no `resume:` line</span>
+    <span class="k">if</span> tasks.<span class="f2">snapshot</span>().<span class="f2">is_empty</span>() {
+        eprintln!(<span class="s">"{NO_PLAN_ERROR}"</span>);
+        <span class="k">return</span> <span class="n">2</span>;
+    }
+    <span class="k">let</span> cap = timeout.<span class="f2">map</span>(|d| d.<span class="f2">as_secs</span>());
+    <span class="k">if let</span> Some(group) = group {
+        <span class="k">let</span> record = crate::session_groups::RunRecord {
+            task: task.<span class="f2">to_string</span>(),
+            config: config.<span class="f2">map</span>(str::to_string),
+            timeout_secs: cap,
+        };
+        <span class="k">let</span> _ = crate::session_groups::<span class="f2">write_run</span>(group, <span class="f2">&amp;</span>record);
+    }</pre>
+  </figure>
+
+  <p>
+    The root gets exactly one opening instruction, and it is a <em>fence</em>: the plan exists;
+    do not build another one.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2861</span><span class="tag">workflow_seed</span></figcaption>
+<pre>        <span class="s">"The task is:\n{task}\n\nA `[workflow]` plan is ALREADY instantiated \
+         (see `task list`). Do NOT create nodes — the scheduler dispatches each \
+         ready node to its member. As each worker reports, call \
+         `task complete &lt;id&gt;` with the report as `artifact`; for a gate, call \
+         `task reject &lt;id&gt; &lt;reason&gt;` with the reason. If an escalation names a \
+         blocked node, call `task reset &lt;id&gt;` to re-evaluate its edge, or stop. \
+         Do not message its member directly. Stop when no node is ready and none \
+         is running."</span></pre>
+  </figure>
+
+  <p class="muted">
+    Note <i>"Do not message its member directly"</i> — in workflow mode the only sanctioned
+    route into a worker is the scheduler's dispatch. Lateral messaging still exists, but only
+    along declared edges (see §11, D030).
+  </p>
+
+  <h3>Then it just waits for the plan to settle</h3>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2713</span><span class="tag">drive_workflow</span></figcaption>
+<pre>    <span class="k">let</span> code = loop {
+        <span class="k">if let</span> Some(code) = tasks.<span class="f2">terminal_code</span>() {
+            <span class="k">break</span> code;
+        }
+        <span class="k">match</span> deadline {
+            Some(deadline) =&gt; {
+                tokio::select! {
+                    changed = updates.<span class="f2">changed</span>() =&gt; {
+                        <span class="k">if</span> changed.<span class="f2">is_err</span>() {
+                            <span class="k">break</span> tasks.<span class="f2">terminal_code</span>().<span class="f2">unwrap_or</span>(<span class="n">1</span>);
+                        }
+                        <span class="f2">log_node_transitions</span>(<span class="f2">&amp;</span>tasks, <span class="f2">&amp;mut</span> seen, quiet);
+                    }
+                    _ = tokio::time::<span class="f2">sleep_until</span>(deadline) =&gt; {
+                        <span class="k">let</span> _ = backend.<span class="f2">send</span>(Request::Cancel);
+                        cancel.<span class="f2">cancel</span>();
+                        <span class="k">break</span> <span class="n">1</span>;
+                    }
+                }
+            }
+            <span class="c">// …no cap: plain `updates.changed().await`…</span></pre>
+  </figure>
+
+  <p>
+    The exit verdict is a pure function of the plan, not of the model's summary:
+    <code>Some(1)</code> the moment any node is <code>Failed</code> (fail-fast — its dependents
+    can never progress), <code>Some(0)</code> once every node is <code>Done</code> or
+    <code>Skipped</code>, <code>None</code> while running.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:1097</span><span class="tag">terminal_code</span></figcaption>
+<pre>    <span class="k">pub fn</span> <span class="f2">terminal_code</span>(<span class="f2">&amp;</span>self) -&gt; Option&lt;i32&gt; {
+        <span class="k">let</span> tasks = self.inner.tasks.<span class="f2">lock</span>().<span class="f2">unwrap</span>();
+        <span class="k">if</span> tasks.<span class="f2">iter</span>().<span class="f2">any</span>(|t| t.state == TaskState::Failed) {
+            <span class="k">return</span> Some(<span class="n">1</span>);
+        }
+        <span class="k">if</span> tasks
+            .<span class="f2">iter</span>()
+            .<span class="f2">all</span>(|t| <span class="f2">matches!</span>(t.state, TaskState::Done | TaskState::Skipped))
+        {
+            <span class="k">return</span> Some(<span class="n">0</span>);
+        }
+        None
+    }</pre>
+  </figure>
+</section>
+
+<!-- ============================================================ 04 -->
+<section id="boot">
+  <h2><span class="num">04</span>Boot: config → validated graph → plan</h2>
+
+  <p>Three gates stand between a TOML file and a live plan.</p>
+
+  <ol>
+    <li><b>Structural validation</b> (<code>config.rs:1057</code>
+      <code>validate_workflow_structure</code>): unique node ids, one edge per
+      <code>(from,to)</code> pair, no self-edge, both endpoints known, a gate needs ≥1 incoming
+      edge, an edge condition is exactly one of <code>script</code>/<code>judge</code>,
+      scripts non-empty.</li>
+    <li><b>Acyclicity</b> (<code>config.rs:1175</code> <code>topo_order</code>): the graph is
+      walked to produce creation order, which is why an edge may legally name a node authored
+      <em>later</em> in the file.</li>
+    <li><b>Member resolution</b> (<code>config.rs:1155</code>
+      <code>validate_workflow_members</code>, called at <code>main.rs:793</code>): every
+      <code>member</code> must exist in the <em>folded</em> team — including markdown agent
+      definitions — so a typo cannot silently produce an undispatchable node.</li>
+  </ol>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2951</span><span class="tag">instantiate_workflow — excerpt</span></figcaption>
+<pre><span class="k">fn</span> <span class="f2">instantiate_workflow</span>(
+    tasks: <span class="f2">&amp;</span>crate::tasks::TaskList,
+    workflow: <span class="f2">&amp;</span>crate::config::Workflow,
+    task: Option&lt;<span class="f2">&amp;</span>str&gt;,
+) -&gt; <span class="k">usize</span> {
+    <span class="k">let</span> order = crate::config::<span class="f2">topo_order</span>(workflow)
+        .<span class="f2">unwrap_or_else</span>(|e| <span class="f2">workflow_fail</span>(<span class="f2">&amp;</span>e.<span class="f2">to_string</span>()));
+    <span class="k">let</span> n = order.<span class="f2">len</span>();
+    <span class="k">let mut</span> ids: HashMap&lt;<span class="f2">&amp;</span>str, u32&gt; = HashMap::<span class="f2">new</span>();
+    <span class="k">for</span> node <span class="k">in</span> order {
+        <span class="c">// …each incoming edge becomes a `Dep` (plain id, or `Edged` with a condition)…</span>
+        <span class="k">let</span> t = <span class="k">match</span> tasks.<span class="f2">create</span>(crate::config::<span class="f2">node_title</span>(node, task), deps, node.gate) {
+            Ok(t) =&gt; t,
+            Err(e) =&gt; <span class="f2">workflow_fail</span>(<span class="f2">&amp;</span>format!(<span class="s">"node `{}`: {e}"</span>, node.id)),
+        };
+        ids.<span class="f2">insert</span>(node.id.<span class="f2">as_str</span>(), t.id);
+        <span class="k">match</span> (<span class="f2">&amp;</span>node.member, <span class="f2">&amp;</span>node.script) {
+            (Some(m), None) =&gt; {
+                <span class="k">if let</span> Err(e) = tasks.<span class="f2">assign</span>(t.id, crate::tools::message::<span class="f2">address</span>(m)) {
+                    <span class="f2">workflow_fail</span>(<span class="f2">&amp;</span>format!(<span class="s">"node `{}`: {e}"</span>, node.id));
+                }
+                <span class="c">// A1: the OWNER comes from `assign`, but the per-node DEADLINE has</span>
+                <span class="c">// no other way in — without this `configure` the knob is dead.</span>
+                <span class="k">if let</span> Err(e) = tasks.<span class="f2">configure</span>(
+                    t.id,
+                    crate::tasks::RunSpec::Session {
+                        member: None,
+                        timeout_secs: node.timeout_secs,
+                    },
+                    node.gate,
+                ) {
+                    <span class="f2">workflow_fail</span>(<span class="f2">&amp;</span>format!(<span class="s">"node `{}`: {e}"</span>, node.id));
+                }
+            }
+            <span class="c">// …(None, Some(cmd)) =&gt; RunSpec::Script { command: cmd }…</span>
+        }
+    }
+    n
+}</pre>
+  </figure>
+
+  <p>
+    <code>create</code> writes a <code>Todo</code> node and journals a <code>Create</code>
+    line; <code>assign</code> writes <code>owner</code> (<code>agent:&lt;member&gt;</code>);
+    <code>configure</code> writes the <code>RunSpec</code> + <code>gate</code>. All three are
+    replays: the same file <code>plan.ndjson</code> rebuilds the identical graph on resume.
+    <code>{{task}}</code> is substituted into titles only — never into scripts
+    (<code>config.rs:469</code> <code>node_title</code>).
+  </p>
+</section>
+
+<!-- ============================================================ 05 -->
+<section id="loop">
+  <h2><span class="num">05</span>The scheduler loop — one place that decides "what now"</h2>
+
+  <p>
+    <code>Scheduler::run</code> is a single <code>tokio::select!</code> loop over four wake
+    sources: a plan change, a judge verdict, a node deadline, and nothing at all.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/scheduler.rs:234</span><span class="tag">Scheduler::run — excerpt</span></figcaption>
+<pre>        loop {
+            <span class="k">let</span> _ = updates.<span class="f2">borrow_and_update</span>();
+            self.<span class="f2">prune_unjudgeable</span>();
+            <span class="k">let</span> ready = self.<span class="f2">frontier</span>();
+            self.<span class="f2">dispatch</span>(<span class="f2">&amp;</span>ready).<span class="k">await</span>;
+            <span class="c">// Escalate ONCE per Failed set: a real stall (something terminal and</span>
+            <span class="c">// nothing ready).</span>
+            <span class="k">let</span> failed: Vec&lt;u32&gt; = self.<span class="f2">failed_ids</span>();
+            <span class="k">if</span> failed != last_escalated {
+                <span class="k">if</span> failed.<span class="f2">is_empty</span>() {
+                    last_escalated.<span class="f2">clear</span>();
+                } <span class="k">else if</span> self.<span class="f2">frontier</span>().<span class="f2">is_empty</span>() {
+                    self.<span class="f2">escalate</span>(<span class="f2">escalation_content</span>(
+                        <span class="f2">&amp;</span>self.<span class="f2">failed_tasks</span>(),
+                        self.tasks.<span class="f2">max_attempts</span>(),
+                    ));
+                    last_escalated = failed;
+                }
+            }
+            <span class="c">// …prune the deadline map against a fresh snapshot, pick the earliest…</span>
+            tokio::select! {
+                changed = updates.<span class="f2">changed</span>() =&gt; {
+                    <span class="k">if</span> changed.<span class="f2">is_err</span>() { <span class="k">break</span>; }
+                }
+                <span class="c">// The ONLY place an async judge result mutates the plan.</span>
+                Some((id, verdict)) = judge_rx.<span class="f2">recv</span>() =&gt; self.<span class="f2">on_verdict</span>(id, verdict).<span class="k">await</span>,
+                fired = <span class="f2">sleep_until_opt</span>(next) =&gt; {
+                    <span class="k">if let</span> Some(id) = fired {
+                        self.started.<span class="f2">remove</span>(<span class="f2">&amp;</span>id);
+                        <span class="k">let</span> _ = self.<span class="f2">fire_node_deadline</span>(id);
+                    }
+                }
+            }
+        }</pre>
+  </figure>
+
+  <h3>Dispatch: a Wake for a session, a subprocess for a script</h3>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/scheduler.rs:567</span><span class="tag">dispatch_one</span></figcaption>
+<pre>            RunSpec::Session { .. } =&gt; {
+                <span class="k">let</span> Some(owner) = task.owner.<span class="f2">as_ref</span>() <span class="k">else</span> { <span class="k">return</span>; };
+                <span class="k">let</span> deps: Vec&lt;Task&gt; = task.deps.<span class="f2">iter</span>()
+                    .<span class="f2">filter_map</span>(|d| snapshot.<span class="f2">iter</span>().<span class="f2">find</span>(|t| t.id == d.<span class="f2">id</span>()).<span class="f2">cloned</span>())
+                    .<span class="f2">collect</span>();
+                <span class="k">let</span> content = <span class="f2">dispatch_content</span>(task, <span class="f2">&amp;</span>deps);
+                <span class="k">if</span> self.registry
+                    .<span class="f2">deliver</span>(<span class="f2">&amp;</span>self.root, owner, Request::Wake { content })
+                    .<span class="f2">is_ok</span>()
+                {
+                    <span class="k">let</span> _ = self.tasks.<span class="f2">start</span>(id);
+                    self.started.<span class="f2">insert</span>(id, tokio::time::Instant::<span class="f2">now</span>());
+                }
+            }</pre>
+  </figure>
+
+  <p>
+    The hydration is what makes a workflow node self-contained. A worker is not told "look at
+    the plan"; it receives its own title, every dependency's artifact, and the last reject
+    reason if this is a rework:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/scheduler.rs:733</span><span class="tag">dispatch_content — exact shape</span></figcaption>
+<pre>#2 implement
+
+#1 produced:
+&lt;artifact of dep #1&gt;
+
+Revise per this feedback:
+&lt;feedback&gt;</pre>
+  </figure>
+
+  <p>
+    A <code>Script</code> node never sees a model. Its command runs through the <b>same</b>
+    <code>before_tool_call</code> policy the <code>bash</code> tool uses, and its exit code
+    <em>is</em> the verdict: <code>0</code> → <code>Done</code>, non-zero →
+    <code>reject</code> (or <code>fail</code> at the cap), killed → <code>fail</code>
+    (<code>scheduler.rs:591-655</code>).
+  </p>
+</section>
+
+<!-- ============================================================ 06 -->
+<section id="model">
+  <h2><span class="num">06</span>The data model both modes share</h2>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:172</span><span class="tag">Task — field comments condensed</span></figcaption>
+<pre><span class="k">pub struct</span> Task {
+    <span class="k">pub</span> id: u32,                    <span class="c">// monotonic, 1-based</span>
+    <span class="k">pub</span> title: String,
+    <span class="k">pub</span> owner: Option&lt;SessionId&gt;,  <span class="c">// the dispatch key</span>
+    <span class="k">pub</span> state: TaskState,
+    <span class="k">pub</span> deps: Vec&lt;Dep&gt;,            <span class="c">// blocked-by, optionally condition-guarded</span>
+    <span class="k">pub</span> attempts: u32,              <span class="c">// rework rounds; the cap compares this</span>
+    <span class="k">pub</span> reset_epoch: u32,           <span class="c">// bumped by `reset` — makes a reset observable</span>
+    <span class="k">pub</span> feedback: Option&lt;String&gt;,   <span class="c">// the last reject reason = next run's input</span>
+    <span class="k">pub</span> artifact: Option&lt;String&gt;,   <span class="c">// this node's output; hydrates dependents</span>
+    <span class="k">pub</span> gate: <span class="k">bool</span>,                 <span class="c">// reject re-opens deps, not itself</span>
+    <span class="k">pub</span> run: RunSpec,               <span class="c">// Session { member, timeout_secs } | Script { command }</span>
+}</pre>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Five states · tasks.rs:45</h4>
+      <p>
+        <code>Todo</code> → <code>Doing</code> → <code>Done</code>, plus two terminals:
+        <code>Failed</code> (rework cap hit; dependents stay blocked forever) and
+        <code>Skipped</code> (an incoming edge's condition was false — terminal, but
+        <em>satisfied</em> for readiness, so a pruned step never stalls the DAG).
+      </p>
+    </div>
+    <div class="card">
+      <h4>Readiness is derived, never stored · tasks.rs:1068</h4>
+      <p>
+        <code>ready_ids()</code> = <code>Todo</code> ∧ every dep <code>Done</code> or
+        <code>Skipped</code>. The scheduler keeps only "ready ∧ (has an owner ∨ is a
+        Script)", so an unowned session node is silently never dispatched rather than
+        looping.
+      </p>
+    </div>
+  </div>
+
+  <p class="muted" style="margin-top:1rem">
+    In team mode this exact struct is filled in by the <code>task</code> tool; in workflow mode
+    by <code>instantiate_workflow</code>. Everything downstream — frontier, hydration,
+    escalation, the TUI's <code>/tasks</code> rendering, the journal — is shared, and therefore
+    identical.
+  </p>
+</section>
+
+<!-- ============================================================ 07 -->
+<section id="gates">
+  <h2><span class="num">07</span>Gates, rework, escalation</h2>
+
+  <p>
+    <code>gate = true</code> inverts what a node's verdict means: a gate <em>judges its
+    dependencies</em>, so rejecting it sends the work back rather than closing the gate.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:894</span><span class="tag">reopen_inner — the cap</span></figcaption>
+<pre>            tasks[idx].attempts += <span class="n">1</span>;
+            <span class="k">if</span> tasks[idx].attempts &gt; self.<span class="f2">max_attempts</span>() {
+                tasks[idx].state = TaskState::Failed;
+                outcome = ReopenOutcome::ReachedCap;
+            } <span class="k">else</span> {
+                tasks[idx].feedback = Some(reason.<span class="f2">to_string</span>());
+                tasks[idx].state = TaskState::Todo;
+                tasks[idx].artifact = None;
+                <span class="k">for</span> cid <span class="k">in</span> cone_ids {      <span class="c">// the whole downstream cone…</span>
+                    <span class="k">if let</span> Some(t) = tasks.<span class="f2">iter_mut</span>().<span class="f2">find</span>(|t| t.id == cid) {
+                        t.state = TaskState::Todo;  <span class="c">// …back to Todo</span>
+                        t.artifact = None;
+                    }
+                }
+                outcome = ReopenOutcome::Reopened;
+            }</pre>
+  </figure>
+
+  <p>
+    Past the cap the node is <code>Failed</code> and the scheduler wakes the root with a
+    <code>Wake</code> from its own address <code>scheduler</code> (which the orchestrator gives
+    an ownership edge to the root, or <code>deliver</code> would be
+    <code>NotPermitted</code> — <code>agents.rs:834</code>):
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/scheduler.rs:705</span><span class="tag">escalation_content</span></figcaption>
+<pre>scheduler: 1 node(s) failed — the plan is stalled.
+#4 implement — failed after 3 reworks; reset it (task op: reset id:4) or accept it.</pre>
+  </figure>
+
+  <p><code>task reset &lt;id&gt;</code> is the escape hatch: it bumps <code>reset_epoch</code>, which
+     also re-arms a node the scheduler had blocked as unjudgeable.</p>
+
+  <h3>R′ — the verify gate is structure, not a reminder</h3>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/verify_gate.rs:92</span><span class="tag">the refusal text</span></figcaption>
+<pre><span class="k">pub const</span> GATE_REASON: <span class="f2">&amp;</span>str = <span class="s">"verify gate required: task #{id} is a work node \
+with no gate depending on it — create a gate (`task create` with \
+`deps: [{id}]` and `gate: true`, then `assign` it) before completing #{id}"</span>;</pre>
+  </figure>
+
+  <p>
+    The hook's decision table (<code>verify_gate.rs:117</code>) is small and total: non-<code>task</code>
+    calls pass; only <code>op:"complete"</code> is examined; a real gate (gate ∧ ≥1 dep)
+    passes; a <code>Script</code> node passes (its exit code is the verdict); a node a gate
+    already depends on passes. Everything else is refused, and the loop feeds
+    <code>blocked: …</code> back to the model. <b>D002</b> is the honest caveat printed in every
+    design doc: a gate proves the step <em>ran</em>, never that it was <em>right</em>.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">Consequence for template authors</span>
+    <p>
+      In <code>.wcode/workflow.toml</code> there is an explicit
+      <code>explore → review-sketch</code> edge that looks redundant. It is not: R′ demands a
+      gate with a <b>direct</b> dependency on every work node, so without it
+      <code>task complete explore</code> is refused and the pipeline deadlocks at node #1.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ 08 -->
+<section id="bounds">
+  <h2><span class="num">08</span>Bounds, exit codes, resume, status</h2>
+
+  <p>
+    One rule, stated once in the scheduler and honoured everywhere: <b>no limit unless set.</b>
+    Both <code>None</code> (key absent) and <code>Some(0)</code> mean unbounded — never a
+    zero-length kill. v0.12.0's hard-coded 300 s script cutoff is gone (<b>D033</b>, amended).
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/scheduler.rs:42</span><span class="tag">the one bound rule</span></figcaption>
+<pre><span class="c">/// * `None` (the key is absent) or `Some(0)` → `None` = NO timer;</span>
+<span class="c">/// * `Some(n)` → `n` seconds.</span>
+<span class="c">///</span>
+<span class="c">/// There is deliberately no site default: an unset node/edge bound is</span>
+<span class="c">/// UNBOUNDED … The bound that matters is the WHOLE-RUN cap, set at launch</span>
+<span class="c">/// (`--timeout`, else `[workflow] timeout_secs`).</span></pre>
+  </figure>
+
+  <div class="table-wrap" style="margin-top:1.2rem">
+    <table>
+      <thead><tr><th>Bound</th><th>Where set</th><th>What fires</th></tr></thead>
+      <tbody>
+        <tr><td>whole run</td><td><code>--timeout N</code> (wins) else <code>[workflow] timeout_secs</code></td><td>cancels the root's in-flight turn + the run token; exit 1; a <code>resume:</code> line</td></tr>
+        <tr><td>one session node</td><td><code>[[workflow.node]] timeout_secs</code> → <code>RunSpec::Session.timeout_secs</code></td><td><code>node timeout: exceeded Ns</code> → <code>fail</code>; dependents blocked; escalation</td></tr>
+        <tr><td>one script node</td><td>same key, but on the <code>Script</code> spec</td><td>the <code>run_command</code> timeout; never double-booked by the timer arm</td></tr>
+        <tr><td>one edge</td><td><code>condition.timeout_secs</code></td><td><code>script</code>: block-and-escalate; <code>judge</code>: elapsed → <code>Verdict::None</code> → block-and-escalate</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="margin-top:1.2rem">The observable surface of a headless run:</p>
+  <ul>
+    <li><b>stderr</b> — a per-event log (root reports + every node-state change:
+      <code>#id [state] title</code>); <code>--quiet</code> silences it.</li>
+    <li><b>stdout</b> — the final per-node summary, always
+      (<code>print_workflow_summary</code>, <code>main.rs:2780</code>).</li>
+    <li><b><code>--status [group|latest]</code></b> — the read-only counterpart, which reads
+      <code>plan.ndjson</code> through <code>TaskList::read_at</code> and deliberately
+      <em>not</em> <code>load_at</code> (that would journal a <code>Restart</code> into the file
+      being inspected — <code>main.rs:2793</code>).</li>
+    <li><b><code>resume:</code></b> — any non-zero exit from a created run prints a
+      copy-pasteable relaunch line carrying the same cap; the task text lives in
+      <code>&lt;groupdir&gt;/run.json</code>.</li>
+  </ul>
+
+  <div class="table-wrap" style="margin-top:1.2rem">
+    <table>
+      <thead><tr><th>Exit</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>every node <code>Done</code> or <code>Skipped</code></td></tr>
+        <tr><td><code>1</code></td><td>a node <code>Failed</code> (fail-fast), the run cap elapsed, or the root's first turn errored / hit max turns</td></tr>
+        <tr><td><code>2</code></td><td>no plan loaded at all — refused <em>before</em> the root is seeded, so no <code>run.json</code> and no false <code>resume:</code> promise</td></tr>
+        <tr><td><code>130</code></td><td>Ctrl-C: the run token is cancelled and a <code>resume:</code> line is printed, skipping the normal shutdown tail on purpose</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 09 -->
+<section id="divergence">
+  <h2><span class="num">09</span>The divergence table</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Dimension</th>
+          <th class="col-a">Agent-team mode</th>
+          <th class="col-b">Workflow mode</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Entry</td>
+          <td class="col-a"><code>wcode</code> + non-empty <code>[team]</code>, or <code>--agents</code></td>
+          <td class="col-b"><code>--agents --task "…"</code> (+ a <code>[workflow]</code>), or <code>WCODE_TASK</code></td>
+        </tr>
+        <tr>
+          <td>Plan origin</td>
+          <td class="col-a">Authored at runtime by the root via <code>task{create,depends,assign}</code></td>
+          <td class="col-b"><code>instantiate_workflow</code> at boot, from TOML, in topological order</td>
+        </tr>
+        <tr>
+          <td>Prompt the root sees</td>
+          <td class="col-a"><code># Your team</code> roster + optional <code>[orchestrator] guidelines</code> prose</td>
+          <td class="col-b">Same roster, plus the seed: <i>"ALREADY instantiated … Do NOT create nodes"</i></td>
+        </tr>
+        <tr>
+          <td>What triggers work</td>
+          <td class="col-a">The model decides to delegate; <code>spawn</code>/<code>message</code> are free-form</td>
+          <td class="col-b">The scheduler wakes a node whose deps are all satisfied and whose edges admit</td>
+        </tr>
+        <tr>
+          <td>Node payload</td>
+          <td class="col-a">Whatever the root typed in <code>message</code></td>
+          <td class="col-b"><code>#id title</code> + every dep's artifact + reject feedback, auto-hydrated</td>
+        </tr>
+        <tr>
+          <td>Who closes a node</td>
+          <td class="col-a">The root, on a report it just read</td>
+          <td class="col-b">The root too — but the <em>scheduler</em> decided the node was ready; scripts close themselves by exit code</td>
+        </tr>
+        <tr>
+          <td>Rework</td>
+          <td class="col-a">Model says "try again" in prose</td>
+          <td class="col-b"><code>task reject</code> → cone reset to <code>Todo</code> with the reason injected, capped by <code>max_attempts</code>, then <code>Failed</code> + escalation</td>
+        </tr>
+        <tr>
+          <td>Branching</td>
+          <td class="col-a">Improvised</td>
+          <td class="col-b">Declared: edge <code>condition = { script }</code> or <code>{ judge }</code>; false → <code>Skipped</code></td>
+        </tr>
+        <tr>
+          <td>Human in the loop</td>
+          <td class="col-a">Continuous — you watch and steer every turn</td>
+          <td class="col-b">None by default (<b>D001</b>: the human-signoff step is deliberately not a node)</td>
+        </tr>
+        <tr>
+          <td>Surface</td>
+          <td class="col-a">TUI/REPL, one surface per member, live <code>/tasks</code></td>
+          <td class="col-b">Headless: stderr log + stdout summary; watch it with <code>--status</code></td>
+        </tr>
+        <tr>
+          <td>Termination</td>
+          <td class="col-a">The user quits</td>
+          <td class="col-b"><code>terminal_code()</code> → process exit 0/1/2 (130 on Ctrl-C)</td>
+        </tr>
+        <tr>
+          <td>Persistence</td>
+          <td class="col-a">Session group; the plan is journaled as it is authored</td>
+          <td class="col-b">Same journal, plus <code>run.json</code> (task + config + cap) so the <code>resume:</code> line is exact</td>
+        </tr>
+        <tr>
+          <td>Best for</td>
+          <td class="col-a">Exploration, ambiguous work, a conversation with a team</td>
+          <td class="col-b">A known, repeatable pipeline — recon → sketch → review → build → verify → ship</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="label">The invariant that makes this cheap</span>
+    <p>
+      Both modes mutate the <b>same</b> <code>TaskList</code> through the <b>same</b> journal
+      and are rendered by the <b>same</b> TUI reducer. Workflow mode adds a <em>seeder</em>
+      (config → plan) and a <em>driver</em> (wait for terminal), not a second engine.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================ 10 -->
+<section id="trace">
+  <h2><span class="num">10</span>Worked trace: the shipped feature pipeline</h2>
+
+  <figure class="diagram">
+    <div class="legend">
+      <span><i style="background:#2a3a55;border:1px solid #4a6da8"></i>member node (Session)</span>
+      <span><i style="background:#4a3a1c;border:1px solid #a8823a"></i>gate</span>
+      <span><i style="background:#33405a"></i>edge</span>
+      <span>◆ = <code>gate = true</code></span>
+    </div>
+    <svg viewBox="0 0 1140 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The shipped workflow DAG">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6b85"/>
+        </marker>
+        <style>
+          .n { font: 600 12px ui-monospace, monospace; fill: #dce3ed; }
+          .s { font: 400 10px ui-monospace, monospace; fill: #93a0b4; }
+          .e { stroke: #5b6b85; stroke-width: 1.4; fill: none; marker-end: url(#ar); }
+          .el { font: 400 9.5px ui-monospace, monospace; fill: #6b7788; }
+        </style>
+      </defs>
+
+      <!-- edges -->
+      <path class="e" d="M170,72 L200,72"/>
+      <path class="e" d="M340,72 L370,72"/>
+      <path class="e" d="M510,72 L560,72"/>
+      <path class="e" d="M630,94 L630,190"/>
+      <path class="e" d="M700,212 L740,212"/>
+      <path class="e" d="M880,212 C 912,212 912,150 940,148"/>
+      <path class="e" d="M700,80 C 830,80 840,132 940,136"/>
+      <path class="e" d="M100,50 C 190,8 350,8 440,50"/>
+      <text class="el" x="205" y="16">R′: explore needs a gate with a DIRECT dep on it</text>
+
+      <!-- nodes -->
+      <g>
+        <rect x="30" y="50" width="140" height="44" rx="9" fill="#2a3a55" stroke="#4a6da8"/>
+        <text class="n" x="100" y="70" text-anchor="middle">explore</text>
+        <text class="s" x="100" y="85" text-anchor="middle">explorer</text>
+      </g>
+      <g>
+        <rect x="200" y="50" width="140" height="44" rx="9" fill="#2a3a55" stroke="#4a6da8"/>
+        <text class="n" x="270" y="70" text-anchor="middle">sketch</text>
+        <text class="s" x="270" y="85" text-anchor="middle">sketcher</text>
+      </g>
+      <g>
+        <rect x="370" y="50" width="140" height="44" rx="9" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="n" x="440" y="70" text-anchor="middle">◆ review-sketch</text>
+        <text class="s" x="440" y="85" text-anchor="middle">reviewer · gate</text>
+      </g>
+      <g>
+        <rect x="560" y="50" width="140" height="44" rx="9" fill="#2a3a55" stroke="#4a6da8"/>
+        <text class="n" x="630" y="70" text-anchor="middle">implement</text>
+        <text class="s" x="630" y="85" text-anchor="middle">developer</text>
+      </g>
+      <g>
+        <rect x="560" y="190" width="140" height="44" rx="9" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="n" x="630" y="210" text-anchor="middle">◆ verify</text>
+        <text class="s" x="630" y="225" text-anchor="middle">reviewer · gate</text>
+      </g>
+      <g>
+        <rect x="740" y="190" width="140" height="44" rx="9" fill="#2a3a55" stroke="#4a6da8"/>
+        <text class="n" x="810" y="210" text-anchor="middle">publish</text>
+        <text class="s" x="810" y="225" text-anchor="middle">developer</text>
+      </g>
+      <g>
+        <rect x="940" y="118" width="140" height="44" rx="9" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="n" x="1010" y="138" text-anchor="middle">◆ ci</text>
+        <text class="s" x="1010" y="153" text-anchor="middle">gh pr checks · gate</text>
+      </g>
+    </svg>
+    <figcaption>
+      Nodes and edges exactly as declared in <code>.wcode/workflow.toml:159-237</code>. A red
+      <code>ci</code> re-opens both <code>implement</code> (fix) and <code>publish</code>
+      (re-push), and the cone re-runs.
+    </figcaption>
+  </figure>
+
+  <h3>The declared template <span class="hint">.wcode/workflow.toml</span></h3>
+
+  <figure class="code">
+    <figcaption><span class="f">.wcode/workflow.toml:153</span><span class="tag">toml</span></figcaption>
+<pre>[workflow]
+max_attempts = <span class="n">3</span>
+timeout_secs = <span class="n">21600</span>                <span class="c"># 6 h: the WHOLE-RUN cap (the primary bound).</span>
+
+[[workflow.node]]
+id = <span class="s">"explore"</span>                      <span class="c"># map the ground truth for the request</span>
+timeout_secs = <span class="n">900</span>                  <span class="c"># opt-in: recon over a large tree</span>
+member = <span class="s">"explorer"</span>
+title = <span class="s">"Explore the repo for the feature request: {{task}}"</span>
+
+[[workflow.node]]
+id = <span class="s">"review-sketch"</span>                <span class="c"># first-layer gate: approve the sketch, or</span>
+member = <span class="s">"reviewer"</span>                 <span class="c"># reject it and re-open `sketch`</span>
+gate = <span class="k">true</span>
+
+[[workflow.edge]]
+from = <span class="s">"explore"</span>
+to = <span class="s">"review-sketch"</span>                 <span class="c"># R′ consumption, not redundancy</span></pre>
+  </figure>
+
+  <h3>Life of one node</h3>
+  <ol class="trace">
+    <li>
+      <b>Scheduler dispatches <code>implement</code></b>
+      <span class="where">scheduler.rs:567 → Registry::deliver(Request::Wake)</span>
+      Content = <code>#5 implement</code> + <code>#3 showed:</code> artifact + any
+      <code>Revise per this feedback:</code> block. Node flips <code>Todo → Doing</code>, its
+      dispatch instant enters the deadline map.
+    </li>
+    <li>
+      <b>The developer session runs its turn</b>
+      <span class="where">crates/wcode-cli/src/agents.rs:492 → ReportBack</span>
+      When it ends, <code>after_run</code> delivers its final message to the root as a
+      <code>Wake</code>. A failed/aborted worker synthesizes a status line instead, so the root
+      is never left waiting.
+    </li>
+    <li>
+      <b>The root relays the verdict</b>
+      <span class="where">crates/wcode-cli/src/tools/task.rs:152</span>
+      <code>task{op:"complete", id:5, artifact:"…"}</code>. Before the write,
+      <code>VerifyGateHooks</code> checks R′: does a gate depend directly on #5? Yes
+      (<code>verify</code>), so the call passes.
+    </li>
+    <li>
+      <b><code>complete</code> stores the artifact and publishes</b>
+      <span class="where">tasks.rs:856</span>
+      Refuses if a dep is unsatisfied. The <code>watch</code> publish wakes the scheduler, whose
+      next frontier is now <code>verify</code>.
+    </li>
+    <li>
+      <b><code>verify</code> is a gate, so a reject means "send it back"</b>
+      <span class="where">tasks.rs:1021 reject → reopen_inner</span>
+      Every dep of the gate and its whole downstream cone return to <code>Todo</code> with the
+      reason as <code>feedback</code>; the gate itself returns to <code>Todo</code> rather than
+      "finishing". Attempts are bumped; past <code>max_attempts</code> the node becomes
+      <code>Failed</code>.
+    </li>
+    <li>
+      <b>Everything settles → the process exits</b>
+      <span class="where">main.rs:2713 → tasks.rs:1097</span>
+      <code>terminal_code()</code> returns <code>Some(0)</code> → summary on stdout, exit 0.
+      <code>Some(1)</code> → summary, a <code>resume:</code> line, exit 1.
+    </li>
+  </ol>
+</section>
+
+<!-- ============================================================ 11 -->
+<section id="gotchas">
+  <h2><span class="num">11</span>Gotchas that are decisions, not bugs</h2>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>D001 — fenced to <code>--task</code></h4>
+      <p>
+        A template without a task is inert by design: `<code>workflow: present but inert (no
+        --task)</code>`. Headless without a task would have no human to approve a plan, and
+        interactive use would fight the root's own planning.
+      </p>
+    </div>
+    <div class="card">
+      <h4>D002 — a gate is shape</h4>
+      <p>
+        The gate proves a step <em>ran</em>. The verdict is still the root model's. This is
+        stated in the code comments, the README and the shipped
+        <code>[orchestrator] guidelines</code> — deliberately, so nobody mistakes a green gate
+        for a correct diff.
+      </p>
+    </div>
+    <div class="card">
+      <h4>D029 — a skip prunes, never stalls</h4>
+      <p>
+        <code>Skipped</code> is terminal <em>and</em> satisfied. A false script condition or a
+        judge <code>SKIP</code> takes that branch out of the run while its dependents still
+        become ready. A policy <em>refusal</em>, by contrast, blocks and escalates — it is never
+        laundered into a skip.
+      </p>
+    </div>
+    <div class="card">
+      <h4>D030 — lateral messaging is edge-scoped</h4>
+      <p>
+        At boot <code>register_adjacency</code> (<code>main.rs:2924</code>) calls
+        <code>allow_pair</code> for each edge whose <em>both</em> endpoints are member nodes, so
+        edge-joined nodes may <code>message</code> each other — and nobody else.
+      </p>
+    </div>
+    <div class="card">
+      <h4>D033 — no implicit bounds</h4>
+      <p>
+        An unset node/edge bound is unbounded. If you relied on v0.12.0's 300 s script cutoff as
+        a backstop, set <code>timeout_secs</code> before upgrading: a wedged command now waits
+        until the run cap.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Never sleep to wait</h4>
+      <p>
+        The root is told to end its turn rather than poll — a report is a <code>Wake</code> that
+        only lands between turns. <code>SleepRefusalHooks</code> enforces it for
+        <code>sleep</code>-leading commands, so a <code>sleep</code>-leading edge or node script
+        cannot exist at all.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 12 -->
+<section id="evidence">
+  <h2><span class="num">12</span>Evidence index</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Anchor</th><th>What it proves</th></tr></thead>
+      <tbody>
+        <tr><td><code>main.rs:1668</code></td><td>the scheduler is spawned for any orchestrator — both modes</td></tr>
+        <tr><td><code>main.rs:2911</code></td><td><code>should_instantiate_workflow</code> — the <code>--task</code> fence (D001)</td></tr>
+        <tr><td><code>main.rs:1381</code></td><td>the frozen inert-workflow notice</td></tr>
+        <tr><td><code>main.rs:2951</code></td><td><code>instantiate_workflow</code> — topological creation, assign, configure</td></tr>
+        <tr><td><code>main.rs:2924</code></td><td><code>register_adjacency</code> — edge-scoped lateral messaging (D030)</td></tr>
+        <tr><td><code>main.rs:2567 / 2646</code></td><td><code>run_workflow</code> wrapper vs. <code>drive_workflow</code> driver</td></tr>
+        <tr><td><code>main.rs:2861</code></td><td><code>workflow_seed</code> — "Do NOT create nodes"</td></tr>
+        <tr><td><code>main.rs:2780 / 2799</code></td><td>final summary · read-only <code>--status</code></td></tr>
+        <tr><td><code>main.rs:1513</code></td><td><code>VerifyGateHooks</code> installed whenever an orchestrator exists</td></tr>
+        <tr><td><code>scheduler.rs:222</code></td><td>the single <code>select!</code> loop</td></tr>
+        <tr><td><code>scheduler.rs:42</code></td><td>the "no limit unless set" rule (D033)</td></tr>
+        <tr><td><code>scheduler.rs:419 / 457</code></td><td><code>dispatch</code> / <code>edges_admit</code> — the AND-folded conditions</td></tr>
+        <tr><td><code>scheduler.rs:567</code></td><td><code>dispatch_one</code> — the hydrating <code>Wake</code></td></tr>
+        <tr><td><code>scheduler.rs:733</code></td><td><code>dispatch_content</code>'s exact text shape</td></tr>
+        <tr><td><code>scheduler.rs:705</code></td><td><code>escalation_content</code> — "the plan is stalled"</td></tr>
+        <tr><td><code>tasks.rs:45 / 172</code></td><td><code>TaskState</code> · the <code>Task</code> node</td></tr>
+        <tr><td><code>tasks.rs:894</code></td><td><code>reopen_inner</code> — attempts, cone reset, the cap</td></tr>
+        <tr><td><code>tasks.rs:1021</code></td><td><code>reject</code> — a gate returns to <code>Todo</code>, deps re-open</td></tr>
+        <tr><td><code>tasks.rs:1068 / 1097</code></td><td>derived readiness · the headless terminal verdict</td></tr>
+        <tr><td><code>verify_gate.rs:92 / 137</code></td><td>R′'s refusal text and its decision table</td></tr>
+        <tr><td><code>agents.rs:492</code></td><td><code>ReportBack::after_run</code> — a report can never be lost</td></tr>
+        <tr><td><code>agents.rs:834</code></td><td><code>spawn_scheduler</code> — the escalation ownership edge</td></tr>
+        <tr><td><code>repl.rs:71</code></td><td>the <code># Your team</code> prompt block (mode A)</td></tr>
+        <tr><td><code>config.rs:1057 / 1175</code></td><td><code>validate_workflow_structure</code> · <code>topo_order</code></td></tr>
+        <tr><td><code>judge.rs:88</code></td><td>the zero-tool judge contract (<code>VERDICT: TAKE|SKIP</code>)</td></tr>
+        <tr><td><code>.wcode/workflow.toml:153</code></td><td>the shipped pipeline, with its bounds and gates</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  Built from source at <code>v0.12.0-21-g0be6694</code>. Every quote above is a verbatim
+  excerpt; code elisions and condensed doc-comments are marked <code>// …</code>. Line numbers locate,
+  the quoted text pins — a later reformat moves the number, not the claim.
+</footer>
+
+</main>
+</body>
+</html>

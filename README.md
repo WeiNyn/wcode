@@ -27,7 +27,8 @@ Silicon) tarballs are attached to each
 [release](https://github.com/WeiNyn/wcode/releases). Build the latest from source
 with `cargo install --path crates/wcode-cli`.
 
-More at **[weinyn.github.io/wcode](https://weinyn.github.io/wcode/)**.
+The manual — **[the wcode book](https://weinyn.github.io/wcode/)** — covers setup,
+every tool, the kernel, teams, the task DAG, and workflow mode.
 
 ## Configure
 

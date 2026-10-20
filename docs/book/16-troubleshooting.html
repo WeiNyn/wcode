@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 · Troubleshooting — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>16</b> · Troubleshooting</span>
+  <span class="pn"><a href="15-configuration-reference.html">← 15 Configuration reference</a><a href="17-development.html">17 Development →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part VI · Reference &amp; craft · <b>Chapter 16</b></div>
+    <h1>Troubleshooting</h1>
+    <p class="lede">
+      Symptom, cause, fix — and the command that proves which one you have. Almost every entry here
+      can be diagnosed without spending a token.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">16.1</span>It cannot reach the model</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix / proof</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>"no API key" error</td>
+          <td>No <code>api_key</code>, no <code>OPENAI_API_KEY</code>, and a non-localhost base URL</td>
+          <td>Set the key — or point at a local endpoint; the localhost forms build keyless. <code>wcode --dump-config</code> shows the key slot as <code>(none)</code>.</td>
+        </tr>
+        <tr>
+          <td>401 / 403</td>
+          <td>Wrong or expired key</td>
+          <td><code>wcode --list-models</code> — it fails here too, with the provider's message.</td>
+        </tr>
+        <tr>
+          <td>404 on a valid model</td>
+          <td>Endpoint mismatch: <code>chat</code> vs <code>responses</code></td>
+          <td><code>--endpoint chat</code> (or <code>responses</code>) for one run; pin it in <code>[models.&lt;id&gt;]</code> if it is permanent.</td>
+        </tr>
+        <tr>
+          <td>Requests go to OpenAI and you did not mean that</td>
+          <td><code>base_url</code> unset</td>
+          <td>Startup already warns on stderr. <code>--dump-config</code> shows the effective base URL and its source.</td>
+        </tr>
+        <tr>
+          <td>Empty model list</td>
+          <td>The endpoint has no <code>/models</code> route (many local servers)</td>
+          <td>Not fatal — pass <code>--model</code> explicitly. Model listing is convenience, not a requirement.</td>
+        </tr>
+        <tr>
+          <td>Long pauses, then "Retrying"</td>
+          <td>429/5xx or a connect stall</td>
+          <td>Expected: bounded retries with backoff. Tighten or disable with <code>[retry]</code>. Reproduce deterministically against a refused port: <code>--base-url http://127.0.0.1:9/v1</code> with <code>WCODE_RETRY_MAX=2</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16.2</span>The model cannot find its tools</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix / proof</th></tr></thead>
+      <tbody>
+        <tr><td><code>grep</code>/<code>find</code> "unknown tool"</td><td>Off by default</td><td><code>[tools] grep = true</code> / <code>find = true</code>, or <code>WCODE_GREP=1</code>.</td></tr>
+        <tr><td><code>ast_search</code> missing</td><td>No <code>ast-grep</code>/<code>sg</code> on <code>PATH</code></td><td>Install it; detection is automatic, and the tool is never registered unusably.</td></tr>
+        <tr><td>A planned tool call never runs</td><td>A policy refused it</td><td>Look for a <code>blocked: …</code> tool error in the transcript — plan mode, bash risk, or the verify gate. All three explain themselves.</td></tr>
+        <tr><td>Reads race writes</td><td>You disabled parallelism or expected it</td><td>Read-only tools run concurrently; mutating ones are barriers. <code>--sequential</code> is the opposite knob.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16.3</span>Edits are refused</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Error</th><th>What actually happened</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td><code>E_NO_MATCH</code></td><td>The literal text is not in the file — whitespace, indentation, or the file changed</td><td>Re-read the region; copy the text. A <code>read</code> line truncated with <code>…(+N)</code> is <strong>not</strong> usable as <code>old_string</code> — use <code>grep</code> to get the exact bytes.</td></tr>
+        <tr><td><code>E_AMBIGUOUS_MATCH</code></td><td>The text occurs more than once</td><td>Include another line to pin one occurrence — or <code>replace_all</code> if you truly mean all.</td></tr>
+        <tr><td><code>E_EMPTY_OLD_STRING</code></td><td><code>old_string</code> was empty</td><td>Give the text; use <code>write</code> for a whole-file rewrite.</td></tr>
+        <tr><td>A whole <code>edits</code> batch refused</td><td>One op failed; the batch is atomic</td><td>The error names the op (<code>op2</code>). Fix that op — nothing was written.</td></tr>
+        <tr><td>"plan mode: <code>edit</code> is disabled"</td><td>Plan mode is on</td><td><code>/plan off</code>. It is never persisted, so a new session is already off.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="dim">
+    There is no staleness error class, by design: a changed file simply stops matching, which is the
+    same <code>E_NO_MATCH</code>. See <a href="08-editing.html">Chapter 08</a>.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">16.4</span>The plan will not advance</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix / proof</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>"workflow: present but inert (no --task)"</td>
+          <td>D001 — a <code>[workflow]</code> without a task does nothing</td>
+          <td>Pass <code>--task "…"</code> (and <code>--agents</code>), or use <code>[team]</code> for interactive work.</td>
+        </tr>
+        <tr>
+          <td><code>task complete &lt;id&gt;</code> blocked: "verify gate required"</td>
+          <td>R′ — the node has no gate depending on it</td>
+          <td>Create a gate with <code>deps: [id], gate: true</code> and assign it. In a template, add an edge plus a <code>gate = true</code> node.</td>
+        </tr>
+        <tr>
+          <td>The pipeline deadlocks at node #1</td>
+          <td>Same rule, in the template</td>
+          <td>A bare work node is a deadlock, not a warning. Check with <code>wcode --status latest</code> after one refused-port boot.</td>
+        </tr>
+        <tr>
+          <td>"scheduler: N node(s) failed — the plan is stalled"</td>
+          <td>Rework cap hit, or a node was failed outright</td>
+          <td><code>task reset &lt;id&gt;</code> to retry, or accept it and stop. The escalation names the node and the reason.</td>
+        </tr>
+        <tr>
+          <td>"node timeout: exceeded Ns"</td>
+          <td>The per-node <code>timeout_secs</code> fired</td>
+          <td>Raise it, or remove it (unset = unbounded). The dependents are blocked until a <code>reset</code>.</td>
+        </tr>
+        <tr>
+          <td>A node never runs though nothing is running</td>
+          <td>No owner (a <code>Session</code> node with no <code>assign</code>)</td>
+          <td>The frontier skips it silently by design. <code>task list</code> shows the missing owner.</td>
+        </tr>
+        <tr>
+          <td><code>--timeout</code> ignored</td>
+          <td><code>--timeout</code> without <code>--task</code> is a boot error; <code>0</code> means no cap</td>
+          <td><code>[workflow] timeout_secs</code> is only the default when the flag is absent.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16.5</span>Team trouble</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix / proof</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>A role "stopped working"</td>
+          <td>A <code>[[team]]</code> entry of the same name shadows the <code>.md</code> file <em>wholesale</em></td>
+          <td>Grep your config for the name. TOML wins over project <code>.md</code>, which wins over global.</td>
+        </tr>
+        <tr>
+          <td><code>error: team member `x`: unknown tool `foo`; valid tools: …</code></td>
+          <td>The allow-list names a tool that is not registered (<code>grep</code>/<code>find</code> are off by default)</td>
+          <td>Either enable the tool in <code>[tools]</code> or drop it from the list. Boot fails loudly on purpose.</td>
+        </tr>
+        <tr>
+          <td>Worker replies but the plan does not advance</td>
+          <td>The <em>root</em> must call <code>task complete</code> — a report does not close a node</td>
+          <td>Expected. In workflow mode the seed says so; in team mode the root decides.</td>
+        </tr>
+        <tr>
+          <td>The root hangs "waiting"</td>
+          <td>It is polling — a <code>sleep</code> or a loop blocks the <code>Wake</code> it awaits</td>
+          <td>It must end its turn instead. <code>SleepRefusalHooks</code> refuses a <code>sleep</code>-leading command at the root.</td>
+        </tr>
+        <tr>
+          <td>"NotPermitted" on a message</td>
+          <td>No ownership edge and no <code>allow_pair</code> grant</td>
+          <td>Members may talk to their owner; workflow edges grant lateral pairs. Otherwise it is a design error, not a bug.</td>
+        </tr>
+        <tr>
+          <td>A member was not resumed</td>
+          <td>Its transcript is missing or corrupt</td>
+          <td>Reported as a warning by design — one lost worker must not lose the run.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16.6</span>Sessions, prompt, and presentation</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix / proof</th></tr></thead>
+      <tbody>
+        <tr><td>No <code>resume:</code> line at exit</td><td><code>--no-session</code>, or a <code>--socket</code> client</td><td>Expected: nothing to resume locally.</td></tr>
+        <tr><td>A workflow run has no <code>run.json</code></td><td>Also <code>--no-session</code> (no group dir)</td><td>Drop the flag if you want a resumable run.</td></tr>
+        <tr><td><code>--resume</code> restores the wrong model</td><td>It restores the last <code>ModelChange</code></td><td>Pass <code>--model</code> — the flag wins.</td></tr>
+        <tr><td>Instructions not applied</td><td>Wrong directory, wrong candidate name, or the budget dropped the file</td><td><code>wcode --dump-system-prompt</code> is the ground truth. The nearest file always survives the 64 KiB cap.</td></tr>
+        <tr><td>Skill not discovered</td><td>No <code>description</code>, invalid YAML, or deeper than 4 levels</td><td>Malformed skills warn on stderr and are skipped. <code>/skills</code> lists what was found.</td></tr>
+        <tr><td>TUI did not start</td><td>Input or output is not a TTY, or <code>-p</code>/<code>serve</code>/<code>--task</code></td><td>Force it with <code>--tui</code> (it will need a real terminal), or use <code>--no-tui</code> deliberately.</td></tr>
+        <tr><td>Colours look wrong / noisy</td><td>A truecolor preset on a 256-colour terminal, or the inverse</td><td><code>--theme default</code> (named-16) or <code>NO_COLOR=1</code>.</td></tr>
+        <tr><td>A long background command "vanished"</td><td>It finished and pushed a message you did not read</td><td><code>bg list</code>, then <code>bg output &lt;id&gt;</code>; the spill file path is printed with the tail.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">16.7</span>The three commands that answer most questions</h2>
+  <ol class="steps">
+    <li>
+      <b><code>wcode --dump-config</code></b>
+      <span class="where">no model, no session</span>
+      The resolved model, endpoint and base URL, and where each value came from. Keys render as
+      <code>(set)</code>/<code>(none)</code> — the secret is never printed.
+    </li>
+    <li>
+      <b><code>wcode --dump-system-prompt</code></b>
+      <span class="where">no model</span>
+      The exact prompt: base text, instruction files, skill catalogue, team roster, orchestrator
+      guidelines. If a rule is not in here, it is not in play.
+    </li>
+    <li>
+      <b><code>wcode --status latest</code></b>
+      <span class="where">no model, no socket, provably no write</span>
+      The plan as journaled. Use it after any headless run to see which nodes exist, their states,
+      and (in the journal's <code>create</code> lines) their deps and gate flags.
+    </li>
+  </ol>
+
+  <div class="callout good">
+    <span class="label">Reproducing without a provider</span>
+    <p>
+      A local OpenAI-compatible server (<code>--base-url http://localhost:11434/v1</code>) exercises
+      the happy path; a refused port (<code>http://127.0.0.1:9/v1</code>) with a small
+      <code>WCODE_RETRY_MAX</code> exercises the error path. Neither needs a key, and neither costs
+      anything.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="15-configuration-reference.html">← 15 Configuration reference</a></span>
+  <span>next · <a href="17-development.html">17 Development →</a></span>
+</div></div></footer>
+</body>
+</html>

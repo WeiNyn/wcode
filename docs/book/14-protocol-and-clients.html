@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14 · Protocol &amp; clients — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>14</b> · Protocol &amp; clients</span>
+  <span class="pn"><a href="13-workflow-mode.html">← 13 Workflow mode</a><a href="15-configuration-reference.html">15 Configuration reference →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part V · Beyond one process · <b>Chapter 14</b></div>
+    <h1>Protocol &amp; clients</h1>
+    <p class="lede">
+      The same <code>Request</code> → <code>AgentEvent</code> conversation that runs in-process can
+      run across a socket or a pipe. That is what makes a TUI, a VS Code webview, and a remote
+      worker all clients of one kernel rather than forks of it.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">14.1</span>The seam that makes it cheap</h2>
+  <p>
+    Client code targets <code>Backend</code>, never <code>Agent</code>. Two variants —
+    <code>Local</code> (an in-process <code>SessionHandle</code>) and <code>Remote</code> (a socket
+    <code>Client</code>) — and the rest of the program cannot tell them apart.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-protocol/src/backend.rs:1</span><span class="tag">the seam</span></figcaption>
+<pre>//! [`Backend`] is the seam the client code targets: the REPL, the TUI, and (S4)
+//! a peer session call `send`/`ask`/`subscribe` and never branch on whether the
+//! session runs in this process ([`SessionHandle`]) or across a socket
+//! ([`Client`]). Swapping the transport is swapping the variant.</pre>
+  </figure>
+
+  <p>
+    This is why there is no separate "remote mode" in the TUI: <code>--socket</code> swaps a
+    constructor argument. Two features are honestly client-side and therefore refused over a
+    socket — <code>/new</code> and <code>/reload</code>, both of which re-exec the process.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">14.2</span>One frame, one line</h2>
+  <p>
+    The wire format is newline-delimited JSON: one object per line, the body flattened into the
+    envelope so a frame is a flat object on the wire.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/protocol.rs:361</span><span class="tag">Frame</span></figcaption>
+<pre><span class="k">pub struct</span> Frame&lt;P&gt; {
+    <span class="c">/// Protocol major version ([`PROTOCOL_VERSION`]).</span>
+    <span class="k">pub</span> v: u32,
+    <span class="c">/// Sender-assigned id, monotonic per connection; answers echo it in `reply_to`.</span>
+    <span class="k">pub</span> id: u64,
+    <span class="c">/// The request this frame answers, if any. Streaming events that are not</span>
+    <span class="c">/// direct replies leave it absent.</span>
+    #[serde(default, skip_serializing_if = <span class="s">"Option::is_none"</span>)]
+    <span class="k">pub</span> reply_to: Option&lt;u64&gt;,
+    <span class="c">/// The session this frame concerns — the target of a request, the origin of</span>
+    <span class="c">/// an event. The whole addressing scheme.</span>
+    <span class="k">pub</span> session: SessionId,
+    <span class="c">/// The sender's address, when it is not the transport's own client.</span>
+    #[serde(default, skip_serializing_if = <span class="s">"Option::is_none"</span>)]
+    <span class="k">pub</span> sender: Option&lt;SessionId&gt;,
+    #[serde(flatten)]
+    <span class="k">pub</span> body: P,
+}</pre>
+  </figure>
+
+  <p>
+    Three properties fall out of that envelope, and each solves a problem a naive protocol would
+    have:
+  </p>
+  <div class="grid3">
+    <div class="card">
+      <h4><code>reply_to</code> separates answers from streams</h4>
+      <p>
+        A client's <code>ask</code> resolves on the matching <code>reply_to</code> while streamed
+        events keep arriving on the same connection. No multiplexing dance, no second socket.
+      </p>
+    </div>
+    <div class="card">
+      <h4><code>session</code> is the address</h4>
+      <p>
+        A server demuxes a request to the handle named by its frame, and stamps every event with its
+        origin. One connection can carry a whole team.
+      </p>
+    </div>
+    <div class="card">
+      <h4><code>v</code> is a major version</h4>
+      <p>
+        <code>PROTOCOL_VERSION = 1</code>. Unknown request variants deserialize to
+        <code>Unknown</code> and are answered <code>Ack</code> — an old server reading a new request
+        reports "unavailable", never a wrong answer.
+      </p>
+    </div>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-protocol/src/frame.rs:30</span><span class="tag">bounds, not buffers</span></figcaption>
+<pre><span class="c">/// Maximum size (bytes, trailing newline excluded) of a single frame's JSON</span>
+<span class="c">/// body. A peer that sends a longer line is rejected with `InvalidData` rather</span>
+<span class="c">/// than buffered unboundedly. 16 MiB, matching jcode — far above any legitimate</span>
+<span class="c">/// frame.</span>
+<span class="k">pub const</span> MAX_FRAME_BYTES: <span class="k">usize</span> = <span class="num">16</span> * <span class="num">1024</span> * <span class="num">1024</span>;</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">14.3</span>The request vocabulary</h2>
+  <p>
+    The same enum is used in-process and on the wire. Two families: requests that name an
+    <code>Agent</code> method, and requests the <em>transport</em> answers.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Request</th><th>Answered by</th><th>Reply</th></tr></thead>
+      <tbody>
+        <tr><td><code>Submit { text }</code></td><td>the agent — runs a turn</td><td>the event stream</td></tr>
+        <tr><td><code>Notify { content }</code></td><td>the agent — append, no turn</td><td><code>Ack</code></td></tr>
+        <tr><td><code>Interrupt { content }</code></td><td>the agent — next turn boundary</td><td><code>Ack</code></td></tr>
+        <tr><td><code>Wake { content }</code></td><td>the agent — a turn even if idle</td><td>the event stream</td></tr>
+        <tr><td><code>Cancel</code></td><td>the agent — idempotent</td><td><code>Ack</code></td></tr>
+        <tr><td><code>SetModel</code> · <code>SetEffort</code> · <code>SetPlanMode</code></td><td>the agent — applied at the boundary</td><td><code>Ack</code></td></tr>
+        <tr><td><code>Compact { instructions }</code></td><td>the agent — one summarization pass</td><td><code>Ack</code></td></tr>
+        <tr><td><code>SideAsk { text }</code></td><td>the agent — tool-free, not recorded</td><td><code>SideAnswer</code></td></tr>
+        <tr><td><code>GetHistory</code> · <code>Status</code> · <code>Usage</code></td><td>the agent — from the last turn-boundary snapshot</td><td><code>History</code> / <code>Status</code> / <code>Usage</code></td></tr>
+        <tr><td><code>ListSessions</code></td><td><strong>the transport</strong> (a server knows its roster)</td><td><code>Sessions</code></td></tr>
+        <tr><td><code>ListModels</code></td><td><strong>the transport</strong> (provider catalog)</td><td><code>Models</code></td></tr>
+        <tr><td><code>Define { … }</code></td><td><strong>the transport</strong> — build a worker on a peer</td><td><code>Spawned</code> or <code>Error</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="dim">
+    The last three "name no Agent method" — so an in-process session answers them with
+    <code>Ack</code> (read as "unavailable"), while a server intercepts them. That is how the same
+    enum serves both worlds without a capability bit.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">14.4</span>Serving</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>Transport</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>wcode serve</code></td><td>Unix socket at <code>~/.config/wcode/wcode.sock</code></td><td>The default path sits beside the config, so both ends agree without an argument.</td></tr>
+        <tr><td><code>wcode serve --socket /path</code></td><td>Unix socket</td><td>Explicit path.</td></tr>
+        <tr><td><code>wcode serve --stdio</code></td><td>stdin/stdout</td><td>Any platform; one client; implies <code>serve</code>.</td></tr>
+        <tr><td><code>wcode --socket /path -p "…"</code></td><td>client</td><td>One turn against the served session.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Each connection gets a writer draining an outbound queue, one fan-out task per served session,
+    and a read loop that demuxes inbound requests to the handle named by the frame. The roster is
+    <strong>live</strong>: a session registered after the server started — a worker the orchestrator
+    spawns mid-run — is fanned to every connection, and the grown roster is pushed as an unsolicited
+    <code>Sessions</code> frame, so a client learns new ids without polling.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-protocol/src/server.rs:8</span><span class="tag">the roster is live</span></figcaption>
+<pre>//! The roster is **live**: beside an explicit root (served under its own session
+//! id, distinct from the registry's `agent:orchestrator` alias), the server
+//! follows a [`watch::Receiver`] of the extra sessions. A session registered
+//! after the server started — a worker a running orchestrator spawns — is fanned
+//! to every connection, and the grown roster is **pushed** as an unsolicited
+//! [`AgentEvent::Sessions`] frame, so a client learns new ids without polling.</pre>
+  </figure>
+
+  <div class="callout warn">
+    <span class="label">What does not work over stdio</span>
+    <p>
+      <code>--task</code> is refused with <code>serve</code> at the boot guards, and a headless
+      workflow needs a process exit code that a served session cannot express. In-process
+      <code>--agents</code> with a team works fine over <code>--stdio</code>; the workers are
+      in-process, so no socket is involved.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">14.5</span>A served session as a worker</h2>
+  <p>
+    The same protocol runs the other direction: <code>serve</code> can publish <em>this</em> session
+    as somebody's worker.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">shell</span><span class="tag">two ends of one worker</span></figcaption>
+<pre><span class="c"># machine B: this session is a worker owned by an orchestrator on machine A</span>
+wcode serve --name w7 --owner agent:orchestrator
+
+<span class="c"># machine A: register it, then spawn/message it like any member</span>
+wcode --agents --peer w7=/tmp/wcode/w7.sock</pre>
+  </figure>
+
+  <p>
+    A root can also define a worker <em>on</em> a peer with <code>spawn { to: "w7" }</code>, which
+    travels as <code>Request::Define</code> and is answered <code>Spawned</code>. On the peer, the
+    worker is registered in its own registry — so the remote session can message its owner back
+    through the same permission model described in <a href="11-teams-and-roles.html">Chapter 11</a>.
+  </p>
+  <p>
+    Fire-and-forget deliveries to remote peers are flushed before exit
+    (<code>flush_all</code> with a bounded timeout), so a <code>message</code> sent in a one-shot
+    run is not lost when the process drops the runtime.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">14.6</span>The VS Code client</h2>
+  <p>
+    <code>editors/vscode/</code> is a second client, not a second kernel. It spawns
+    <code>wcode serve --stdio</code> and speaks the same frames as the TUI — which is why a
+    behavioural feature never has to be implemented twice.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Piece</th><th>What it is</th></tr></thead>
+      <tbody>
+        <tr><td>Extension host</td><td>TypeScript: spawns the binary, owns the connection, routes frames.</td></tr>
+        <tr><td>Webview</td><td>The UI. Deliberately dependency-free; syntax highlighting runs host-side on Prism (D008).</td></tr>
+        <tr><td>Tabs</td><td>Each editor tab is an independent wcode session (D013).</td></tr>
+        <tr><td>Settings</td><td>Three <em>presentation</em> settings and nothing behavioural (D015).</td></tr>
+        <tr><td>Reading measure</td><td>Adaptive, not a fixed column count (D014).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="label">Why "presentation only" is a hard rule</span>
+    <p>
+      A client that can change behaviour becomes a second source of truth — and then two clients
+      disagree. So the extension can restyle text, and cannot decide whether a tool runs. Every
+      behavioural knob lives in the kernel or in a <code>Hooks</code> impl, where both clients
+      inherit it.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">14.7</span>What this buys, concretely</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4>Attach late</h4>
+      <p>
+        Start a long session with <code>serve</code>, disconnect, come back with a client — the
+        kernel never stopped, and the roster arrives on connect.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Watch a team from one place</h4>
+      <p>
+        One socket carries the root and every worker, each event stamped with its origin session.
+        That is what the TUI's surfaces and sidebar consume.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Split a team across machines</h4>
+      <p>
+        <code>--peer</code> plus <code>serve --owner</code> makes a worker remote without a new
+        concept: it is still an address, a permission edge, and a mailbox.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Test without a terminal</h4>
+      <p>
+        A client is a frame producer. The protocol is testable with strings and a pipe, which is how
+        the transport is tested today.
+      </p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="13-workflow-mode.html">← 13 Workflow mode</a></span>
+  <span>next · <a href="15-configuration-reference.html">15 Configuration reference →</a></span>
+</div></div></footer>
+</body>
+</html>

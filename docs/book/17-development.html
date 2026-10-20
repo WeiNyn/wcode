@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17 · Development — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>17</b> · Development</span>
+  <span class="pn"><a href="16-troubleshooting.html">← 16 Troubleshooting</a><a href="appendix-decisions.html">A Decisions &amp; file map →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part VI · Reference &amp; craft · <b>Chapter 17</b></div>
+    <h1>Development</h1>
+    <p class="lede">
+      The repository's own rules, and the three extension points that matter: a tool, a hook, a
+      provider. Plus the shape of a change — because this codebase cares as much about how a diff
+      reads as about what it does.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">17.1</span>The workspace</h2>
+  <figure class="code">
+    <figcaption><span class="f">Cargo.toml:1</span><span class="tag">workspace</span></figcaption>
+<pre>[workspace]
+resolver = <span class="s">"3"</span>
+members = [<span class="s">"crates/wcode-harness"</span>, <span class="s">"crates/wcode-protocol"</span>, <span class="s">"crates/wcode-tui"</span>, <span class="s">"crates/wcode-cli"</span>]
+
+[workspace.package]
+version = <span class="s">"0.13.0"</span>
+edition = <span class="s">"2024"</span>
+license = <span class="s">"MIT"</span></pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>What it must do</th></tr></thead>
+      <tbody>
+        <tr><td><code>cargo build</code></td><td>Compile the binary (<code>--bin wcode</code> for just the CLI).</td></tr>
+        <tr><td><code>cargo test --workspace</code></td><td>Pass. Every change.</td></tr>
+        <tr><td><code>cargo clippy --workspace --all-targets</code></td><td>Be <em>clean</em> — not "mostly clean".</td></tr>
+        <tr><td><code>cargo install --path crates/wcode-cli</code></td><td>Install the current tree as <code>wcode</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="label">`cargo build` proves nothing about behaviour</span>
+    <p>
+      The repository's guideline is explicit: prefer a <em>live end-to-end check</em> over unit tests
+      alone. Point at a keyless local endpoint for the happy path, and at a refused port for the
+      error path. A green build is a precondition, not evidence.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">17.2</span>The house rules</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4>One logical change per commit</h4>
+      <p>
+        Imperative subject, area prefix: <code>harness:</code>, <code>cli:</code>,
+        <code>tui:</code>, <code>docs:</code>. Example:
+        <code>cli: fence [workflow] to --task</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4>No <code>anyhow</code></h4>
+      <p>
+        Errors are typed (<code>thiserror</code>) or plain strings at a boundary. A workspace-wide
+        grep for <code>anyhow</code> returns nothing, and that is deliberate.
+      </p>
+    </div>
+    <div class="card">
+      <h4>The kernel stays presentation-free</h4>
+      <p>
+        <code>wcode-harness</code> may not know what a terminal, a TOML file, or a team is. If a
+        change needs that knowledge, it belongs in <code>wcode-cli</code> or a client.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Cite code as <code>file:line</code> + a snippet</h4>
+      <p>
+        The number locates, the quote pins it. Comments and docs in this repository are full of
+        these anchors, which is why a reformat does not falsify them.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Track multi-step work</h4>
+      <p>
+        <code>docs/next-steps.md</code> is the index; a larger effort gets its own
+        <code>docs/*-plan.md</code>; a decision gets <code>docs/decisions/DNNN-*.md</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Absence is a design position</h4>
+      <p>
+        Before adding a config key, ask whether a <code>Hooks</code> impl would do. Before adding a
+        dependency, ask what it replaces.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">17.3</span>Add a tool</h2>
+  <p>Three steps: implement <code>TypedTool</code>, erase it, register it.</p>
+
+  <figure class="code">
+    <figcaption><span class="f">sketch</span><span class="tag">a new tool</span></figcaption>
+<pre><span class="k">use</span> serde::Deserialize;
+<span class="k">use</span> wcode_harness::tool::{ToolContext, ToolOutput, TypedTool};
+
+#[derive(Deserialize, schemars::JsonSchema)]
+<span class="k">pub struct</span> Args {
+    <span class="c">/// One `///` line per field: it becomes the JSON-schema description the</span>
+    <span class="c">/// model reads. Write it for the model, not for a compiler.</span>
+    <span class="k">pub</span> path: String,
+}
+
+<span class="k">pub struct</span> MyTool;
+
+#[async_trait::async_trait]
+<span class="k">impl</span> TypedTool <span class="k">for</span> MyTool {
+    <span class="k">type</span> Args = Args;
+    <span class="k">fn</span> <span class="f2">name</span>(<span class="f2">&amp;</span>self) -&gt; <span class="f2">&amp;</span>str { <span class="s">"my_tool"</span> }
+    <span class="k">fn</span> <span class="f2">description</span>(<span class="f2">&amp;</span>self) -&gt; <span class="f2">&amp;</span>str {
+        <span class="s">"One sentence: what it does and WHEN to reach for it."</span>
+    }
+    <span class="c">/// Only if it is read-only and needs no shared state.</span>
+    <span class="k">fn</span> <span class="f2">parallel_safe</span>(<span class="f2">&amp;</span>self) -&gt; <span class="k">bool</span> { <span class="k">true</span> }
+    <span class="c">/// True for anything that writes the workspace — plan mode keys off this</span>
+    <span class="c">/// in the `MUTATING_TOOLS` list; keep the two in sync.</span>
+    <span class="k">fn</span> <span class="f2">mutating</span>(<span class="f2">&amp;</span>self) -&gt; <span class="k">bool</span> { <span class="k">false</span> }
+
+    <span class="k">async fn</span> <span class="f2">execute</span>(<span class="f2">&amp;</span>self, args: Args, ctx: <span class="f2">&amp;</span>ToolContext) -&gt; ToolOutput {
+        <span class="k">let</span> path = <span class="f2">super::resolve</span>(<span class="f2">&amp;</span>ctx.working_dir, <span class="f2">&amp;</span>args.path);
+        <span class="c">// …work…</span>
+        ToolOutput { output: <span class="s">"…"</span>.<span class="f2">into</span>(), is_error: <span class="k">false</span>, diff: None, path: None }
+    }
+}</pre>
+  </figure>
+
+  <ol class="steps">
+    <li>
+      <b>Implement the trait</b> <span class="where">crates/wcode-cli/src/tools/&lt;name&gt;.rs</span>
+      Typed args + <code>schemars</code> schema. Tool descriptions and field doc-comments <em>are</em>
+      the interface — they are what the model reads.
+    </li>
+    <li>
+      <b>Register it</b> <span class="where">tools/mod.rs default_tools()</span>
+      <code>erased(MyTool)</code>. Mutating tools take the shared <code>lock</code>. A conditional
+      tool hides behind a capability check (a binary on <code>PATH</code>) so the model never holds
+      an unusable tool.
+    </li>
+    <li>
+      <b>Test behaviour, not shape</b> <span class="where">#[cfg(test)] in the file</span>
+      Every tool in this repo has tests that would fail if the logic were wrong: a no-match, an
+      ambiguous match, a refused argument, a cancellation.
+    </li>
+  </ol>
+
+  <div class="callout">
+    <span class="label">Tool output is three fields, and two are for humans</span>
+    <p>
+      <code>output</code> is what the model reads. <code>diff</code> and <code>path</code> are
+      presentation-only — they ride the event to the UI and never enter the model's context, so
+      showing a diff costs no tokens.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">17.4</span>Add a policy</h2>
+  <p>
+    Implement <code>Hooks</code> and push it into the set. Order matters, and the CLI pins it
+    explicitly: safety first, token-saving second, situational policies after the worker template
+    is cloned (so workers do not inherit root-only gates).
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/repl.rs:319</span><span class="tag">default_hooks</span></figcaption>
+<pre><span class="k">pub fn</span> <span class="f2">default_hooks</span>(cfg: <span class="f2">&amp;</span>HooksConfig) -&gt; HooksSet {
+    <span class="k">let mut</span> hooks = HooksSet::<span class="f2">new</span>();
+    hooks.<span class="f2">push</span>(Arc::<span class="f2">new</span>(BashRiskHooks::<span class="f2">new</span>())); <span class="c">// safety gate first</span>
+    hooks.<span class="f2">push</span>(Arc::<span class="f2">new</span>(RtkHooks::<span class="f2">new</span>(cfg.rtk))); <span class="c">// rtk proxy second</span>
+    hooks
+}</pre>
+  </figure>
+
+  <p>
+    Two real examples from this repository show the two shapes a policy takes:
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Policy</th><th>Hook used</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>PlanModeHooks</code></td><td><code>before_tool_call</code></td><td>Refuses four editing tools and mutating shell commands while a shared flag is on.</td></tr>
+        <tr><td><code>VerifyGateHooks</code></td><td><code>before_tool_call</code></td><td>Refuses <code>task{op:"complete"}</code> for a work node no gate consumes.</td></tr>
+        <tr><td><code>ReportBack</code></td><td><code>after_run</code></td><td>Delivers a worker's final message to its owner as a <code>Wake</code>.</td></tr>
+        <tr><td><code>SleepRefusalHooks</code></td><td><code>before_tool_call</code></td><td>Refuses a <code>sleep</code>-leading command (root only), so the model ends its turn instead of polling.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="dim">
+    A policy that needs shared state (a plan, a flag, a registry) simply holds a clone of it — the
+    handles are <code>Arc</code>-backed, which is why <code>VerifyGateHooks</code> can live in the CLI
+    without the kernel depending on <code>TaskList</code>.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">17.5</span>Add a provider</h2>
+  <p>
+    A provider is one function: context, system prompt, tool definitions, options → a stream of
+    events. <code>rig_stream_fn()</code> is the shipped OpenAI-compatible adapter; a new one is a
+    new <code>StreamFn</code>, not a new loop.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/streamfn.rs:284</span><span class="tag">the whole contract</span></figcaption>
+<pre><span class="k">pub type</span> StreamFn =
+    Arc&lt;<span class="k">dyn</span> Fn(<span class="f2">&amp;</span>[AgentMessage], <span class="f2">&amp;</span>str, <span class="f2">&amp;</span>[ToolDefinition], <span class="f2">&amp;</span>LlmOpts) -&gt; LlmStream + Send + Sync&gt;;</pre>
+  </figure>
+
+  <p>
+    Keep the loop's expectations: emit text deltas, thinking, tool calls, and a terminal signal;
+    honour the cancel token; let the adapter own retries and stall timeouts. A fake
+    <code>StreamFn</code> is also the cheapest way to test the loop — no network, no key.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">17.6</span>Documentation as part of the change</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Artifact</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td><code>docs/next-steps.md</code></td><td>The tracker. Every multi-step effort has a row here, with a pointer.</td></tr>
+        <tr><td><code>docs/&lt;topic&gt;-plan.md</code></td><td>A larger effort: design, phases, decisions, open questions.</td></tr>
+        <tr><td><code>docs/decisions/DNNN-&lt;slug&gt;.md</code></td><td>One decision worth remembering, with the alternatives weighed. The format is short: context, decision, consequences, amendments.</td></tr>
+        <tr><td><code>docs/work/WNNN-&lt;slug&gt;.md</code></td><td>A work item: ask, scope/non-scope, plan with gates, quality commands, expected outcome.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout good">
+    <span class="label">Why this book cites decisions</span>
+    <p>
+      Because half of wcode's behaviour looks arbitrary until you read the record: why a workflow
+      needs a task, why a gate is not a verification, why the default palette has no colour. The
+      appendix indexes all 34.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">17.7</span>A change, end to end</h2>
+  <ol class="steps">
+    <li><b>Recon</b> — read the code the change touches; collect <code>file:line</code> evidence.</li>
+    <li><b>Brief</b> — for anything non-trivial: scope, non-scope, interface, numbered plan with a gate per step.</li>
+    <li><b>Sketch</b> — the interface first, as a reviewable block: signatures, types, contracts, test skeletons.</li>
+    <li><b>Review the sketch</b> — against the locked design, before any implementation exists.</li>
+    <li><b>Implement</b> — one logical change, tests that assert behaviour, clippy clean.</li>
+    <li><b>Verify</b> — a second read of the diff against the task, plus a live check where possible.</li>
+    <li><b>Record</b> — the work item's outcome and, if a decision was made, a <code>DNNN</code> file.</li>
+  </ol>
+  <p class="dim">
+    This is the loop the shipped workflow template encodes: <code>explore → sketch →
+    review-sketch → implement → verify → publish → ci</code>. The template is not ceremony; it is
+    this chapter, executable.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="16-troubleshooting.html">← 16 Troubleshooting</a></span>
+  <span>next · <a href="appendix-decisions.html">A Decisions &amp; file map →</a></span>
+</div></div></footer>
+</body>
+</html>

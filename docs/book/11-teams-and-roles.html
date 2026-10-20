@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · Teams &amp; roles — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>11</b> · Teams &amp; roles</span>
+  <span class="pn"><a href="10-plan-mode.html">← 10 Plan mode</a><a href="12-the-task-dag.html">12 The task DAG →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part IV · Teams &amp; pipelines · <b>Chapter 11</b></div>
+    <h1>Teams &amp; roles</h1>
+    <p class="lede">
+      A team is a roster of worker sessions the root can address by name. Roles are markdown files,
+      not config blocks; the roster is a phonebook, not a hierarchy; and every message travels
+      through an ownership edge the registry enforces.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">11.1</span>Turning it on</h2>
+  <p>
+    Two ways, and the second is the one that surprises people:
+  </p>
+  <ul>
+    <li><code>wcode --agents</code> — register the root-only tools (<code>spawn</code>,
+      <code>message</code>, <code>peers</code>, <code>member</code>, <code>task</code>).</li>
+    <li>A <strong>non-empty <code>[team]</code> auto-enables agents mode</strong> — no
+      <code>--agents</code> needed (<code>main.rs:799</code>). In this repository,
+      <code>wcode</code> alone starts the full team, because <code>.wcode/team.toml</code> exists.</li>
+  </ul>
+
+  <figure class="code">
+    <figcaption><span class="f">.wcode/team.toml</span><span class="tag">a preset roster (shape)</span></figcaption>
+<pre>[orchestrator]
+guidelines = <span class="s">"Step 1: message a member by name; Step 2: verify their result."</span>
+
+[[team]]
+name      = <span class="s">"explorer"</span>
+role      = <span class="s">"recon only; never edit; cite file:line"</span>
+tools     = [<span class="s">"read"</span>, <span class="s">"grep"</span>, <span class="s">"find"</span>]
+read_only = <span class="k">true</span>
+
+[[team]]
+name   = <span class="s">"reviewer"</span>
+role   = <span class="s">"verify diffs; PASS / NITS / FAIL"</span>
+effort = <span class="s">"high"</span></pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>The address. Unique; a duplicate fails the load loudly.</td></tr>
+        <tr><td><code>role</code></td><td>Appended to the worker's prompt as <code># Role</code>.</td></tr>
+        <tr><td><code>tools</code></td><td>Allow-list. <code>message</code> is always kept — a worker with no way to report is a bug.</td></tr>
+        <tr><td><code>read_only</code></td><td>Refuses the mutating tools and mutating <code>bash</code>/<code>bg</code> (<code>ReadOnlyHooks</code>).</td></tr>
+        <tr><td><code>model</code> · <code>effort</code> · <code>base_url</code> · <code>api_key</code></td><td>Per-member provider knobs; absent inherits the root's.</td></tr>
+        <tr><td><code>file</code></td><td>Point at a role file outside the scanned roots (cwd-relative or absolute); sibling keys override it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11.2</span>Roles are markdown files</h2>
+  <p>
+    Frontmatter supplies the member's fields; the body becomes its <code># Role</code>. They are
+    discovered from two roots, and folded <em>under</em> the TOML roster — so a TOML member of the
+    same name wins wholesale.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Precedence</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>highest</td><td>the folded TOML <code>[[team]]</code></td></tr>
+        <tr><td></td><td><code>./.wcode/agents/**/*.md</code> (project)</td></tr>
+        <tr><td>lowest</td><td><code>~/.config/wcode/agents/**/*.md</code> (global — a team that travels)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/agent_files.rs:23</span><span class="tag">frontmatter fields</span></figcaption>
+<pre><span class="k">struct</span> AgentFrontmatter {
+    <span class="c">/// Required phonebook key; absent → the file is skipped.</span>
+    name: Option&lt;String&gt;,
+    <span class="c">/// Informational in v1 (D-C4); the `role` fallback when the body is empty.</span>
+    description: Option&lt;String&gt;,
+    model: Option&lt;String&gt;,
+    <span class="c">/// CSV string OR YAML list, normalized (D-C3). Absent = `None` (inherit all);</span>
+    <span class="c">/// present-but-empty = `Some(vec![])` (only `message`).</span>
+    tools: Option&lt;Vec&lt;String&gt;&gt;,
+    base_url: Option&lt;String&gt;,
+    api_key: Option&lt;String&gt;,
+    read_only: <span class="k">bool</span>,
+    effort: Option&lt;String&gt;,
+}</pre>
+  </figure>
+
+  <figure class="code">
+    <figcaption><span class="f">.wcode/agents/explorer.md</span><span class="tag">a role file</span></figcaption>
+<pre>---
+name: explorer
+tools: [read, grep, find]
+read_only: true
+---
+Reconnaissance for this repository. Map the ground truth before anyone changes
+it — facts, not opinions. Report <span class="s">`file:line`</span> evidence with a short
+quoted snippet, and say plainly what you did **not** verify.</pre>
+  </figure>
+
+  <div class="callout warn">
+    <span class="label">The shadowing trap</span>
+    <p>
+      A <code>[[team]]</code> entry of the same name as an <code>.md</code> role replaces it
+      <em>wholesale</em> — not per field. A TOML member with only <code>name</code> and
+      <code>model</code> silently drops the file's body, tools and <code>read_only</code>. If a role
+      "stopped working", look for a TOML stub with the same name.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11.3</span>Named project teams</h2>
+  <p>
+    A repository can ship several rosters and switch between them without rewriting config:
+    one file per team under <code>./.wcode/teams/&lt;name&gt;.toml</code>.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>wcode --team recon</code></td><td>Use <code>.wcode/teams/recon.toml</code> as the overlay. Mutually exclusive with <code>--config</code>.</td></tr>
+        <tr><td><code>wcode --list-teams</code></td><td>Print the discovered names and paths, exit.</td></tr>
+        <tr><td><code>/team</code></td><td>(TUI) picker — the directory <em>is</em> the list.</td></tr>
+        <tr><td><code>/team roster</code> · <code>/team &lt;name&gt;</code></td><td>Print the listing, or switch directly.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Selecting a named team replaces the project <code>team.toml</code> wholesale and suppresses the
+    project <code>./.wcode/agents/</code> scan — "use this team instead" means exactly that.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">11.4</span>A worker's life</h2>
+  <p>
+    A spawned worker is a full session: its own model, its own tools, its own transcript. Two
+    pieces of injected prose make it a <em>worker</em> rather than another root.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/agents.rs:428</span><span class="tag">the worker blurb</span></figcaption>
+<pre>        <span class="k">let mut</span> system = <span class="f2">format!</span>(
+            <span class="s">"{}\n\n# You are a worker\nYou are the session `{id}`, spawned by \
+             `{owner}`. Complete the task you are given. When you finish, your \
+             final message is reported back to `{owner}` automatically — you do \
+             not need to send it yourself. Report what you did, not just that \
+             you are done. Structure your final message as: (1) outcome — \
+             done / blocked / partial; (2) what changed or you found, with \
+             `file:anchor` or commit evidence; (3) the validation you ran \
+             (command + result); (4) open questions and what you did NOT \
+             check. Omit a part only if it truly does not apply."</span>,
+            t.system
+        );</pre>
+  </figure>
+
+  <h3>Report-back is a hook, not a habit</h3>
+  <p>
+    A worker is not asked to remember to report. <code>ReportBack::after_run</code> delivers its
+    final message to the owner as a <code>Wake</code> — and when the run ended badly, it
+    synthesizes a status line instead, so an orchestrator is never left waiting for a report that
+    cannot come.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/agents.rs:541</span><span class="tag">ReportBack</span></figcaption>
+<pre><span class="k">struct</span> ReportBack { registry: Registry, me: SessionId, owner: SessionId }
+
+#[async_trait::async_trait]
+<span class="k">impl</span> Hooks <span class="k">for</span> ReportBack {
+    <span class="k">async fn</span> <span class="f2">after_run</span>(<span class="f2">&amp;</span>self, ctx: <span class="f2">&amp;</span>[AgentMessage], stop: StopReason) {
+        <span class="k">let</span> content = <span class="k">match</span> (stop, wcode_harness::message::<span class="f2">last_assistant_text</span>(ctx)) {
+            (StopReason::Stop, Some(text)) =&gt; text,
+            _ =&gt; <span class="f2">report_for_stop</span>(<span class="f2">&amp;</span>self.me, stop),
+        };</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">11.5</span>Addressing, and who may talk to whom</h2>
+  <p>
+    Members are addressed by name; a bare name resolves through the phonebook, and an explicit
+    <code>agent:&lt;id&gt;</code> reaches a session directly. Four delivery modes, and they are
+    genuinely different:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Mode</th><th>Meaning</th><th>Mid-run behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>wake</code> (default)</td><td>"Process this" — runs a turn even if the recipient is idle.</td><td>Rides the follow-up channel.</td></tr>
+        <tr><td><code>notify</code></td><td>"Know this" — appended to the conversation, no turn.</td><td>Recorded now, or at the next boundary.</td></tr>
+        <tr><td><code>interrupt</code></td><td>"Change course" — soft interrupt, does not cancel the run.</td><td>Injected at the next turn boundary.</td></tr>
+        <tr><td><code>ask</code></td><td>"Answer me" — a tool-free question, answered from context.</td><td>Answered from the last turn-boundary snapshot.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The registry enforces scope</h3>
+  <p>
+    Addressing is not free-for-all. <code>Registry::deliver</code> resolves the pair through a
+    permitted set built from <b>ownership edges</b> (a spawn creates one in each direction) plus
+    explicit <code>allow_pair</code> grants. Anything else is <code>NotPermitted</code> — and a
+    workflow's lateral edges are exactly such a grant.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-protocol/src/registry.rs:329</span><span class="tag">permitted</span></figcaption>
+<pre>        <span class="k">let</span> owned = {
+            <span class="k">let</span> owners = self.inner.owners.<span class="f2">lock</span>().<span class="f2">unwrap</span>();
+            owners.<span class="f2">get</span>(from) == Some(to) || owners.<span class="f2">get</span>(to) == Some(from)
+        };
+        owned
+            || self
+                .inner
+                .allows
+                .<span class="f2">lock</span>()
+                .<span class="f2">unwrap</span>()
+                .<span class="f2">contains</span>(<span class="f2">&amp;</span>(from.<span class="f2">clone</span>(), to.<span class="f2">clone</span>()))</pre>
+  </figure>
+
+  <div class="callout">
+    <span class="label">Why a phonebook and not a tree</span>
+    <p>
+      A worker may talk to its owner; two workers may talk if a workflow edge joined them. There is
+      no manager chain to walk and no inherited capability — which is what makes a stale worker
+      unable to chatter at a stranger, and a runaway spawn unable to recurse into a mesh.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11.6</span>Supervising without waiting</h2>
+  <p>
+    The root can inspect a teammate <em>while it works</em>, without blocking its own turn:
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th><code>member</code> op</th><th>Returns</th><th>Model call?</th></tr></thead>
+      <tbody>
+        <tr><td><code>status</code></td><td>The member's last completed work</td><td>no</td></tr>
+        <tr><td><code>usage</code></td><td>Its tokens, cache hit rate, per-tool errors, cost</td><td>no</td></tr>
+        <tr><td><code>ask</code></td><td>An answer to a tool-free question, from its own context</td><td>yes — its model</td></tr>
+        <tr><td><code>cancel</code></td><td>Stops its in-flight run; waits for it to stop</td><td>no</td></tr>
+        <tr><td><code>model</code> / <code>effort</code></td><td>Retunes the member (the roster is updated)</td><td>no</td></tr>
+        <tr><td><code>compact</code></td><td>Summarizes its older history now, optionally focused</td><td>yes</td></tr>
+        <tr><td><code>retire</code></td><td>Drops it from the roster and marks it retired</td><td>no</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="label">Never sleep to wait for a worker</span>
+    <p>
+      A worker's report arrives as a <code>Wake</code> — which can only be processed between the
+      root's turns. So a polling loop, a <code>sleep</code>, or a blocking <code>wait</code> blocks
+      the very message being awaited. <code>SleepRefusalHooks</code> refuses a <code>sleep</code>-leading
+      command at the root for exactly this reason: the correct move is to <em>end the turn</em>.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">11.7</span>Remote peers</h2>
+  <p>
+    A worker need not live in this process. A served session can be registered as a peer:
+  </p>
+  <figure class="code">
+    <figcaption><span class="f">shell + config</span><span class="tag">peers</span></figcaption>
+<pre>wcode serve --name w7 --owner agent:orchestrator   <span class="c"># serve this session as a worker</span>
+wcode --peer explorer=/tmp/wcode/explorer.sock     <span class="c"># register it locally</span>
+
+[peers]
+explorer = <span class="s">"/tmp/wcode/explorer.sock"</span>       <span class="c"># a socket, connected lazily</span>
+helper   = <span class="s">"agent:w7"</span>                        <span class="c"># an in-process alias</span></pre>
+  </figure>
+  <p>
+    A value containing <code>:</code> is an address alias; otherwise it is a socket path (Unix
+    only). A socket peer is connected lazily, so a missing daemon costs a failed delivery, not a
+    failed boot. Chapter <a href="14-protocol-and-clients.html">14</a> covers the transport.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="10-plan-mode.html">← 10 Plan mode</a></span>
+  <span>next · <a href="12-the-task-dag.html">12 The task DAG →</a></span>
+</div></div></footer>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08 · Editing by literal text — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>08</b> · Editing by literal text</span>
+  <span class="pn"><a href="07-the-tools.html">← 07 The tools</a><a href="09-instructions-and-skills.html">09 Instructions &amp; skills →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part III · Inside · <b>Chapter 08</b></div>
+    <h1>Editing by literal text</h1>
+    <p class="lede">
+      The single most consequential decision in wcode: there is no line-address primitive. An edit
+      names the text it replaces. Everything else — the error codes, the batch semantics, the
+      absence of a staleness guard — falls out of that one choice (D007).
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">8.1</span>The failure this prevents</h2>
+  <p>
+    Line numbers are <em>positions</em>. The moment one line is inserted above, every number below
+    refers to a different line — silently. A model that read a file, then applied two edits in one
+    pass, is the classic corruption story: the second edit lands on the wrong region, or on a
+    region that no longer exists.
+  </p>
+  <p>
+    wcode removes the failure mode by removing the primitive. <code>read</code> still prints
+    numbers, because a human and a citation both need them — but they are <strong>locators</strong>,
+    never addresses.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tools/edit.rs:8</span><span class="tag">the whole contract, in the arg docs</span></figcaption>
+<pre><span class="k">pub struct</span> EditArgs {
+    <span class="c">/// File path (relative to the working directory unless absolute).</span>
+    <span class="k">pub</span> path: String,
+    <span class="c">/// The exact text to replace — **byte-exact**, so whitespace counts. Must</span>
+    <span class="c">/// occur exactly once unless `replace_all`; include the surrounding lines to</span>
+    <span class="c">/// make it unique.</span>
+    <span class="k">pub</span> old_string: String,
+    <span class="c">/// The text to put in its place, verbatim — leading whitespace is preserved.</span>
+    <span class="c">/// Empty deletes the match.</span>
+    <span class="k">pub</span> new_string: String,
+    <span class="c">/// Replace every occurrence instead of requiring a unique match.</span>
+    <span class="k">pub</span> replace_all: Option&lt;<span class="k">bool</span>&gt;,
+}</pre>
+  </figure>
+
+  <p>
+    Note what is <em>not</em> in that struct: no start line, no end line, no line count, no
+    offset, no hash. The address is the text.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">8.2</span>Byte-exact means byte-exact</h2>
+  <p>
+    Matching is a literal substring search over the file's bytes. Tabs are not spaces; a trailing
+    space is significant; a missing blank line is a miss. That strictness is the safety property —
+    a fuzzy match is a guess, and a guess is how an agent edits the wrong thing.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Code</th><th>Condition</th><th>What the model is told</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>E_NO_MATCH</code></td>
+          <td><code>old_string</code> occurs zero times</td>
+          <td>"The match is byte-exact — re-read the file and copy the text (whitespace counts)."</td>
+        </tr>
+        <tr>
+          <td><code>E_AMBIGUOUS_MATCH</code></td>
+          <td>It occurs more than once and <code>replace_all</code> is not set</td>
+          <td>The occurrence count, and two fixes: include more surrounding lines, or set <code>replace_all</code>.</td>
+        </tr>
+        <tr>
+          <td><code>E_EMPTY_OLD_STRING</code></td>
+          <td><code>old_string</code> is empty</td>
+          <td>"There is nothing to match — give the exact text, or use <code>write</code> for a whole-file rewrite."</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tools/edit.rs:89</span><span class="tag">ambiguity is refused, not guessed</span></figcaption>
+<pre>        <span class="k">if</span> matches &gt; <span class="n">1</span> <span class="f2">&amp;&amp;</span> !replace_all {
+            <span class="k">return</span> ToolOutput {
+                output: <span class="f2">format!</span>(
+                    <span class="s">"[E_AMBIGUOUS_MATCH] `old_string` occurs {matches} times in {}. Include more surrounding lines to pin one, or set `replace_all: true` to replace every match."</span>,
+                    args.path
+                ),
+                is_error: <span class="k">true</span>,</pre>
+  </figure>
+
+  <div class="callout">
+    <span class="label">Errors are a contract, not noise</span>
+    <p>
+      Every message names the code <em>and</em> the fix. A model that reads
+      "include more surrounding lines" can recover on the next turn without a human; a model that
+      reads "edit failed" cannot. The wording is part of the tool's interface.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8.3</span>The match <em>is</em> the staleness check</h2>
+  <p>
+    Older designs (including an earlier wcode) addressed a <em>range</em> by two hash anchors, and
+    needed a separate whole-file digest guard to cover the span between them. Text matching covers
+    that span by construction: if the file changed anywhere inside the region you named, your text
+    no longer matches.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">git log -S digest_cas</span><span class="tag">the machinery that went away</span></figcaption>
+<pre>7c740fe cli: read/grep print plain lines; the anchor + digest machinery goes (W007 P3+P4)</pre>
+  </figure>
+
+  <p>
+    So there is <strong>no anchor store, no digest cache, and no session memory of file state</strong>.
+    Three consequences, all good:
+  </p>
+  <ul>
+    <li>An external edit — <code>bash</code>, a formatter, another process — is picked up
+      automatically, because nothing is cached.</li>
+    <li>Nothing to invalidate, so nothing to get stale.</li>
+    <li>The tool is stateless, so it works identically in a fresh process, a resumed session, or a
+      worker that has never read the file.</li>
+  </ul>
+
+  <div class="callout warn">
+    <span class="label">A note on <code>[workspace] digest_cas</code></span>
+    <p>
+      The README still documents a <code>[workspace] digest_cas</code> key for whole-file
+      compare-and-swap. At this commit <strong>no such code exists</strong> — the digest machinery
+      was removed with the anchor scheme (<code>7c740fe</code>). The book follows the code: there
+      is no digest guard, by design. Treat that README section as stale.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">8.4</span>One edit, and a batch of edits</h2>
+  <p>
+    A single <code>edit</code> is one op. A model often needs three coupled changes in one file;
+    issuing three separate calls means a partial success is possible, and a partial refactor is
+    worse than a failed one. <code>edits</code> makes the batch atomic.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tools/edits.rs:58</span><span class="tag">edits — description</span></figcaption>
+<pre><span class="s">"Apply several literal-string edits to ONE file atomically. Ops run in order against
+the accumulating content; each `old_string` must occur exactly once at its turn unless
+`replace_all`. If any op fails, the whole batch is refused and nothing is written —
+so a batch is all-or-nothing, unlike sequential `edit` calls."</span></pre>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>In order, against accumulating content</h4>
+      <p>
+        Op 2 matches against what op 1 produced. That makes rename-then-reference safe: the second
+        op can depend on the first having happened.
+      </p>
+    </div>
+    <div class="card">
+      <h4>All-or-nothing</h4>
+      <p>
+        A failing op refuses the whole call. The repository has a test that asserts op1 must not
+        land when op2 fails (<code>edits.rs:212</code>).
+      </p>
+    </div>
+  </div>
+
+  <p>
+    There is no <code>dry_run</code> flag. The diff is returned on success and shown in the
+    transcript, so "review before applying" is a <em>reading</em> step, not a mode — and git is the
+    undo.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">8.5</span>When writing the whole file is right</h2>
+  <p>
+    <code>write</code> is the escape hatch, not the default: it creates parents, overwrites, and
+    writes the content <strong>byte for byte</strong> — no reformatting, no trailing-newline
+    tampering, indentation preserved exactly.
+  </p>
+  <p>It is the right tool when:</p>
+  <ul>
+    <li>the file is new;</li>
+    <li>the change is most of the file (an <code>old_string</code> that long is a liability);</li>
+    <li>you are deliberately regenerating a file whose content is derived anyway.</li>
+  </ul>
+  <p>
+    It is the wrong tool for a one-line change in a 600-line file: you would be re-typing 600 lines
+    the model must reproduce exactly, which is precisely the failure mode literal editing exists to
+    remove.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">8.6</span>The practice that follows</h2>
+  <ol class="steps">
+    <li>
+      <b>Read the region you intend to change</b>
+      <span class="where">read with offset/limit, or grep for the anchor line</span>
+      You are collecting text to paste, not a line number to point at.
+    </li>
+    <li>
+      <b>Make <code>old_string</code> unique and small</b>
+      <span class="where">2–6 lines usually suffice</span>
+      Include the function signature or a neighbouring line when the body alone is ambiguous. On
+      <code>E_AMBIGUOUS_MATCH</code>, add a line — do not reach for <code>replace_all</code> unless
+      you truly mean every occurrence.
+    </li>
+    <li>
+      <b>Group coupled changes into one <code>edits</code> call</b>
+      <span class="where">all-or-nothing</span>
+      A rename plus its three call sites is one atomic intent.
+    </li>
+    <li>
+      <b>Read the diff in the transcript</b>
+      <span class="where">ToolExecutionEnd carries it</span>
+      The diff is presentation-only — it never enters the model's context, so it costs no tokens
+      and never becomes something the model "remembers" instead of the file.
+    </li>
+  </ol>
+
+  <div class="callout good">
+    <span class="label">Why this survives parallelism</span>
+    <p>
+      Because matching is content-addressed, two agents editing disjoint regions of the same file
+      cannot silently clobber each other — a lost update means the text no longer matches, which is
+      a refusal rather than corruption. The mutation lock (<a href="07-the-tools.html">Chapter
+      07</a>) makes the writes atomic on top of that.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="07-the-tools.html">← 07 The tools</a></span>
+  <span>next · <a href="09-instructions-and-skills.html">09 Instructions &amp; skills →</a></span>
+</div></div></footer>
+</body>
+</html>

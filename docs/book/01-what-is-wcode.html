@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 · What wcode is — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>01</b> · What wcode is</span>
+  <span class="pn"><a href="index.html">← Contents</a><a href="02-install-and-configure.html">02 Install &amp; configure →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part I · Begin · <b>Chapter 01</b></div>
+    <h1>What wcode is</h1>
+    <p class="lede">
+      A terminal coding agent with a small kernel and no opinions you cannot delete in code.
+      This chapter is the thesis: what wcode optimises for, what shape that gives the
+      repository, and which features it deliberately does not have.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">1.1</span>The one-sentence version</h2>
+  <p>
+    wcode streams an LLM conversation to your terminal, gives the model a handful of
+    <strong>content-addressed</strong> tools — numbered reads, literal-text edits, grep/find, a
+    shell — and stays out of the way. It speaks to <em>any</em> OpenAI-compatible
+    chat-completions endpoint, so the model is a setting, not a dependency.
+  </p>
+  <p>
+    The design goal is not "the most capable agent". It is the smallest agent that is still
+    pleasant to supervise: one event loop, one tool protocol, one session format, and a
+    policy seam (<code>Hooks</code>) where everything situational lives as <em>code</em>
+    rather than as configuration.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">1.2</span>Shape: a kernel and its clients</h2>
+  <p>
+    Five pieces, and only one of them knows how to think. The kernel owns the loop; every
+    other crate is either transport or presentation.
+  </p>
+
+  <figure class="diagram">
+    <div class="legend">
+      <span><i style="background:#2a3a55;border:1px solid #4a6da8"></i>kernel (no I/O opinions)</span>
+      <span><i style="background:#1e2a3a;border:1px solid #33405a"></i>transport</span>
+      <span><i style="background:#4a3a1c;border:1px solid #a8823a"></i>clients</span>
+    </div>
+    <svg viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="wcode crate architecture">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#5b6b85"/>
+        </marker>
+        <style>
+          .bn { font: 600 12.5px ui-monospace, monospace; fill: #dce3ed; }
+          .bd { font: 400 10px system-ui, sans-serif; fill: #93a0b4; }
+          .ln { stroke: #5b6b85; stroke-width: 1.3; fill: none; marker-end: url(#ar2); }
+          .ll { font: 400 9.5px ui-monospace, monospace; fill: #6b7788; }
+        </style>
+      </defs>
+
+      <!-- ── tier 1: clients ─────────────────────────────────────────── -->
+      <g>
+        <rect x="40" y="40" width="240" height="64" rx="11" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="bn" x="160" y="66" text-anchor="middle">wcode-cli</text>
+        <text class="bd" x="160" y="84" text-anchor="middle">flags · config · tools · teams · scheduler</text>
+      </g>
+      <g>
+        <rect x="310" y="40" width="240" height="64" rx="11" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="bn" x="430" y="66" text-anchor="middle">wcode-tui</text>
+        <text class="bd" x="430" y="84" text-anchor="middle">ratatui: reducer · bands · overlays</text>
+      </g>
+      <g>
+        <rect x="580" y="40" width="280" height="64" rx="11" fill="#4a3a1c" stroke="#a8823a"/>
+        <text class="bn" x="720" y="62" text-anchor="middle">editors/vscode</text>
+        <text class="bd" x="720" y="79" text-anchor="middle">a second client, same frames</text>
+        <text class="ll" x="720" y="94" text-anchor="middle">spawns `wcode serve --stdio`</text>
+      </g>
+
+      <!-- ── tier 2: transport ──────────────────────────────────────── -->
+      <rect x="40" y="156" width="820" height="60" rx="11" fill="#1e2a3a" stroke="#33405a"/>
+      <text class="bn" x="450" y="181" text-anchor="middle">wcode-protocol</text>
+      <text class="bd" x="450" y="200" text-anchor="middle">Backend (Local | Remote) · Frame · Registry · serve / Client</text>
+
+      <!-- ── tier 3: kernel ─────────────────────────────────────────── -->
+      <rect x="170" y="272" width="560" height="66" rx="11" fill="#2a3a55" stroke="#4a6da8"/>
+      <text class="bn" x="450" y="300" text-anchor="middle">wcode-harness</text>
+      <text class="bd" x="450" y="319" text-anchor="middle">Agent · run_loop · Tool · Hooks · StreamFn · sessions</text>
+
+      <!-- ── dependencies point down ────────────────────────────────── -->
+      <path class="ln" d="M160,104 L160,154"/>
+      <path class="ln" d="M430,104 L430,154"/>
+      <path class="ln" d="M720,104 L720,154"/>
+      <text class="ll" x="446" y="140">Request ↓ · AgentEvent ↑</text>
+      <path class="ln" d="M450,216 L450,270"/>
+      <text class="ll" x="466" y="248">the same vocabulary, in-process or on a socket</text>
+    </svg>
+    <figcaption>
+      Dependencies point <em>down</em>: a client speaks <code>Request</code>/<code>AgentEvent</code>
+      to the transport, and the transport drives the kernel. No client implements the loop, and the
+      kernel never learns what a terminal is.
+    </figcaption>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Crate</th><th>Role</th><th>Lines (src/, pre-test)</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>wcode-harness</code></td>
+          <td>The kernel: agent, tool-calling loop, tools, hooks, streaming adapter, compaction, JSONL sessions, limits.</td>
+          <td>8 211</td>
+        </tr>
+        <tr>
+          <td><code>wcode-protocol</code></td>
+          <td>Transport above the kernel: the <code>Backend</code> seam, NDJSON frames, a socket <code>serve</code>/<code>Client</code>, the session <code>Registry</code>.</td>
+          <td>1 544</td>
+        </tr>
+        <tr>
+          <td><code>wcode-cli</code></td>
+          <td>The composition root (binary <code>wcode</code>): flags, config, concrete tools, instructions, skills, teams, the task DAG, the scheduler.</td>
+          <td>21 939</td>
+        </tr>
+        <tr>
+          <td><code>wcode-tui</code></td>
+          <td>The full-screen client: a pure reducer over <code>AgentEvent</code>, three bands, overlays, theme.</td>
+          <td>16 092</td>
+        </tr>
+        <tr>
+          <td><code>editors/vscode</code></td>
+          <td>A second client (TypeScript, ~6.4k lines): spawns <code>wcode serve --stdio</code> and speaks the same frames.</td>
+          <td>—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="dim">
+    Measured at <code>g0be6694</code> by cutting each file at its last
+    <code>#[cfg(test)]</code>; in-file tests roughly double the Python-measured total
+    (67 938 lines with tests). The README rounds these numbers differently — trust the
+    measurement, not the prose.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/lib.rs:1</span><span class="tag">the whole kernel surface</span></figcaption>
+<pre><span class="k">pub mod</span> actor;
+<span class="k">pub mod</span> agent;
+<span class="k">pub mod</span> compaction;
+<span class="k">pub mod</span> event;
+<span class="k">pub mod</span> hooks;
+<span class="k">pub mod</span> limits;
+<span class="k">pub mod</span> loop_;
+<span class="k">pub mod</span> message;
+<span class="k">pub mod</span> pricing;
+<span class="k">pub mod</span> protocol;
+<span class="k">pub mod</span> session;
+<span class="k">pub mod</span> stats;
+<span class="k">pub mod</span> streamfn;
+<span class="k">pub mod</span> tool;</pre>
+  </figure>
+
+  <p>
+    Fourteen modules. Nothing in that list knows what a terminal is, what a config file is, or
+    what a "team" is — which is exactly why a TUI, a VS Code webview, and a socket server can
+    all be built on it without forking the loop.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">1.3</span>The seam: events down, hooks in</h2>
+  <p>
+    The kernel exposes exactly two interfaces to the outside world, and both are narrow.
+  </p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Out · AgentEvent</h4>
+      <p>
+        Everything the run does becomes a value: <code>TurnStart</code>,
+        <code>MessageUpdate</code>, <code>ToolExecutionStart/Update/End</code>,
+        <code>TurnEnd</code>, <code>Compaction</code>, <code>Retrying</code>,
+        <code>MessageReceived</code>, <code>Error</code>. A UI is a function from that stream
+        to pixels — it cannot reach into the loop, and the loop cannot reach back.
+      </p>
+    </div>
+    <div class="card">
+      <h4>In · Hooks</h4>
+      <p>
+        Seven call sites: <code>transform_tool_input</code>, <code>before_tool_call</code>,
+        <code>after_tool_call</code>, <code>before_inbound</code>,
+        <code>transform_context</code>, <code>should_stop_after_turn</code>,
+        <code>after_run</code>. Every policy wcode has — plan mode, bash risk, the verify
+        gate, report-back — is one implementation of this trait.
+      </p>
+    </div>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/hooks.rs:19</span><span class="tag">the policy seam</span></figcaption>
+<pre>    <span class="k">async fn</span> <span class="f2">transform_tool_input</span>(<span class="f2">&amp;</span>self, _call: <span class="f2">&amp;mut</span> ToolCall) {}
+    <span class="k">async fn</span> <span class="f2">before_tool_call</span>(<span class="f2">&amp;</span>self, _call: <span class="f2">&amp;</span>ToolCall) -&gt; Option&lt;String&gt; {
+        None
+    }
+    <span class="k">async fn</span> <span class="f2">after_tool_call</span>(<span class="f2">&amp;</span>self, _call: <span class="f2">&amp;</span>ToolCall, _out: <span class="f2">&amp;mut</span> ToolOutput) {}
+    <span class="k">async fn</span> <span class="f2">before_inbound</span>(<span class="f2">&amp;</span>self, _msg: <span class="f2">&amp;mut</span> AgentMessage) {}
+    <span class="k">async fn</span> <span class="f2">transform_context</span>(<span class="f2">&amp;</span>self, _msgs: <span class="f2">&amp;mut</span> Vec&lt;AgentMessage&gt;) {}
+    <span class="k">async fn</span> <span class="f2">should_stop_after_turn</span>(<span class="f2">&amp;</span>self, _ctx: <span class="f2">&amp;</span>[AgentMessage]) -&gt; <span class="k">bool</span> {
+        <span class="k">false</span>
+    }
+    <span class="k">async fn</span> <span class="f2">after_run</span>(<span class="f2">&amp;</span>self, _ctx: <span class="f2">&amp;</span>[AgentMessage], _stop: StopReason) {}</pre>
+  </figure>
+
+  <p>
+    <code>before_tool_call</code> returning <code>Some(reason)</code> is the important one: the
+    tool <strong>does not run</strong>, and the reason is fed back to the model as a
+    <code>blocked: …</code> tool error. That single return value is how plan mode refuses
+    writes, how a catastrophic shell command is stopped, and how an unverified work node is
+    refused — three policies, one seam, zero configuration.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">1.4</span>What wcode deliberately does not have</h2>
+  <p>
+    The repository's own guidelines state it plainly: <em>Minimalism is the point.</em>
+    Absent by design:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Not present</th><th>What people expect instead</th><th>What wcode does</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>MCP</td>
+          <td>A plugin protocol, servers, tool discovery at runtime</td>
+          <td>Tools are Rust <code>TypedTool</code>s compiled in. Adding one is a small diff, not a config entry.</td>
+        </tr>
+        <tr>
+          <td>Permission prompts</td>
+          <td>"Allow this command?" dialogs, allowlists on disk</td>
+          <td><code>BashRiskHooks</code> refuses a fixed set of catastrophic commands; everything else is allowed. The human supervises by reading the transcript, not by clicking.</td>
+        </tr>
+        <tr>
+          <td>Approval flows</td>
+          <td>A review queue, a staging area, a "apply" button</td>
+          <td>Diff is shown inline; the edit already happened. Git is the undo.</td>
+        </tr>
+        <tr>
+          <td>Config files for behaviour</td>
+          <td><code>agents.toml</code>, <code>rules/</code>, <code>policies.yaml</code></td>
+          <td>Implement <code>Hooks</code>. Build the variant you want instead of configuring one.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="label">Why this is a feature, not an omission</span>
+    <p>
+      Every knob is a code path that must be documented, defaulted, validated, and kept
+      working. wcode's answer is: if a policy matters to you, it is a type in your program.
+      The cost is that you cannot tune it from a TOML file. The benefit is that there is
+      nothing to tune — and therefore nothing to drift.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">1.5</span>Content-addressed, not line-addressed</h2>
+  <p>
+    One decision shapes every tool, so it belongs in the introduction rather than buried in
+    Chapter 08. Agents corrupt files when they address <em>positions</em>: insert a line and
+    every line number below means something else. So wcode has no line-address primitive at
+    all. <code>edit</code> replaces an exact literal <code>old_string</code>; a miss writes
+    nothing.
+  </p>
+  <p>
+    The match <em>is</em> the staleness check — if the file changed since the read, the text
+    no longer matches. There is no anchor store, no digest guard, no session memory of what
+    the file used to look like. <a href="08-editing.html">Chapter 08</a> is the full argument.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">1.6</span>Scale, honestly</h2>
+  <div class="grid3">
+    <div class="card"><h4>Kernel</h4><p><strong>8.2k</strong> lines pre-test. Small enough to read in an afternoon; it is the part that must be correct.</p></div>
+    <div class="card"><h4>One binary</h4><p><code>cargo install --path crates/wcode-cli</code>. No runtime, no Python, no node — unless you want the VS Code client, which needs node.</p></div>
+    <div class="card"><h4>Zero daemons</h4><p>A session is a process and a JSONL file. <code>serve</code> is opt-in, not the default posture.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">1.7</span>Where to start reading the code</h2>
+  <ol class="steps">
+    <li>
+      <b><code>crates/wcode-harness/src/loop_.rs</code></b>
+      <span class="where">~ the heart</span>
+      One turn = one model call + the tools it produced. Read this before anything else; every
+      other module is a service this loop uses.
+    </li>
+    <li>
+      <b><code>crates/wcode-harness/src/agent.rs</code></b>
+      <span class="where">state above the loop</span>
+      Conversation history, model/effort switching, compaction, cancel, side questions.
+    </li>
+    <li>
+      <b><code>crates/wcode-cli/src/main.rs</code></b>
+      <span class="where">the composition root</span>
+      Flags → config → hooks → tools → agent → surface. If you wonder "who sets this?", it is
+      probably here.
+    </li>
+    <li>
+      <b><code>crates/wcode-cli/src/tools/</code></b>
+      <span class="where">the concrete tools</span>
+      One file per tool. Small, typed, individually tested — the best template for your own.
+    </li>
+    <li>
+      <b><code>crates/wcode-cli/src/tasks.rs</code> + <code>scheduler.rs</code></b>
+      <span class="where">the team machinery</span>
+      Read after Chapter 12, not before.
+    </li>
+  </ol>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="index.html">← Contents</a></span>
+  <span>next · <a href="02-install-and-configure.html">02 Install &amp; configure →</a></span>
+</div></div></footer>
+</body>
+</html>

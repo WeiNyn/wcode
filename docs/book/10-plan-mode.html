@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 · Plan mode — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>10</b> · Plan mode</span>
+  <span class="pn"><a href="09-instructions-and-skills.html">← 09 Instructions &amp; skills</a><a href="11-teams-and-roles.html">11 Teams &amp; roles →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part III · Inside · <b>Chapter 10</b></div>
+    <h1>Plan mode</h1>
+    <p class="lede">
+      A live toggle that tells the model "explore and propose, do not mutate" — and enforces it
+      twice: by refusing the editing tools outright, and by scanning shell commands for obvious
+      mutators. It is a guardrail with an honest boundary, and the boundary is documented.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">10.1</span>Three parts, one boolean</h2>
+  <p>
+    Plan mode is not a mode in the kernel's loop. It is the conjunction of three things, all driven
+    by one shared atomic flag:
+  </p>
+
+  <div class="grid3">
+    <div class="card">
+      <h4>A shared handle</h4>
+      <p>
+        <code>PlanModeHandle</code> — a cloneable <code>Arc&lt;AtomicBool&gt;</code>, off by
+        default, read by the hook on every tool call and written by the toggle.
+      </p>
+    </div>
+    <div class="card">
+      <h4>A hook</h4>
+      <p>
+        <code>PlanModeHooks</code> implements <code>before_tool_call</code>: a
+        <code>Some(reason)</code> blocks the call and feeds the reason back to the model.
+      </p>
+    </div>
+    <div class="card">
+      <h4>A prompt section</h4>
+      <p>
+        <code>PLAN_SECTION</code> is appended to the system prompt while the flag is on, so the
+        model knows the <em>intent</em>, not just the refusals.
+      </p>
+    </div>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/hooks.rs:62</span><span class="tag">the denylist is deliberately short</span></figcaption>
+<pre><span class="c">/// The workspace-mutating tools blocked in plan mode (D3). Read-only tools</span>
+<span class="c">/// (`read`/`grep`/`find`/`ast_search`/`session_search`) and the plan-recording</span>
+<span class="c">/// `todo` (and the team tools `task`/`peers`/`message`) are deliberately absent.</span>
+<span class="k">pub const</span> MUTATING_TOOLS: <span class="f2">&amp;</span>[<span class="f2">&amp;</span>str] = <span class="f2">&amp;</span>[<span class="s">"edit"</span>, <span class="s">"edits"</span>, <span class="s">"write"</span>, <span class="s">"ast_edit"</span>];</pre>
+  </figure>
+
+  <p>
+    That list is the whole tool half of the policy — four names. Everything else stays available on
+    purpose: the agent must still be able to read, search, fetch, and <strong>record the plan as a
+    todo list</strong>, or plan mode would be indistinguishable from "do nothing".
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">10.2</span>The shell half, and its honest boundary</h2>
+  <p>
+    Blocking four tools is easy. Blocking a shell is not: <code>bash</code> can do anything. So the
+    policy does a <em>string scan</em> over the command, segment by segment, and refuses the
+    obvious mutators.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/hooks.rs:119</span><span class="tag">what the scan looks for</span></figcaption>
+<pre><span class="c">/// Shell verbs whose presence as a segment's leading word blocks `bash` in plan</span>
+<span class="c">/// mode.</span>
+<span class="k">const</span> MUTATING_VERBS: <span class="f2">&amp;</span>[<span class="f2">&amp;</span>str] = <span class="f2">&amp;</span>[
+    <span class="s">"rm"</span>, <span class="s">"rmdir"</span>, <span class="s">"mv"</span>, <span class="s">"cp"</span>, <span class="s">"mkdir"</span>, <span class="s">"touch"</span>, <span class="s">"chmod"</span>, <span class="s">"chown"</span>, <span class="s">"chgrp"</span>, <span class="s">"ln"</span>, <span class="s">"dd"</span>, <span class="s">"truncate"</span>,
+    <span class="s">"tee"</span>, <span class="s">"patch"</span>,
+];
+
+<span class="c">/// `git` subcommands that mutate the index, history, or the remote.</span>
+<span class="k">const</span> MUTATING_GIT: <span class="f2">&amp;</span>[<span class="f2">&amp;</span>str] = <span class="f2">&amp;</span>[
+    <span class="s">"add"</span>, <span class="s">"commit"</span>, <span class="s">"checkout"</span>, <span class="s">"reset"</span>, <span class="s">"clean"</span>, <span class="s">"apply"</span>, <span class="s">"merge"</span>, <span class="s">"rebase"</span>, <span class="s">"push"</span>, <span class="s">"stash"</span>,
+    <span class="s">"restore"</span>, <span class="s">"rm"</span>, <span class="s">"mv"</span>,
+];</pre>
+  </figure>
+
+  <p>The design document publishes the false-positive / false-negative table rather than hiding it:</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Input</th><th>Verdict</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>ls -la</code>, <code>cat x</code>, <code>git status</code>, <code>rg foo</code></td><td>allow</td><td>reads</td></tr>
+        <tr><td><code>cargo build</code>, <code>cargo test</code>, <code>make</code>, <code>tsc --noEmit</code></td><td>allow</td><td>read-only builds — artifacts are not a workspace mutation</td></tr>
+        <tr><td><code>rm -rf build</code>, <code>mv a b</code>, <code>sed -i</code>, <code>tee f</code>, <code>&gt;f</code></td><td>block</td><td>mutate</td></tr>
+        <tr><td><code>git commit -m x</code>, <code>git checkout -- .</code>, <code>git push</code></td><td>block</td><td>mutate history / remote</td></tr>
+        <tr><td><code>cargo fix/fmt/install</code>, <code>npm/pnpm/yarn install</code>, <code>go mod tidy</code>, <code>pip install</code></td><td>block</td><td>mutate the source tree / lockfiles</td></tr>
+        <tr><td><code>echo hi &gt; /tmp/x</code></td><td><strong>false positive</strong></td><td>writes outside the workspace — blocked anyway, and that is acceptable</td></tr>
+        <tr><td><code>python -c 'open("f","w")'</code></td><td><strong>false negative</strong></td><td>an arbitrary mutator hidden in an interpreter</td></tr>
+        <tr><td><code>./build.sh</code></td><td><strong>false negative</strong></td><td>side effects unknown</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">docs/plan-mode.md:113</span><span class="tag">the stated guarantee</span></figcaption>
+<pre>The FP/FN table is the honest boundary: bash can always escape a string scan, so
+plan mode's *guarantee* is "the model must actively disguise a mutation to bypass
+it", not "mutation is impossible". The reason string tells the model the same.</pre>
+  </figure>
+
+  <div class="callout warn">
+    <span class="label">Why not sandbox it?</span>
+    <p>
+      Because a sandbox would have to be a container, a seccomp profile, or an LSM policy — a
+      dependency and a platform matrix, for a mode whose actual job is "make the model stop and
+      think". The guardrail is cheap, transparent, and refuses the mistakes that actually happen.
+      Someone determined to write a file can always run <code>perl -e</code>; that is not the threat
+      model.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">10.3</span>The prompt section</h2>
+  <p>
+    A refusal teaches the model what <em>not</em> to try; it does not tell it what to do instead.
+    The section does — including the exit instruction, so the model hands control back rather than
+    looping.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/agent.rs:20</span><span class="tag">PLAN_SECTION, verbatim</span></figcaption>
+<pre><span class="k">pub const</span> PLAN_SECTION: <span class="f2">&amp;</span>str = <span class="s">"# Plan mode\nYou are planning, not executing. Explore and propose only — do NOT modify the\nworkspace: the editing tools are disabled and mutating shell commands are refused.\nFine-tune the plan with the user first. When the plan is final, record it as a\ntodo list (status pending), then tell the user to run `/plan off` to execute."</span>;</pre>
+  </figure>
+
+  <p>
+    Note the two affordances the section leans on: <code>todo</code> is <em>not</em> blocked, and
+    the user is told the exact command to switch modes. The plan therefore has somewhere to live,
+    and the hand-off is explicit.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">10.4</span>How the toggle works</h2>
+  <p>
+    <code>/plan</code> (bare) toggles; <code>/plan on|off</code> sets. In the TUI it travels as
+    <code>Request::SetPlanMode { on }</code>, which the actor applies to the agent.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/agent.rs:134</span><span class="tag">a prompt swap, not a rebuild</span></figcaption>
+<pre>    <span class="k">pub fn</span> <span class="f2">set_plan_mode</span>(<span class="f2">&amp;mut</span> self, on: <span class="k">bool</span>) {
+        self.plan_mode.<span class="f2">set</span>(on);
+        self.system = <span class="k">if</span> on {
+            <span class="f2">format!</span>(<span class="s">"{}\n\n{}"</span>, self.base_system, PLAN_SECTION)
+        } <span class="k">else</span> {
+            self.base_system.<span class="f2">clone</span>()
+        };
+    }</pre>
+  </figure>
+
+  <p>
+    Three details follow from that implementation, and all three are worth knowing:
+  </p>
+  <ul>
+    <li><strong>It takes effect on the next run.</strong> An in-flight run cloned the system prompt
+      into its <code>LoopConfig</code> at start; the toggle does not retroactively rewrite it.</li>
+    <li><strong>Off restores the base prompt exactly.</strong> There is no accumulation of
+      sections across toggles, because <code>base_system</code> is tracked separately.</li>
+    <li><strong>It is never persisted.</strong> <code>/new</code> and <code>/resume</code> both
+      start with plan mode off — a safety property, since a forgotten "on" would silently disable
+      editing in the next session.</li>
+  </ul>
+
+  <p>
+    The TUI shows the state in the composer's foot line as <code>⏻ plan</code>; the REPL prints a
+    notice on each toggle. The TUI's <code>/help</code> lists
+    <code>toggle plan mode (explore, don't mutate)</code>.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">10.5</span>A separate, always-on gate</h2>
+  <p>
+    Do not confuse plan mode with <code>BashRiskHooks</code>. They are different policies with
+    different lifetimes, and both can be active:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th><code>PlanModeHooks</code></th><th><code>BashRiskHooks</code></th></tr></thead>
+      <tbody>
+        <tr><td>When</td><td>Only while the flag is on</td><td>Always</td></tr>
+        <tr><td>Scope</td><td>Four editing tools + mutating shell commands</td><td>A catastrophic subset of shell commands only</td></tr>
+        <tr><td>Disabled by</td><td><code>/plan off</code></td><td>Nothing — no config knob</td></tr>
+        <tr><td>Purpose</td><td>Keep the agent in the planning phase</td><td>Prevent destroying the machine</td></tr>
+        <tr><td>Shared with</td><td>Workers inherit the handle</td><td>The scheduler's <code>Script</code> nodes run under it too</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="dim">
+    That last row matters for workflow mode: a <code>script</code> node executes under the same
+    <code>before_tool_call</code> gate as <code>bash</code>, so a policy refusal fails the node
+    visibly instead of silently skipping it.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">10.6</span>Working in plan mode</h2>
+  <ol class="steps">
+    <li>
+      <b>Turn it on and say what you want</b>
+      <span class="where">/plan then your request</span>
+      The model reads, searches, runs read-only commands, and proposes.
+    </li>
+    <li>
+      <b>Argue with the plan</b>
+      <span class="where">normal turns</span>
+      Cheap: nothing has been written, so a wrong plan costs a message, not a revert.
+    </li>
+    <li>
+      <b>Have it record the plan as a todo list</b>
+      <span class="where">todo with status pending</span>
+      The list persists in the session, so it survives a resume — and <code>/verify</code> renders
+      its progress later.
+    </li>
+    <li>
+      <b><code>/plan off</code> and say "execute it"</b>
+      <span class="where">the same conversation</span>
+      The model already has the plan in context; the editing tools come back online.
+    </li>
+  </ol>
+
+  <div class="callout good">
+    <span class="label">The one thing plan mode buys you</span>
+    <p>
+      It moves the expensive mistake from "a wrong edit, discovered in review" to "a wrong
+      sentence, discovered in reading". That is all it does — and it does it without a permission
+      dialog, a staging area, or a second model.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="09-instructions-and-skills.html">← 09 Instructions &amp; skills</a></span>
+  <span>next · <a href="11-teams-and-roles.html">11 Teams &amp; roles →</a></span>
+</div></div></footer>
+</body>
+</html>

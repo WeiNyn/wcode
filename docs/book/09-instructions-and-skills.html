@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09 · Instructions &amp; skills — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>09</b> · Instructions &amp; skills</span>
+  <span class="pn"><a href="08-editing.html">← 08 Editing by literal text</a><a href="10-plan-mode.html">10 Plan mode →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part III · Inside · <b>Chapter 09</b></div>
+    <h1>Instructions &amp; skills</h1>
+    <p class="lede">
+      Two mechanisms for telling the agent how your repository works — and they are deliberately
+      different. Instructions are <em>always</em> in the prompt. Skills are a catalogue in the
+      prompt whose bodies load only when needed.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">9.1</span>Instruction files: a discovered set, not a list</h2>
+  <p>
+    wcode does not read one "rules file". It discovers a <strong>set</strong>: one global file in
+    the config directory, plus one candidate per directory walking from the repository root down
+    to your working directory. Nearest last — so the most local file has the final word.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/instructions.rs:29</span><span class="tag">candidate names</span></figcaption>
+<pre><span class="c">/// Default candidate names, tried in order per directory (first hit wins).</span>
+<span class="c">/// `CLAUDE.md` is included for portability, as pi and jcode do.</span>
+<span class="k">pub const</span> DEFAULT_INSTRUCTION_NAMES: <span class="f2">&amp;</span>[<span class="f2">&amp;</span>str] =
+    <span class="f2">&amp;</span>[<span class="s">"AGENTS.override.md"</span>, <span class="s">"AGENTS.md"</span>, <span class="s">"CLAUDE.md"</span>];</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Order</th><th>Source</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><code>~/.config/wcode/&lt;name&gt;</code></td><td>The global file — first in the block, so a project file overrides it in spirit.</td></tr>
+        <tr><td>2 … N</td><td>repo root → working dir</td><td>One candidate per directory, nearest last. Run from a subdirectory and both levels load.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Two budgets, and what happens at them</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>32 KiB per file · <code>MAX_FILE_BYTES = 32_768</code></h4>
+      <p>A single file beyond this is truncated. A 200 KB <code>AGENTS.md</code> would otherwise crowd out the actual task.</p>
+    </div>
+    <div class="card">
+      <h4>64 KiB total · <code>MAX_TOTAL_BYTES = 65_536</code></h4>
+      <p>Files that would exceed the combined cap are dropped <em>from the least specific end</em> — the global file first — so the nearest project file always survives.</p>
+    </div>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/instructions.rs:20</span><span class="tag">the caps, with their reasons</span></figcaption>
+<pre><span class="c">/// Max bytes of a single instruction file folded into the system prompt.</span>
+<span class="c">/// Beyond this it is truncated — a huge `AGENTS.md` would crowd out the task.</span>
+<span class="k">pub const</span> MAX_FILE_BYTES: <span class="k">usize</span> = <span class="n">32_768</span>;
+
+<span class="c">/// Max bytes of the combined instructions block. Files that would exceed it are</span>
+<span class="c">/// dropped from the least specific end (the global file first), so the nearest</span>
+<span class="c">/// project file always survives.</span>
+<span class="k">pub const</span> MAX_TOTAL_BYTES: <span class="k">usize</span> = <span class="n">65_536</span>;</pre>
+  </figure>
+
+  <h3>Controls</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Want</th><th>Do</th></tr></thead>
+      <tbody>
+        <tr><td>Skip instruction files entirely</td><td><code>--no-instructions</code>, <code>WCODE_INSTRUCTIONS=off</code>, or <code>[instructions] file = "off"</code></td></tr>
+        <tr><td>Load exactly one file, no discovery</td><td><code>[instructions] file = "AGENTS.md"</code> (a name walked up, a relative path, or absolute)</td></tr>
+        <tr><td>Different candidate names</td><td><code>[instructions] names = ["CONTRIBUTING.md"]</code></td></tr>
+        <tr><td>Skip the global file</td><td><code>[instructions] global = false</code></td></tr>
+        <tr><td>See exactly what the model got</td><td><code>wcode --dump-system-prompt</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="label">Why a set, and why nearest-last</span>
+    <p>
+      A monorepo needs repository-wide conventions <em>and</em> a package's own deviations. Loading
+      one file forces you to choose; loading the chain lets the nearest file speak last, which is
+      the same precedence a reader would expect from nested configuration — without any merge
+      logic.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9.2</span>Skills: progressive disclosure</h2>
+  <p>
+    A skill is a directory with a <code>SKILL.md</code>: YAML frontmatter (<code>name</code>,
+    <code>description</code>) plus a body. Only the name and the description enter the system
+    prompt, as an <code># Available skills</code> section. The body loads when the agent
+    <code>read</code>s the file.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">a SKILL.md</span><span class="tag">markdown</span></figcaption>
+<pre>---
+name: pdf-tools
+description: Extract text and tables from PDFs. Use for PDF documents.
+---
+
+# PDF tools
+Run `scripts/extract.sh &lt;file&gt;`.</pre>
+  </figure>
+
+  <p>
+    The economics are the point: twenty skills cost twenty one-line entries, not twenty bodies.
+    A body is loaded only when a task actually matches — so the catalogue can be large and the
+    per-turn cost stays flat.
+  </p>
+
+  <h3>Discovery order (first name wins)</h3>
+  <ol class="steps">
+    <li><b>Explicit roots</b> <span class="where">[skills] dirs / WCODE_SKILLS</span>Scanned first, so a project can pin its own set.</li>
+    <li><b>The working dir and its ancestors</b> <span class="where">.wcode/skills, then the shared pair</span>The shared pair prefers <code>.agents/skills</code> and falls back to <code>.claude/skills</code> where <code>.agents</code> is absent.</li>
+    <li><b>Global roots</b> <span class="where">~/.local/share/wcode/skills, then the shared pair</span>So a skill travels with you across repositories.</li>
+  </ol>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/skills.rs:110</span><span class="tag">the root order</span></figcaption>
+<pre><span class="c">///    root, nearest first (`.wcode/skills`, then the shared pair),</span>
+<span class="c">/// 3. the global roots (`~/.local/share/wcode/skills`, then the shared pair).</span>
+<span class="c">///</span>
+<span class="c">/// The shared pair prefers `.agents/skills` and falls back to `.claude/skills`</span></pre>
+  </figure>
+
+  <h3>Limits that keep the catalogue honest</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Limit</th><th>Value</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Prompt description</td><td><code>MAX_PROMPT_DESCRIPTION_CHARS = 200</code></td><td>One line per skill, enforced.</td></tr>
+        <tr><td>Whole section</td><td><code>MAX_SECTION_BYTES = 16_384</code></td><td>The catalogue itself cannot crowd out the task.</td></tr>
+        <tr><td>Scan depth</td><td><code>MAX_SCAN_DEPTH = 4</code></td><td>Bounded walk; a deep tree cannot make startup slow.</td></tr>
+        <tr><td>Name / description</td><td><code>64</code> / <code>1024</code> chars</td><td>Frontmatter validation; malformed skills warn and are skipped, never fatal.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>When the model does not pick it up</h3>
+  <p>
+    Descriptions are chosen by the model, and models are imperfect. Two escapes:
+  </p>
+  <div class="grid2">
+    <div class="card">
+      <h4><code>/skills</code></h4>
+      <p>List what was discovered — name, description, file — so you can see whether the skill is even visible.</p>
+    </div>
+    <div class="card">
+      <h4><code>/skill &lt;name&gt; [args]</code></h4>
+      <p>Force the body into a turn. Extra <code>args</code> become the task. This is the "I know the tool exists, use it" override.</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Knob</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--no-skills</code> / <code>WCODE_SKILLS=off</code></td><td>No discovery at all.</td></tr>
+        <tr><td><code>[skills] enabled = false</code></td><td>Same, from config.</td></tr>
+        <tr><td><code>[skills] dirs = ["./team-skills"]</code></td><td>Extra roots, scanned first.</td></tr>
+        <tr><td><code>[skills] disabled = ["noisy"]</code></td><td>Skip by name.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9.3</span>Instructions vs. skills vs. role files</h2>
+  <p>
+    Three things that all look like "markdown the model reads", with three different lifetimes.
+    Getting the wrong one is the most common setup mistake.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th></th><th>Instructions</th><th>Skills</th><th>Role files</th></tr></thead>
+      <tbody>
+        <tr><td>File</td><td><code>AGENTS.md</code>, <code>CLAUDE.md</code>, …</td><td><code>SKILL.md</code></td><td><code>.wcode/agents/*.md</code></td></tr>
+        <tr><td>Reaches the prompt</td><td>Always, in full (up to the caps)</td><td>Name + description only</td><td>The body becomes the worker's <code># Role</code></td></tr>
+        <tr><td>Scope</td><td>Every session in the tree</td><td>Every session; body on demand</td><td>One team member</td></tr>
+        <tr><td>Right for</td><td>Conventions, commands, guardrails</td><td>Procedures, checklists, scripts</td><td>Who a worker is and how it reports</td></tr>
+        <tr><td>Chapter</td><td>this one</td><td>this one</td><td><a href="11-teams-and-roles.html">11</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout good">
+    <span class="label">The rule of thumb</span>
+    <p>
+      If it must be true in <em>every</em> turn, it is an instruction. If it is a procedure the
+      agent should perform <em>sometimes</em>, it is a skill. If it describes <em>who a teammate
+      is</em>, it is a role.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">9.4</span>Verifying the composed prompt</h2>
+  <p>
+    Instruction files, skills, the team roster, and the orchestrator guidelines all land in one
+    string. You never have to guess what is in it:
+  </p>
+  <figure class="code">
+    <figcaption><span class="f">shell</span><span class="tag">no model required</span></figcaption>
+<pre>wcode --dump-system-prompt            <span class="c"># the exact composed prompt, then exit</span>
+wcode --dump-system-prompt --no-instructions   <span class="c"># …without the folded files</span>
+wcode --no-skills --dump-system-prompt         <span class="c"># …and without the skill catalogue</span></pre>
+  </figure>
+  <p>
+    This is also the fastest way to debug "why does the agent keep doing X?" — the instruction is
+    either in that output or it is not being loaded.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="08-editing.html">← 08 Editing by literal text</a></span>
+  <span>next · <a href="10-plan-mode.html">10 Plan mode →</a></span>
+</div></div></footer>
+</body>
+</html>

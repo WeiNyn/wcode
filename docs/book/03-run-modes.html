@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 · The three run modes — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>03</b> · The three run modes</span>
+  <span class="pn"><a href="02-install-and-configure.html">← 02 Install &amp; configure</a><a href="04-the-tui.html">04 The TUI →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part II · Daily use · <b>Chapter 03</b></div>
+    <h1>The three run modes</h1>
+    <p class="lede">
+      wcode has exactly one entry point and picks a surface from your flags and your terminal.
+      Knowing which branch you landed in explains almost every "why did it do that?" — from
+      exit codes to whether Ctrl-C kills the process or just the turn.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">3.1</span>The decision tree</h2>
+  <p>
+    <code>dispatch</code> is the fork in the road. It reads the parsed flags in a fixed order
+    and never revisits the choice.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2335</span><span class="tag">the only surface decision</span></figcaption>
+<pre><span class="k">fn</span> <span class="f2">choose_tui</span>(args: <span class="f2">&amp;</span>Args, tty: <span class="k">bool</span>) -&gt; <span class="k">bool</span> {
+    <span class="k">if</span> args.no_tui || args.prompt.<span class="f2">is_some</span>() || args.serve || args.task.<span class="f2">is_some</span>() {
+        <span class="k">return false</span>;
+    }
+    args.tui || tty
+}
+
+<span class="c">/// Both ends must be a terminal for an interactive TUI.</span>
+<span class="k">fn</span> <span class="f2">is_tty</span>() -&gt; <span class="k">bool</span> {
+    std::io::stdin().<span class="f2">is_terminal</span>() <span class="f2">&amp;&amp;</span> std::io::stdout().<span class="f2">is_terminal</span>()
+}</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>You typed</th><th>You got</th><th>Ends when</th></tr></thead>
+      <tbody>
+        <tr><td><code>wcode -p "…"</code></td><td><b>One-shot</b>: one turn, reply on stdout, exit.</td><td>the turn ends</td></tr>
+        <tr><td><code>wcode --agents --task "…"</code></td><td><b>Headless workflow</b>: a plan is driven to terminal state.</td><td>the plan settles (<code>terminal_code</code>)</td></tr>
+        <tr><td><code>wcode serve …</code></td><td>The process owns the session and serves it over a socket/stdio.</td><td>the client disconnects</td></tr>
+        <tr><td><code>wcode --socket … -p "…"</code></td><td>A client of a session served elsewhere.</td><td>the turn ends</td></tr>
+        <tr><td><code>wcode</code> (TTY both ends)</td><td><b>TUI</b> — the full-screen client.</td><td>you quit</td></tr>
+        <tr><td><code>wcode</code> (piped / CI)</td><td><b>REPL</b> — the line client.</td><td>EOF or <code>/exit</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Two things follow from that table and surprise people: <code>-p</code> never starts a TUI
+    even on a terminal, and piping input forces the REPL even if you wanted the TUI. Both are
+    deliberate — a pipe cannot render an alt-screen, and a script cannot answer a prompt.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">3.2</span>One-shot (<code>-p</code>)</h2>
+  <p>
+    The simplest contract in the program: text in, final assistant text out, a meaningful exit
+    code. The reply is the <em>last</em> assistant message — not a concatenation of the
+    streamed deltas.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:2485</span><span class="tag">one_shot — exit codes</span></figcaption>
+<pre>    <span class="k">match</span> reply {
+        Ok(AgentEvent::Stopped { stop_reason: StopReason::Error }) =&gt; {
+            <span class="k">match</span> last_error {
+                Some(msg) =&gt; eprintln!(<span class="s">"error: {msg}"</span>),
+                None =&gt; eprintln!(<span class="s">"run failed"</span>),
+            }
+            <span class="n">1</span>
+        }
+        Ok(AgentEvent::Stopped { stop_reason: StopReason::MaxTurns }) =&gt; {
+            eprintln!(<span class="s">"error: hit maximum turns; task may be incomplete"</span>);
+            <span class="n">1</span>
+        }
+        Ok(AgentEvent::Stopped { .. }) =&gt; {
+            <span class="k">if</span> !last_text.<span class="f2">trim</span>().<span class="f2">is_empty</span>() {
+                <span class="f2">println!</span>(<span class="s">"{last_text}"</span>);
+            }
+            <span class="n">0</span>
+        }</pre>
+  </figure>
+
+  <div class="grid3">
+    <div class="card"><h4>stdout</h4><p>Only the final assistant text. Nothing else — so <code>wcode -p … | jq</code> style plumbing works.</p></div>
+    <div class="card"><h4>stderr</h4><p>Errors, the provider diagnostic at startup, retry notices, thinking and tool lines.</p></div>
+    <div class="card"><h4>exit</h4><p><code>0</code> clean · <code>1</code> model error, max turns, or session closed.</p></div>
+  </div>
+
+  <div class="callout">
+    <span class="label">Why a drain task runs alongside</span>
+    <p>
+      <code>one_shot</code> subscribes to the event stream <em>and</em> awaits the reply. The
+      drain captures what the reply does not carry — the last stream error and the last
+      <code>MessageEnd</code> text — so a failed run can still report the real cause instead of
+      a generic exit.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">3.3</span>The REPL</h2>
+  <p>
+    A readline-flavoured loop with <code>/</code>-commands, prompt history, and one important
+    asymmetry: <strong>Ctrl-C aborts the run, not the program</strong>. Press it while idle and
+    it exits.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">README.md:441</span><span class="tag">REPL commands (excerpt)</span></figcaption>
+<pre>| `/model &lt;id&gt;`   | switch model mid-conversation (logged as a `ModelChange`); bare `/model` lists models |
+| `/resume [path]`| reopen a session and replay its history as context (default: latest) |
+| `/compact [p]`  | summarize older messages now, keeping the most recent |
+| `/plan [on|off]`| toggle plan mode: editing tools disabled, mutating shell refused |
+| `/verify`       | render the plan's progress: the cached todo checklist and its done count |
+| `/skills`       | list the discovered `SKILL.md` packages |
+| `/reload`       | `cargo build --bin wcode` then re-exec into the same session |</pre>
+  </figure>
+
+  <p>
+    Unknown <code>/…</code> lines are <em>not</em> errors — they are sent to the model as
+    prompt text, so a leading slash in prose does not derail the turn.
+  </p>
+  <p>
+    The full command table (including <code>/btw</code>, <code>/usage</code>,
+    <code>/sessions</code>, <code>/skill</code>) is in
+    <a href="05-sessions-and-memory.html">Chapter 05</a> and
+    <a href="15-configuration-reference.html">Chapter 15</a>.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">3.4</span>The TUI</h2>
+  <p>
+    The default interactive surface on a terminal: a full-screen <code>ratatui</code> client
+    over the same <code>AgentEvent</code> stream. It is not a different agent — it is a
+    different renderer, running in the same process over the same session.
+  </p>
+  <p>
+    Chapter <a href="04-the-tui.html">04</a> covers it properly. The one thing to know now: with
+    a team, each member is its own <strong>surface</strong>, and typing goes to the focused one.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">3.5</span>Typing while it runs</h2>
+  <p>
+    In the TUI and REPL you can submit while a turn is in flight. The input is
+    <strong>queued</strong>, not dropped and not interleaved: it starts at <code>AgentEnd</code>,
+    as a fresh turn, on the surface that owns the queue.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-tui/src/app.rs:4036</span><span class="tag">queue semantics (D034)</span></figcaption>
+<pre>    <span class="c">/// The queued prompts (W029) outlive a cancel: Esc while running cancels the</span>
+    <span class="c">/// run, not the queue, so the next prompt still starts when it ends. At IDLE,</span>
+    <span class="c">/// a non-empty queue is dropped with a notice — a queue with no run coming</span></pre>
+  </figure>
+
+  <p>
+    Only the foot line shows a count (<code>⇥ N queued</code>); the queued text is not rendered
+    as a transcript block until it actually runs. So the transcript never shows a user message
+    that has not happened yet.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">3.6</span>Choosing, in practice</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>I want to…</th><th>Use</th><th>Why not the others</th></tr></thead>
+      <tbody>
+        <tr><td>ask one question in a script / CI</td><td><code>-p</code></td><td>exit code + pure stdout is the whole point</td></tr>
+        <tr><td>work for an hour with a model, editing files</td><td>TUI</td><td>the REPL reprints a lot; the TUI keeps a scrollable transcript and a live status band</td></tr>
+        <tr><td>run over SSH in a dumb terminal</td><td><code>--no-tui</code></td><td>the alt-screen and mouse capture need a real TTY</td></tr>
+        <tr><td>drive a feature to a pull request, unattended</td><td><code>--task</code></td><td>workflow mode is the only mode with a terminal exit code for a <em>plan</em></td></tr>
+        <tr><td>keep one long-lived session, attach several clients</td><td><code>serve</code> + <code>--socket</code></td><td>a client cannot fork the kernel; the server owns it</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <span class="label">What <code>--no-session</code> really means</span>
+    <p>
+      It skips the JSONL transcript — no resumable file, no <code>resume:</code> line at exit,
+      and a headless workflow run gets no <code>run.json</code> either (so no
+      <code>resume:</code> promise it cannot keep). The conversation still exists in memory for
+      the life of the process.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="02-install-and-configure.html">← 02 Install &amp; configure</a></span>
+  <span>next · <a href="04-the-tui.html">04 The TUI →</a></span>
+</div></div></footer>
+</body>
+</html>

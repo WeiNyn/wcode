@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12 · The task DAG — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>12</b> · The task DAG</span>
+  <span class="pn"><a href="11-teams-and-roles.html">← 11 Teams &amp; roles</a><a href="13-workflow-mode.html">13 Workflow mode →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part IV · Teams &amp; pipelines · <b>Chapter 12</b></div>
+    <h1>The task DAG</h1>
+    <p class="lede">
+      The plan is a graph the root owns: nodes, blocked-by edges, artifacts as the hand-off, and
+      gates whose rejection sends work back. It is journaled, so a crash costs a restart rather than
+      the plan — and a scheduler, not the model, decides what runs next.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">12.1</span>Why a graph at all</h2>
+  <p>
+    A flat todo list cannot express "verify waits for implement, and a failed verify re-opens
+    implement". A tree cannot express "ci waits for both implement and publish". A DAG can express
+    both, and its acyclicity gives one useful guarantee: <em>readiness is computable</em>.
+  </p>
+  <p>
+    The plan is root-owned. Only the root gets the <code>task</code> tool, so only the root plans;
+    a worker keeps its report-back. That asymmetry is what lets the scheduler trust the plan.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">12.2</span>The node</h2>
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:172</span><span class="tag">Task (field comments condensed)</span></figcaption>
+<pre><span class="k">pub struct</span> Task {
+    <span class="k">pub</span> id: u32,                    <span class="c">// monotonic, 1-based</span>
+    <span class="k">pub</span> title: String,
+    <span class="k">pub</span> owner: Option&lt;SessionId&gt;,  <span class="c">// the dispatch key</span>
+    <span class="k">pub</span> state: TaskState,
+    <span class="k">pub</span> deps: Vec&lt;Dep&gt;,            <span class="c">// blocked-by, optionally condition-guarded</span>
+    <span class="k">pub</span> attempts: u32,              <span class="c">// rework rounds; the cap compares this</span>
+    <span class="k">pub</span> reset_epoch: u32,           <span class="c">// bumped by `reset` — makes a reset observable</span>
+    <span class="k">pub</span> feedback: Option&lt;String&gt;,   <span class="c">// the last reject reason = next run's input</span>
+    <span class="k">pub</span> artifact: Option&lt;String&gt;,   <span class="c">// this node's output; hydrates dependents</span>
+    <span class="k">pub</span> gate: <span class="k">bool</span>,                 <span class="c">// reject re-opens deps, not itself</span>
+    <span class="k">pub</span> run: RunSpec,               <span class="c">// Session { member, timeout_secs } | Script { command }</span>
+}</pre>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Five states · <code>tasks.rs:45</code></h4>
+      <p>
+        <code>Todo</code> → <code>Doing</code> → <code>Done</code>. Two terminals:
+        <strong><code>Failed</code></strong> (the rework cap was hit; dependents stay blocked
+        forever) and <strong><code>Skipped</code></strong> (an incoming edge's condition was false
+        — terminal, but <em>satisfied</em> for readiness, so a pruned step never stalls the DAG).
+      </p>
+    </div>
+    <div class="card">
+      <h4>Two run kinds · <code>RunSpec</code></h4>
+      <p>
+        <code>Session { member, timeout_secs }</code> — a worker produces the outcome.
+        <code>Script { command }</code> — <code>sh -c</code> under the bash policy; the exit code
+        <em>is</em> the verdict.
+      </p>
+    </div>
+  </div>
+
+  <h3>Readiness is derived, never stored</h3>
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:1068</span><span class="tag">ready_ids</span></figcaption>
+<pre>    <span class="k">pub fn</span> <span class="f2">ready_ids</span>(<span class="f2">&amp;</span>self) -&gt; Vec&lt;u32&gt; {
+        <span class="k">let</span> tasks = self.inner.tasks.<span class="f2">lock</span>().<span class="f2">unwrap</span>();
+        tasks
+            .<span class="f2">iter</span>()
+            .<span class="f2">filter</span>(|t| {
+                t.state == TaskState::Todo
+                    <span class="f2">&amp;&amp;</span> t.deps.<span class="f2">iter</span>().<span class="f2">all</span>(|d| {
+                        tasks.<span class="f2">iter</span>().<span class="f2">find</span>(|x| x.id == d.<span class="f2">id</span>()).<span class="f2">is_some_and</span>(|x| {
+                            <span class="f2">matches!</span>(x.state, TaskState::Done | TaskState::Skipped)
+                        })
+                    })
+            })
+            .<span class="f2">map</span>(|t| t.id)
+            .<span class="f2">collect</span>()
+    }</pre>
+  </figure>
+  <p>
+    No <code>ready</code> flag, no <code>blocked</code> counter to keep in sync. Every mutation
+    publishes a snapshot on a <code>watch</code> channel and readiness is recomputed from it — which
+    is why the TUI, the scheduler, and <code>task list</code> can never disagree.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">12.3</span>Edges, and two kinds of dependency</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th><code>Dep</code></th><th>Meaning</th><th>Readiness</th></tr></thead>
+      <tbody>
+        <tr><td><code>Id(n)</code></td><td>Plain blocked-by.</td><td><code>n</code> must be <code>Done</code> or <code>Skipped</code>.</td></tr>
+        <tr><td><code>Edged { id, condition }</code></td><td>Blocked-by <em>and</em> guarded: a <code>script</code> test (exit 0 = taken) or a <code>judge</code> verdict.</td><td>All deps satisfied, then every incoming condition AND-folds to "take".</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    A false condition makes the target <code>Skipped</code> — it never runs, but its own dependents
+    become ready anyway. That is the difference between pruning a branch and deadlocking on it.
+    A policy <em>refusal</em> (rather than a false test) blocks and escalates instead; it is never
+    laundered into a silent skip.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">12.4</span>The seven ops</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Op</th><th>Needs</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>create</code></td><td><code>title</code>; optional <code>deps</code>, <code>gate</code></td><td>A <code>Todo</code> node, unowned. Tool-authored nodes are always <code>Session</code> (a model judgement), never <code>Script</code>.</td></tr>
+        <tr><td><code>assign</code></td><td><code>id</code>, <code>assignee</code></td><td>Writes <code>owner</code> — the dispatch key. Resolves a phonebook name, else <code>agent:&lt;name&gt;</code>.</td></tr>
+        <tr><td><code>depends</code></td><td><code>id</code>, <code>on</code></td><td>Adds the edge <code>id → on</code> (rejects a cycle).</td></tr>
+        <tr><td><code>complete</code></td><td><code>id</code>; optional <code>artifact</code></td><td><code>Done</code> + stores the artifact. <strong>Refuses while any dep is unsatisfied.</strong></td></tr>
+        <tr><td><code>reject</code></td><td><code>id</code> of a <strong>gate</strong>; optional <code>reason</code></td><td>Re-opens the gate's deps and their cone; the gate returns to <code>Todo</code>.</td></tr>
+        <tr><td><code>reset</code></td><td><code>id</code></td><td>Clears a terminal <code>Failed</code> node back to <code>Todo</code>; bumps <code>reset_epoch</code>.</td></tr>
+        <tr><td><code>list</code></td><td>—</td><td><code>#id [state] title (owner) ← #deps ×attempts</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:856</span><span class="tag">complete will not corrupt the graph</span></figcaption>
+<pre>            <span class="k">for</span> d <span class="k">in</span> <span class="f2">&amp;</span>deps {
+                <span class="k">let</span> done = tasks.<span class="f2">iter</span>().<span class="f2">find</span>(|t| t.id == d.<span class="f2">id</span>()).<span class="f2">is_some_and</span>(|t| {
+                    <span class="f2">matches!</span>(t.state, TaskState::Done | TaskState::Skipped)
+                });
+                <span class="k">if</span> !done {
+                    <span class="k">return</span> Err(<span class="f2">format!</span>(<span class="s">"#{id} is blocked by #{}"</span>, d.<span class="f2">id</span>()));
+                }
+            }</pre>
+  </figure>
+
+  <p class="dim">
+    That guard is why an out-of-order <code>complete</code> is an error rather than a state-machine
+    corruption: the model cannot mark work done before its inputs exist.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">12.5</span>Gates and rework</h2>
+  <p>
+    <code>gate = true</code> inverts what a verdict means. A normal node's <code>complete</code>
+    says "this is finished"; a gate's <code>reject</code> says "the work it depends on is not".
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:894</span><span class="tag">reopen_inner — the cap</span></figcaption>
+<pre>            tasks[idx].attempts += <span class="n">1</span>;
+            <span class="k">if</span> tasks[idx].attempts &gt; self.<span class="f2">max_attempts</span>() {
+                tasks[idx].state = TaskState::Failed;
+                outcome = ReopenOutcome::ReachedCap;
+            } <span class="k">else</span> {
+                tasks[idx].feedback = Some(reason.<span class="f2">to_string</span>());
+                tasks[idx].state = TaskState::Todo;
+                tasks[idx].artifact = None;
+                <span class="k">for</span> cid <span class="k">in</span> cone_ids {      <span class="c">// the whole downstream cone…</span>
+                    <span class="k">if let</span> Some(t) = tasks.<span class="f2">iter_mut</span>().<span class="f2">find</span>(|t| t.id == cid) {
+                        t.state = TaskState::Todo;  <span class="c">// …back to Todo</span>
+                        t.artifact = None;
+                    }
+                }
+                outcome = ReopenOutcome::Reopened;
+            }</pre>
+  </figure>
+
+  <p>
+    Three things to notice: the <strong>whole downstream cone</strong> is invalidated (not just the
+    immediate predecessor), the reason becomes the node's <code>feedback</code> — so the next run is
+    hydrated with it — and the cap is <code>max_attempts</code> (default 3, settable as
+    <code>[workflow] max_attempts</code>).
+  </p>
+
+  <div class="callout warn">
+    <span class="label">A gate is shape, not verification (D002)</span>
+    <p>
+      Completing a gate means the root model accepted the work. Nothing about the gate proves the
+      diff is correct. That is not a gap to be fixed with more machinery — it is where the human (or
+      a reviewer role with an actual rubric) belongs.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">12.6</span>R′: the verify gate as structure</h2>
+  <p>
+    "Ask a reviewer" is a reminder a model can skip. <code>VerifyGateHooks</code> turns it into a
+    structural precondition: a work node cannot be completed unless some gate depends on it
+    <em>directly</em>.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/verify_gate.rs:92</span><span class="tag">the refusal</span></figcaption>
+<pre><span class="k">pub const</span> GATE_REASON: <span class="f2">&amp;</span>str = <span class="s">"verify gate required: task #{id} is a work node \
+with no gate depending on it — create a gate (`task create` with \
+`deps: [{id}]` and `gate: true`, then `assign` it) before completing #{id}"</span>;</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>If the call is…</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>not a <code>task</code> call</td><td>allow (the hot path)</td></tr>
+        <tr><td><code>task</code> with <code>op ≠ complete</code></td><td>allow — create/assign/depends/reject/reset/list</td></tr>
+        <tr><td><code>complete</code> of a real gate (gate ∧ ≥1 dep)</td><td>allow — that <em>is</em> the approval</td></tr>
+        <tr><td><code>complete</code> of a <code>Script</code> node</td><td>allow — the exit code was the verdict</td></tr>
+        <tr><td><code>complete</code> of a node some gate already depends on</td><td>allow</td></tr>
+        <tr><td><code>complete</code> of an un-gated <code>Session</code> work node</td><td><strong>blocked</strong>, with the reason above</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    A blocked call does not run, and the loop feeds <code>blocked: …</code> back to the model — which
+    then creates the gate and assigns it. That is the whole enforcement: no new tool, no new state,
+    one predicate over the snapshot.
+  </p>
+
+  <div class="callout">
+    <span class="label">Consequence for template authors</span>
+    <p>
+      Every <code>Session</code> work node needs a consuming gate, or the plan deadlocks at
+      <code>complete</code>. The shipped pipeline has an explicit
+      <code>explore → review-sketch</code> edge for exactly this reason: without it,
+      <code>task complete explore</code> is refused. A dep-less <code>gate: true</code> node is
+      <em>not</em> an exemption — it is a degenerate bypass whose own <code>reject</code> would error.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">12.7</span>Journaled, so a crash is a restart</h2>
+  <p>
+    Every public mutation records one journal line (<code>PlanOp</code>) to
+    <code>&lt;groupdir&gt;/plan.ndjson</code>: <code>Create</code>, <code>Depends</code>,
+    <code>Assign</code>, <code>Configure</code>, <code>Start</code>, <code>Complete</code>,
+    <code>Reopen</code>, <code>Reject</code>, <code>Reset</code>, <code>Fail</code>, and a
+    <code>Restart</code> written on load.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:234</span><span class="tag">the journal ops</span></figcaption>
+<pre><span class="k">pub</span>(crate) <span class="k">enum</span> PlanOp {
+    Create { id: u32, title: String, deps: Vec&lt;Dep&gt;, gate: <span class="k">bool</span> },
+    Depends { id: u32, on: u32 },
+    Assign { id: u32, owner: SessionId },
+    Configure { id: u32, run: RunSpec, gate: <span class="k">bool</span> },
+    Start { id: u32 },
+    Complete { id: u32, artifact: Option&lt;String&gt; },
+    Reopen { id: u32, reason: String },
+    Reject { gate: u32, reason: String },
+    Reset { id: u32 },
+    Fail { id: u32, reason: String },</pre>
+  </figure>
+
+  <h3>Two invariants that make resume safe</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4><code>Doing → Todo</code> on load</h4>
+      <p>
+        A node that was in flight when the process died is restarted, never assumed complete. This
+        is why the scheduler must be spawned <em>after</em> the plan loads — otherwise a
+        <code>Doing</code> node would never re-enter <code>ready_ids()</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4><code>reset_epoch</code></h4>
+      <p>
+        <code>reset</code> bumps a counter even when every other field is already at its reset
+        value — the one signal that makes a <code>reset</code> observable to the scheduler's
+        block-and-escalate bookkeeping.
+      </p>
+    </div>
+  </div>
+
+  <p>
+    The scheduler's in-memory deadline map is deliberately <em>not</em> journaled: a crash is not the
+    node's fault, so a resumed node gets a fresh deadline rather than timing out for work it never
+    got to do.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">12.8</span>Reading the plan</h2>
+  <p>Three views, one source:</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Where</th><th>Shows</th></tr></thead>
+      <tbody>
+        <tr><td>TUI sidebar / <code>/tasks</code></td><td>Live nodes, owner, attempts — the same <code>watch</code> snapshot the scheduler uses.</td></tr>
+        <tr><td><code>task list</code> (root tool)</td><td>The model's own view, so it can plan against reality rather than memory.</td></tr>
+        <tr><td><code>wcode --status [group|latest]</code></td><td>Read-only replay of <code>plan.ndjson</code>: no model, no socket, no write.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="11-teams-and-roles.html">← 11 Teams &amp; roles</a></span>
+  <span>next · <a href="13-workflow-mode.html">13 Workflow mode →</a></span>
+</div></div></footer>
+</body>
+</html>

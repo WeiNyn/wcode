@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05 · Sessions &amp; memory — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>05</b> · Sessions &amp; memory</span>
+  <span class="pn"><a href="04-the-tui.html">← 04 The TUI</a><a href="06-the-kernel.html">06 The kernel →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part II · Daily use · <b>Chapter 05</b></div>
+    <h1>Sessions &amp; memory</h1>
+    <p class="lede">
+      A session is a file. That is the whole persistence design: append-only JSONL, one line per
+      event, resumed by replay. On top of it sit two things that make long runs survivable —
+      compaction, and the exact command that brings the conversation back.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">5.1</span>A file, not a database</h2>
+  <p>
+    Every session is a JSONL transcript under
+    <code>~/.local/share/wcode/sessions</code> — the same path on macOS and Linux, on purpose.
+    Each line is one tagged entry; the file is appended as the conversation happens, so a
+    crash loses at most the line in flight.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/session.rs:13</span><span class="tag">the entry taxonomy</span></figcaption>
+<pre><span class="k">pub enum</span> SessionEntry {
+    Header { version: u32, id: String, cwd: String, created: String },
+    Message { id: String, parent_id: Option&lt;String&gt;, message: AgentMessage },
+    ModelChange { id: String, model: String },
+    EffortChange { id: String, effort: Option&lt;String&gt; },
+    <span class="c">/// A compaction boundary: `summary` stands in for every `Message` before</span>
+    <span class="c">/// `first_kept_message` (an ordinal into the `Message` sequence).</span>
+    Compaction { id: String, summary: String, first_kept_message: usize, … },
+    Todo { id: String, todos: Vec&lt;TodoItem&gt; },
+    #[serde(other)] Unknown,
+}</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Entry</th><th>Why it exists</th></tr></thead>
+      <tbody>
+        <tr><td><code>Header</code></td><td>Version, id, the <code>cwd</code> the tools ran in, creation time. Stamped first, so a truncated file is still identifiable.</td></tr>
+        <tr><td><code>Message</code></td><td>The conversation. <code>parent_id</code> is reserved for future fork/tree sessions; the kernel is linear today and always records <code>None</code>.</td></tr>
+        <tr><td><code>ModelChange</code> / <code>EffortChange</code></td><td>Mid-session switches are recorded, so resuming restores the model you were actually using — not the one in <code>config.toml</code>.</td></tr>
+        <tr><td><code>Compaction</code></td><td>A summary plus the ordinal of the first message it does <em>not</em> cover. The transcript is never rewritten; the boundary is a new line.</td></tr>
+        <tr><td><code>Todo</code></td><td>The <code>todo</code> tool's checklist, last write wins — so a plan survives <code>--resume</code> and <code>/reload</code>.</td></tr>
+        <tr><td><code>Unknown</code></td><td><code>#[serde(other)]</code>: a file written by a newer wcode still loads on an older one instead of failing.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Two properties follow from "append-only text": a torn final line is tolerated (it is
+    skipped), and <code>session_search</code> can read the file directly to recover turns a
+    compaction replaced with a summary.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">5.2</span>Groups: a team is a directory</h2>
+  <p>
+    With a team, one root session cannot describe the whole run — each worker has its own
+    transcript. So a team session becomes a <em>group directory</em>:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/session_groups.rs:6</span><span class="tag">on-disk layout</span></figcaption>
+<pre>&lt;base&gt;/
+  &lt;millis&gt;_&lt;id8&gt;/              <span class="c"># one group dir per ROOT session</span>
+    root.jsonl                 <span class="c"># the root's transcript (today's flat file, moved in)</span>
+    manifest.json              <span class="c"># team topology — fast path only (D5)</span>
+    members/
+      w1.jsonl                 <span class="c"># one transcript per worker (SessionEntry, unchanged)</span>
+  &lt;millis&gt;_&lt;id8&gt;.jsonl …       <span class="c"># legacy flat files: listed, treated as bare roots</span></pre>
+  </figure>
+
+  <p>
+    The file names are deterministic on purpose. A normal session gets a
+    <code>{millis}_{uuid8}</code> name; a group needs <code>root.jsonl</code> and
+    <code>members/&lt;name&gt;.jsonl</code> so an address can be mapped back to a file.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/session.rs:85</span><span class="tag">the deterministic-name constructor</span></figcaption>
+<pre>    <span class="c">/// Like [`create`], but the file is exactly `&lt;dir&gt;/&lt;name&gt;.jsonl` — the</span>
+    <span class="c">/// deterministic tree session groups need (`root.jsonl`, `members/&lt;name&gt;.jsonl`),</span>
+    <span class="c">/// where a `{millis}_{uuid8}` name would not map back to an address.</span>
+    <span class="k">pub fn</span> <span class="f2">create_named</span>(dir: <span class="f2">&amp;</span>Path, name: <span class="f2">&amp;</span>str) -&gt; io::Result&lt;Session&gt; {</pre>
+  </figure>
+
+  <h3>Resume rebuilds the team</h3>
+  <p>
+    Resuming a group does not just reopen a transcript. It scans <code>members/</code>, opens
+    each file (torn-tail tolerant), seeds each worker with its full history, and re-establishes
+    the registry edges and phonebook names — a live spawn, minus the spawn.
+  </p>
+  <p class="dim">
+    A corrupt or missing member file is reported and skipped, never fatal: losing one worker's
+    memory should not lose the whole run.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">5.3</span>Resuming, exactly</h2>
+  <p>
+    <code>--resume</code> takes an optional path; bare, it takes the newest session. Either
+    way the history is replayed as <em>context</em> — the model sees the conversation, but no
+    turn is re-executed.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>You get back</th><th>Because</th></tr></thead>
+      <tbody>
+        <tr><td>The conversation</td><td>Every <code>Message</code> entry, replayed in order.</td></tr>
+        <tr><td>The model you were using</td><td>The last <code>ModelChange</code> — unless <code>--model</code> is passed, which wins.</td></tr>
+        <tr><td>The effort you were using</td><td>The last <code>EffortChange</code> — unless <code>--effort</code> is passed, which wins.</td></tr>
+        <tr><td>The todo list</td><td>The last <code>Todo</code> entry; <code>/verify</code> renders it.</td></tr>
+        <tr><td>The team</td><td>For a group dir: rebuilt from <code>members/</code>.</td></tr>
+        <tr><td>Plan mode off</td><td>Deliberate: plan mode is a live toggle, never persisted.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>The line you will actually use</h3>
+  <p>
+    On a clean interactive exit wcode prints a copy-pasteable command that brings the session
+    back, program name and all:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/repl.rs:625</span><span class="tag">relaunch_line</span></figcaption>
+<pre><span class="c">/// The relaunch command as a copy-pasteable shell line: the invoked program</span>
+<span class="c">/// (`argv[0]`, else `wcode`) plus the shell-quoted [`reload_args`].</span>
+<span class="k">pub fn</span> <span class="f2">relaunch_line</span>(args: <span class="f2">&amp;</span>[String]) -&gt; String {
+    <span class="k">let</span> program = std::env::<span class="f2">args_os</span>()
+        .<span class="f2">next</span>()
+        .<span class="f2">map</span>(|a| a.<span class="f2">to_string_lossy</span>().<span class="f2">into_owned</span>())
+        .<span class="f2">filter</span>(|s| !s.<span class="f2">is_empty</span>())
+        .<span class="f2">unwrap_or_else</span>(|| <span class="s">"wcode"</span>.<span class="f2">to_string</span>());</pre>
+  </figure>
+
+  <p>
+    Every argument is single-quoted with embedded quotes escaped, so a task containing quotes
+    still round-trips — the repository has a test that asserts exactly that
+    (<code>repl.rs:1816</code>). A remote (<code>--socket</code>) session prints nothing: the
+    server owns it, and relaunching locally would be a lie.
+  </p>
+
+  <div class="callout">
+    <span class="label">Two different <code>resume:</code> lines</span>
+    <p>
+      An interactive session prints <code>resume: wcode --resume &lt;path&gt; --model … --agents</code>.
+      A headless workflow run prints
+      <code>resume: wcode --agents --config … --timeout N --resume &lt;group&gt; --task '…'</code>
+      — it must carry the task and the cap, or the continuation would not be the same run.
+      See <a href="13-workflow-mode.html">Chapter 13</a>.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5.4</span>Compaction: the context you keep</h2>
+  <p>
+    Long sessions outgrow the window. wcode summarizes the older prefix rather than truncating
+    it, and it does so under a policy you can tune — or ignore.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/compaction.rs:110</span><span class="tag">CompactionPolicy</span></figcaption>
+<pre><span class="k">pub struct</span> CompactionPolicy {
+    <span class="c">/// Context-window override, consulted only when `limits` doesn't know the model.</span>
+    <span class="k">pub</span> window: Option&lt;u64&gt;,
+    <span class="c">/// Working ceiling in tokens. `None` = the model window. Capped to the</span>
+    <span class="c">/// window at trigger time, so it can never disable window safety.</span>
+    <span class="k">pub</span> budget: Option&lt;u64&gt;,
+    <span class="c">/// Compact once fewer than this many tokens remain below the ceiling.</span>
+    <span class="k">pub</span> min_remaining: u64,
+    <span class="c">/// Recent context kept verbatim after compacting, in tokens.</span>
+    <span class="k">pub</span> keep_recent_tokens: u64,
+    <span class="c">/// Complete turns always kept, whatever their token size.</span>
+    <span class="k">pub</span> keep_recent_turns: usize,
+}</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>window</code></td><td>model's advertised window</td><td>Override for models the catalog does not know; else <code>DEFAULT_CONTEXT_WINDOW = 128_000</code>.</td></tr>
+        <tr><td><code>budget</code></td><td>the window</td><td>Working ceiling. <code>ceiling = min(budget, window)</code> — a budget can never exceed the real window.</td></tr>
+        <tr><td><code>min_remaining</code></td><td><code>16_384</code></td><td>Trigger: <code>used ≥ ceiling − min_remaining</code>.</td></tr>
+        <tr><td><code>keep_recent_tokens</code></td><td><code>20_000</code></td><td>Recent context kept verbatim after a compaction.</td></tr>
+        <tr><td><code>keep_recent_turns</code></td><td><code>2</code></td><td>Whole turns kept regardless of size — so "what did we just say" is never summarized away.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/compaction.rs:141</span><span class="tag">the ceiling rule</span></figcaption>
+<pre>    <span class="c">/// The working ceiling: the configured budget, capped to the model window.</span>
+    <span class="k">pub fn</span> <span class="f2">ceiling</span>(<span class="f2">&amp;</span>self, window: u64) -&gt; u64 {
+        self.budget.<span class="f2">map_or</span>(window, |b| b.<span class="f2">min</span>(window))
+    }</pre>
+  </figure>
+
+  <p>
+    Compaction is announced, not silent: <code>AgentEvent::Compaction</code> reports how many
+    messages were summarized and how many were kept, and a best-effort attempt that could not
+    run emits <code>CompactionSkipped</code> with the reason. <code>/compact [focus]</code>
+    runs one on demand, optionally steering the summary.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">Compaction does not destroy the transcript</span>
+    <p>
+      The file keeps every message; a <code>Compaction</code> line is <em>added</em>. So the
+      summary governs the live context, while the record remains complete — which is why
+      <code>session_search</code> can still find a turn that the summary replaced.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">5.5</span>Looking backwards: <code>session_search</code></h2>
+  <p>
+    The one memory tool. It reads transcripts, never the live context, and it is read-only.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Scope</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>all</code> (default)</td><td>Every session in the store, grouped by session; the current one is excluded unless <code>include_current</code>.</td></tr>
+        <tr><td><code>current</code></td><td>This session's file — including turns a compaction replaced with a summary. Also takes <code>turns{start,end}</code> (a verbatim ordinal range) and <code>stats</code> (turn count + token estimate).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Terms are ANDed and case-insensitive; thinking and tool-result text is skipped unless
+    <code>include_tools</code>. This is how an agent answers "how did we fix this last week?"
+    without a vector database.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">5.6</span>What the session costs</h2>
+  <p>
+    <code>/usage</code> (or the <code>Usage</code> request) answers in one payload: turns,
+    summed input/output tokens, the cache hit rate, per-tool calls / errors / result bytes, and
+    a <code>~$</code> figure when the model is priced. With a team it prints one line per local
+    member plus a total.
+  </p>
+  <p class="dim">
+    The pricing is deliberately honest: an unpriced model shows tokens and no cost, rather than
+    a fabricated number. The session also exposes the same data to a client through
+    <code>Request::Usage</code>, so the TUI's modal and the REPL's report cannot disagree.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="04-the-tui.html">← 04 The TUI</a></span>
+  <span>next · <a href="06-the-kernel.html">06 The kernel →</a></span>
+</div></div></footer>
+</body>
+</html>

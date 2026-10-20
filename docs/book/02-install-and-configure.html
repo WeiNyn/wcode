@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02 · Install &amp; configure — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>02</b> · Install &amp; configure</span>
+  <span class="pn"><a href="01-what-is-wcode.html">← 01 What wcode is</a><a href="03-run-modes.html">03 The three run modes →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part I · Begin · <b>Chapter 02</b></div>
+    <h1>Install &amp; configure</h1>
+    <p class="lede">
+      One binary, one TOML file, one provider. This chapter gets you from nothing to a
+      working turn — and explains the four ways configuration can arrive, because that is
+      where most first-run confusion lives.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">2.1</span>Install</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Route</th><th>Command</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>Homebrew</td><td><code>brew tap WeiNyn/wcode https://github.com/WeiNyn/wcode</code><br><code>brew install wcode</code></td><td>A tap by URL — no extra repo to clone.</td></tr>
+        <tr><td>crates.io</td><td><code>cargo install wcode-cli</code></td><td>Needs a Rust toolchain; installs the <code>wcode</code> binary.</td></tr>
+        <tr><td>Prebuilt</td><td>tarballs on each release</td><td>Linux x86_64/aarch64, macOS Intel/Apple Silicon.</td></tr>
+        <tr><td>From source</td><td><code>cargo install --path crates/wcode-cli</code></td><td>Latest <code>HEAD</code>; what the maintainers run.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Nothing else is required. The binary is self-contained; <code>ast-grep</code> and
+    <code>rtk</code> are optional — detected on <code>PATH</code>, never demanded.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">2.2</span>Where configuration lives</h2>
+  <p>
+    Two directories matter, both under your home:
+  </p>
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/config.rs:1237</span><span class="tag">paths</span></figcaption>
+<pre><span class="k">pub fn</span> <span class="f2">config_dir</span>() -&gt; Option&lt;PathBuf&gt; {
+    dirs::<span class="f2">home_dir</span>().<span class="f2">map</span>(|p| p.<span class="f2">join</span>(<span class="s">".config/wcode"</span>))
+}</pre>
+  </figure>
+  <p>
+    <code>~/.config/wcode/</code> holds <code>config.toml</code> (provider, behaviour flags),
+    <code>agents/</code> (global role files) and <code>wcode.sock</code> when serving.
+    Sessions go somewhere else — <code>~/.local/share/wcode/sessions</code>
+    (<code>repl.rs:278</code>), deliberately using <code>~/.local/share</code> even on macOS so
+    the layout is identical everywhere.
+  </p>
+
+  <h3>Four layers, later wins</h3>
+  <ol class="steps">
+    <li>
+      <b>The global config</b> <span class="where">~/.config/wcode/config.toml</span>
+      The default provider and behaviour. A <em>missing</em> global file is simply "absent" —
+      not an error.
+    </li>
+    <li>
+      <b>Project overlays, auto-discovered</b> <span class="where">./.wcode/config.toml, then ./.wcode/team.toml</span>
+      Folded over the global config, team second. Plus the <code>./.wcode/agents/**/*.md</code>
+      scan. Disable all of it with <code>--no-project-config</code>.
+    </li>
+    <li>
+      <b>A named project team</b> <span class="where">--team &lt;name&gt; → ./.wcode/teams/&lt;name&gt;.toml</span>
+      Replaces the project <code>team.toml</code> wholesale and suppresses the project agents
+      scan. Mutually exclusive with <code>--config</code>.
+    </li>
+    <li>
+      <b>An explicit overlay</b> <span class="where">--config &lt;path&gt; / WCODE_CONFIG</span>
+      Deep-merged last. A missing or unparseable explicit overlay is a hard error — unlike a
+      missing global file.
+    </li>
+  </ol>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/config.rs:1253</span><span class="tag">merge semantics</span></figcaption>
+<pre>    <span class="c">/// Load the global `config.toml`, then optionally deep-merge an overlay file</span>
+    <span class="c">/// on top of it (`--config`/`WCODE_CONFIG`). The overlay wins per key: two</span>
+    <span class="c">/// tables recurse, a scalar or array is replaced wholesale. Both files are</span>
+    <span class="c">/// parsed to `toml::Value` first, so a partial table (e.g. `[tools] grep`)</span>
+    <span class="c">/// overrides without clobbering its siblings.</span></pre>
+  </figure>
+
+  <p>
+    That "tables recurse, scalars replace" rule is what makes overlays usable: a repo can add
+    <code>[tools] grep = true</code> without restating the rest of <code>[tools]</code>, and a
+    team file can replace the whole <code>[[team]]</code> array without merging members.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">2.3</span>A minimal, working config</h2>
+  <p>Only <code>model</code> is required. Everything else has a sane default.</p>
+
+  <figure class="code">
+    <figcaption><span class="f">~/.config/wcode/config.toml</span><span class="tag">minimal</span></figcaption>
+<pre>model    = <span class="s">"gpt-4.1"</span>                       <span class="c"># required</span>
+base_url = <span class="s">"https://api.openai.com/v1"</span>  <span class="c"># any OpenAI-compatible endpoint</span>
+api_key  = <span class="s">"sk-..."</span>                       <span class="c"># or OPENAI_API_KEY</span></pre>
+  </figure>
+
+  <h3>Provider precedence, in one rule</h3>
+  <p>
+    The globals (<code>model</code>/<code>base_url</code>/<code>api_key</code>/<code>endpoint</code>),
+    the <code>WCODE_*</code> environment variables, and the
+    <code>--base-url</code>/<code>--endpoint</code> flags together define the
+    <strong>default provider</strong>. A <code>[models.&lt;id&gt;]</code> entry for the
+    currently selected model overrides the fields it names — nothing more:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">README.md:272</span><span class="tag">precedence</span></figcaption>
+<pre>Provider precedence is `[models.&lt;id&gt;]` &gt; flags/env/config: the toml globals,
+`WCODE_*`, and `--base-url`/`--endpoint` together set the **default provider**;
+a `[models.&lt;id&gt;]` entry for the selected model overrides the
+`endpoint`/`base_url`/`api_key` fields it names (an unmapped model — or a field
+the entry omits — uses the default).</pre>
+  </figure>
+
+  <p>
+    A model switch is therefore reversible: switching back to an unmapped id restores the
+    default provider, with no state left behind.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Values</th><th>Default</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td>any id your endpoint serves</td><td>required</td></tr>
+        <tr><td><code>base_url</code></td><td><code>https://…/v1</code></td><td><code>api.openai.com</code> (warned, not silent)</td></tr>
+        <tr><td><code>api_key</code></td><td>secret</td><td><code>OPENAI_API_KEY</code>, or a placeholder for localhost</td></tr>
+        <tr><td><code>endpoint</code></td><td><code>chat</code> · <code>responses</code> · <code>auto</code></td><td><code>auto</code> — derived from the model id</td></tr>
+        <tr><td><code>effort</code></td><td>free-style, e.g. <code>high</code></td><td>unset — nothing is sent</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <span class="label">Effort is free-style</span>
+    <p>
+      Model listing returns ids, not capability flags, so wcode cannot know whether a model
+      supports reasoning effort. It sends what you set and nothing otherwise — <em>per
+      endpoint</em>: Chat sends <code>reasoning_effort</code>, Responses sends
+      <code>reasoning: { effort }</code>, unset sends neither.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2.4</span>Keyless local endpoints</h2>
+  <p>
+    Ollama, llama.cpp, vLLM and friends need no key. wcode recognises the localhost forms and
+    builds the client with a placeholder bearer token, so there is no dummy-key ritual:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/streamfn.rs:362</span><span class="tag">the keyless carve-out</span></figcaption>
+<pre>                [<span class="s">"http://localhost"</span>, <span class="s">"http://127.0.0.1"</span>, <span class="s">"http://[::1]"</span>]</pre>
+  </figure>
+
+  <figure class="code">
+    <figcaption><span class="f">shell</span><span class="tag">local run</span></figcaption>
+<pre>wcode --no-session --model llama3.1 --base-url http://localhost:11434/v1</pre>
+  </figure>
+
+  <p>
+    If you do not know which local port is up, let wcode probe the usual suspects —
+    <code>OLLAMA_HOST</code>, <code>:11434</code>, <code>:1234</code>:
+  </p>
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:461</span><span class="tag">--detect-endpoint</span></figcaption>
+<pre><span class="k">async fn</span> <span class="f2">detect_endpoint</span>() -&gt; Option&lt;String&gt; {
+    <span class="k">for</span> candidate <span class="k">in</span> <span class="f2">detect_candidates</span>(<span class="f2">&amp;</span>EnvLike::<span class="f2">from_env</span>()) {
+        <span class="k">if</span> wcode_harness::streamfn::<span class="f2">probe_endpoint</span>(<span class="f2">&amp;</span>candidate, DETECT_TIMEOUT).<span class="k">await</span> {
+            <span class="k">return</span> Some(candidate);
+        }
+    }
+    None
+}</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">2.5</span>Prove it works, without spending a token</h2>
+  <p>
+    Three read-only commands answer "is my configuration what I think it is?". None of them
+    calls a model.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/main.rs:485</span><span class="tag">--dump-config never prints a secret</span></figcaption>
+<pre><span class="c">/// The `--dump-config` body. An explicit field list (never `{cfg:?}`), and every</span>
+<span class="c">/// key slot rendered as `(set)`/`(none)` — the secret never reaches the output.</span>
+<span class="k">fn</span> <span class="f2">config_dump</span>(cfg: <span class="f2">&amp;</span>Config) -&gt; String {</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>Answers</th></tr></thead>
+      <tbody>
+        <tr><td><code>wcode --dump-config</code></td><td>The resolved model, endpoint and base URL — and <em>where each came from</em>. Keys render as <code>(set)</code>/<code>(none)</code>.</td></tr>
+        <tr><td><code>wcode --list-models</code></td><td><code>GET {base_url}/models</code> — proof the endpoint and key work, before any prompt.</td></tr>
+        <tr><td><code>wcode --dump-system-prompt</code></td><td>The exact composed system prompt, instruction files and skills included.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Then the smallest possible live call:</p>
+  <figure class="code">
+    <figcaption><span class="f">shell</span><span class="tag">first turn</span></figcaption>
+<pre>wcode -p <span class="s">"reply with the single word: ok"</span>
+<span class="c"># or against a local endpoint:</span>
+wcode -p <span class="s">"reply ok"</span> --model llama3.1 --base-url http://localhost:11434/v1</pre>
+  </figure>
+
+  <div class="callout good">
+    <span class="label">The no-cost smoke test used throughout this book</span>
+    <p>
+      For anything involving retries or error paths, point at a refused port:
+      <code>--base-url http://127.0.0.1:9/v1</code> with <code>WCODE_RETRY_MAX=2</code>. It fails
+      fast, deterministically, and costs nothing.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2.6</span>Environment variables</h2>
+  <p>
+    Environment beats TOML for the fields it names. The full list is in
+    <a href="15-configuration-reference.html">Chapter 15</a>; the ones you will actually use:
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Variable</th><th>Overrides</th></tr></thead>
+      <tbody>
+        <tr><td><code>WCODE_BASE_URL</code> / <code>WCODE_API_KEY</code></td><td>the toml globals (default provider)</td></tr>
+        <tr><td><code>OPENAI_API_KEY</code></td><td>the key, as a fallback</td></tr>
+        <tr><td><code>WCODE_CONFIG</code></td><td>the explicit overlay path (<code>--config</code> wins)</td></tr>
+        <tr><td><code>WCODE_ENDPOINT</code> · <code>WCODE_EFFORT</code></td><td>the toml globals</td></tr>
+        <tr><td><code>WCODE_PROJECT_CONFIG=off</code></td><td>disables project auto-discovery only</td></tr>
+        <tr><td><code>WCODE_GREP</code> / <code>WCODE_FIND</code></td><td><code>[tools] grep</code>/<code>find</code></td></tr>
+        <tr><td><code>WCODE_RETRY_*</code></td><td>the <code>[retry]</code> table</td></tr>
+        <tr><td><code>NO_COLOR</code></td><td>the TUI's entire palette</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2.7</span>First-run pitfalls</h2>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>"It went to OpenAI and I didn't mean that"</h4>
+      <p>
+        <code>base_url</code> was unset. wcode warns on stderr at startup rather than silently
+        defaulting — <code>provider: …</code> plus a warning line. Check with
+        <code>--dump-config</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4>"--model didn't fix my broken config"</h4>
+      <p>
+        Correct. Flags override a <em>successfully loaded</em> config; an unreadable or invalid
+        <code>config.toml</code> still exits with an error. <code>--model</code> rescues a
+        <em>missing</em> <code>model</code>, not a broken file.
+      </p>
+    </div>
+    <div class="card">
+      <h4>"grep and find don't exist"</h4>
+      <p>
+        They are off by default (<code>[tools] grep = true</code>, <code>find = true</code>).
+        The model can always search with <code>bash</code>; the dedicated tools are opt-in
+        because a smaller tool set is a cheaper prompt.
+      </p>
+    </div>
+    <div class="card">
+      <h4>"My project settings are being ignored"</h4>
+      <p>
+        Project auto-discovery starts at the <em>working directory</em> and walks up to the repo
+        root looking for <code>.wcode/</code>. Run from a subdirectory and it still works; run
+        from outside the repo and it cannot. <code>WCODE_PROJECT_CONFIG=off</code> disables it
+        deliberately.
+      </p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="01-what-is-wcode.html">← 01 What wcode is</a></span>
+  <span>next · <a href="03-run-modes.html">03 The three run modes →</a></span>
+</div></div></footer>
+</body>
+</html>

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06 · The kernel — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>06</b> · The kernel</span>
+  <span class="pn"><a href="05-sessions-and-memory.html">← 05 Sessions &amp; memory</a><a href="07-the-tools.html">07 The tools →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part III · Inside · <b>Chapter 06</b></div>
+    <h1>The kernel</h1>
+    <p class="lede">
+      <code>wcode-harness</code> is the part that must be correct: a turn loop, a tool protocol,
+      a hook seam, and a streaming adapter. It knows nothing about terminals, config files, or
+      teams — and that ignorance is what makes four clients possible.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">6.1</span>One loop, one turn at a time</h2>
+  <p>
+    <code>run_loop</code> is a function, not a task: it owns the run, drains three channels, and
+    returns a <code>RunResult</code>. Everything else in the kernel is in service of it.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/loop_.rs:111</span><span class="tag">run_loop</span></figcaption>
+<pre><span class="k">pub async fn</span> <span class="f2">run_loop</span>(
+    ctx: <span class="f2">&amp;mut</span> Vec&lt;AgentMessage&gt;,
+    <span class="k">mut</span> cfg: LoopConfig&lt;<span class="f2">'_</span>&gt;,
+    sink: tokio::sync::mpsc::UnboundedSender&lt;AgentEvent&gt;,
+) -&gt; Result&lt;RunResult, LoopError&gt; {</pre>
+  </figure>
+
+  <p><code>LoopConfig</code> is the entire surface of a run:</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Why it is a parameter</th></tr></thead>
+      <tbody>
+        <tr><td><code>system</code>, <code>tools</code>, <code>llm</code>, <code>stream_fn</code></td><td>What to say, what it may call, which model, over which transport.</td></tr>
+        <tr><td><code>hooks</code></td><td>The policy set — the only way to change behaviour without editing the loop.</td></tr>
+        <tr><td><code>steering</code>, <code>follow_ups</code>, <code>cancel</code></td><td>Three input channels: inject at the next turn boundary, queue after the run, or stop now.</td></tr>
+        <tr><td><code>working_dir</code></td><td>Plumbed explicitly so an embedded agent can run against a directory other than the process cwd.</td></tr>
+        <tr><td><code>max_turns</code></td><td>Caps a runaway tool loop. Default <code>DEFAULT_MAX_TURNS = 100</code> (<code>loop_.rs:15</code>).</td></tr>
+        <tr><td><code>parallel</code></td><td>Whether concurrency-safe calls in one batch fan out. <code>--sequential</code> turns it off.</td></tr>
+        <tr><td><code>compaction</code></td><td>The policy from Chapter 05, consulted before each request.</td></tr>
+        <tr><td><code>ctx_snapshot</code></td><td>A read-only window the loop republishes at each turn boundary, so a client can ask mid-run questions without the <code>&amp;mut</code> the run holds.</td></tr>
+        <tr><td><code>session</code></td><td>Optional JSONL sink; each produced message is persisted as it is pushed.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Anatomy of a turn</h3>
+  <ol class="steps">
+    <li>
+      <b>Check the turn budget</b> <span class="where">loop_.rs:139</span>
+      <code>turns &gt;= max_turns</code> ends the run on a <em>completed</em> boundary — the final
+      turn's tool results are already in context, so no call is left unpaired.
+    </li>
+    <li>
+      <b>Drain steering</b> <span class="where">loop_.rs:149</span>
+      Every queued <code>Message</code> is announced (<code>MessageStart</code>/<code>MessageEnd</code>),
+      persisted, and pushed into context — so an interruption is visible in the transcript, not
+      spliced in invisibly.
+    </li>
+    <li>
+      <b>Transform context, then compact if near the ceiling</b> <span class="where">loop_.rs:166</span>
+      Hooks first (they may rewrite history), then auto-compaction — best-effort: a summarizer
+      failure must not abort a run that can still proceed.
+    </li>
+    <li>
+      <b>Stream the model</b>
+      Deltas become <code>MessageUpdate</code>; thinking becomes its own event; a stream error is
+      fed back as a turn rather than killing the run (bounded by
+      <code>DEFAULT_MAX_STREAM_ERROR_TURNS</code>).
+    </li>
+    <li>
+      <b>Execute the batch</b>
+      Tool calls are dispatched with policy first (<code>before_tool_call</code>), each emitting
+      <code>ToolExecutionStart</code> → <code>Update</code> → <code>End</code>. Results are
+      appended in <em>call order</em>, whatever the execution order.
+    </li>
+    <li>
+      <b>Loop or stop</b>
+      No tool calls → the turn is final. Tool calls → another turn. A cancel token firing at any
+      point yields <code>StopReason::Aborted</code>.
+    </li>
+  </ol>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/message.rs:32</span><span class="tag">every way a run can end</span></figcaption>
+<pre><span class="k">pub enum</span> StopReason {
+    Stop,
+    Length,
+    ToolUse,
+    Aborted,
+    Error,
+    <span class="c">/// Run stopped at the per-run turn cap (`LoopConfig::max_turns`) before the</span>
+    <span class="c">/// model signalled completion — the task may be incomplete, but the history</span>
+    <span class="c">/// is intact and the run can be resumed.</span>
+    MaxTurns,
+}</pre>
+  </figure>
+
+  <div class="callout">
+    <span class="label">Why <code>MaxTurns</code> is not an error</span>
+    <p>
+      It is a <em>safety valve</em>, not a failure: the conversation is consistent, the session
+      is intact, and the next turn can continue. Callers map it to a non-zero exit
+      (<code>-p</code> prints "task may be incomplete"), but nothing is lost.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6.2</span>Parallel tools, without races</h2>
+  <p>
+    Models routinely emit several tool calls in one message. Running them serially wastes the
+    round trip; running them blindly races reads against writes. wcode lets a tool <em>opt in</em>
+    to concurrency, and treats everything else as a barrier.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/tool.rs:39</span><span class="tag">TypedTool</span></figcaption>
+<pre><span class="k">pub trait</span> TypedTool: Send + Sync + <span class="s">'static</span> {
+    <span class="k">type</span> Args: serde::de::DeserializeOwned + schemars::JsonSchema;
+    <span class="k">fn</span> <span class="f2">name</span>(<span class="f2">&amp;</span>self) -&gt; <span class="f2">&amp;</span>str;
+    <span class="k">fn</span> <span class="f2">description</span>(<span class="f2">&amp;</span>self) -&gt; <span class="f2">&amp;</span>str;
+
+    <span class="c">/// Whether this tool may run concurrently with other calls in the same</span>
+    <span class="c">/// batch. Default `false` — a tool opts in, so anything that mutates state</span>
+    <span class="c">/// is a barrier unless it explicitly claims otherwise.</span>
+    <span class="k">fn</span> <span class="f2">parallel_safe</span>(<span class="f2">&amp;</span>self) -&gt; <span class="k">bool</span> {
+        <span class="k">false</span>
+    }
+
+    <span class="k">fn</span> <span class="f2">mutating</span>(<span class="f2">&amp;</span>self) -&gt; <span class="k">bool</span> { <span class="k">false</span> }
+    <span class="k">async fn</span> <span class="f2">execute</span>(<span class="f2">&amp;</span>self, args: Self::Args, ctx: <span class="f2">&amp;</span>ToolContext) -&gt; ToolOutput;
+}</pre>
+  </figure>
+
+  <p>
+    In practice: <code>read</code>, <code>grep</code>, <code>find</code>,
+    <code>ast_search</code> and <code>webfetch</code> opt in. <code>bash</code>,
+    <code>edit</code>/<code>edits</code>/<code>write</code>, and anything that mutates shared
+    state (<code>task</code>, <code>message</code>, <code>spawn</code>) are barriers — so no read
+    can race a write <em>inside a batch</em>. <code>--sequential</code> or
+    <code>[tools] parallel = false</code> restores strict one-at-a-time execution.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/loop_.rs:502</span><span class="tag">the per-call decision</span></figcaption>
+<pre>                            <span class="k">let</span> parallel_safe = cfg.parallel <span class="f2">&amp;&amp;</span> tool.<span class="f2">parallel_safe</span>();</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">6.3</span>The event stream</h2>
+  <p>
+    One enum is the entire UI contract. A renderer is a function from this stream to pixels;
+    it never holds the <code>Agent</code>.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Event</th><th>What a client does with it</th></tr></thead>
+      <tbody>
+        <tr><td><code>AgentStart</code> / <code>AgentEnd</code></td><td>Bracket the run; start/stop the spinner; dequeue input at the end.</td></tr>
+        <tr><td><code>TurnStart</code> / <code>TurnEnd</code></td><td>Turn boundaries; the status line's "thinking" state.</td></tr>
+        <tr><td><code>MessageStart</code> / <code>MessageUpdate</code> / <code>MessageEnd</code></td><td>Streaming text. <code>MessageEnd</code> carries the committed message.</td></tr>
+        <tr><td><code>ToolExecutionStart</code> / <code>Update</code> / <code>End</code></td><td>The <code>⚙</code> row: name, params, live output, then the final result plus an optional diff and path.</td></tr>
+        <tr><td><code>Compaction</code> / <code>CompactionSkipped</code></td><td>A <code>⋯</code> notice: summarized N, kept M — or why it could not run.</td></tr>
+        <tr><td><code>Retrying</code></td><td>A transient failure is being retried after backoff.</td></tr>
+        <tr><td><code>MessageReceived</code></td><td>Another agent delivered a message (a worker's report, a peer's note).</td></tr>
+        <tr><td><code>Error</code></td><td>A fatal-class stream failure (bad request, auth, schema).</td></tr>
+        <tr><td><code>History</code>, <code>Status</code>, <code>Usage</code>, <code>SideAnswer</code>, <code>Ack</code>, <code>Sessions</code>, <code>Models</code>, <code>Spawned</code></td><td>Replies to a specific <code>Request</code> — never streamed, always correlated.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/event.rs:62</span><span class="tag">the run's shape</span></figcaption>
+<pre>    AgentStart,
+    TurnStart,
+    MessageStart { … },
+    MessageUpdate { … },
+    MessageEnd { … },
+    ToolExecutionStart { … },
+    ToolExecutionUpdate { … },
+    ToolExecutionEnd { … },
+    TurnEnd { … },
+    <span class="c">/// Auto-compaction summarized `summarized` older messages, keeping `kept`.</span>
+    Compaction { … },</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">6.4</span>The actor: one mailbox, one writer</h2>
+  <p>
+    A <code>SessionActor</code> turns an <code>Agent</code> into a task with an inbox and a
+    subscribable outbox. Callers send <code>Request</code>s and observe
+    <code>AgentEvent</code>s; nobody holds the <code>Agent</code> itself.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/actor.rs:7</span><span class="tag">the seam</span></figcaption>
+<pre>  caller  (REPL / TUI / future peer session — all identical here)
+    │  send(Request)                          ▲  subscribe() → recv()
+    ▼                                         │  (own cursor per subscriber)
+  inbox: mpsc::Unbounded&lt;Request&gt;       outbox: broadcast&lt;AgentEvent&gt;
+    │                                         ▲  events.send(ev)
+    └───────────► SessionActor task ◄─────────┘
+                  owns the Agent; serves one Request at a time;
+                  `deferred: VecDeque&lt;Request&gt;` parks mid-run commands</pre>
+  </figure>
+
+  <p>
+    Two behaviours matter and are easy to miss:
+  </p>
+  <ul>
+    <li><strong>One request at a time.</strong> A run holds an <code>&amp;mut</code> on the agent,
+      so anything arriving mid-run is parked and serviced afterwards — except the requests that
+      have a defined mid-run answer.</li>
+    <li><strong>Reads answer from the last turn boundary.</strong>
+      <code>GetHistory</code>, <code>Status</code>, <code>Usage</code>, and
+      <code>SideAsk</code> are answered from a snapshot instead of being refused, so the TUI can
+      show a transcript and a member can be peeked while it works.</li>
+  </ul>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Request</th><th>Mid-run behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>Submit</code></td><td>Parked; starts the next run.</td></tr>
+        <tr><td><code>Notify</code></td><td>Appended to the conversation, no turn — the "tell, don't ask" mode.</td></tr>
+        <tr><td><code>Interrupt</code></td><td>Injected at the next turn boundary of the in-flight run.</td></tr>
+        <tr><td><code>Wake</code></td><td>Runs a turn even if idle — how a scheduler dispatch and a worker report arrive.</td></tr>
+        <tr><td><code>Cancel</code></td><td>Stops the run (and any retry wait). Idempotent.</td></tr>
+        <tr><td><code>SetModel</code>/<code>SetEffort</code>/<code>SetPlanMode</code></td><td>Applied at the boundary; plan mode also recomposes the system prompt.</td></tr>
+        <tr><td><code>SideAsk</code></td><td>Answered tool-free from the current context, never recorded.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6.5</span>The streaming adapter</h2>
+  <p>
+    The kernel does not import a vendor SDK into the loop. A run receives a
+    <code>StreamFn</code>: context, system prompt, tool definitions and options in; a stream of
+    events out.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/streamfn.rs:284</span><span class="tag">the provider seam</span></figcaption>
+<pre><span class="k">pub type</span> StreamFn =
+    Arc&lt;<span class="k">dyn</span> Fn(<span class="f2">&amp;</span>[AgentMessage], <span class="f2">&amp;</span>str, <span class="f2">&amp;</span>[ToolDefinition], <span class="f2">&amp;</span>LlmOpts) -&gt; LlmStream + Send + Sync&gt;;</pre>
+  </figure>
+
+  <p>
+    <code>rig_stream_fn()</code> is the built-in OpenAI-compatible adapter. It handles three
+    things the loop should not know about:
+  </p>
+  <ul>
+    <li><strong>Endpoint selection.</strong> <code>chat</code> or <code>responses</code> — and
+      <code>auto</code> derives it from the model id (D025).</li>
+    <li><strong>Effort mapping.</strong> Chat sends <code>reasoning_effort</code>, Responses sends
+      <code>reasoning: { effort }</code>; unset sends neither.</li>
+    <li><strong>Stalls and retries.</strong> A connect or first-item stall, and an inter-item
+      idle gap, are bounded separately; transient failures retry with exponential backoff,
+      capped.</li>
+  </ul>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/streamfn.rs:683</span><span class="tag">RetryPolicy</span></figcaption>
+<pre><span class="k">pub struct</span> RetryPolicy {
+    <span class="c">/// Retries after the first attempt (0 disables retrying).</span>
+    <span class="k">pub</span> max: u32,
+    <span class="c">/// Base backoff: attempt `n` waits `base * 2^(n-1)`, capped at `cap`.</span>
+    <span class="k">pub</span> base: Duration,
+    <span class="c">/// Upper bound on a single backoff wait.</span>
+    <span class="k">pub</span> cap: Duration,
+    <span class="c">/// Time-to-first-token: covers connect + the first stream item. `ZERO` = off.</span>
+    <span class="k">pub</span> ttft: Duration,
+    <span class="c">/// Inter-item idle: resets on every received item. `ZERO` = off.</span>
+    <span class="k">pub</span> idle: Duration,
+}</pre>
+  </figure>
+
+  <p>
+    Defaults: 3 retries, 500 ms base, 8 s cap, 60 s to first token, 120 s idle — all tunable in
+    <code>[retry]</code> or by the matching <code>WCODE_RETRY_*</code> variables. Two zero
+    conventions matter: <code>ttft = 0</code> and <code>idle = 0</code> <em>disable</em> that
+    timeout, and retries are announced as <code>Retrying</code> events so a slow run explains
+    itself.
+  </p>
+
+  <div class="callout good">
+    <span class="label">Why an adapter and not an SDK call</span>
+    <p>
+      The kernel's job is the loop. Provider quirks — SSE shape, effort naming, retry
+      semantics — live behind one function pointer, which is also how a test substitutes a fake
+      stream with no network at all.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">6.6</span>The <code>Agent</code>: state above the loop</h2>
+  <p>
+    <code>run_loop</code> is stateless between calls; <code>Agent</code> holds everything that
+    must survive one.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Method</th><th>What it owns</th></tr></thead>
+      <tbody>
+        <tr><td><code>run</code></td><td>Drives <code>run_loop</code> with the current system prompt, tools and channels.</td></tr>
+        <tr><td><code>messages</code> / <code>history</code></td><td>The conversation as the kernel sees it.</td></tr>
+        <tr><td><code>cancel</code> / <code>cancel_token</code></td><td>The token a Ctrl-C, a deadline, or a peer cancel fires.</td></tr>
+        <tr><td><code>steer</code> / <code>follow_up</code></td><td>The two input channels, exposed as senders.</td></tr>
+        <tr><td><code>notify</code></td><td>Append without a turn (with a tag naming the sender).</td></tr>
+        <tr><td><code>set_model</code> / <code>set_effort</code></td><td>Swap the provider knobs for subsequent turns; reuses pooled HTTP connections.</td></tr>
+        <tr><td><code>set_plan_mode</code></td><td>Flips the shared handle <em>and</em> recomposes the system prompt from a tracked base.</td></tr>
+        <tr><td><code>compact</code></td><td>One summarization pass, optionally focused.</td></tr>
+        <tr><td><code>side_ask</code> / <code>side_handle</code></td><td>A tool-free question answered from context — the <code>/btw</code> path, and a handle for callers that do not own the agent.</td></tr>
+        <tr><td><code>session_id</code> / <code>session_path</code></td><td>Identity and where the transcript is — the latter feeds <code>session_search</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/agent.rs:134</span><span class="tag">plan mode is a prompt swap, not a rebuild</span></figcaption>
+<pre>    <span class="k">pub fn</span> <span class="f2">set_plan_mode</span>(<span class="f2">&amp;mut</span> self, on: <span class="k">bool</span>) {
+        self.plan_mode.<span class="f2">set</span>(on);
+        self.system = <span class="k">if</span> on {
+            <span class="f2">format!</span>(<span class="s">"{}\n\n{}"</span>, self.base_system, PLAN_SECTION)
+        } <span class="k">else</span> {
+            self.base_system.<span class="f2">clone</span>()
+        };
+    }</pre>
+  </figure>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="05-sessions-and-memory.html">← 05 Sessions &amp; memory</a></span>
+  <span>next · <a href="07-the-tools.html">07 The tools →</a></span>
+</div></div></footer>
+</body>
+</html>

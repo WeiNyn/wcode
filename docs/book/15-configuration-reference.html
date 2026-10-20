@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 · Configuration reference — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>15</b> · Configuration reference</span>
+  <span class="pn"><a href="14-protocol-and-clients.html">← 14 Protocol &amp; clients</a><a href="16-troubleshooting.html">16 Troubleshooting →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part VI · Reference &amp; craft · <b>Chapter 15</b></div>
+    <h1>Configuration reference</h1>
+    <p class="lede">
+      Every key, flag, and environment variable, in one place — plus the two places where the
+      README and the code disagree, flagged rather than silently reconciled.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">15.1</span>The file, section by section</h2>
+  <p class="dim">
+    Locations and precedence are <a href="02-install-and-configure.html">Chapter 02</a>. An absent
+    table means "use the defaults"; a scalar or array in an overlay replaces wholesale; a table
+    merges per key.
+  </p>
+
+  <h3>Top level</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td>string</td><td><b>Required.</b> The model id your endpoint serves.</td></tr>
+        <tr><td><code>base_url</code></td><td>string</td><td>Any OpenAI-compatible endpoint. Unset → <code>api.openai.com</code>, with a startup warning.</td></tr>
+        <tr><td><code>api_key</code></td><td>string</td><td>Or <code>OPENAI_API_KEY</code>; a localhost base URL works keyless.</td></tr>
+        <tr><td><code>endpoint</code></td><td><code>chat</code>|<code>responses</code>|<code>auto</code></td><td>Default <code>auto</code> — derived from the model id (D025).</td></tr>
+        <tr><td><code>effort</code></td><td>string</td><td>Free-style reasoning effort; omitted = nothing sent.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[models."&lt;id&gt;"]</code></h3>
+  <p>Per-model provider overrides. Absent fields inherit the default provider; an unmapped model restores it, so a switch is reversible.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>endpoint</code> · <code>base_url</code> · <code>api_key</code></td><td>Re-point the provider for this id only.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[hooks]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Values</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>rtk</code></td><td><code>auto</code>|<code>true</code>|<code>false</code></td><td>Route bash output through the <code>rtk</code> proxy. <code>auto</code> = on iff the binary is on <code>PATH</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[tools]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>grep</code></td><td><code>false</code></td><td>Register the <code>grep</code> tool (<code>bash</code> can search).</td></tr>
+        <tr><td><code>find</code></td><td><code>false</code></td><td>Register the <code>find</code> tool.</td></tr>
+        <tr><td><code>parallel</code></td><td><code>true</code></td><td>Run independent calls in one batch concurrently. <code>--sequential</code> forces it off.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[compaction]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>budget</code></td><td>the model window</td><td>Working token ceiling; capped to the window.</td></tr>
+        <tr><td><code>window</code></td><td>catalog, else 128k</td><td>Context-window override for unknown models.</td></tr>
+        <tr><td><code>min_remaining</code></td><td><code>16384</code></td><td>Compact once fewer than this many tokens remain below the ceiling.</td></tr>
+        <tr><td><code>keep_recent_tokens</code></td><td><code>20000</code></td><td>Recent context kept verbatim after compacting.</td></tr>
+        <tr><td><code>keep_recent_turns</code></td><td><code>2</code></td><td>Whole turns always kept, whatever their size.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[instructions]</code> · <code>[skills]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>instructions.file</code></td><td>— (discovery)</td><td>Load exactly this name/path instead of discovering. <code>"off"</code> disables.</td></tr>
+        <tr><td><code>instructions.names</code></td><td><code>AGENTS.override.md</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code></td><td>Candidate names per directory.</td></tr>
+        <tr><td><code>instructions.global</code></td><td><code>true</code></td><td>Also load one from <code>~/.config/wcode</code>.</td></tr>
+        <tr><td><code>skills.enabled</code></td><td><code>true</code></td><td>Discover <code>SKILL.md</code> packages at all.</td></tr>
+        <tr><td><code>skills.dirs</code></td><td><code>[]</code></td><td>Extra roots, scanned first.</td></tr>
+        <tr><td><code>skills.disabled</code></td><td><code>[]</code></td><td>Names to skip.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[retry]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>max</code></td><td><code>3</code></td><td>Retries after the first attempt (<code>0</code> disables).</td></tr>
+        <tr><td><code>base_ms</code></td><td><code>500</code></td><td>Base backoff (<code>base * 2^(n-1)</code>).</td></tr>
+        <tr><td><code>cap_ms</code></td><td><code>8000</code></td><td>Upper bound on one wait.</td></tr>
+        <tr><td><code>ttft_ms</code></td><td><code>60000</code></td><td>Time to connect + first item (<code>0</code> disables).</td></tr>
+        <tr><td><code>idle_ms</code></td><td><code>120000</code></td><td>Inter-item idle, reset per received item (<code>0</code> disables).</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[theme]</code> · <code>[tui]</code></h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>theme.name</code></td><td><code>default</code></td><td><code>default</code> · <code>dark</code> · <code>light</code> · <code>gruvbox-dark</code> · <code>nord</code> · <code>solarized-dark</code> · <code>solarized-light</code> · <code>omarchy</code>.</td></tr>
+        <tr><td><code>theme.&lt;role&gt;</code></td><td>the preset</td><td>17 roles (<code>accent</code>, <code>dim</code>, <code>error</code>, …) as a named ANSI colour or <code>#rrggbb</code>; explicit keys survive a preset switch.</td></tr>
+        <tr><td><code>tui.width</code></td><td><code>68</code></td><td>Transcript measure, 40–200. Out of range fails the load.</td></tr>
+        <tr><td><code>tui.view</code></td><td><code>focus</code></td><td><code>all</code> or <code>focus</code>; an unknown token is a startup error.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3><code>[[team]]</code> · <code>[orchestrator]</code> · <code>[peers]</code></h3>
+  <p>Covered in <a href="11-teams-and-roles.html">Chapter 11</a>. Fields: <code>name</code>, <code>role</code>, <code>model</code>, <code>tools</code>, <code>read_only</code>, <code>effort</code>, <code>base_url</code>, <code>api_key</code>, <code>file</code>; plus <code>orchestrator.guidelines</code> and <code>peers.&lt;name&gt;</code>.</p>
+
+  <h3><code>[workflow]</code></h3>
+  <p>Covered in <a href="13-workflow-mode.html">Chapter 13</a>. Fields: <code>max_attempts</code>, <code>timeout_secs</code>, <code>[[workflow.node]]</code> (<code>id</code>, <code>member</code>|<code>script</code>, <code>gate</code>, <code>title</code>, <code>timeout_secs</code>), <code>[[workflow.edge]]</code> (<code>from</code>, <code>to</code>, <code>condition</code>).</p>
+
+  <div class="callout warn">
+    <span class="label">Documented but absent: <code>[workspace] digest_cas</code></span>
+    <p>
+      <code>README.md:99-103</code> documents a <code>[workspace] digest_cas</code> key for
+      whole-file compare-and-swap. At this commit <strong>no such table or code exists</strong>: the
+      digest machinery was removed together with the hash-anchor scheme (<code>7c740fe</code>).
+      Setting it is harmless (an unknown table is ignored) and it does nothing. See
+      <a href="08-editing.html">Chapter 08</a> for why the design does not need it.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">15.2</span>Flags</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>-p &lt;prompt&gt;</code></td><td>One-shot: run once, print the reply, exit.</td></tr>
+        <tr><td><code>--resume [path]</code></td><td>Resume a session (default: latest).</td></tr>
+        <tr><td><code>--no-session</code></td><td>Don't record a session file.</td></tr>
+        <tr><td><code>--model</code> · <code>--base-url</code> · <code>--endpoint</code> · <code>--effort</code></td><td>Override the loaded config (and rescue a <em>missing</em> model).</td></tr>
+        <tr><td><code>--config &lt;path&gt;</code></td><td>Explicit overlay, deep-merged last (also <code>WCODE_CONFIG</code>).</td></tr>
+        <tr><td><code>--team &lt;name&gt;</code></td><td>Use <code>./.wcode/teams/&lt;name&gt;.toml</code> (mutually exclusive with <code>--config</code>).</td></tr>
+        <tr><td><code>--list-teams</code> · <code>--list-models</code> · <code>--list-themes</code></td><td>Print and exit.</td></tr>
+        <tr><td><code>--sequential</code></td><td>One tool call at a time.</td></tr>
+        <tr><td><code>--no-instructions</code> · <code>--no-skills</code></td><td>Skip the corresponding discovery.</td></tr>
+        <tr><td><code>--no-project-config</code></td><td>Disable project auto-discovery only (also <code>WCODE_PROJECT_CONFIG=off</code>).</td></tr>
+        <tr><td><code>--dump-system-prompt</code> · <code>--dump-config</code></td><td>Print the composed prompt / resolved provider sources, exit. Neither calls a model.</td></tr>
+        <tr><td><code>--detect-endpoint</code></td><td>Probe common local endpoints when <code>base_url</code> is unset.</td></tr>
+        <tr><td><code>--agents</code></td><td>Register the root-only tools (implicit for a non-empty <code>[team]</code>).</td></tr>
+        <tr><td><code>serve</code> · <code>--socket</code> · <code>--stdio</code></td><td>Serve a session, or connect to one (<a href="14-protocol-and-clients.html">Chapter 14</a>).</td></tr>
+        <tr><td><code>--peer name=socket</code></td><td>Register a remote peer (repeatable).</td></tr>
+        <tr><td><code>--name &lt;id&gt;</code> · <code>--owner &lt;addr&gt;</code></td><td>Serve this session as <code>&lt;addr&gt;</code>'s worker.</td></tr>
+        <tr><td><code>--task</code> · <code>--timeout</code> · <code>--quiet</code> · <code>--status</code></td><td>Headless workflow (<a href="13-workflow-mode.html">Chapter 13</a>).</td></tr>
+        <tr><td><code>--tui</code> · <code>--no-tui</code></td><td>Force the full-screen client or the line REPL.</td></tr>
+        <tr><td><code>--theme &lt;name&gt;</code></td><td>Select a palette preset (or <code>omarchy</code>).</td></tr>
+        <tr><td><code>-V</code> · <code>-h</code></td><td>Version, help.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">15.3</span>Environment variables</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Variable</th><th>Overrides</th></tr></thead>
+      <tbody>
+        <tr><td><code>WCODE_BASE_URL</code> · <code>WCODE_API_KEY</code></td><td>the toml globals (default provider)</td></tr>
+        <tr><td><code>OPENAI_API_KEY</code></td><td>the key, as a fallback</td></tr>
+        <tr><td><code>WCODE_ENDPOINT</code> · <code>WCODE_EFFORT</code></td><td>the toml globals</td></tr>
+        <tr><td><code>WCODE_CONFIG</code></td><td>the explicit overlay path (<code>--config</code> wins)</td></tr>
+        <tr><td><code>WCODE_PROJECT_CONFIG=off</code></td><td>project auto-discovery</td></tr>
+        <tr><td><code>WCODE_RTK</code></td><td><code>hooks.rtk</code></td></tr>
+        <tr><td><code>WCODE_GREP</code> · <code>WCODE_FIND</code></td><td><code>tools.grep</code> / <code>tools.find</code></td></tr>
+        <tr><td><code>WCODE_INSTRUCTIONS</code></td><td><code>instructions.file</code> (a name/path, or <code>off</code>)</td></tr>
+        <tr><td><code>WCODE_SKILLS</code></td><td>extra skill roots, or <code>off</code></td></tr>
+        <tr><td><code>WCODE_TASK</code></td><td><code>--task</code> when the flag is absent</td></tr>
+        <tr><td><code>WCODE_RETRY_MAX</code>, <code>_BASE_MS</code>, <code>_CAP_MS</code>, <code>_TTFT_MS</code>, <code>_IDLE_MS</code></td><td>the <code>[retry]</code> table</td></tr>
+        <tr><td><code>WCODE_COMPACT_BUDGET</code>, <code>_WINDOW</code>, <code>_MIN_REMAINING</code>, <code>_KEEP_RECENT_TOKENS</code>, <code>_KEEP_RECENT_TURNS</code></td><td>the <code>[compaction]</code> table</td></tr>
+        <tr><td><code>NO_COLOR</code></td><td>the entire TUI palette (wins over <code>[theme]</code>)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">15.4</span>The <code>/</code>-command map</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Command</th><th>Where</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>/exit</code></td><td>both</td><td>Quit (prints the resume line).</td></tr>
+        <tr><td><code>/new</code></td><td>both</td><td>Fresh conversation + session (TUI: re-exec; refused over a socket).</td></tr>
+        <tr><td><code>/model &lt;id&gt;</code> · <code>/models [filter]</code></td><td>both</td><td>Switch (logged) or list the provider catalog.</td></tr>
+        <tr><td><code>/effort [level]</code></td><td>both</td><td>Show/set/clear reasoning effort.</td></tr>
+        <tr><td><code>/resume [path]</code> · <code>/sessions</code></td><td>REPL (TUI: picker)</td><td>Reopen a session; list them.</td></tr>
+        <tr><td><code>/compact [focus]</code></td><td>both</td><td>Summarize older messages now.</td></tr>
+        <tr><td><code>/usage</code></td><td>both</td><td>Tokens, cache hit rate, per-tool stats, cost.</td></tr>
+        <tr><td><code>/btw &lt;question&gt;</code></td><td>both</td><td>Tool-free side question; never recorded.</td></tr>
+        <tr><td><code>/plan [on|off]</code></td><td>both</td><td>Plan mode (<a href="10-plan-mode.html">Chapter 10</a>).</td></tr>
+        <tr><td><code>/verify</code></td><td>both</td><td>The todo checklist and its done count.</td></tr>
+        <tr><td><code>/skills</code> · <code>/skill &lt;name&gt; [args]</code></td><td>REPL</td><td>List discovered skills; force one into a turn.</td></tr>
+        <tr><td><code>/reload [--no-session]</code></td><td>both</td><td>Rebuild + re-exec into the session.</td></tr>
+        <tr><td><code>/theme [name]</code> · <code>/width</code></td><td>TUI</td><td>Palette (bare = picker) · transcript measure.</td></tr>
+        <tr><td><code>/team [roster|&lt;name&gt;]</code> · <code>/surface</code></td><td>TUI</td><td>Team picker/listing · surface picker.</td></tr>
+        <tr><td><code>/tasks</code> · <code>/changes</code> · <code>/copy</code> · <code>/help</code></td><td>TUI</td><td>Plan modal · changed files with diffs · copy · keymap.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="dim">
+    Unknown <code>/…</code> lines are sent to the model as prompt text, so a stray slash does not
+    derail a turn.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">15.5</span>Validating a config</h2>
+  <p>
+    Three failures are loud on purpose: an out-of-range <code>tui.width</code>, an unknown
+    <code>tui.view</code> token, and a duplicate or unknown <code>[[team]]</code> name. The rest are
+    defaulted or warned.
+  </p>
+  <figure class="code">
+    <figcaption><span class="f">shell</span><span class="tag">the three checks</span></figcaption>
+<pre>wcode --dump-config          <span class="c"># resolved provider + where each value came from</span>
+wcode --dump-system-prompt   <span class="c"># the exact prompt (instructions + skills + roster)</span>
+wcode --list-teams --list-themes</pre>
+  </figure>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="14-protocol-and-clients.html">← 14 Protocol &amp; clients</a></span>
+  <span>next · <a href="16-troubleshooting.html">16 Troubleshooting →</a></span>
+</div></div></footer>
+</body>
+</html>

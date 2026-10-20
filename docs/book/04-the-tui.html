@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04 · The TUI — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>04</b> · The TUI</span>
+  <span class="pn"><a href="03-run-modes.html">← 03 The three run modes</a><a href="05-sessions-and-memory.html">05 Sessions &amp; memory →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part II · Daily use · <b>Chapter 04</b></div>
+    <h1>The TUI</h1>
+    <p class="lede">
+      A full-screen client over the same event stream: a pinned header, a transcript with a
+      reading measure, a composer with a foot line, and — only when a team is working — a thin
+      strip of members above the box. This chapter is the map, the keys, and the rules that
+      keep it legible.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">4.1</span>The base: three bands, no more</h2>
+  <p>
+    The visual spec fixes the skeleton, and every later redesign amends it rather than
+    inventing a fourth band:
+  </p>
+
+  <figure class="diagram">
+    <div class="legend">
+      <span><i style="background:#2a3a55;border:1px solid #4a6da8"></i>pinned</span>
+      <span><i style="background:#1e2a3a;border:1px solid #33405a"></i>flex</span>
+      <span><i style="background:#4a3a1c;border:1px solid #a8823a"></i>composer</span>
+    </div>
+    <svg viewBox="0 0 820 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TUI bands">
+      <defs><style>
+        .bn { font: 600 12px ui-monospace, monospace; fill: #dce3ed; }
+        .bd { font: 400 10px system-ui, sans-serif; fill: #93a0b4; }
+        .fx { font: 400 10.5px ui-monospace, monospace; fill: #7d8ca1; }
+      </style></defs>
+
+      <rect x="20" y="20" width="780" height="34" rx="6" fill="#2a3a55" stroke="#4a6da8"/>
+      <text class="bn" x="34" y="41">WCODE · session 0f3c ──── wcode · ⎇ main</text>
+      <text class="bn" x="666" y="41">gpt-4.1 · high</text>
+      <text class="bd" x="20" y="70">header band — one bare row, no rule</text>
+
+      <rect x="20" y="84" width="780" height="126" rx="6" fill="#1e2a3a" stroke="#33405a"/>
+      <text class="fx" x="44" y="106">❯ refactor the scheduler</text>
+      <text class="fx" x="44" y="128">  I'll start with the frontier function…</text>
+      <text class="fx" x="44" y="150">  read    src/scheduler.rs   212 lines</text>
+      <text class="fx" x="44" y="172">  edit    src/scheduler.rs   ✓ 3 hunks</text>
+      <text class="fx" x="44" y="194">  thinking  the timeout arm is pruned each loop…</text>
+      <text class="bd" x="20" y="226">transcript — flex, rendered in a measure (default 68 cols, centered past 84)</text>
+
+      <rect x="20" y="240" width="780" height="22" rx="5" fill="#171c25" stroke="#33405a"/>
+      <text class="fx" x="30" y="255">● explorer   ◐ developer   ○ reviewer</text>
+      <text class="bd" x="600" y="236">team strip — rides above the box, only while a member runs</text>
+
+      <rect x="20" y="268" width="780" height="24" rx="6" fill="#4a3a1c" stroke="#a8823a"/>
+      <text class="fx" x="30" y="284">❯ ▌</text>
+      <text class="fx" x="560" y="284">14.2k/272k · ⏻ plan · ⠹ running</text>
+    </svg>
+    <figcaption>
+      Header · transcript · composer. The team strip is a <em>rider</em>, not a band; an overlay
+      (picker, modal, help) floats above the whole thing and never reflows it.
+    </figcaption>
+  </figure>
+
+  <p>
+    Three rules do most of the visual work, all from the spec:
+  </p>
+  <ul>
+    <li><strong>Role lives in the left gutter.</strong> One margin column, a marker column,
+      content at a fixed column; wrapped lines align under the content, not the marker.</li>
+    <li><strong>Dim is the workhorse.</strong> Under the default palette the screen is a grey
+      ramp and <em>red is the only hue</em> — used for errors and failed tools. A preset
+      (<code>nord</code>, <code>gruvbox-dark</code>, …) is an opt-in escape hatch.</li>
+    <li><strong>Blank lines separate roles, not boxes.</strong> Tools are flat rows at the
+      gutter column; there is no tree drawing (D023), no band rules, no double frame.</li>
+  </ul>
+
+  <figure class="code">
+    <figcaption><span class="f">docs/tui-design.md:16</span><span class="tag">principle 1</span></figcaption>
+<pre>1. **The base is the header over the transcript over the composer.** A pinned
+   **header band** — ONE bare row, no rule (D023) — carries the running
+   head `WCODE · session &lt;id&gt; ──── project · ⎇ branch` with `model · effort` far
+   right (D010) … The composer keeps its **foot line** …
+   A **0–3-row team strip rides above the composer** only while a member is
+   running; it is a rider, not a band.</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">4.2</span>The glyph table</h2>
+  <p>
+    One table governs every mark on screen. If a glyph is not here, it is not in the product.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Element</th><th>Glyph</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td>user prompt</td><td><code>❯</code></td><td>transcript and composer prefix</td></tr>
+        <tr><td>running</td><td><code>⠹ ⠋⠙⠸…</code></td><td>foot line / member rows</td></tr>
+        <tr><td>idle</td><td><code>⏸</code></td><td>foot line</td></tr>
+        <tr><td>thinking</td><td><code>thinking</code> + <code>▌</code></td><td>in-flight annotation row</td></tr>
+        <tr><td>tool error</td><td><code>✗</code></td><td>tool row (red)</td></tr>
+        <tr><td>compaction / retry</td><td><code>⋯</code></td><td>transcript notice</td></tr>
+        <tr><td>browse cursor</td><td><code>▌</code> + <code>▤ browse</code></td><td>browse mode</td></tr>
+        <tr><td>plan mode</td><td><code>⏻</code></td><td>foot line</td></tr>
+        <tr><td>queued input</td><td><code>⇥ N queued</code></td><td>foot line only</td></tr>
+        <tr><td>team state</td><td><code>● ○ ✓ ✗</code></td><td>sidebar + strip</td></tr>
+        <tr><td>todos</td><td><code>☑ ☐</code></td><td>sidebar (Todos)</td></tr>
+        <tr><td>overlay frame</td><td><code>╭ ╮ ╰ ╯</code></td><td>picker / modal</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4.3</span>Keys</h2>
+  <p>
+    The keymap is a single Rust constant — the same data renders <code>F1</code> and
+    <code>/help</code>, so the documentation cannot drift from the behaviour.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-tui/src/app.rs:1046</span><span class="tag">the keymap (excerpt)</span></figcaption>
+<pre>    (<span class="s">"Enter"</span>, <span class="s">"submit the prompt"</span>),
+    (<span class="s">"Shift-Enter / Ctrl-J"</span>, <span class="s">"insert a newline"</span>),
+    (<span class="s">"Up / Down"</span>, <span class="s">"recall prompt history"</span>),
+    (<span class="s">"Ctrl-T"</span>, <span class="s">"expand / collapse all tool output"</span>),
+    (<span class="s">"Ctrl-N / Shift-Tab"</span>, <span class="s">"focus the next / previous surface"</span>),
+    (<span class="s">"Alt-1..9"</span>, <span class="s">"focus sidebar row N"</span>),
+    (<span class="s">"Ctrl-G"</span>, <span class="s">"browse the transcript"</span>),
+    (<span class="s">"Ctrl-B"</span>, <span class="s">"toggle the sidebar"</span>),
+    (<span class="s">"Ctrl-O"</span>, <span class="s">"toggle the transcript view (all/focus)"</span>),
+    (<span class="s">"Alt-[ / Alt-]"</span>, <span class="s">"narrow / widen the transcript"</span>),
+    (<span class="s">"F1"</span>, <span class="s">"toggle this help"</span>),
+    (<span class="s">"Ctrl-Y"</span>, <span class="s">"copy the last reply"</span>),
+    (<span class="s">"Esc"</span>, <span class="s">"cancel a run (no-op when idle)"</span>),
+    (<span class="s">"Ctrl-C"</span>, <span class="s">"cancel a run; quit when idle"</span>),</pre>
+  </figure>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>The three "modes" inside the TUI</h4>
+      <p>
+        <strong>Normal</strong> — typing goes to the focused surface.
+        <strong>Browse</strong> (<code>Ctrl-G</code>) — a cursor over the transcript; <code>j</code>/<code>k</code>, <code>g</code>/<code>G</code>,
+        <code>{</code>/<code>}</code>, <code>/</code> search, <code>Enter</code> to expand a block, <code>y</code> to copy.
+        <strong>Overlay</strong> — a picker or info modal owns the keys until <code>Esc</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Ctrl-C is two keys in one</h4>
+      <p>
+        While a run is in flight it cancels the run and stays. When idle it quits. In browse
+        mode it still quits when idle — browse is a view, not a shield.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4.4</span>Surfaces: a team in one window</h2>
+  <p>
+    With a team, each member is a surface. The root is <code>wcode</code>; workers are named.
+    Input and <code>/</code>-commands go to the <strong>focused</strong> surface, so you can
+    interrupt a worker mid-turn with a question without addressing it through the root.
+  </p>
+  <ul>
+    <li><code>Ctrl-N</code> / <code>Shift-Tab</code> — cycle surfaces.</li>
+    <li><code>Alt-1..9</code> — jump to sidebar row N.</li>
+    <li><code>/surface</code> — open the picker.</li>
+    <li><code>Ctrl-O</code> — <strong>All</strong> vs <strong>Focus</strong>: All merges every
+      surface's turns into one ordered transcript (default is Focus).</li>
+  </ul>
+
+  <figure class="code">
+    <figcaption><span class="f">docs/decisions/D031, D032</span><span class="tag">All-mode semantics</span></figcaption>
+<pre>D031 — TUI All/Focus view mode: a client-local merge, default Focus
+D032 — The All-mode merge orders each turn by its last activity</pre>
+  </figure>
+
+  <p>
+    Because the merge is client-local, All mode is a <em>view</em> of data the client already
+    has; it never asks the server for a combined history and never reorders the sessions
+    themselves.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">4.5</span>Sidebar, strip, and overlays</h2>
+  <div class="grid3">
+    <div class="card">
+      <h4>Sidebar</h4>
+      <p>
+        Left-docked, 30 columns, shown only when the terminal is at least 80 wide
+        (<code>Ctrl-B</code> toggles). Three sections: <b>Team</b>, <b>Todos</b>,
+        <b>Changes</b>. The focused row is marked <code>*</code>.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Working band</h4>
+      <p>
+        A 0–3 row strip above the composer, one dim row per member while it runs — so a
+        background worker is visible without stealing the transcript.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Overlays</h4>
+      <p>
+        Pickers (<code>/model</code>, <code>/theme</code>, <code>/team</code>,
+        <code>/surface</code>, <code>/resume</code>) and scrollable info modals
+        (<code>/help</code>, <code>/verify</code>, <code>/usage</code>, <code>/tasks</code>).
+        <code>↑</code>/<code>↓</code> scroll a line, <code>PgUp</code>/<code>PgDn</code> a page,
+        <code>Esc</code> closes.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4.6</span>Colour, themes, and <code>NO_COLOR</code></h2>
+  <p>
+    Seventeen roles live in <code>crates/wcode-tui/src/theme.rs</code> and nowhere else. A
+    capability ladder picks the colour tier — plain, named 16, 256, truecolor — so a hex value
+    is honoured only where the terminal supports it.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Preset</th><th>Character</th></tr></thead>
+      <tbody>
+        <tr><td><code>default</code></td><td>Named-16, bare grey ramp, red the only hue (D023). Safe on any terminal.</td></tr>
+        <tr><td><code>dark</code> · <code>light</code></td><td>Truecolor; <code>light</code> assumes a light terminal background.</td></tr>
+        <tr><td><code>gruvbox-dark</code> · <code>nord</code> · <code>solarized-dark</code> · <code>solarized-light</code></td><td>Truecolor escapes hatches; each overrides every chromatic role.</td></tr>
+        <tr><td><code>omarchy</code></td><td>Reads the live desktop theme from <code>~/.local/state/omarchy/current/theme/colors.toml</code>; re-read on <code>/theme omarchy</code>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Select with <code>--theme &lt;name&gt;</code>, <code>[theme] name = "…"</code>, or a live
+    <code>/theme</code>; <code>--list-themes</code> prints the catalog. Individual roles can be
+    overridden in <code>[theme]</code> and survive a preset switch.
+    <code>NO_COLOR</code> wins over everything and yields <code>Theme::plain</code>.
+  </p>
+
+  <div class="callout warn">
+    <span class="label">Why the default has no colour</span>
+    <p>
+      Preference, not laziness. A grey ramp with one red reads at 7:1 contrast in any terminal
+      and any light/dark setting; a colourful palette looks great in the author's screenshot and
+      badly on someone else's solarized terminal. Colour is one flag away, deliberately.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">4.7</span>Commands from inside the TUI</h2>
+  <p>
+    Anything that maps to a <code>Request</code> works here: <code>/model</code>,
+    <code>/effort</code>, <code>/compact</code>, <code>/usage</code>, <code>/copy</code>,
+    <code>/btw</code>, <code>/plan</code>, <code>/verify</code>, <code>/tasks</code>,
+    <code>/team</code>, <code>/surface</code>, <code>/theme</code>, <code>/help</code>,
+    <code>/exit</code>.
+  </p>
+  <p>
+    Four commands are <em>client-side re-execs</em> and therefore refused over a socket:
+    <code>/resume</code>, <code>/new</code> (alias <code>/clear</code>), and
+    <code>/reload [--no-session]</code>. <code>/changes</code> lists the files this run
+    changed and re-shows their diffs.
+  </p>
+  <p class="dim">
+    The session-lifecycle commands that are not requests (<code>/sessions</code>,
+    <code>/skills</code>, <code>/skill</code>) stay in the REPL.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="03-run-modes.html">← 03 The three run modes</a></span>
+  <span>next · <a href="05-sessions-and-memory.html">05 Sessions &amp; memory →</a></span>
+</div></div></footer>
+</body>
+</html>

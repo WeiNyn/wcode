@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode — the book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="cover">
+  <div class="in">
+    <div class="eyebrow">wcode · a minimal coding agent · v0.13.0</div>
+    <h1 class="big">The wcode book:<br><em>one small kernel,</em><br>everything on top of it</h1>
+    <p class="lede">
+      A complete guide to wcode — what it is, how to run it, what every tool does, how the
+      kernel works, and how a team of agents turns a feature request into a merged pull
+      request. Every claim is pinned to the source with <code>file:line</code>, because a
+      manual that drifts from the code is worse than no manual.
+    </p>
+    <div class="parts">
+
+      <div class="part">
+        <h2>Part I · Begin</h2>
+        <div class="chapters">
+          <a href="01-what-is-wcode.html">
+            <span class="no">01</span><span class="t">What wcode is</span>
+            <span class="d">The thesis, the shape, the things it refuses to do</span>
+          </a>
+          <a href="02-install-and-configure.html">
+            <span class="no">02</span><span class="t">Install &amp; configure</span>
+            <span class="d">Binaries, <code>config.toml</code>, providers, overlays, first model call</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="part">
+        <h2>Part II · Daily use</h2>
+        <div class="chapters">
+          <a href="03-run-modes.html">
+            <span class="no">03</span><span class="t">The three run modes</span>
+            <span class="d">One-shot, REPL, TUI — and which one you are in</span>
+          </a>
+          <a href="04-the-tui.html">
+            <span class="no">04</span><span class="t">The TUI</span>
+            <span class="d">Bands, keys, surfaces, the sidebar, browse mode, themes</span>
+          </a>
+          <a href="05-sessions-and-memory.html">
+            <span class="no">05</span><span class="t">Sessions &amp; memory</span>
+            <span class="d">JSONL sessions, group dirs, resume, compaction, usage</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="part">
+        <h2>Part III · Inside</h2>
+        <div class="chapters">
+          <a href="06-the-kernel.html">
+            <span class="no">06</span><span class="t">The kernel</span>
+            <span class="d">Agent, the tool loop, events, hooks, streaming, retries</span>
+          </a>
+          <a href="07-the-tools.html">
+            <span class="no">07</span><span class="t">The tools</span>
+            <span class="d">Every tool, its contract, and when the model reaches for it</span>
+          </a>
+          <a href="08-editing.html">
+            <span class="no">08</span><span class="t">Editing by literal text</span>
+            <span class="d">Why there are no line addresses (D007) and how the contract holds</span>
+          </a>
+          <a href="09-instructions-and-skills.html">
+            <span class="no">09</span><span class="t">Instructions &amp; skills</span>
+            <span class="d">AGENTS.md discovery, SKILL.md, budgets, progressive disclosure</span>
+          </a>
+          <a href="10-plan-mode.html">
+            <span class="no">10</span><span class="t">Plan mode</span>
+            <span class="d">Explore and propose without mutating — and how it can't be bypassed</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="part">
+        <h2>Part IV · Teams &amp; pipelines</h2>
+        <div class="chapters">
+          <a href="11-teams-and-roles.html">
+            <span class="no">11</span><span class="t">Teams &amp; roles</span>
+            <span class="d">The roster, role files, addressing, lateral messaging</span>
+          </a>
+          <a href="12-the-task-dag.html">
+            <span class="no">12</span><span class="t">The task DAG</span>
+            <span class="d">The plan, five states, gates, rework, the verify gate R′</span>
+          </a>
+          <a href="13-workflow-mode.html">
+            <span class="no">13</span><span class="t">Workflow mode</span>
+            <span class="d">A declared pipeline, driven headless to an exit code</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="part">
+        <h2>Part V · Beyond one process</h2>
+        <div class="chapters">
+          <a href="14-protocol-and-clients.html">
+            <span class="no">14</span><span class="t">Protocol &amp; clients</span>
+            <span class="d"><code>serve</code>, sockets, stdio, the VS Code extension, peers</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="part">
+        <h2>Part VI · Reference &amp; craft</h2>
+        <div class="chapters">
+          <a href="15-configuration-reference.html">
+            <span class="no">15</span><span class="t">Configuration reference</span>
+            <span class="d">Every key, every flag, every environment variable</span>
+          </a>
+          <a href="16-troubleshooting.html">
+            <span class="no">16</span><span class="t">Troubleshooting</span>
+            <span class="d">Symptom → cause → fix, with the command that proves it</span>
+          </a>
+          <a href="17-development.html">
+            <span class="no">17</span><span class="t">Development</span>
+            <span class="d">The repo, the gates, how to add a tool, a hook, a provider</span>
+          </a>
+          <a href="appendix-decisions.html">
+            <span class="no">A</span><span class="t">Appendix · decisions</span>
+            <span class="d">The D001–D034 record, and a file map of the workspace</span>
+          </a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section>
+    <h2><span class="num">§</span>Reading paths</h2>
+    <p>You do not have to read this cover to cover. Three honest routes:</p>
+    <div class="paths">
+      <div class="card">
+        <h4>I just want to use it</h4>
+        <ol>
+          <li><a href="02-install-and-configure.html">02 Install &amp; configure</a></li>
+          <li><a href="03-run-modes.html">03 The three run modes</a></li>
+          <li><a href="04-the-tui.html">04 The TUI</a></li>
+          <li><a href="07-the-tools.html">07 The tools</a></li>
+          <li><a href="16-troubleshooting.html">16 Troubleshooting</a></li>
+        </ol>
+      </div>
+      <div class="card">
+        <h4>I want my repo to have a team</h4>
+        <ol>
+          <li><a href="02-install-and-configure.html">02 Install &amp; configure</a></li>
+          <li><a href="09-instructions-and-skills.html">09 Instructions &amp; skills</a></li>
+          <li><a href="11-teams-and-roles.html">11 Teams &amp; roles</a></li>
+          <li><a href="12-the-task-dag.html">12 The task DAG</a></li>
+          <li><a href="13-workflow-mode.html">13 Workflow mode</a></li>
+        </ol>
+      </div>
+      <div class="card">
+        <h4>I want to change the code</h4>
+        <ol>
+          <li><a href="06-the-kernel.html">06 The kernel</a></li>
+          <li><a href="08-editing.html">08 Editing by literal text</a></li>
+          <li><a href="14-protocol-and-clients.html">14 Protocol &amp; clients</a></li>
+          <li><a href="17-development.html">17 Development</a></li>
+          <li><a href="appendix-decisions.html">A Decisions &amp; file map</a></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">§</span>Conventions in this book</h2>
+    <div class="grid2">
+      <div class="card">
+        <h4>Citations locate, quotes pin</h4>
+        <p>
+          Code is cited as <code>crates/wcode-cli/src/tasks.rs:894</code> plus a quoted
+          snippet. The number locates the line; the snippet still identifies it after a
+          reformat moves the number. Anchors are relative to the workspace root.
+        </p>
+      </div>
+      <div class="card">
+        <h4>Excerpts are excerpts</h4>
+        <p>
+          Snippets are trimmed to the point being made. An elision inside code is marked
+          <code>// …</code>; a doc-comment summarised in place is marked
+          <em>condensed</em> in the caption. Nothing is invented.
+        </p>
+      </div>
+      <div class="card">
+        <h4>Decision numbers are load-bearing</h4>
+        <p>
+          <strong>D001</strong>–<strong>D034</strong> are the repository's decision records, in
+          <code>docs/decisions/</code>. This book cites them where a behaviour looks surprising
+          but is deliberate. The appendix indexes all of them.
+        </p>
+      </div>
+      <div class="card">
+        <h4>Two kinds of "why"</h4>
+        <p>
+          A <span class="muted">blue</span> note explains a mechanism. An
+          <span style="color:var(--gate)">amber</span> note explains a decision — something that
+          looks like a limitation and is not.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">§</span>What this book is built from</h2>
+    <p>
+      Source at <code>v0.13.0</code> — everything merged since v0.12.0: <code>README.md</code>, <code>AGENTS.md</code>,
+      <code>docs/*.md</code> (the plans), <code>docs/decisions/*.md</code> (the record), and the
+      crates themselves — <code>wcode-harness</code> (the kernel), <code>wcode-protocol</code>
+      (transport), <code>wcode-tui</code> (the full-screen client),
+      <code>wcode-cli</code> (the composition root), <code>editors/vscode</code> (a second
+      client). Where the README and the code disagree, the book follows the code and says so.
+    </p>
+    <div class="callout">
+      <span class="label">How to check a claim</span>
+      <p>
+        Every mechanism in this book can be reproduced without an API key:
+        <code>wcode --dump-config</code>, <code>--dump-system-prompt</code>,
+        <code>--help</code>, or a run against a keyless local endpoint
+        (<code>--base-url http://localhost:11434/v1</code>). Chapters name the check that
+        proves them.
+      </p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · built from source at v0.13.0</span>
+  <span>start · <a href="01-what-is-wcode.html">01 What wcode is →</a></span>
+</div></div></footer>
+</body>
+</html>

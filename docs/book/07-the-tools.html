@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07 · The tools — the wcode book</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="index.html">wcode book</a>
+  <span class="here"><b>07</b> · The tools</span>
+  <span class="pn"><a href="06-the-kernel.html">← 06 The kernel</a><a href="08-editing.html">08 Editing by literal text →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Part III · Inside · <b>Chapter 07</b></div>
+    <h1>The tools</h1>
+    <p class="lede">
+      Eighteen tools: thirteen every session gets, two that depend on a flag or a binary, and five that only a root ever sees.
+      This chapter is the reference — what each tool promises, what it refuses, and the three
+      policies wrapped around them.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">7.1</span>What registers, and when</h2>
+  <p>
+    The tool set is a Rust function, not a config list. Two tools are conditional on your
+    <code>[tools]</code> flags (because <code>bash</code> can do their job), two are conditional
+    on a binary being present, and one family is root-only.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tools/mod.rs:30</span><span class="tag">default_tools — excerpt</span></figcaption>
+<pre>    <span class="k">let mut</span> tools = vec![
+        <span class="f2">erased</span>(read::Read),
+        <span class="f2">erased</span>(webfetch::WebFetch::<span class="f2">new</span>()),
+        <span class="f2">erased</span>(bash::Bash::<span class="f2">new</span>(bg.<span class="f2">clone</span>())),
+        <span class="f2">erased</span>(background::Bg::<span class="f2">new</span>(bg.<span class="f2">clone</span>())),
+        <span class="f2">erased</span>(edit::Edit::<span class="f2">new</span>(lock.<span class="f2">clone</span>())),
+        <span class="f2">erased</span>(edits::Edits::<span class="f2">new</span>(lock.<span class="f2">clone</span>())),
+        <span class="f2">erased</span>(write::Write::<span class="f2">new</span>(lock.<span class="f2">clone</span>())),
+        <span class="f2">erased</span>(todo::Todo::<span class="f2">new</span>()),
+        <span class="f2">erased</span>(session_search::SessionSearch::<span class="f2">new</span>(sessions_dir.<span class="f2">to_path_buf</span>())),
+    ];
+    <span class="c">// grep/find are redundant with `bash` (it can grep/find itself), so they</span>
+    <span class="c">// register only when explicitly enabled in `[tools]`.</span>
+    <span class="k">if</span> cfg.grep { tools.<span class="f2">push</span>(<span class="f2">erased</span>(grep::Grep)); }
+    <span class="k">if</span> cfg.find { tools.<span class="f2">push</span>(<span class="f2">erased</span>(find::Find)); }
+    <span class="c">// ast-grep shell-out follows the rtk "auto" pattern: registered only when</span>
+    <span class="c">// the `sg` binary is on PATH so the model never holds an unusable tool.</span>
+    <span class="k">if</span> ast_search::<span class="f2">available</span>() { tools.<span class="f2">push</span>(<span class="f2">erased</span>(ast_search::AstSearch)); }
+    <span class="k">if</span> ast_edit::<span class="f2">available</span>() { tools.<span class="f2">push</span>(<span class="f2">erased</span>(ast_edit::AstEdit::<span class="f2">new</span>(lock.<span class="f2">clone</span>()))); }
+    tools</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Tool</th><th>Registered</th><th>Parallel-safe</th></tr></thead>
+      <tbody>
+        <tr><td><code>read</code></td><td>always</td><td>yes</td></tr>
+        <tr><td><code>webfetch</code></td><td>always</td><td>yes</td></tr>
+        <tr><td><code>bash</code></td><td>always</td><td>no — barrier</td></tr>
+        <tr><td><code>bg</code></td><td>always</td><td>no</td></tr>
+        <tr><td><code>edit</code> · <code>edits</code> · <code>write</code></td><td>always (shared mutation lock)</td><td>no</td></tr>
+        <tr><td><code>todo</code></td><td>always, every session</td><td>no (a write is a barrier)</td></tr>
+        <tr><td><code>session_search</code></td><td>always</td><td>yes</td></tr>
+        <tr><td><code>grep</code> · <code>find</code></td><td><code>[tools] grep/find</code></td><td>yes</td></tr>
+        <tr><td><code>ast_search</code> · <code>ast_edit</code></td><td>an <code>ast-grep</code>/<code>sg</code> binary on <code>PATH</code></td><td><code>ast_search</code> yes; <code>ast_edit</code> no</td></tr>
+        <tr><td><code>spawn</code> · <code>message</code> · <code>peers</code> · <code>member</code> · <code>task</code></td><td>root only (<code>--agents</code>)</td><td>no</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7.2</span>Reading and searching</h2>
+
+  <h3><code>read</code> <span class="hint">the numbering is for locating, not addressing</span></h3>
+  <p>
+    Prints <code>&lt;line number&gt;\t&lt;content&gt;</code>. The number feeds an
+    <code>offset</code> or a citation; it is never an address. A line longer than 300 characters
+    is truncated with <code>…(+N)</code> — and a truncated line is <em>not</em> usable as an
+    <code>old_string</code>, which is why the tool says so.
+  </p>
+
+  <h3><code>grep</code> <span class="hint">off by default</span></h3>
+  <p>
+    Regex search returning <code>path:lineno:content</code>, so a hit pastes straight into an
+    <code>edit</code> as <code>old_string</code> and into a <code>read</code> as
+    <code>offset</code>. It respects <code>.gitignore</code> (plus a built-in floor of
+    <code>.git</code>, <code>target</code>, <code>node_modules</code>) and skips binaries;
+    <code>no_ignore: true</code> searches ignored files too.
+  </p>
+
+  <h3><code>find</code> <span class="hint">off by default</span></h3>
+  <p>Glob listing, one path per line. Same ignore semantics as <code>grep</code>.</p>
+
+  <h3><code>ast_search</code> <span class="hint">needs ast-grep</span></h3>
+  <p>
+    Structural search with <code>$UPPERCASE</code> wildcards — "find every call whose second
+    argument is a string literal", which no regex can express reliably. Registered only when the
+    binary exists, so the model never holds an unusable tool.
+  </p>
+
+  <div class="callout">
+    <span class="label">Why <code>grep</code>/<code>find</code> ship off</span>
+    <p>
+      A tool set is prompt budget. If the model can search with <code>bash</code>, a dedicated
+      tool must earn its schema bytes. Repositories that want them (this one does — see
+      <code>.wcode/workflow.toml</code>'s <code>[tools] grep/find = true</code>) turn them on in
+      one line.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7.3</span>The shell, and the three policies around it</h2>
+  <p>
+    <code>bash</code> is <code>sh -c</code> in the working directory: stdout, labeled
+    <code>[stderr]</code>, exit code. 30 s default timeout, Ctrl-C kills the process group.
+    Three separate mechanisms shape it.
+  </p>
+
+  <h3>1 · The catastrophic-risk gate (always on)</h3>
+  <p>
+    No config knob, no allowlist — a fixed set of commands that would destroy the machine is
+    refused before execution, and the model receives a <code>blocked:</code> error explaining
+    why.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-harness/src/hooks.rs:374</span><span class="tag">BashRiskHooks</span></figcaption>
+<pre><span class="k">fn</span> <span class="f2">bash_risk_reason</span>(cmd: <span class="f2">&amp;</span>str) -&gt; Option&lt;String&gt; {
+    <span class="k">let</span> label = <span class="f2">device_write</span>(cmd)
+        .<span class="f2">or_else</span>(|| <span class="f2">mkfs_or_wipe</span>(cmd))
+        .<span class="f2">or_else</span>(|| <span class="f2">recursive_root_delete</span>(cmd))
+        .<span class="f2">or_else</span>(|| <span class="f2">forkbomb</span>(cmd))
+        .<span class="f2">or_else</span>(|| <span class="f2">recursive_perm_root</span>(cmd))?;
+    Some(<span class="f2">format!</span>(
+        <span class="s">"catastrophic shell command (`{label}`) — this would destroy the system; \
+         run it outside wcode if you really mean it"</span>
+    ))
+}</pre>
+  </figure>
+
+  <p class="dim">
+    The carve-outs are deliberate: <code>dd if=/dev/sda of=/tmp/img</code> (reading a device into
+    a file) is allowed; only <code>of=/dev/…</code> and a redirect into a device are refused.
+  </p>
+
+  <h3>2 · Plan mode (opt-in, toggleable)</h3>
+  <p>
+    While plan mode is on, mutating shell commands are refused by a denylist — see
+    <a href="10-plan-mode.html">Chapter 10</a>.
+  </p>
+
+  <h3>3 · The token filter (opt-in, <code>rtk</code>)</h3>
+  <p>
+    If <code>rtk</code> is on <code>PATH</code> (the default is <code>auto</code>), every bash
+    call is first passed through <code>rtk rewrite</code>. A rewrite means the command runs as
+    <code>rtk …</code> and the model sees compressed output; no rewrite, or any failure, means the
+    original command runs untouched.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/rtk.rs:5</span><span class="tag">degrade, never fail</span></figcaption>
+<pre>//! rtk stays an optional external binary: any failure — binary missing,
+//! rewrite timeout, non-rewrite exit — degrades to the current raw behavior.</pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">7.4</span>Long commands: <code>bg</code></h2>
+  <p>
+    Any bash call can be started in the background (<code>bash { background: true }</code>), and
+    <code>bg</code> manages it: <code>list</code>, <code>status &lt;id&gt;</code>,
+    <code>output &lt;id&gt; [tail]</code>, <code>wait &lt;id&gt; [secs]</code>,
+    <code>kill &lt;id&gt;</code>.
+  </p>
+  <p>
+    The part that matters: a finished task <strong>pushes</strong> a
+    <code>[message from bg]</code> back into the session — a turn if the session is idle, next-turn
+    context if it is running. So a five-minute build does not require the model to poll, and a
+    polling loop (which would block the message it is waiting for) never has to exist.
+  </p>
+  <p class="dim">
+    <code>wait</code> defaults to 60 s and caps at 300 s; the spill file path is printed with the
+    tail so long output is recoverable.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">7.5</span>Writing safely</h2>
+  <p>
+    <code>edit</code>, <code>edits</code> and <code>write</code> share one mutation lock and write
+    through a temp file plus an atomic rename. Two consequences: concurrent file mutation cannot
+    interleave, and a crash mid-write cannot truncate the target.
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-cli/src/tools/mod.rs:111</span><span class="tag">temp_path</span></figcaption>
+<pre><span class="c">/// Same-directory temp name for atomic write+rename mutations. PID-suffixed so</span>
+<span class="c">/// two wcode processes editing the same file can't clobber each other's temp</span>
+<span class="c">/// (rename is still atomic — last writer wins, never a truncation), and it</span>
+<span class="c">/// never collides with a user file that happens to be named `*.tmp-wcode`.</span>
+<span class="k">pub(crate) fn</span> <span class="f2">temp_path</span>(path: <span class="f2">&amp;</span>Path) -&gt; PathBuf {
+    <span class="k">let</span> name = path.<span class="f2">file_name</span>().<span class="f2">unwrap_or_default</span>().<span class="f2">to_string_lossy</span>();
+    path.<span class="f2">with_file_name</span>(<span class="f2">format!</span>(<span class="s">"{name}.tmp-wcode-{}"</span>, std::process::<span class="f2">id</span>()))
+}</pre>
+  </figure>
+
+  <p>
+    The editing contract itself — byte-exact matching, the two error codes, batch atomicity — is
+    <a href="08-editing.html">Chapter 08</a>'s subject.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">7.6</span>The web</h2>
+  <p>
+    <code>webfetch</code> GETs a URL over http(s) and reduces HTML to readable text.
+    <code>format</code> selects <code>text</code>/<code>markdown</code>/<code>html</code>
+    (default <code>markdown</code>); the body is capped at 5 MiB and the output at 40k
+    characters, so one page cannot flood the context. It is read-only and always registered.
+  </p>
+  <p class="dim">
+    GET only, by construction: no method, headers, body, or cookie parameter exists. If a page
+    needs a session, it is not fetchable — which keeps the tool's blast radius at "read public
+    text".
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">7.7</span>Session-local state</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4><code>todo</code> — the checklist</h4>
+      <p>
+        Call with <code>todos</code> to replace the whole list (each item
+        <code>content</code> + <code>status</code> pending/in-progress/completed), or with no
+        args to read it back. Registered in every session, workers included. Persisted as a
+        <code>Todo</code> session entry, so <code>/verify</code> works after a resume.
+      </p>
+    </div>
+    <div class="card">
+      <h4><code>session_search</code> — the archive</h4>
+      <p>
+        Reads transcripts, not context. <code>scope: all</code> scans the store;
+        <code>scope: current</code> reads this session and can return a verbatim turn range or a
+        token estimate. Fully described in <a href="05-sessions-and-memory.html">Chapter 05</a>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7.8</span>The root-only family</h2>
+  <p>
+    Five tools exist only for a root orchestrator (a worker's tool set has none of them, so only
+    the root plans or delegates):
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Tool</th><th>Verb</th><th>Chapter</th></tr></thead>
+      <tbody>
+        <tr><td><code>spawn</code></td><td>Start a worker session on a task; it reports back.</td><td><a href="11-teams-and-roles.html">11</a></td></tr>
+        <tr><td><code>message</code></td><td>Send to an address: <code>wake</code>, <code>notify</code>, <code>interrupt</code>, or <code>ask</code>.</td><td><a href="11-teams-and-roles.html">11</a></td></tr>
+        <tr><td><code>peers</code></td><td>List who is addressable, and in which state.</td><td><a href="11-teams-and-roles.html">11</a></td></tr>
+        <tr><td><code>member</code></td><td>Inspect or retune a teammate mid-run: <code>status</code>, <code>ask</code>, <code>cancel</code> (plus <code>model</code>/<code>effort</code>/<code>compact</code>/<code>retire</code>).</td><td><a href="11-teams-and-roles.html">11</a></td></tr>
+        <tr><td><code>task</code></td><td>The plan: <code>create</code>, <code>assign</code>, <code>depends</code>, <code>complete</code>, <code>reject</code>, <code>reset</code>, <code>list</code>.</td><td><a href="12-the-task-dag.html">12</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7.9</span>What is not a tool</h2>
+  <p>
+    No MCP client, no plugin loader, no dynamic registration. A tool is a Rust type compiled into
+    the binary: typed args (<code>schemars</code> schema), a description, an
+    <code>execute</code>. That is why the tool set can be reasoned about — and why adding one is
+    a ten-line diff rather than a protocol negotiation.
+  </p>
+  <p>
+    To write one, see <a href="17-development.html">Chapter 17</a>.
+  </p>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="index.html">contents</a> · <a href="06-the-kernel.html">← 06 The kernel</a></span>
+  <span>next · <a href="08-editing.html">08 Editing by literal text →</a></span>
+</div></div></footer>
+</body>
+</html>

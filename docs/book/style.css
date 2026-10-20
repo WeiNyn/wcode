@@ -1,0 +1,301 @@
+/* wcode book — shared stylesheet.
+   One accent (blue) for structure, one warning (amber) for "by design" notes,
+   one success (green) for "as shipped". Everything else is a grey. */
+
+:root {
+  --bg: #0b0e13;
+  --panel: #12161d;
+  --panel-2: #171c25;
+  --line: #232b37;
+  --text: #dce3ed;
+  --muted: #93a0b4;
+  --dim: #6b7788;
+  --accent: #6ea8fe;
+  --gate: #f0b95c;
+  --ok: #6ee7a8;
+  --bad: #f2777a;
+  --code: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 5rem; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.68 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code { font-family: var(--code); font-size: .86em; }
+:not(pre) > code {
+  background: #1b222c;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: .08em .38em;
+  color: #cfe0ff;
+  white-space: nowrap;
+}
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 1.5rem 5rem; }
+
+/* ---------- book nav (injected) ---------- */
+nav.booknav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(11, 14, 19, .92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+nav.booknav .in {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: .62rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font: 500 .8rem/1.4 var(--code);
+}
+nav.booknav .home { color: var(--muted); letter-spacing: .04em; }
+nav.booknav .here { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+nav.booknav .here b { color: var(--text); font-weight: 600; }
+nav.booknav .pn { margin-left: auto; display: flex; gap: .4rem; flex-shrink: 0; }
+nav.booknav .pn a {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: .3rem .55rem;
+  color: var(--muted);
+  font-size: .76rem;
+}
+nav.booknav .pn a:hover { color: var(--text); border-color: #33405a; background: var(--panel-2); text-decoration: none; }
+
+/* ---------- chapter header ---------- */
+header.chap {
+  border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(680px 280px at 10% -20%, rgba(110,168,254,.13), transparent 70%),
+    radial-gradient(520px 220px at 90% 0%, rgba(240,185,92,.07), transparent 70%);
+}
+header.chap .in { max-width: 1080px; margin: 0 auto; padding: 3.2rem 1.5rem 2rem; }
+.eyebrow {
+  font: 600 .72rem/1 var(--code);
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.eyebrow b { color: var(--accent); font-weight: 600; }
+h1 {
+  font-size: clamp(1.85rem, 4vw, 2.65rem);
+  line-height: 1.1;
+  letter-spacing: -.02em;
+  margin: .9rem 0 .8rem;
+  font-weight: 660;
+}
+.lede { font-size: 1.06rem; color: var(--muted); max-width: 66ch; margin: 0; }
+
+/* ---------- prose ---------- */
+section { padding-top: 2.6rem; }
+h2 {
+  font-size: 1.35rem;
+  letter-spacing: -.01em;
+  margin: 0 0 .9rem;
+  padding-bottom: .6rem;
+  border-bottom: 1px solid var(--line);
+  font-weight: 640;
+}
+h2 .num { font: 600 .78rem var(--code); color: var(--accent); margin-right: .65rem; vertical-align: .16em; }
+h3 { font-size: 1rem; margin: 1.9rem 0 .55rem; font-weight: 620; }
+h3 .hint { font: 400 .78rem var(--code); color: var(--dim); margin-left: .6rem; }
+p { margin: .8rem 0; }
+ul, ol { margin: .8rem 0; padding-left: 1.3rem; }
+li { margin: .34rem 0; }
+li::marker { color: var(--dim); }
+strong { font-weight: 620; color: #fff; }
+.muted { color: var(--muted); }
+.dim { color: var(--dim); }
+hr.soft { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+
+/* ---------- cards / grids ---------- */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+@media (max-width: 860px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.05rem 1.15rem;
+}
+.card h4 {
+  margin: 0 0 .45rem;
+  font: 600 .76rem/1.4 var(--code);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.card p:last-child { margin-bottom: 0; }
+
+.callout {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: linear-gradient(180deg, rgba(110,168,254,.07), rgba(110,168,254,.02));
+  border-radius: 0 10px 10px 0;
+  padding: .85rem 1.05rem;
+  margin: 1.15rem 0;
+}
+.callout.warn { border-left-color: var(--gate); background: linear-gradient(180deg, rgba(240,185,92,.08), rgba(240,185,92,.02)); }
+.callout.good { border-left-color: var(--ok); background: linear-gradient(180deg, rgba(110,231,168,.07), rgba(110,231,168,.02)); }
+.callout p { margin: .3rem 0; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label {
+  font: 600 .7rem/1 var(--code);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  display: block;
+  margin-bottom: .4rem;
+}
+
+/* ---------- tables ---------- */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; margin: 1.1rem 0; }
+table { width: 100%; border-collapse: collapse; font-size: .89rem; }
+th, td { text-align: left; padding: .72rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th {
+  background: var(--panel-2);
+  font: 600 .72rem/1.3 var(--code);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: rgba(255,255,255,.017); }
+td:first-child { color: var(--muted); }
+table code { white-space: nowrap; }
+
+/* ---------- code ---------- */
+figure.code {
+  margin: 1.1rem 0;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  overflow: hidden;
+  background: #0d1117;
+}
+figure.code figcaption {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  flex-wrap: wrap;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  padding: .48rem .85rem;
+  font: 500 .74rem/1.4 var(--code);
+  color: var(--dim);
+}
+figure.code figcaption .f { color: var(--accent); }
+figure.code figcaption .tag {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: .15rem .52rem;
+  font-size: .66rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+figure.code pre {
+  margin: 0;
+  padding: .9rem 1rem;
+  overflow-x: auto;
+  font: 400 .82rem/1.6 var(--code);
+  color: #c9d5e4;
+  tab-size: 2;
+}
+figure.code .c { color: #5f6d80; font-style: italic; }
+figure.code .k { color: #c792ea; }
+figure.code .s { color: #9fe0a8; }
+figure.code .n { color: #f0b95c; }
+figure.code .f2 { color: #82aaff; }
+figure.code .o { color: #8fa4bd; }
+
+/* ---------- diagrams ---------- */
+figure.diagram {
+  margin: 1.3rem 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 1rem;
+  overflow-x: auto;
+}
+figure.diagram svg { display: block; min-width: 760px; height: auto; }
+figure.diagram figcaption, figure.code figcaption.note { font-size: .8rem; color: var(--dim); }
+.legend { display: flex; gap: 1.3rem; flex-wrap: wrap; font-size: .77rem; color: var(--muted); padding: .1rem .2rem .55rem; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .45rem; vertical-align: middle; }
+
+/* ---------- stepped lists ---------- */
+ol.steps { list-style: none; padding: 0; counter-reset: s; }
+ol.steps > li { position: relative; padding: 0 0 1.05rem 2.5rem; counter-increment: s; margin: 0; }
+ol.steps > li::before {
+  content: counter(s);
+  position: absolute; left: 0; top: .08rem;
+  width: 1.55rem; height: 1.55rem; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--panel-2);
+  color: var(--accent); font: 600 .72rem/1.5rem var(--code); text-align: center;
+}
+ol.steps > li::after { content: ""; position: absolute; left: .77rem; top: 1.85rem; bottom: .15rem; width: 1px; background: var(--line); }
+ol.steps > li:last-child::after { display: none; }
+ol.steps b { color: #fff; font-weight: 620; }
+ol.steps .where { font: 400 .75rem var(--code); color: var(--dim); }
+
+/* ---------- index page ---------- */
+.cover { border-bottom: 1px solid var(--line); background:
+  radial-gradient(740px 320px at 12% -10%, rgba(110,168,254,.15), transparent 70%),
+  radial-gradient(620px 260px at 92% 0%, rgba(240,185,92,.08), transparent 70%); }
+.cover .in { max-width: 1080px; margin: 0 auto; padding: 5rem 1.5rem 3rem; }
+h1.big { font-size: clamp(2.4rem, 6vw, 4rem); line-height: 1.03; letter-spacing: -.03em; margin: 1.1rem 0 1rem; }
+h1.big em { font-style: normal; color: var(--accent); }
+.parts { display: grid; gap: 2.2rem; margin-top: 2.2rem; }
+.part h2 { border-bottom: 1px solid var(--line); }
+.part .chapters { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .6rem; }
+.part .chapters a {
+  display: block;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 10px;
+  padding: .7rem .85rem;
+  color: var(--muted);
+  transition: border-color .15s, background .15s, color .15s;
+}
+.part .chapters a:hover { border-color: #33405a; background: var(--panel-2); color: var(--text); text-decoration: none; }
+.part .chapters a .no { font: 600 .74rem var(--code); color: var(--dim); margin-right: .55rem; }
+.part .chapters a .t { color: var(--text); font-weight: 560; display: block; margin-bottom: .18rem; }
+.part .chapters a .d { font-size: .8rem; color: var(--dim); display: block; }
+
+.paths { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: .9rem; margin-top: 1rem; }
+.paths .card h4 { color: var(--accent); }
+.paths .card ol { margin: .2rem 0 0; padding-left: 1.15rem; font-size: .88rem; }
+
+/* ---------- footer (injected) ---------- */
+footer.bookfoot {
+  border-top: 1px solid var(--line);
+  margin-top: 3.4rem;
+  padding: 1.3rem 0 3rem;
+  color: var(--dim);
+  font-size: .82rem;
+}
+footer.bookfoot .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: baseline; }
+footer.bookfoot .grow { flex: 1; }
+footer.bookfoot a { color: var(--muted); }
+footer.bookfoot a:hover { color: var(--text); }
+
+@media print {
+  nav.booknav, footer.bookfoot { display: none; }
+  body { background: #fff; color: #111; }
+  figure.code, .card, .table-wrap { break-inside: avoid; }
+}
