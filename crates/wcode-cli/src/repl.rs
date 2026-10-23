@@ -319,6 +319,45 @@ pub fn resolve_session_path(arg: &str) -> PathBuf {
     }
 }
 
+/// The `/sessions` listing: one line per session, ` <mark> <name>[ · <title>]`.
+/// A pure builder so the line the REPL prints is the line a test can assert —
+/// the print site above only joins them with newlines.
+fn sessions_lines(
+    list: &[std::path::PathBuf],
+    current: Option<&Path>,
+    current_group: Option<&Path>,
+) -> Vec<String> {
+    list.iter()
+        .map(|p| {
+            let mark = if current == Some(p.as_path()) || current_group == Some(p.as_path()) {
+                "*"
+            } else {
+                " "
+            };
+            format!("{mark} {}", sessions_row(p))
+        })
+        .collect()
+}
+
+/// One `/sessions` row: `name · title` for a titled session, `name` alone
+/// otherwise. The file NAME leads because it is the token a human pastes back
+/// into `--resume`; the title is decoration on the same line.
+///
+/// `crate::row_session` (private in `main.rs`, reachable from this descendant
+/// module) resolves a group entry to its `root.jsonl`, so the title is read from
+/// the transcript this row stands for.
+fn sessions_row(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    match crate::row_session(path).and_then(|s| s.title()) {
+        Some(title) => format!("{name} · {title}"),
+        None => name,
+    }
+}
+
 /// Materialize the default hook set from config. Every built-in native hook
 /// gets a slot here — the bash risk gate (always on) first, then rtk — so
 /// future integrations each add one entry (plus a field in [`HooksConfig`]) and
@@ -1196,19 +1235,8 @@ pub async fn run(
                     // A group-resumed session's path is `<dir>/root.jsonl`; map
                     // it back up so the group dir row is still marked.
                     let current_group = current.and_then(crate::session_groups::group_dir_of);
-                    for p in list {
-                        let mark = if current == Some(p.as_path())
-                            || current_group.as_deref() == Some(p.as_path())
-                        {
-                            "*"
-                        } else {
-                            " "
-                        };
-                        // The shared picker row: a titled session leads with its
-                        // title, an untitled one keeps the pre-W031 shape.
-                        // `session_label` stays private in `main.rs` — this module
-                        // is a descendant of the crate root.
-                        println!("{mark} {}", crate::session_label(&p));
+                    for line in sessions_lines(&list, current, current_group.as_deref()) {
+                        println!("{line}");
                     }
                 }
                 Err(e) => eprintln!("list sessions: {e}"),
@@ -2027,6 +2055,78 @@ mod tests {
             ..LlmOpts::default()
         };
         assert_eq!(context_line(&unknown, &reported), None);
+    }
+
+    /// GATE (W031 second-layer B1): a `/sessions` row must still NAME a session
+    /// you can resume. The listing's whole purpose is that its output is pasted
+    /// back into `--resume` (`resolve_session_path`'s doc), so the leading token
+    /// is the file name — a titled session shows its title AFTER it, never instead
+    /// of it. A test that only checked the title appears would pass against the
+    /// broken (picker-shaped) row.
+    #[test]
+    fn sessions_rows_stay_pasteable_into_resume() {
+        use wcode_harness::session::{Session, SessionEntry};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut titled = Session::create(dir.path()).unwrap();
+        titled
+            .append(SessionEntry::Title {
+                id: "t1".into(),
+                title: "retry backoff fix".into(),
+            })
+            .unwrap();
+        let titled_path = titled.path().unwrap().to_path_buf();
+        let name = titled_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        // Assert the LINES THE REPL PRINTS, mark included — not just the row
+        // builder, so the print site cannot drift from what is tested.
+        let lines = sessions_lines(
+            std::slice::from_ref(&titled_path),
+            Some(titled_path.as_path()),
+            None,
+        );
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0];
+        assert_eq!(
+            line,
+            &format!("* {name} · retry backoff fix"),
+            "the mark, then the name, then the title"
+        );
+
+        // The LEADING token AFTER THE MARK (what a human copies) is the file name …
+        let token = line.split(' ').nth(1).unwrap();
+        assert_eq!(token, name, "the pasteable token leads the row: {line}");
+
+        // … and it RESOLVES to this very session: the regression was that
+        // `session_label`'s `title · age` token resolved to nothing.
+        let resolved = resolve_session_path(token);
+        assert_eq!(
+            resolved.file_name().unwrap().to_string_lossy(),
+            name,
+            "the printed token must name this session: {line} → {resolved:?}"
+        );
+
+        // An untitled session keeps the bare, pasteable name.
+        let mut plain = Session::create(dir.path()).unwrap();
+        plain
+            .append(SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: wcode_harness::message::AgentMessage::user_text("hi"),
+            })
+            .unwrap();
+        let plain_path = plain.path().unwrap().to_path_buf();
+        let plain_name = plain_path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(sessions_row(&plain_path), plain_name);
+        assert_eq!(
+            sessions_lines(std::slice::from_ref(&plain_path), None, None),
+            vec![format!("  {plain_name}")],
+            "an unmarked, untitled row is the bare name"
+        );
     }
 
     #[test]

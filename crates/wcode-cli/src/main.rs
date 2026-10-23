@@ -2584,6 +2584,8 @@ async fn one_shot(backend: Backend, prompt: &str) -> i32 {
                 Ok(AgentEvent::Error { message }) => last_error = Some(message),
                 Ok(AgentEvent::MessageEnd { message }) => last_text = message.as_text(),
                 Ok(AgentEvent::AgentEnd) => break,
+                // Deliberate: a `-p` run prints the ANSWER (captured above), never
+                // a name or a per-event line. Do not "fix" this with a print.
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -2788,6 +2790,9 @@ async fn drive_workflow(
             print_workflow_summary(&tasks);
             return 1;
         }
+        // Deliberate: the workflow summary below is authoritative; a title (or any
+        // other event) adds nothing to a headless run. Do not "fix" this with a
+        // stray print.
         Ok(_) => {}
     }
 

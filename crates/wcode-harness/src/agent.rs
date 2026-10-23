@@ -323,8 +323,10 @@ impl Agent {
             .follow_rx
             .take()
             .expect("follow_rx present between runs");
-        // Read before the literal: `session` inside it takes `&mut self`, so the
-        // accessor cannot be called there.
+        // Read before the literal: the accessor takes `&self` (the WHOLE struct),
+        // and `session: self.session.as_mut()` inside the literal holds a `&mut`
+        // borrow of it. A disjoint field READ (`self.title_after_turns`) would be
+        // fine there; the method call is not.
         let title_after_turns = self.title_after_turns();
         let cfg = LoopConfig {
             system: self.system.clone(),
