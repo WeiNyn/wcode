@@ -11,4 +11,5 @@ pub mod protocol;
 pub mod session;
 pub mod stats;
 pub mod streamfn;
+pub mod title;
 pub mod tool;
