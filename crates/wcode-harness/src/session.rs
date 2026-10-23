@@ -51,6 +51,19 @@ pub enum SessionEntry {
         id: String,
         todos: Vec<TodoItem>,
     },
+    /// The session's semantic name (W031): last write wins, like `Todo`.
+    /// Appended by the auto-titler at a turn boundary (`loop_`) and by an
+    /// explicit `/rename` (`Agent::set_title`) — never edited in place, never
+    /// re-written by the loop once one exists (§5.5).
+    ///
+    /// Wire tag is `title` (`{"type":"title","id":…,"title":…}`): purely
+    /// additive, so `PROTOCOL_VERSION` stays 1 and an older binary reads it as
+    /// `SessionEntry::Unknown` — the forward-compat path pinned by
+    /// `unknown_entries_tolerated`.
+    Title {
+        id: String,
+        title: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -250,6 +263,21 @@ impl Session {
     pub fn todo(&self) -> Option<Vec<TodoItem>> {
         self.entries.iter().rev().find_map(|e| match e {
             SessionEntry::Todo { todos, .. } => Some(todos.clone()),
+            _ => None,
+        })
+    }
+
+    /// The session's most recently persisted title, if any (`None` = never
+    /// titled). Last write wins, exactly like [`Self::model`]/[`Self::effort`]/
+    /// [`Self::todo`].
+    ///
+    /// The loop's auto-trigger calls this FIRST, before counting turns
+    /// (W031 **D2**): an existing title short-circuits, so a `--resume` never
+    /// re-titles and a `/rename` permanently disables the auto-titler for that
+    /// session (§5.5).
+    pub fn title(&self) -> Option<String> {
+        self.entries.iter().rev().find_map(|e| match e {
+            SessionEntry::Title { title, .. } => Some(title.clone()),
             _ => None,
         })
     }
@@ -531,6 +559,61 @@ mod tests {
         // The serde wire tag is `todo` (the extensible-`type` path).
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains(r#""type":"todo""#), "{raw}");
+    }
+
+    #[test]
+    fn title_latest_wins_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Session::create(dir.path()).unwrap();
+        assert_eq!(s.title(), None, "a fresh session has no title");
+        s.append(SessionEntry::Title {
+            id: "ti1".into(),
+            title: "first name".into(),
+        })
+        .unwrap();
+        s.append(SessionEntry::Title {
+            id: "ti2".into(),
+            title: "retry backoff fix".into(),
+        })
+        .unwrap();
+
+        let path = s.path().unwrap().to_path_buf();
+        let raw = fs::read_to_string(&path).unwrap();
+        // The serde wire tag is `title` (the extensible-`type` path); the entry
+        // is appended, never edited, so both writes are on disk.
+        assert!(raw.contains(r#""type":"title""#), "{raw}");
+        assert_eq!(raw.matches(r#""type":"title""#).count(), 2, "{raw}");
+
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(
+            reopened.title().as_deref(),
+            Some("retry backoff fix"),
+            "last write wins"
+        );
+    }
+
+    #[test]
+    fn open_skips_an_unknown_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        // A future binary's `title`-family entry this build cannot read, sitting
+        // in the MIDDLE (so the torn-final-line tolerance cannot hide it). The
+        // `#[serde(other)]` catch-all must take it, not fail the whole session.
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"header","version":1,"id":"x","cwd":"/","created":"2026-01-01T00:00:00Z"}),
+                json!({"type":"title_v2","id":"t1","title":"x","slug":"future"}),
+                json!({"type":"message","id":"1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"q"}]}})
+            ),
+        )
+        .unwrap();
+        let s = Session::open(&path).expect("an unknown catch-all entry must not fail open");
+        assert_eq!(s.entries().len(), 3);
+        assert_eq!(s.entries()[1], SessionEntry::Unknown);
+        assert_eq!(s.messages().len(), 1);
+        assert_eq!(s.title(), None, "an unknown entry carries no title");
     }
 
     #[test]
