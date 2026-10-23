@@ -70,6 +70,16 @@ min_remaining = 16384      # compact once fewer than this many tokens remain
 keep_recent_tokens = 20000 # recent verbatim context kept after compacting, in tokens
 keep_recent_turns = 2      # complete turns always kept, whatever their size
 
+[session]
+# The session's name in the `/resume` picker. After `title_after_turns` assistant
+# turns the model names the session from the opening exchange and the name is
+# appended to the transcript as a `title` entry (last-write-wins, so `/rename`
+# overrules it). A titled row reads `<title> · <age>`; an untitled one keeps the
+# old `<id> · <age> · <first user line>`.
+title_after_turns = 2      # optional; assistant turns before auto-titling.
+                           # 0 disables it. Range 0..=50 (a bad value is a
+                           # startup error). WCODE_TITLE_AFTER_TURNS wins.
+
 [instructions]
 # Instruction ("reference") files folded into the system prompt. An absent table
 # = discover the candidate names from the working dir up to the repo root, plus
@@ -371,6 +381,7 @@ wcode --theme nord           # select a preset or `omarchy` (or `[theme] name` i
 wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --detect-endpoint      # when base_url is unset, probe common local endpoints
+wcode --title "retry fix"    # name this session up front (distinct from --name, the A2A address)
 wcode --dump-config          # print the resolved endpoint/base_url/model and key SOURCES, exit
 wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
@@ -410,7 +421,7 @@ box wraps and grows (capped at 8 rows, or half the screen, then scrolls to the
 cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/theme [name]` (bare `/theme` opens a picker), `/compact [text]`, `/usage`, `/copy`, `/team`,
-`/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/help` — the
+`/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/rename <text>`, `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
@@ -436,7 +447,8 @@ REPL commands (unknown `/...` lines go to the LLM as prompt text):
 | `/models [filter]` | list `GET {base_url}/models` ids, `*` marks current; optional case-insensitive substring filter |
 | `/effort [level]` | show/set reasoning effort (free-style, logged as `EffortChange`); `/effort -` clears to send-nothing |
 | `/resume [path]` | reopen a session and replay its history as context (default: latest); restores model + effort |
-| `/sessions` | list sessions, `*` marks the current one |
+| `/sessions` | list sessions, `*` marks the current one; each row is `<file> · <title>` once the session has a name, so the file name stays pasteable into `/resume` |
+| `/rename <text>` | name this session (appended as a `title` entry, last-write-wins; it also suppresses auto-titling). Bare `/rename` prints usage. Works over a socket — unlike `/resume`, because the server applies it |
 | `/usage` | usage report — the focused session's line, one line per local team member, and a total: input/output tokens, cache hit rate, per-tool calls/errors, and a `~$` cost when the model's price is known |
 | `/btw <question>` | a tool-free side question answered from the current context (never committed); a dim `btw: …` prints while it is in flight — the TUI's status corner shows `⠹ btw…` until the reply |
 | `/plan [on|off]` | toggle (bare) or set plan mode: the editing tools are disabled and mutating shell commands refused (the `PlanModeHooks` denylist), and a `# Plan mode` section is appended to the system prompt — explore and propose, then record the plan as a todo list and `/plan off` to execute |
@@ -560,10 +572,18 @@ and are skipped. `--no-skills` disables discovery.
 
 JSONL files in `~/.local/share/wcode/sessions`, named `<millis>_<id>.jsonl`
 (`~/.local/share` is used even on macOS, matching the config convention).
-One entry per message plus `model_change` / `effort_change` markers; torn
-final lines are tolerated. `/resume` replays the history as the conversation
+One entry per message plus `model_change` / `effort_change` / `todo` /
+`compaction` / `title` markers; torn final lines are tolerated, and an entry kind a
+build does not know is skipped rather than fatal. `/resume` replays the history as
+the conversation
 context and restores the last model + effort (`--model` / `--effort` flags
 win when passed alongside `--resume`).
+
+The `title` entry is the session's **name**. After `title_after_turns` assistant
+turns (config `[session]`, default 2) the model reads the opening exchange and
+writes one; `/rename` overrules it and `--title` sets it at launch. Once a
+session has a name the picker row is `<title> · <age>` — the opaque
+`<millis>_<id>` key and the first line are what the name replaces.
 
 On a clean interactive exit (`/exit`, or EOF; the TUI's `/exit`) wcode prints the
 exact command to bring the session back, e.g.
