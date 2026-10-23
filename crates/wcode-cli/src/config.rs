@@ -501,6 +501,68 @@ pub struct TuiConfig {
     pub view: Option<String>,
 }
 
+/// `[session]`: session behavior, not presentation and not provider.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct SessionConfig {
+    /// Auto-title once this many ASSISTANT turns exist; `0` = never (W031 D2).
+    /// Absent = the kernel default,
+    /// [`wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS`]. Validated loudly
+    /// against `0..=TITLE_AFTER_TURNS_MAX` — an out-of-range value is a startup
+    /// error, exactly like `[tui] width`.
+    pub title_after_turns: Option<usize>,
+}
+
+/// Upper bound on `[session] title_after_turns`. Why a ceiling at all: the
+/// knob trades a model round-trip for a name, so a typo (`200`) would silently
+/// disable the feature for that install — the `validate_measure` rationale. 50 is
+/// far past any real use and well short of a typo.
+pub const TITLE_AFTER_TURNS_MAX: usize = 50;
+
+impl SessionConfig {
+    /// Fold this table (and the env override) into the resolved spec.
+    ///
+    /// Precedence: `WCODE_TITLE_AFTER_TURNS` beats the toml, which beats the
+    /// harness default — the `[compaction]`/`[retry]` rule.
+    ///
+    /// # Errors
+    /// A non-numeric env value, or a value above [`TITLE_AFTER_TURNS_MAX`] from
+    /// EITHER source, as a human message naming the knob and its range.
+    pub fn resolve(&self, env: Option<&str>) -> Result<SessionSpec, String> {
+        let raw = match env {
+            Some(v) => v.trim().parse::<usize>().map_err(|_| {
+                format!("invalid WCODE_TITLE_AFTER_TURNS {v:?}: expected a non-negative integer")
+            })?,
+            None => self
+                .title_after_turns
+                .unwrap_or(wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS),
+        };
+        if raw > TITLE_AFTER_TURNS_MAX {
+            return Err(format!(
+                "title_after_turns {raw}: must be 0..={TITLE_AFTER_TURNS_MAX} (0 = off)"
+            ));
+        }
+        Ok(SessionSpec {
+            title_after_turns: raw,
+        })
+    }
+}
+
+/// The RESOLVED `[session]` (the `wcode_tui::TuiSpec` role for this table): what
+/// `main.rs` hands to the agent. `Default` is the kernel default, so a test or an
+/// embedding that does not care writes `SessionSpec::default()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSpec {
+    pub title_after_turns: usize,
+}
+impl Default for SessionSpec {
+    fn default() -> Self {
+        SessionSpec {
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
+        }
+    }
+}
+
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 pub struct FileConfig {
     pub base_url: Option<String>,
@@ -544,6 +606,10 @@ pub struct FileConfig {
     /// `[tui]`: presentation only (the initial transcript measure). No env var.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// `[session]`: session behavior (W031). Per-knob `Option`, so an absent
+    /// table keeps the kernel defaults.
+    #[serde(default)]
+    pub session: SessionConfig,
     /// `[workflow]`: a plan template instantiated at boot (P5). `None` = no
     /// template (the model authors the DAG at runtime, as today).
     #[serde(default)]
@@ -700,6 +766,8 @@ pub struct Config {
     pub theme: wcode_tui::ThemeSpec,
     /// Resolved `[tui]` (D016): the presentation spec (the initial measure).
     pub tui: wcode_tui::TuiSpec,
+    /// Resolved `[session]` (W031): the auto-titler knob, already validated.
+    pub session: SessionSpec,
     /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
     /// Resolved `[workflow]`: the plan template, passed to `main.rs`.
     pub workflow: Option<Workflow>,
@@ -732,6 +800,13 @@ pub struct EnvLike {
     pub wcode_retry_idle_ms: Option<String>,
     /// `OLLAMA_HOST`: fed to `detect_candidates` (opt-in detection only).
     pub ollama_host: Option<String>,
+    /// `WCODE_TITLE_AFTER_TURNS`: beats `[session] title_after_turns` (W031).
+    ///
+    /// Kept as `Option<String>`, not `Option<usize>`: parsing/validation happens
+    /// in [`SessionConfig::resolve`], so a bad value is a loud `[session]` error
+    /// with the knob's name in it, not a silent `None` ([`parse_count`]'s
+    /// convention).
+    pub wcode_title_after_turns: Option<String>,
 }
 
 impl EnvLike {
@@ -758,6 +833,7 @@ impl EnvLike {
             wcode_retry_ttft_ms: std::env::var("WCODE_RETRY_TTFT_MS").ok(),
             wcode_retry_idle_ms: std::env::var("WCODE_RETRY_IDLE_MS").ok(),
             ollama_host: std::env::var("OLLAMA_HOST").ok(),
+            wcode_title_after_turns: std::env::var("WCODE_TITLE_AFTER_TURNS").ok(),
         }
     }
 }
@@ -778,6 +854,8 @@ pub enum ConfigError {
     Theme(String),
     /// An invalid `[tui]` value: a `width` outside the TUI's allowed range.
     Tui(String),
+    /// An invalid `[session]` value: an out-of-range `title_after_turns`.
+    Session(String),
     /// An invalid `[workflow]`: an unknown member, a cycle, missing-or-both of
     /// `member`|`script`, a duplicate/unknown id, or an empty script.
     Workflow(String),
@@ -797,6 +875,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::Theme(msg) => write!(f, "invalid [theme]: {msg}"),
             ConfigError::Tui(msg) => write!(f, "invalid [tui]: {msg}"),
+            ConfigError::Session(msg) => write!(f, "invalid [session]: {msg}"),
             ConfigError::Workflow(msg) => write!(f, "invalid [workflow]: {msg}"),
             ConfigError::TeamMemberFile(msg) => write!(f, "invalid [[team]] file: {msg}"),
         }
@@ -1004,6 +1083,13 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
             .transpose()
             .map_err(ConfigError::Tui)?,
     };
+    // `[session] title_after_turns` is behavior, not presentation, but a bad
+    // value is just as LOUD — the same "unparseable overlay fails loudly" rule
+    // as `[theme]`/`[tui]`.
+    let session = file
+        .session
+        .resolve(env.wcode_title_after_turns.as_deref())
+        .map_err(ConfigError::Session)?;
     // `[models.<id>]`: resolve each entry into an `LlmProfile`, validating the
     // endpoint value loudly (the same rule as the global `endpoint`). An absent
     // or empty endpoint means INHERIT (`None`), not `parse_endpoint(None)`'s
@@ -1039,6 +1125,7 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
         orchestrator: file.orchestrator,
         theme,
         tui,
+        session,
         workflow: file.workflow,
         models,
         provenance,
@@ -1437,6 +1524,90 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.base_url.as_deref(), Some("http://env"));
         assert_eq!(cfg.model, "m1");
+    }
+
+    #[test]
+    fn title_after_turns_env_beats_toml() {
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 3\n").unwrap();
+
+        // The toml alone resolves to its own value (not the kernel default).
+        let toml_only = merge(EnvLike::default(), file.clone()).unwrap();
+        assert_eq!(toml_only.session.title_after_turns, 3);
+
+        // Env beats toml.
+        let env_wins = merge(
+            EnvLike {
+                wcode_title_after_turns: Some("5".into()),
+                ..EnvLike::default()
+            },
+            file,
+        )
+        .unwrap();
+        assert_eq!(env_wins.session.title_after_turns, 5);
+    }
+
+    #[test]
+    fn session_title_after_turns_rejects_an_out_of_range_value() {
+        // 51 from the TOML: the error names the value AND the range.
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 51\n").unwrap();
+        let err = merge(EnvLike::default(), file).unwrap_err();
+        let ConfigError::Session(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("51"), "names the value: {msg}");
+        assert!(msg.contains("0..=50"), "names the range: {msg}");
+        assert!(
+            err.to_string().starts_with("invalid [session]:"),
+            "the loud [session] prefix: {err}"
+        );
+
+        // The env is validated by the same check — it does not bypass the ceiling.
+        let err = merge(
+            EnvLike {
+                wcode_title_after_turns: Some("99".into()),
+                ..EnvLike::default()
+            },
+            toml::from_str("model = \"m\"\n").unwrap(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Session(_)), "{err:?}");
+
+        // `0` is NOT out of range: it means "never auto-title".
+        let off = merge(EnvLike::default(), toml::from_str("model = \"m\"\n").unwrap()).unwrap();
+        assert_eq!(off.session.title_after_turns, 2, "absent = the kernel default");
+        let off: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 0\n").unwrap();
+        assert_eq!(
+            merge(EnvLike::default(), off).unwrap().session.title_after_turns,
+            0,
+            "0 is a legitimate value (off), not an error"
+        );
+        // And the ceiling itself is inclusive.
+        let at_max: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 50\n").unwrap();
+        assert_eq!(
+            merge(EnvLike::default(), at_max)
+                .unwrap()
+                .session
+                .title_after_turns,
+            50
+        );
+
+        // A non-numeric env value is a loud [session] error naming the variable.
+        let err = merge(
+            EnvLike {
+                wcode_title_after_turns: Some("two".into()),
+                ..EnvLike::default()
+            },
+            toml::from_str("model = \"m\"\n").unwrap(),
+        )
+        .unwrap_err();
+        let ConfigError::Session(msg) = &err else {
+            panic!("wrong error: {err:?}")
+        };
+        assert!(msg.contains("WCODE_TITLE_AFTER_TURNS"), "{msg}");
     }
 
     #[test]

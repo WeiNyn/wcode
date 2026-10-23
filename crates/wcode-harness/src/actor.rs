@@ -39,17 +39,7 @@
 //!        Cancel         ─► (no-op — nothing is running)
 //!        SetModel  {..} ─► agent.set_model(..)
 //!        SetEffort {..} ─► agent.set_effort(..)
-// ==== SKETCH (review-only, not real code) ==== W031 — the module doc
-// Goes HERE: the ASCII map above gains one line, and the two tables below gain
-// one row each. Doc-only, but the tables are the file's contract:
-//
-//   in the map above (after `SetEffort`): `SetTitle  {..} ─► agent.set_title(..)`
-//   in the delivery table (`actor.rs:74-84`, the "while a run is in flight"
-//   table): `| SetModel / SetEffort / SetTitle / Compact | deferred, applied when
-//   the run ends |`
-//   in the requests-and-replies list (`actor.rs:101-109`): `SetTitle` answers
-//   `AgentEvent::SessionTitle` (streamed) — not `Ack` alone.
-// ==== /SKETCH ====
+//!        SetTitle  {..} ─► agent.set_title(..)   → appends a `Title` entry
 //!        Compact   {..} ─► agent.compact(..).await
 //!        GetHistory     ─► reply with the context
 //!        Usage          ─► reply with folded stats (+ $ when priced)
@@ -86,7 +76,7 @@
 //! |---------|--------------------------|
 //! | `Cancel` | delivered at once — the token is cancelled; the loop aborts |
 //! | `Interrupt` / `Wake` | forwarded to the run's channels at once |
-//! | `SetModel` / `SetEffort` / `Compact` | deferred, applied when the run ends |
+//! | `SetModel` / `SetEffort` / `SetTitle` / `Compact` | deferred, applied when the run ends |
 //! | another `Submit` | deferred, becomes the next run |
 //!
 //! The interactive path therefore never waits on a run. The deferred set is
@@ -118,6 +108,11 @@
 //! — correlated in-process by a
 //! one-shot channel. Replies are never fanned out on the event stream; the wire
 //! (S2) will carry the same variants correlated by the envelope's `reply_to`.
+//!
+//! `SetTitle` is the one request that answers with BOTH: the reply is an
+//! [`AgentEvent::SessionTitle`], and the same event is *streamed* so a UI
+//! subscriber (and, mid-run, the deferred `Tell` — which gets no reply at all)
+//! still learns the name.
 //!
 //! Scope so far: every request variant that maps onto an existing [`Agent`]
 //! method is serviced. Still to come (S1b): pointing the CLI at a handle.
@@ -798,6 +793,8 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: crate::hooks::PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: crate::title::DEFAULT_TITLE_AFTER_TURNS,
         }
     }
 

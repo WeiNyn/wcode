@@ -45,36 +45,11 @@ pub struct AgentConfig {
     /// The shared plan-mode switch; the same handle is held by the
     /// `PlanModeHooks` in `hooks`, so `set_plan_mode` flips both.
     pub plan_mode: PlanModeHandle,
-    // ==== SKETCH (review-only, not real code) ==== W031 — AgentConfig half
-    // Goes HERE: the last field of `AgentConfig` (`agent.rs:22-48`), after
-    // `pub plan_mode: PlanModeHandle,`.
-    //
-    // /// Auto-title after this many assistant turns; `0` disables it (W031
-    // /// **D2**). Use [`crate::title::DEFAULT_TITLE_AFTER_TURNS`]. Plumbed into
-    // /// `LoopConfig::title_after_turns` by [`Agent::run`] — the kernel never
-    // /// reads it outside the loop, so there is no `Agent` mirror of it.
-    // pub title_after_turns: usize,
-    //
-    // Friction: adding a NON-`Option` field is a compile error at EVERY
-    // `AgentConfig` literal, and `cargo build` is the authoritative enumerator —
-    // do not trust a hand-written census (this sketch's first draft listed 9 and
-    // was wrong; three different counts have been produced by three readers).
-    // Set `title_after_turns: crate::title::DEFAULT_TITLE_AFTER_TURNS` wherever
-    // the literal is in a worker/transport/test path: W031 asks for no per-worker
-    // knob, so do not invent a second config path.
-    // NO `..Default::default()` EXCEPTION EXISTS: `AgentConfig` has **no**
-    // `Default` impl (`agent.rs:22`, no derive), so a spread literal cannot be
-    // written at all and the compiler really is fully authoritative here.
-    // The only shape it cannot see is a *function* that returns a whole
-    // `AgentConfig` with the new field hard-coded — e.g. `agents.rs:423`
-    // (`-> AgentConfig`) and `actor.rs:814` `test_config`, `agent_tests.rs:118`
-    // `tiny_config`, `streaming.rs:26` `config`. Those compile fine and carry the
-    // kernel default; that is correct for a test/worker, and each is worth one
-    // comment line saying so rather than a silent default.
-    // The ONE literal that must read the CLI value is `repl::build_agent`
-    // (`crates/wcode-cli/src/repl.rs:377`), fed by the new
-    // `repl::AgentSpec::title_after_turns` field (see that block).
-    // ==== /SKETCH ====
+    /// Auto-title after this many assistant turns; `0` disables it (W031
+    /// **D2**). Use [`crate::title::DEFAULT_TITLE_AFTER_TURNS`]. Plumbed into
+    /// `LoopConfig::title_after_turns` by [`Agent::run`] — the kernel never
+    /// reads it outside the loop, so there is no `Agent` mirror of it.
+    pub title_after_turns: usize,
 }
 
 pub struct Agent {
@@ -91,6 +66,8 @@ pub struct Agent {
     parallel_tools: bool,
     compaction: CompactionPolicy,
     plan_mode: PlanModeHandle,
+    /// W031 D2: assistant turns before the auto-titler fires; `0` = off.
+    title_after_turns: usize,
     /// The in-memory mirror of the session's persisted `Title` entry. Only
     /// authoritative when no session is open — see [`Agent::title`].
     title: Option<String>,
@@ -147,6 +124,7 @@ impl Agent {
             parallel_tools: cfg.parallel_tools,
             compaction: cfg.compaction,
             plan_mode: cfg.plan_mode,
+            title_after_turns: cfg.title_after_turns,
             title,
             ctx: cfg.context,
             steer_tx,
@@ -199,6 +177,12 @@ impl Agent {
     /// Current reasoning effort (None = send nothing).
     pub fn effort(&self) -> Option<&str> {
         self.llm.effort.as_deref()
+    }
+
+    /// Assistant turns before the auto-titler fires (`0` = off) — the resolved
+    /// `[session] title_after_turns` this agent was built with (W031).
+    pub fn title_after_turns(&self) -> usize {
+        self.title_after_turns
     }
 
     /// Swaps the reasoning effort mid-conversation (next run) and logs an
@@ -339,6 +323,9 @@ impl Agent {
             .follow_rx
             .take()
             .expect("follow_rx present between runs");
+        // Read before the literal: `session` inside it takes `&mut self`, so the
+        // accessor cannot be called there.
+        let title_after_turns = self.title_after_turns();
         let cfg = LoopConfig {
             system: self.system.clone(),
             tools: self.tools.clone(),
@@ -354,22 +341,7 @@ impl Agent {
             compaction: self.compaction,
             ctx_snapshot: self.ctx_snapshot.clone(),
             session: self.session.as_mut(),
-            // ==== SKETCH (review-only, not real code) ==== W031 — LoopConfig plumbing
-            // Goes HERE: the last field of the `LoopConfig` literal `Agent::run`
-            // builds (`agent.rs:278-293`; the anchor above is the pre-existing
-            // last field `session: self.session.as_mut(),`).
-            //
-            //     title_after_turns: self.title_after_turns,
-            //
-            // That is the entire plumbing: a copy, like `max_turns:
-            // self.max_turns,` two lines up. The loop owns the trigger; the agent
-            // only carries the knob.
-            //
-            // RELATED, same commit: the TUI builds its own `Status` from the
-            // agent at `main.rs:1960-1971` (`session: agent.session_id(),`) — it
-            // needs `title: agent.title(),` in a later step (see the main.rs
-            // sketch), which is why `title()` must read the session (see above).
-            // ==== /SKETCH ====
+            title_after_turns,
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
 
@@ -633,6 +605,8 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: crate::title::DEFAULT_TITLE_AFTER_TURNS,
         })
     }
 
@@ -725,6 +699,43 @@ mod tests {
         let framed = frame_btw("why?");
         assert!(framed.starts_with("[side question"));
         assert!(framed.ends_with("\nwhy?"));
+    }
+
+    #[test]
+    fn agent_config_title_after_turns_reaches_the_agent() {
+        // The `AgentConfig` → `Agent` half of the plumbing (the CLI half is pinned
+        // in `repl.rs`). A non-default value, `0`, and the default all survive, so
+        // a "hardcoded default" or an "off is silently ignored" regression fails.
+        fn build(title_after_turns: usize, session: Option<Session>) -> Agent {
+            Agent::new(AgentConfig {
+                system: "sys".into(),
+                tools: vec![],
+                llm: LlmOpts::default(),
+                stream_fn: scripted(vec![]),
+                hooks: HooksSet::default(),
+                session,
+                context: vec![],
+                working_dir: PathBuf::new(),
+                max_turns: crate::loop_::DEFAULT_MAX_TURNS,
+                parallel_tools: true,
+                compaction: CompactionPolicy::default(),
+                plan_mode: PlanModeHandle::new(),
+                title_after_turns,
+            })
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::create(dir.path()).unwrap();
+        assert_eq!(build(7, Some(session)).title_after_turns(), 7);
+        assert_eq!(
+            build(0, None).title_after_turns(),
+            0,
+            "0 = off is carried verbatim, not read as unset"
+        );
+        assert_eq!(
+            build(crate::title::DEFAULT_TITLE_AFTER_TURNS, None).title_after_turns(),
+            crate::title::DEFAULT_TITLE_AFTER_TURNS
+        );
     }
 
     #[test]

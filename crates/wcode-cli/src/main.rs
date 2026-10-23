@@ -46,7 +46,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>] [--quiet] [--status [group|latest]]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--title <text>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>] [--quiet] [--status [group|latest]]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -59,6 +59,8 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --list-teams       list ./.wcode/teams/*.toml (name and path) and exit
    --endpoint <e>     override the configured endpoint (chat|responses|auto; auto = derive)
    --effort <level>   override the reasoning effort (free-style, e.g. high; '-'/'none'/'off' clears it)
+   --title <text>     name this session (also /rename; distinct from --name,
+                      which is the A2A address)
    --list-models      list models from GET {base_url}/models and exit
    --sequential       run tool calls one at a time (default: independent calls in a
                       batch run in parallel)
@@ -195,6 +197,12 @@ struct Args {
     peers: Vec<String>,
     /// `--name <id>`: this session's A2A address (`agent:<id>`), for `--owner`.
     name: Option<String>,
+    /// `--title <text>`: name this session now (W031). Distinct from `--name`,
+    /// which is the A2A ADDRESS (`--owner`'s inbox key) — one is how a peer
+    /// routes to us, the other is how a human finds us in `/resume`. Applied
+    /// through `Agent::set_title`, so it appends a `Title` entry on a fresh OR a
+    /// resumed session (an explicit rename always wins, §5.5).
+    title: Option<String>,
     /// `--owner <addr>`: make this (served) session a worker of `<addr>` — it
     /// reports back over the socket (S4-4 reply). Requires `--agents`.
     owner: Option<String>,
@@ -328,6 +336,10 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             }
             "--name" => {
                 a.name = Some(args.get(i).ok_or("--name requires an id")?.clone());
+                i += 1;
+            }
+            "--title" => {
+                a.title = Some(args.get(i).ok_or("--title requires text")?.clone());
                 i += 1;
             }
             "--owner" => {
@@ -542,6 +554,18 @@ fn config_dump(cfg: &Config) -> String {
             Some(wcode_tui::ViewMode::Focus) => "focus",
             None => "(default focus)",
         }
+    );
+    // A `0` here is not "unset" but a MEANING (never auto-title), so it renders
+    // as `0 (off)` rather than `(default 2)` — the one value set deliberately.
+    let _ = writeln!(
+        out,
+        "session.title_after_turns: {}{}",
+        cfg.session.title_after_turns,
+        if cfg.session.title_after_turns == 0 {
+            " (off)"
+        } else {
+            ""
+        },
     );
     for (id, profile) in &cfg.models {
         let endpoint = profile.endpoint.map(endpoint_label).unwrap_or("(inherit)");
@@ -1027,6 +1051,20 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
     // created — the server owns it.
     #[cfg(unix)]
     if let Some(sock) = args.socket.clone().filter(|_| !args.serve) {
+        // W031: `--title` needs a LOCAL session. The server owns this session's
+        // file, so a client-side rename would either silently rewrite the
+        // SERVER's disk or read like a launch flag that does nothing useful —
+        // the same reason `/resume` is refused over a socket
+        // (`repl.rs` "cannot resolve a local session over a socket"). `/rename`
+        // still works remotely: it is a deliberate `Request::SetTitle`, not a
+        // launch flag.
+        if args.title.is_some() {
+            eprintln!(
+                "error: --title needs a local session (the server owns the session file); \
+                 use /rename in a remote session instead"
+            );
+            std::process::exit(2);
+        }
         let path = PathBuf::from(&sock);
         let client = match wcode_protocol::Client::connect(&path).await {
             Ok(client) => client,
@@ -1218,6 +1256,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     default_hooks(&cfg.hooks),
                     cfg.tools,
                     cfg.compaction,
+                    cfg.session.title_after_turns,
                     InstructionSet::default(),
                     SkillSet::default(),
                     &[],
@@ -1734,12 +1773,13 @@ fn build_agent_for(
         }
         (None, None) => Vec::new(),
     };
-    build_agent(
+    let (mut agent, bg) = build_agent(
         AgentSpec {
             llm: llm.clone(),
             hooks: agent_hooks,
             tools: &cfg.tools,
             compaction: cfg.compaction,
+            title_after_turns: cfg.session.title_after_turns,
             instructions: &rt.instructions,
             skills: &rt.skills,
             team: root.team,
@@ -1748,7 +1788,17 @@ fn build_agent_for(
         session,
         context,
         extra_tools,
-    )
+    );
+    // W031: an explicit name is written BEFORE any run — so it is on disk before
+    // the auto-titler's first short-circuit sees it, and `-p` cannot race turn 1
+    // (the entry is in the file before the first request is built).
+    if let Some(title) = args.title.as_deref()
+        && let Err(e) = agent.set_title(title)
+    {
+        eprintln!("error: --title: {e}");
+        std::process::exit(2);
+    }
+    (agent, bg)
 }
 
 /// Record the ROOT's effective metadata (model, effort, context window) into `registry`,
@@ -2197,6 +2247,7 @@ async fn dispatch(
             hooks,
             cfg.tools,
             cfg.compaction,
+            cfg.session.title_after_turns,
             instructions,
             skills,
             root.team,
@@ -2408,6 +2459,69 @@ fn session_items() -> Vec<wcode_tui::SessionItem> {
         .collect()
 }
 
+// ==== SKETCH (review-only, not real code) ==== W031 §2 + §6 step 7 — the picker row
+// Goes HERE: `session_label` (`main.rs:2412-2427`, the fn the anchor below
+// starts) becomes the shape below, and `first_user_line`
+// (`main.rs:2454-2473`) is fixed with it. This is P6 — the whole point of W031:
+// today a compacted session's row is `id · age · Summary of the earlier
+// conversation (auto-generated by compaction):`.
+//
+// /// `<title> · id · age · first user line`, omitting whichever parts are
+// /// unavailable. The TITLE leads when the session has one (it is the semantic
+// /// name the user is searching for); with no title the row is the old
+// /// `id · age · first line`.
+// fn session_label(path: &Path) -> String {
+//   CORRECTION (review, amendment 6): NO visibility change. `repl` is a
+//   descendant module of the crate root, and a private item in `main.rs` (the
+//   root module) IS visible to `crate::repl` and its descendants. Keep
+//   `fn session_label(...)` exactly as it is; `repl.rs` calls
+//   `crate::session_label(&p)` with no `pub(crate)`.
+//     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+//     let id = name.strip_suffix(".jsonl").unwrap_or(&name);
+//     // ONE open for both halves. Why: `first_user_line` below already opens the
+//     // session, and a second open per picker row doubles the file reads (the
+//     // picker lists every session on disk).
+//     let session = row_session(path);
+//     let mut parts = vec![id.to_string()];
+//     if let Some(title) = session.as_ref().and_then(|s| s.title()) {
+//         parts.insert(0, title);          // leads: the title IS the row
+//     }
+//     if let Some(age) = age_millis(id) {
+//         parts.push(humanize_age(age));
+//     }
+//     // `<TBD: reviewer>` — when a title exists, drop the first-user-line part?
+//     // The title is the model's compression of that same text, so showing both
+//     // roughly doubles the row. Keeping it is the smaller change and loses
+//     // nothing; lead with the title and keep the line unless a reviewer says
+//     // otherwise.
+//     if let Some(first) = session.as_ref().and_then(|s| first_user_line_of(s)) {
+//         parts.push(first);
+//     }
+//     parts.join(" · ")
+// }
+//
+// /// Open the session a picker row stands for: a group entry resolves to its
+// /// `root.jsonl` (the `main.rs:2455-2460` `group_dir_of` rule), a legacy file is
+// /// already the transcript. `None` on any io/parse error — a picker row must not
+// /// fail the whole listing.
+// fn row_session(path: &Path) -> Option<Session> {
+//     let root = match session_groups::group_dir_of(path) {
+//         Some(dir) => dir.join("root.jsonl"),
+//         None => path.to_path_buf(),
+//     };
+//     Session::open(&root).ok()
+// }
+//
+// Test gates (W031 §6 step 7):
+// #[test] fn session_label_prefers_the_title() { todo!() }
+//   // a session with a Title entry -> the label STARTS with the title.
+// #[test] fn session_label_falls_back_to_id_age_first_line() { todo!() }
+//   // the pre-W031 row, byte-for-byte (today's test at `main.rs:4078-4100`
+//   // `session_label_reads_the_first_user_line_and_age` keeps passing).
+// #[test] fn first_user_line_ignores_a_compaction_summary() { todo!() }
+//   // a session with a Compaction entry: the first user text is the SUMMARY;
+//   // the line must be the first real user message after it, not the constant.
+// ==== /SKETCH ====
 /// `id · age · first user line`, omitting whichever parts are unavailable.
 fn session_label(path: &Path) -> String {
     let name = path
@@ -2451,6 +2565,46 @@ fn humanize_age(ms: u64) -> String {
 
 /// The first line of the session's first user message, truncated — the quickest
 /// way to recognize a session in the picker.
+// ==== SKETCH (review-only, not real code) ==== W031 §2 — the bug fix
+// The fn below gains ONE skip and loses its path-opening half (it becomes
+// `first_user_line_of(&Session)`, so `session_label` opens the file once):
+//
+// /// The first line of the session's first REAL user message, truncated.
+// fn first_user_line_of(session: &Session) -> Option<String> {
+//     session.messages().into_iter().find_map(|message| match message {
+//         AgentMessage::User { .. } => {
+//             let text = message.as_text();
+//             // §2: `Session::messages()` PREPENDS `AgentMessage::summary(..)`
+//             // whenever a compaction boundary exists (`session.rs:185-188`), and
+//             // `summary()` is an ordinary `User` message (`message.rs:75-84`).
+//             // Without this skip, EVERY compacted session's row shows the
+//             // constant `Summary of the earlier conversation (auto-generated by
+//             // compaction):` — exactly the long sessions a user most wants to
+//             // find. Both the picker and the titler must skip it, so the prefix
+//             // comes from the kernel:
+//             if text.starts_with(wcode_harness::title::COMPACTION_SUMMARY_PREFIX) {
+//                 return None;
+//             }
+//             let line = text.lines().next().unwrap_or_default().trim();
+//             (!line.is_empty()).then(|| truncate_chars(line, 48))
+//         }
+//         _ => None,
+//     })
+// }
+//
+// KEEP the path-taking wrapper if anything else calls it (grep first):
+// `fn first_user_line(path: &Path) -> Option<String> { row_session(path).as_ref().and_then(first_user_line_of) }`
+//   CORRECTION (review, amendment 6): it has EXACTLY ONE caller
+//   (`main.rs:2519`, inside `session_label`), and that caller now holds the
+//   `Session` already. So DELETE the path wrapper and keep only
+//   `first_user_line_of(&Session)` + the new `row_session(path)`. Do not keep a
+//   one-call shim that re-opens the file `session_label` just opened.
+//
+// FRICTION: `wcode_harness::title` must be a real module (W031 step 2) before
+// this compiles. If step 7 lands first, inline the literal prefix here with a
+// `// keep in sync with message.rs:79` and expect the drift; better to land
+// step 2 first.
+// ==== /SKETCH ====
 fn first_user_line(path: &Path) -> Option<String> {
     // A group entry resolves to its `root.jsonl` (friction #4); a legacy file
     // is already the transcript.
@@ -3088,6 +3242,8 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
         })))
     }
 
@@ -3621,6 +3777,65 @@ mod tests {
             detect_endpoint: true,
             ..Args::default()
         }));
+    }
+
+    #[test]
+    fn parse_title_flag() {
+        let Parsed::Args(a) = parse_args(&args(&["--title", "retry backoff fix"])).unwrap() else {
+            panic!("not args");
+        };
+        assert_eq!(a.title.as_deref(), Some("retry backoff fix"));
+        // Distinct from `--name`, which stays unset: one is a label, the other an
+        // A2A address.
+        assert_eq!(a.name, None);
+        assert_eq!(Args::default().title, None);
+
+        // A missing value is an error, not a silent no-op.
+        let err = parse_args(&args(&["--title"])).unwrap_err();
+        assert!(err.contains("--title"), "{err}");
+
+        // The two flags compose without clobbering each other.
+        let Parsed::Args(a) =
+            parse_args(&args(&["--name", "w1", "--title", "a name"])).unwrap()
+        else {
+            panic!("not args");
+        };
+        assert_eq!(a.name.as_deref(), Some("w1"));
+        assert_eq!(a.title.as_deref(), Some("a name"));
+    }
+
+    #[test]
+    fn dump_config_names_title_after_turns() {
+        let off: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 0\n").unwrap();
+        let dump = config_dump(&merge(EnvLike::default(), off).unwrap());
+        assert!(
+            dump.contains("session.title_after_turns: 0 (off)"),
+            "0 renders as the off MEANING: {dump}"
+        );
+
+        let on: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 7\n").unwrap();
+        let dump = config_dump(&merge(EnvLike::default(), on).unwrap());
+        assert!(
+            dump.contains("session.title_after_turns: 7\n"),
+            "the resolved value, with no `(off)`: {dump}"
+        );
+
+        // Absent: the kernel default is printed as a real value, not "(default 2)"
+        // — the number is what the agent will use.
+        let dump = config_dump(
+            &merge(
+                EnvLike::default(),
+                toml::from_str("model = \"m\"\n").unwrap(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dump.contains("session.title_after_turns: 2\n"),
+            "the default is resolved, not deferred: {dump}"
+        );
+        assert!(!dump.contains("(off)"), "{dump}");
     }
 
     #[test]

@@ -506,6 +506,9 @@ impl SessionFactory {
             parallel_tools: true,
             compaction: t.compaction,
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+            // W031: a worker carries the kernel default — there is no per-worker
+            // title knob (one title request per worker is the accepted cost).
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
         }
     }
 }
@@ -1110,6 +1113,8 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
         }))
     }
 

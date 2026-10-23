@@ -40,6 +40,8 @@ fn config(stream_fn: StreamFn) -> AgentConfig {
         parallel_tools: false,
         compaction: CompactionPolicy::default(),
         plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+        // W031 test double: the kernel default, like every non-CLI site.
+        title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
     }
 }
 

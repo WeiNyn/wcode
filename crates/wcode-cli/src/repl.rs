@@ -135,6 +135,13 @@ pub enum Command {
     /// `/skill <name> [args]` — force-load a skill's body as a turn, for when
     /// the model does not pick it up from the prompt section on its own.
     Skill(Option<String>),
+    // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — the command
+    // Goes HERE: the last variant of `Command` (`repl.rs:105-140`).
+    //
+    // /// `/rename <text>` — name this session (W031). `Some(text)` = set it,
+    // /// `None` = show the current one (the `/effort` arg convention).
+    // Rename(Option<String>),
+    // ==== /SKETCH ====
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -153,6 +160,22 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "models" => Some(Command::Models(arg)),
         "effort" => Some(Command::Effort(arg)),
         "resume" => Some(Command::Resume(arg)),
+        // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — the parse arm
+        // Goes HERE: in `parse_command` (`repl.rs:142-176`), beside `"resume"`
+        // (the anchor above), before `"sessions"`.
+        //
+        // "rename" => Some(Command::Rename(arg)),
+        //
+        // `arg` is already `Option<String>` and already trimmed (`repl.rs:145-151`),
+        // so `/rename` with no arg is `Rename(None)` = show, and `/rename fix the
+        // retry backoff` is `Rename(Some("fix the retry backoff"))`. Unlike
+        // `/plan`, there is no invalid arg — a title is free text.
+        //
+        // Test gate (W031 §6 step 5): in `parse_command_table` (`repl.rs:2027-2080`),
+        //   assert_eq!(parse_command("/rename"), Some(Command::Rename(None)));
+        //   assert_eq!(parse_command("/rename w031 titles"),
+        //              Some(Command::Rename(Some("w031 titles".into()))));
+        // ==== /SKETCH ====
         "sessions" if arg.is_none() => Some(Command::Sessions),
         "reload" => match arg.as_deref() {
             None => Some(Command::Reload { no_session: false }),
@@ -330,6 +353,9 @@ pub struct AgentSpec<'a> {
     pub hooks: HooksSet,
     pub tools: &'a ToolsConfig,
     pub compaction: CompactionPolicy,
+    /// W031 D2: assistant turns before the auto-titler fires; `0` = off.
+    /// Resolved once in `main` from `[session]`/`WCODE_TITLE_AFTER_TURNS`.
+    pub title_after_turns: usize,
     pub instructions: &'a InstructionSet,
     pub skills: &'a SkillSet,
     pub team: &'a [TeamMember],
@@ -371,6 +397,7 @@ pub fn build_agent(
         parallel_tools: spec.tools.parallel.unwrap_or(true),
         compaction: spec.compaction,
         plan_mode,
+        title_after_turns: spec.title_after_turns,
     });
     (agent, bg)
 }
@@ -763,6 +790,9 @@ pub async fn run(
     hooks: HooksSet,
     tools: ToolsConfig,
     compaction: CompactionPolicy,
+    // W031: the resolved `[session] title_after_turns`, so `/new` and `/resume`
+    // rebuild with the launch value instead of the kernel default.
+    title_after_turns: usize,
     instructions: InstructionSet,
     skills: SkillSet,
     team: &[TeamMember],
@@ -915,6 +945,7 @@ pub async fn run(
                                 hooks: hooks.clone(),
                                 tools: &tools,
                                 compaction,
+                                title_after_turns,
                                 instructions: &instructions,
                                 skills: &skills,
                                 team,
@@ -1070,6 +1101,7 @@ pub async fn run(
                                         hooks: hooks.clone(),
                                         tools: &tools,
                                         compaction,
+                                        title_after_turns,
                                         instructions: &instructions,
                                         skills: &skills,
                                         team,
@@ -1118,6 +1150,7 @@ pub async fn run(
                                 hooks: hooks.clone(),
                                 tools: &tools,
                                 compaction,
+                                title_after_turns,
                                 instructions: &instructions,
                                 skills: &skills,
                                 team,
@@ -1146,6 +1179,53 @@ pub async fn run(
                 }
                 }
             }
+            // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — dispatch + /sessions
+            // Goes HERE: the `Command` dispatch match, right before
+            // `Some(Command::Sessions)` (the arm the anchor below starts).
+            //
+            // Some(Command::Rename(title)) => match title {
+            //     None => println!("{}", current_title_note()),   // or "usage: /rename <text>"
+            //     Some(t) if t.trim().is_empty() => println!("usage: /rename <text>"),
+            //     Some(t) => match backend.ask(Request::SetTitle { title: t.clone() }).await {
+            //         // The actor answers with `SessionTitle` (it also STREAMS it, so a
+            //         // socket client's UI sees it). Print the reply, not the request:
+            //         // the stored title is the authority.
+            //         Ok(AgentEvent::SessionTitle { title }) => println!("title: {title}"),
+            //         Ok(AgentEvent::Error { message }) => eprintln!("rename: {message}"),
+            //         Ok(_) => eprintln!("rename: unexpected reply"),
+            //         Err(_) => eprintln!("rename: session closed"),
+            //     },
+            // },
+            //
+            // NO `if remote` GUARD — and that is the point (§5.6). `/resume` IS
+            // guarded (`repl.rs:997-1001` "/resume is unavailable over a socket (the
+            // server owns the session)") because it lists a client-side directory;
+            // a rename is a `Request` the SERVER applies to its own session file, so
+            // it works over a socket exactly as `/effort` does (`repl.rs:962-996`).
+            // Do not copy the `/resume` guard onto this arm.
+            //
+            // Then the `/sessions` row (`repl.rs:1166-1169`, quoted below) prints
+            // the title: replace the bare `file_name()` with the shared label
+            //   println!("{mark} {}", crate::session_label(&p));
+            // `session_label` stays PRIVATE (`main.rs:2508`); `repl` is a
+            // descendant module of the crate root, so it can call it as-is. Do not
+            // widen it to `pub(crate)`.
+            //
+            // HERMETIC-PINNING ANSWER (amendment 6): the REPL arm CANNOT be pinned
+            // by a unit test. `print_events` writes to real stdout
+            // (`repl.rs`'s `out(...)`), and the one test that observes its
+            // behaviour asserts a CACHE SIDE-EFFECT instead
+            // (`repl.rs:2852`-ish, the `last_todos` cache the `Todo` arm fills).
+            // Do NOT add a `last_title` sink just to have something to assert —
+            // that is test-only state in production code. Pin `/rename` with:
+            //   * a layer-2 grep: `AgentEvent::SessionTitle` appears inside
+            //     `print_events` (a missing arm hits `repl.rs:1618` `_ => {}` and
+            //     compiles silently), plus a print line for it;
+            //   * the live `--no-tui` check: run two turns, see the title line,
+            //     then `/rename x` and `/sessions` and see `x` in the row.
+            // (The title is only on disk after the agent has one; a session renamed
+            // in THIS process shows it because `SetTitle` appended before replying.)
+            // ==== /SKETCH ====
             Some(Command::Sessions) => match list_sessions(&session_dir()) {
                 Ok(list) if list.is_empty() => {
                     println!("no sessions in {}", session_dir().display())
@@ -1980,6 +2060,94 @@ mod tests {
         assert_eq!(context_line(&unknown, &reported), None);
     }
 
+    #[test]
+    fn title_after_turns_from_the_config_reaches_the_agent() {
+        use crate::config::{EnvLike, FileConfig, merge};
+
+        // The whole path, minus the arg parse: toml (7) → `Config.session` → the
+        // `AgentSpec` field main passes → `build_agent`'s `AgentConfig` → the
+        // `Agent`. A test that stops at `Config.session` proves only that the
+        // table PARSES — B1 was that nothing carried it any further.
+        let file: FileConfig =
+            toml::from_str("model = \"m\"\n[session]\ntitle_after_turns = 7\n").unwrap();
+        let cfg = merge(EnvLike::default(), file).unwrap();
+        assert_eq!(cfg.session.title_after_turns, 7);
+
+        let (agent, _bg) = build_agent(
+            AgentSpec {
+                llm: LlmOpts::default(),
+                hooks: HooksSet::default(),
+                tools: &ToolsConfig::default(),
+                compaction: CompactionPolicy::default(),
+                title_after_turns: cfg.session.title_after_turns, // main's expression
+                instructions: &InstructionSet::default(),
+                skills: &SkillSet::default(),
+                team: &[],
+                guidelines: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            agent.title_after_turns(),
+            7,
+            "the resolved knob must reach the agent, not the kernel default"
+        );
+
+        // The env override travels the same path (3 beats the absent toml).
+        let cfg = merge(
+            EnvLike {
+                wcode_title_after_turns: Some("3".into()),
+                ..EnvLike::default()
+            },
+            toml::from_str("model = \"m\"\n").unwrap(),
+        )
+        .unwrap();
+        let (agent, _bg) = build_agent(
+            AgentSpec {
+                llm: LlmOpts::default(),
+                hooks: HooksSet::default(),
+                tools: &ToolsConfig::default(),
+                compaction: CompactionPolicy::default(),
+                title_after_turns: cfg.session.title_after_turns,
+                instructions: &InstructionSet::default(),
+                skills: &SkillSet::default(),
+                team: &[],
+                guidelines: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(agent.title_after_turns(), 3);
+
+        // And the unconfigured case is the kernel default (2), so the assertions
+        // above cannot pass on a hardcoded constant.
+        let cfg = merge(
+            EnvLike::default(),
+            toml::from_str("model = \"m\"\n").unwrap(),
+        )
+        .unwrap();
+        let (agent, _bg) = build_agent(
+            AgentSpec {
+                llm: LlmOpts::default(),
+                hooks: HooksSet::default(),
+                tools: &ToolsConfig::default(),
+                compaction: CompactionPolicy::default(),
+                title_after_turns: cfg.session.title_after_turns,
+                instructions: &InstructionSet::default(),
+                skills: &SkillSet::default(),
+                team: &[],
+                guidelines: None,
+            },
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(agent.title_after_turns(), 2);
+    }
+
     #[tokio::test]
     async fn build_agent_leaves_the_shared_hook_set_untouched() {
         // The per-agent hooks (plan mode) are built INSIDE build_agent, so the
@@ -1993,6 +2161,8 @@ mod tests {
                 hooks: shared.clone(),
                 tools: &ToolsConfig::default(),
                 compaction: CompactionPolicy::default(),
+                // W031 test double: the kernel default, like every non-CLI site.
+                title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
                 instructions: &InstructionSet::default(),
                 skills: &SkillSet::default(),
                 team: &[],

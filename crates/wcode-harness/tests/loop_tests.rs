@@ -238,6 +238,9 @@ fn setup(stream_fn: StreamFn, tools: Vec<Tool>, hooks: HooksSet) -> TestSetup {
             parallel: true,
             compaction: CompactionPolicy::default(),
             ctx_snapshot,
+            // W031: these tests exercise the tool loop, not the titler — off, so no
+            // test can spend a model request on a name.
+            title_after_turns: 0,
         },
         steer_tx,
         follow_tx,
@@ -1572,6 +1575,8 @@ async fn a_steer_at_the_tool_free_boundary_starts_a_second_turn() {
         parallel: true,
         compaction: CompactionPolicy::default(),
         ctx_snapshot,
+        // W031: these tests exercise the tool loop, not the titler — off.
+        title_after_turns: 0,
     };
 
     let mut ctx = vec![AgentMessage::user_text("hi")];

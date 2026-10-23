@@ -544,6 +544,8 @@ mod tests {
             parallel_tools: true,
             compaction,
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
         });
         let handle = SessionActor::spawn(agent);
         let id = SessionId::agent(name);
@@ -792,6 +794,8 @@ mod tests {
             parallel_tools: true,
             compaction: CompactionPolicy::default(),
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+            // W031 test double: the kernel default, like every non-CLI site.
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
         });
         let id = SessionId::agent("w1");
         registry.register(id.clone(), SessionActor::spawn(agent));
