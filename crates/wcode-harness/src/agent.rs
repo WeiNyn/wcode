@@ -45,6 +45,36 @@ pub struct AgentConfig {
     /// The shared plan-mode switch; the same handle is held by the
     /// `PlanModeHooks` in `hooks`, so `set_plan_mode` flips both.
     pub plan_mode: PlanModeHandle,
+    // ==== SKETCH (review-only, not real code) ==== W031 — AgentConfig half
+    // Goes HERE: the last field of `AgentConfig` (`agent.rs:22-48`), after
+    // `pub plan_mode: PlanModeHandle,`.
+    //
+    // /// Auto-title after this many assistant turns; `0` disables it (W031
+    // /// **D2**). Use [`crate::title::DEFAULT_TITLE_AFTER_TURNS`]. Plumbed into
+    // /// `LoopConfig::title_after_turns` by [`Agent::run`] — the kernel never
+    // /// reads it outside the loop, so there is no `Agent` mirror of it.
+    // pub title_after_turns: usize,
+    //
+    // Friction: adding a NON-`Option` field is a compile error at EVERY
+    // `AgentConfig` literal, and `cargo build` is the authoritative enumerator —
+    // do not trust a hand-written census (this sketch's first draft listed 9 and
+    // was wrong; three different counts have been produced by three readers).
+    // Set `title_after_turns: crate::title::DEFAULT_TITLE_AFTER_TURNS` wherever
+    // the literal is in a worker/transport/test path: W031 asks for no per-worker
+    // knob, so do not invent a second config path.
+    // NO `..Default::default()` EXCEPTION EXISTS: `AgentConfig` has **no**
+    // `Default` impl (`agent.rs:22`, no derive), so a spread literal cannot be
+    // written at all and the compiler really is fully authoritative here.
+    // The only shape it cannot see is a *function* that returns a whole
+    // `AgentConfig` with the new field hard-coded — e.g. `agents.rs:423`
+    // (`-> AgentConfig`) and `actor.rs:814` `test_config`, `agent_tests.rs:118`
+    // `tiny_config`, `streaming.rs:26` `config`. Those compile fine and carry the
+    // kernel default; that is correct for a test/worker, and each is worth one
+    // comment line saying so rather than a silent default.
+    // The ONE literal that must read the CLI value is `repl::build_agent`
+    // (`crates/wcode-cli/src/repl.rs:377`), fed by the new
+    // `repl::AgentSpec::title_after_turns` field (see that block).
+    // ==== /SKETCH ====
 }
 
 pub struct Agent {
@@ -61,6 +91,9 @@ pub struct Agent {
     parallel_tools: bool,
     compaction: CompactionPolicy,
     plan_mode: PlanModeHandle,
+    /// The in-memory mirror of the session's persisted `Title` entry. Only
+    /// authoritative when no session is open — see [`Agent::title`].
+    title: Option<String>,
     ctx: Vec<AgentMessage>,
     steer_tx: UnboundedSender<AgentMessage>,
     steer_rx: Option<UnboundedReceiver<AgentMessage>>,
@@ -97,6 +130,10 @@ impl Agent {
         } else {
             cfg.working_dir
         };
+        // The title mirrors the session's persisted `Title` entry, seeded here
+        // because `cfg.session` is MOVED into the literal below — the same
+        // before-the-move shape as the routing id above.
+        let title = cfg.session.as_ref().and_then(|s| s.title());
         Agent {
             system: cfg.system.clone(),
             base_system: cfg.system,
@@ -110,6 +147,7 @@ impl Agent {
             parallel_tools: cfg.parallel_tools,
             compaction: cfg.compaction,
             plan_mode: cfg.plan_mode,
+            title,
             ctx: cfg.context,
             steer_tx,
             steer_rx: Some(steer_rx),
@@ -174,6 +212,54 @@ impl Agent {
         }
         self.llm.effort = effort;
         Ok(())
+    }
+
+    /// Give this session a name: append a `Title` entry (last write wins) and
+    /// mirror it in memory. The EXPLICIT rename path — `/rename` on both human
+    /// surfaces, `--title`, and `crate::protocol::Request::SetTitle` — never
+    /// calls a model.
+    ///
+    /// Appends BEFORE the in-memory write, deliberately (the [`Agent::set_model`]
+    /// rationale, "a failed append must not leave the agent and the session
+    /// disagreeing"): if the append fails the caller gets the `io::Error` and
+    /// [`Agent::title`] is unchanged, so a UI never claims a name the file does
+    /// not have.
+    ///
+    /// # Errors
+    /// The session append's `io::Error`, unchanged. The in-memory mirror is NOT
+    /// updated on failure.
+    ///
+    /// # Does not
+    /// Sanitize (`/rename` takes the user's text verbatim; the AUTO path
+    /// sanitizes, in [`crate::title::sanitize`]), call a model, or refuse an
+    /// empty string — `set_title("")` stores an empty title and [`Agent::title`]
+    /// then returns `Some("")`.
+    pub fn set_title(&mut self, title: &str) -> std::io::Result<()> {
+        if let Some(session) = &mut self.session {
+            session.append(SessionEntry::Title {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: title.to_string(),
+            })?;
+        }
+        self.title = Some(title.to_string());
+        Ok(())
+    }
+
+    /// The session's current title (`None` = never titled).
+    ///
+    /// Reads the SESSION first, the in-memory mirror second — and that order is
+    /// the whole contract. The auto-titler runs inside `run_loop`, which holds
+    /// `&mut Session` and no `&mut Agent`, so a title it appends lands in the
+    /// session and NOT in an `Agent` field; a mirror-only getter would report
+    /// `None` right after a successful auto-title, and a UI asking the actor
+    /// would disagree with the file. Session-first makes the persisted value
+    /// authoritative; the mirror covers `--no-session`, where there is no
+    /// session to ask.
+    pub fn title(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.title())
+            .or_else(|| self.title.clone())
     }
 
     /// Sender clone for steering while `run` holds the `&mut` borrow (UI tasks).
@@ -268,6 +354,22 @@ impl Agent {
             compaction: self.compaction,
             ctx_snapshot: self.ctx_snapshot.clone(),
             session: self.session.as_mut(),
+            // ==== SKETCH (review-only, not real code) ==== W031 — LoopConfig plumbing
+            // Goes HERE: the last field of the `LoopConfig` literal `Agent::run`
+            // builds (`agent.rs:278-293`; the anchor above is the pre-existing
+            // last field `session: self.session.as_mut(),`).
+            //
+            //     title_after_turns: self.title_after_turns,
+            //
+            // That is the entire plumbing: a copy, like `max_turns:
+            // self.max_turns,` two lines up. The loop owns the trigger; the agent
+            // only carries the knob.
+            //
+            // RELATED, same commit: the TUI builds its own `Status` from the
+            // agent at `main.rs:1960-1971` (`session: agent.session_id(),`) — it
+            // needs `title: agent.title(),` in a later step (see the main.rs
+            // sketch), which is why `title()` must read the session (see above).
+            // ==== /SKETCH ====
         };
         let res = run_loop(&mut self.ctx, cfg, sink).await;
 
@@ -623,6 +725,103 @@ mod tests {
         let framed = frame_btw("why?");
         assert!(framed.starts_with("[side question"));
         assert!(framed.ends_with("\nwhy?"));
+    }
+
+    #[test]
+    fn set_title_appends_a_title_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::create(dir.path()).unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        let mut agent = make_agent(Some(session), scripted(vec![]), vec![]);
+        assert_eq!(agent.title(), None, "a fresh session has no title");
+
+        agent.set_title("retry backoff fix").unwrap();
+
+        assert_eq!(agent.title().as_deref(), Some("retry backoff fix"));
+        // The SESSION, not just the mirror: an entry is in the file, exactly one,
+        // and the reader a `/resume` uses agrees.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(r#""type":"title""#), "{raw}");
+        let reopened = Session::open(&path).unwrap();
+        assert_eq!(reopened.title().as_deref(), Some("retry backoff fix"));
+        assert_eq!(
+            reopened
+                .entries()
+                .iter()
+                .filter(|e| matches!(e, SessionEntry::Title { .. }))
+                .count(),
+            1,
+            "one appended entry, not a rewrite"
+        );
+
+        // A second rename appends again and last write wins.
+        agent.set_title("second name").unwrap();
+        assert_eq!(agent.title().as_deref(), Some("second name"));
+        assert_eq!(
+            Session::open(&path).unwrap().title().as_deref(),
+            Some("second name")
+        );
+    }
+
+    #[test]
+    fn set_title_on_a_failed_append_leaves_the_title_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::create(dir.path()).unwrap();
+        let mut agent = make_agent(Some(session), scripted(vec![]), vec![]);
+        // The session's directory removed out from under the open handle, so the
+        // O_APPEND open fails.
+        std::fs::remove_dir_all(dir.path()).unwrap();
+
+        assert!(
+            agent.set_title("never persisted").is_err(),
+            "the append must fail"
+        );
+        assert_eq!(
+            agent.title(),
+            None,
+            "the append ran FIRST, so nothing was claimed"
+        );
+    }
+
+    #[test]
+    fn title_reads_the_session_first() {
+        // The auto-titler appends behind the agent's back — it holds `&mut
+        // Session` and no `&mut Agent` — so the mirror can go STALE while the
+        // session holds the truth. A mirror-first getter would return the older
+        // name here and a UI would disagree with the file.
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::create(dir.path()).unwrap();
+        let path = session.path().unwrap().to_path_buf();
+        let mut agent = make_agent(Some(session), scripted(vec![]), vec![]);
+
+        agent.set_title("from the agent").unwrap();
+        agent
+            .session
+            .as_mut()
+            .unwrap()
+            .append(SessionEntry::Title {
+                id: "t-loop".into(),
+                title: "titled by the loop".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            agent.title().as_deref(),
+            Some("titled by the loop"),
+            "the persisted entry wins over the stale mirror"
+        );
+        assert_eq!(
+            Session::open(&path).unwrap().title().as_deref(),
+            Some("titled by the loop")
+        );
+    }
+
+    #[test]
+    fn title_without_a_session_uses_the_mirror() {
+        let mut agent = make_agent(None, scripted(vec![]), vec![]);
+        assert_eq!(agent.title(), None);
+        agent.set_title("no file to write").unwrap();
+        assert_eq!(agent.title().as_deref(), Some("no file to write"));
     }
 
     #[test]

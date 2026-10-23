@@ -219,6 +219,26 @@ pub enum AgentEvent {
     Todo {
         todos: Vec<TodoItem>,
     },
+    /// The session's title is now `title` (W031) — STREAMED, like `Todo` /
+    /// `Compaction` (a plain state payload the UI reduces), and also the reply
+    /// to a [`crate::protocol::Request::SetTitle`]. Emitted by the loop's
+    /// auto-titler at a turn boundary and by the actor's `SetTitle` arm.
+    ///
+    /// The field is `title`, not `id`: the envelope already carries a top-level
+    /// `id` and a flattened duplicate key would not deserialize — the same
+    /// constraint `Todo`/`Spawned` document.
+    ///
+    /// Wire note: unlike `Request`, this enum has **no** `#[serde(other)]`
+    /// catch-all (it is exhaustive by design). A peer that cannot deserialize a
+    /// new variant does not skip it — `read_frame` returns `Err` and the socket
+    /// client breaks its read loop and RECONNECTS. So an old client talking to a
+    /// new auto-titling server drops the connection once per titled session.
+    /// That is pre-existing forward-compat behaviour and deliberately NOT
+    /// "fixed" by adding an `Unknown` arm here (which would make every
+    /// consumer's match silently permissive instead of exhaustive).
+    SessionTitle {
+        title: String,
+    },
     AgentEnd,
 }
 
@@ -431,6 +451,12 @@ mod tests {
                 ],
             },
             "todo",
+        );
+        roundtrip(
+            AgentEvent::SessionTitle {
+                title: "retry backoff fix".into(),
+            },
+            "session_title",
         );
     }
 

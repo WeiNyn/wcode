@@ -210,6 +210,7 @@ pub struct SessionInfo {
 /// | `Cancel` | `Agent::cancel` |
 /// | `SetModel` | `Agent::set_model` |
 /// | `SetEffort` | `Agent::set_effort` |
+/// | `SetTitle` | `Agent::set_title` |
 /// | `Compact` | `Agent::compact` |
 /// | `Usage` | `crate::stats::session_stats` + `pricing::cost_of` |
 ///
@@ -268,6 +269,21 @@ pub enum Request {
     /// (removing mutating tools + mutating `bash`) and recomposes the system
     /// prompt. Infallible — replies [`AgentEvent::Ack`].
     SetPlanMode { on: bool },
+
+    /// Rename this session (W031 §5.6): append a [`crate::session::SessionEntry::Title`]
+    /// and stream [`crate::event::AgentEvent::SessionTitle`]. The verb behind
+    /// `/rename <text>` on both human surfaces and behind `--title`. Infallible
+    /// in intent — an append failure answers [`crate::event::AgentEvent::Error`].
+    ///
+    /// The title is NOT run through `crate::title::sanitize`: an explicit rename
+    /// is the human's own words. An empty string stores an empty title (clearing
+    /// is not in W031's scope).
+    ///
+    /// Additive on the wire (`{"type":"set_title","title":"…"}`), so
+    /// [`PROTOCOL_VERSION`] stays 1: an OLD peer catches it as [`Request::Unknown`]
+    /// and answers `Ack`, which reads as "unavailable" — the [`Request::Usage`]
+    /// precedent.
+    SetTitle { title: String },
 
     /// Ask a side question (`/btw`): answer `text` tool-free, from the current
     /// context, WITHOUT recording it. A read — carries user content, names no
@@ -435,6 +451,7 @@ mod tests {
         );
         roundtrip(Request::Compact { instructions: None }, "compact");
         roundtrip(Request::SetPlanMode { on: true }, "set_plan_mode");
+roundtrip(Request::SetTitle { title: "w031 titles".into() }, "set_title");
         roundtrip(Request::Notify { content: "n".into() }, "notify");
         roundtrip(Request::Interrupt { content: "i".into() }, "interrupt");
         roundtrip(Request::Wake { content: "w".into() }, "wake");
@@ -554,6 +571,7 @@ mod tests {
         assert!(!is_inbound(&Request::Usage));
         assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
         assert!(!is_inbound(&Request::SetPlanMode { on: true }));
+assert!(!is_inbound(&Request::SetTitle { title: "x".into() }));
         assert!(!is_inbound(&Request::Cancel));
         assert!(!is_inbound(&Request::ListSessions));
         assert!(!is_inbound(&Request::ListModels));

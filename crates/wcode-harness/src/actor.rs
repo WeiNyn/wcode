@@ -39,6 +39,17 @@
 //!        Cancel         ─► (no-op — nothing is running)
 //!        SetModel  {..} ─► agent.set_model(..)
 //!        SetEffort {..} ─► agent.set_effort(..)
+// ==== SKETCH (review-only, not real code) ==== W031 — the module doc
+// Goes HERE: the ASCII map above gains one line, and the two tables below gain
+// one row each. Doc-only, but the tables are the file's contract:
+//
+//   in the map above (after `SetEffort`): `SetTitle  {..} ─► agent.set_title(..)`
+//   in the delivery table (`actor.rs:74-84`, the "while a run is in flight"
+//   table): `| SetModel / SetEffort / SetTitle / Compact | deferred, applied when
+//   the run ends |`
+//   in the requests-and-replies list (`actor.rs:101-109`): `SetTitle` answers
+//   `AgentEvent::SessionTitle` (streamed) — not `Ack` alone.
+// ==== /SKETCH ====
 //!        Compact   {..} ─► agent.compact(..).await
 //!        GetHistory     ─► reply with the context
 //!        Usage          ─► reply with folded stats (+ $ when priced)
@@ -460,6 +471,22 @@ async fn dispatch(
             agent.set_plan_mode(on);
             AgentEvent::Ack
         }
+        // Rename this session (W031): append the `Title` entry and report it.
+        // Streamed AND returned. Why both: `dispatch` answers an `Ask` through its
+        // `reply` oneshot and a `Tell` not at all, so a mid-run `SetTitle` —
+        // re-queued as a `Tell` by the matcher below — would otherwise learn
+        // nothing. The broadcast copy is the report; the returned copy is the
+        // `Ask`'s reply. A double delivery to an `Ask` caller is harmless: the
+        // reducer sets the same title twice (and `Todo` already works this way).
+        Request::SetTitle { title } => match agent.set_title(&title) {
+            Ok(()) => {
+                let _ = events.send(AgentEvent::SessionTitle { title: title.clone() });
+                AgentEvent::SessionTitle { title }
+            }
+            Err(e) => AgentEvent::Error {
+                message: e.to_string(),
+            },
+        },
         Request::GetHistory => AgentEvent::History {
             messages: agent.messages().to_vec(),
         },
@@ -649,10 +676,18 @@ async fn run(
                     // its contract is "next run": acknowledge now and re-queue it
                     // as a `Tell` so it is applied silently at the run boundary —
                     // instead of leaving the ask to time out (item-41 ASK_TIMEOUT).
+                    //
+                    // `SetTitle` rides this same arm (W031): the Ack means
+                    // "accepted, applied at the run boundary", and the title itself
+                    // arrives as a STREAMED `AgentEvent::SessionTitle` from the idle
+                    // arm once the run is over. No second reply channel is needed —
+                    // that would break the one-reply-per-Ask invariant the
+                    // transport relies on.
                     Message::Ask {
                         from,
                         request:
                             req @ (Request::SetModel { .. }
+                            | Request::SetTitle { .. }
                             | Request::SetEffort { .. }
                             | Request::SetPlanMode { .. }),
                         reply,
@@ -706,6 +741,7 @@ mod tests {
     use crate::event::LlmStreamEvent;
     use crate::hooks::HooksSet;
     use crate::message::StopReason;
+    use crate::session::Session;
     use crate::streamfn::{LlmOpts, LlmStream, StreamFn};
     use crate::tool::{ToolContext, ToolOutput, TypedTool, erased};
     use futures::StreamExt as _;
@@ -985,6 +1021,129 @@ mod tests {
                 path: None,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn set_title_mid_run_is_deferred_and_still_reported() {
+        // A run that blocks inside a tool: exactly the window in which a rename
+        // must NOT apply (it needs `&mut Agent`, which the run holds).
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![gate]);
+        cfg.session = Some(Session::create(dir.path()).unwrap());
+        let path = cfg.session.as_ref().unwrap().path().unwrap().to_path_buf();
+        let handle = SessionActor::spawn(Agent::new(cfg));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // the run is inside the tool
+
+        // 1. The Ask is answered AT ONCE with the deferral Ack — a bounded wait,
+        //    so a missing deferral arm fails here instead of hanging.
+        let ack = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle.ask(Request::SetTitle {
+                title: "retry backoff".into(),
+            }),
+        )
+        .await
+        .expect("the deferral Ack must arrive mid-run, not after it")
+        .unwrap();
+        assert_eq!(ack, AgentEvent::Ack, "the Ack, not the title");
+
+        // 2. Nothing was applied yet: the file still has no `Title` entry.
+        assert_eq!(
+            Session::open(&path).unwrap().title(),
+            None,
+            "the rename waits for the run boundary"
+        );
+
+        release.notify_one();
+        wait_for_end(&mut rx).await; // the run finishes first…
+
+        // 3. …and THEN the title is reported — by the re-queued `Tell`, through
+        //    the idle arm's STREAM. This is the half a silent drop would lose.
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the SessionTitle must arrive after the run")
+            .expect("the outbox stays open");
+        assert_eq!(
+            event,
+            AgentEvent::SessionTitle {
+                title: "retry backoff".into()
+            }
+        );
+        assert_eq!(
+            Session::open(&path).unwrap().title().as_deref(),
+            Some("retry backoff"),
+            "applied exactly once, at the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_set_title_replies_and_streams_the_title() {
+        let rec = Recorder::default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![]);
+        cfg.session = Some(Session::create(dir.path()).unwrap());
+        let path = cfg.session.as_ref().unwrap().path().unwrap().to_path_buf();
+        let handle = SessionActor::spawn(Agent::new(cfg));
+        let mut rx = handle.subscribe();
+
+        let reply = handle
+            .ask(Request::SetTitle {
+                title: "idle rename".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reply,
+            AgentEvent::SessionTitle {
+                title: "idle rename".into()
+            }
+        );
+
+        // Streamed too, so a subscriber (the TUI status line) learns it.
+        let streamed = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a streamed SessionTitle")
+            .expect("the outbox stays open");
+        assert_eq!(
+            streamed,
+            AgentEvent::SessionTitle {
+                title: "idle rename".into()
+            }
+        );
+        assert_eq!(
+            Session::open(&path).unwrap().title().as_deref(),
+            Some("idle rename")
+        );
     }
 
     #[tokio::test]
