@@ -148,8 +148,10 @@ fn agent_config_with_llm(
         parallel_tools: true,
         compaction: wcode_harness::compaction::CompactionPolicy::default(),
         plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
-        // W031 test double: the kernel default, like every non-CLI site.
-        title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
+        // W031: OFF for this double — these tests count model calls, and the
+        // auto-titler would add one at the second assistant turn. The knob's own
+        // plumbing is pinned by `agent_config_title_after_turns_reaches_the_agent`.
+        title_after_turns: 0,
     }
 }
 

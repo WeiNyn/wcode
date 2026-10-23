@@ -2176,3 +2176,425 @@ async fn a_done_terminated_stream_is_unaffected() {
         tags(&events)
     );
 }
+
+// ---------------------------------------------------------------------------
+// W031 D1: the auto-title trigger (`maybe_title` in `run_loop`)
+//
+// A "title call" is told apart from a turn call by its shape: the titler is
+// invoked with an EMPTY tool list and its own system prompt. Every call is
+// recorded with the assistant-turn count of the ctx it saw and the `effort` it
+// was issued with, so the timings and the opts are assertable.
+// ---------------------------------------------------------------------------
+
+/// One recorded call from the titler-aware double.
+#[derive(Debug, Clone, PartialEq)]
+struct TitlerCall {
+    is_title: bool,
+    /// The reasoning effort the call was issued with — a title call must carry
+    /// `None`, whatever the run's own opts say.
+    effort: Option<String>,
+}
+
+#[derive(Clone)]
+struct Titler {
+    /// One script per NON-title (turn) call, popped in order.
+    turns: Arc<Mutex<VecDeque<Vec<LlmStreamEvent>>>>,
+    calls: Arc<Mutex<Vec<TitlerCall>>>,
+    /// What a title call answers: the title text, or the stream error to raise.
+    title: Result<String, String>,
+}
+
+impl Titler {
+    fn new(turns: VecDeque<Vec<LlmStreamEvent>>, title: Result<&str, &str>) -> Titler {
+        Titler {
+            turns: Arc::new(Mutex::new(turns)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            title: match title {
+                Ok(t) => Ok(t.to_string()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
+
+    fn stream_fn(&self) -> StreamFn {
+        let t = self.clone();
+        Arc::new(
+            move |ctx: &[AgentMessage],
+                  system: &str,
+                  tools: &[rig::completion::ToolDefinition],
+                  opts: &LlmOpts| {
+                let is_title =
+                    tools.is_empty() && system.contains("naming a coding-agent session");
+                let _ = ctx;
+                t.calls.lock().unwrap().push(TitlerCall {
+                    is_title,
+                    effort: opts.effort.clone(),
+                });
+                let events = if is_title {
+                    match &t.title {
+                        Ok(text) => vec![
+                            LlmStreamEvent::TextDelta(text.clone()),
+                            LlmStreamEvent::Done {
+                                stop_reason: StopReason::Stop,
+                                usage: None,
+                            },
+                        ],
+                        Err(message) => vec![LlmStreamEvent::Error {
+                            message: message.clone(),
+                            fatal: true,
+                        }],
+                    }
+                } else {
+                    t.turns.lock().unwrap().pop_front().unwrap_or_default()
+                };
+                Box::pin(futures::stream::iter(events)) as LlmStream
+            },
+        )
+    }
+
+    fn title_calls(&self) -> Vec<TitlerCall> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.is_title)
+            .cloned()
+            .collect()
+    }
+}
+
+/// Turns 1-2 issue a tool call (the run continues); turn 3 answers in text
+/// (the run stops) — three assistant turns.
+fn three_tool_turns() -> VecDeque<Vec<LlmStreamEvent>> {
+    let tool_turn = |n: u32| {
+        vec![
+            LlmStreamEvent::ToolCall {
+                id: format!("c{n}"),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "x" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]
+    };
+    VecDeque::from(vec![
+        tool_turn(1),
+        tool_turn(2),
+        vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ])
+}
+
+/// A `LoopConfig` with an optional session, and a non-empty `effort` so the
+/// titler's `effort = None` is observable at the seam.
+fn cfg_common<'a>(
+    session: Option<&'a mut wcode_harness::session::Session>,
+    stream_fn: StreamFn,
+    title_after_turns: usize,
+) -> LoopConfig<'a> {
+    let (_steer_tx, steering) = mpsc::unbounded_channel();
+    let (_follow_tx, follow_ups) = mpsc::unbounded_channel();
+    let (ctx_snapshot, _ctx_rx) = tokio::sync::watch::channel(Vec::new());
+    let (tool, _seen) = echo_tool();
+    LoopConfig {
+        system: "sys".into(),
+        tools: vec![tool],
+        llm: LlmOpts {
+            model: "m1".into(),
+            effort: Some("high".into()),
+            ..LlmOpts::default()
+        },
+        stream_fn,
+        hooks: HooksSet::default(),
+        steering,
+        follow_ups,
+        cancel: tokio_util::sync::CancellationToken::new(),
+        working_dir: std::path::PathBuf::from("."),
+        session,
+        max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+        parallel: true,
+        compaction: CompactionPolicy::default(),
+        ctx_snapshot,
+        title_after_turns,
+    }
+}
+
+/// The session-backed configuration the run tests use.
+fn cfg_with_session<'a>(
+    session: &'a mut wcode_harness::session::Session,
+    stream_fn: StreamFn,
+    title_after_turns: usize,
+) -> LoopConfig<'a> {
+    cfg_common(Some(session), stream_fn, title_after_turns)
+}
+
+fn title_entry_count(session: &wcode_harness::session::Session) -> usize {
+    session
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, wcode_harness::session::SessionEntry::Title { .. }))
+        .count()
+}
+
+/// GATE 1: the title lands at the SECOND assistant turn — not the first, and
+/// exactly once across three.
+#[tokio::test]
+async fn auto_title_fires_at_the_second_assistant_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    let t = Titler::new(three_tool_turns(), Ok("retry backoff fix"));
+
+    let mut ctx = vec![AgentMessage::user_text("add retry backoff")];
+    let (res, events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 2),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let all = t.calls.lock().unwrap().clone();
+    let first_title = all
+        .iter()
+        .position(|c| c.is_title)
+        .unwrap_or_else(|| panic!("no title call at all: {all:?}"));
+    assert_eq!(
+        all.iter().filter(|c| c.is_title).count(),
+        1,
+        "exactly one title call across three boundaries: {all:?}"
+    );
+    // The order of the recorded calls IS the timing: the title request comes
+    // after exactly two assistant turns (turn 1 and turn 2), not before.
+    assert_eq!(
+        all[..first_title].iter().filter(|c| !c.is_title).count(),
+        2,
+        "the trigger fires at the SECOND assistant turn, not before: {all:?}"
+    );
+    assert_eq!(
+        all[first_title].effort, None,
+        "the titler drops reasoning effort (the run itself asked for `high`)"
+    );
+
+    assert_eq!(title_entry_count(&session), 1);
+    assert_eq!(session.title().as_deref(), Some("retry backoff fix"));
+    assert!(
+        tags(&events).contains(&"session_title"),
+        "the UI learns the name: {:?}",
+        tags(&events)
+    );
+
+    // Ordering: after the SECOND `turn_end`, before the third `turn_start`.
+    let tag_list = tags(&events);
+    let at = tag_list
+        .iter()
+        .position(|t| *t == "session_title")
+        .unwrap();
+    let turn_starts = tag_list
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| **t == "turn_start")
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    let turn_ends = tag_list
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| **t == "turn_end")
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert!(
+        at > turn_ends[1],
+        "the title comes after the second turn_end: {tag_list:?}"
+    );
+    assert!(
+        at < turn_starts[2],
+        "and before the third turn starts: {tag_list:?}"
+    );
+}
+
+/// GATE 2: an existing `Title` suppresses the titler entirely — not merely a
+/// second entry (D2's `--resume` short-circuit, and `/rename`'s suppression).
+#[tokio::test]
+async fn auto_title_skips_a_session_that_already_has_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    session
+        .append(wcode_harness::session::SessionEntry::Title {
+            id: "seeded".into(),
+            title: "named by the human".into(),
+        })
+        .unwrap();
+    let t = Titler::new(three_tool_turns(), Ok("a machine name"));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 2),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert!(
+        t.title_calls().is_empty(),
+        "no title REQUEST is made when one exists: {:?}",
+        t.title_calls()
+    );
+    assert_eq!(title_entry_count(&session), 1, "the seeded entry, alone");
+    assert_eq!(session.title().as_deref(), Some("named by the human"));
+}
+
+/// GATE 3: `title_after_turns = 0` means off — the titler is never invoked.
+#[tokio::test]
+async fn auto_title_is_off_at_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    let t = Titler::new(three_tool_turns(), Ok("should never be asked"));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 0),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert!(
+        t.title_calls().is_empty(),
+        "0 = off, so not one title request: {:?}",
+        t.title_calls()
+    );
+    assert_eq!(title_entry_count(&session), 0);
+    assert!(!tags(&events).contains(&"session_title"));
+
+    // The same answer for a run with NO session (`--no-session`): there is no
+    // file to hold a `Title`, so "no entry exists" would be true at every
+    // boundary and the run would re-request with nothing to remember it by. It
+    // must not ask at all, even with the knob ON.
+    let t = Titler::new(three_tool_turns(), Ok("cannot be stored"));
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(cfg_common(None, t.stream_fn(), 2), &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert!(
+        t.title_calls().is_empty(),
+        "no session = nowhere to store a title, so no request: {:?}",
+        t.title_calls()
+    );
+    assert!(!tags(&events).contains(&"session_title"));
+}
+
+/// GATE 4: a failed title is SILENT — no entry, no event, no `Error`, and the
+/// run keeps its own stop reason.
+#[tokio::test]
+async fn auto_title_failure_leaves_no_entry_and_does_not_stop_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    let t = Titler::new(three_tool_turns(), Err("titler 500"));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 2),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(
+        res.unwrap(),
+        StopReason::Stop,
+        "the failure does not change the run"
+    );
+    assert_eq!(t.title_calls().len(), 1, "it was tried once");
+    assert_eq!(title_entry_count(&session), 0, "nothing was stored");
+    assert_eq!(session.title(), None);
+    let tag_list = tags(&events);
+    assert!(
+        !tag_list.contains(&"session_title"),
+        "silence: no SessionTitle: {tag_list:?}"
+    );
+    assert!(
+        !tag_list.contains(&"error"),
+        "silence: no AgentEvent::Error either: {tag_list:?}"
+    );
+}
+
+/// GATE 5: the title is SETTLED before the run returns — the regression guard
+/// against "improving" this into a detached task. The 2-turn script makes the
+/// trigger fire at the run's LAST boundary, and the file is read right after
+/// `run()` returns.
+#[tokio::test]
+async fn auto_title_is_settled_before_the_run_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    let path = session.path().unwrap().to_path_buf();
+    let turns = VecDeque::from(vec![
+        vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "x" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ],
+        vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ],
+    ]);
+    let t = Titler::new(turns, Ok("settled title"));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 2),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    // On disk BEFORE the caller resumes: no detached writer could guarantee this.
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains(r#""type":"title""#),
+        "the entry is on disk when run_loop returns: {raw}"
+    );
+    assert!(raw.contains("settled title"), "{raw}");
+    // …and it was announced before the run's final event.
+    let tag_list = tags(&events);
+    let at = tag_list.iter().position(|t| *t == "session_title").unwrap();
+    let end = tag_list.iter().rposition(|t| *t == "agent_end").unwrap();
+    assert!(at < end, "session_title precedes agent_end: {tag_list:?}");
+}
+
+/// GATE 6 — THE LATCH (B3). A titler that errors EVERY time is asked exactly
+/// once across three boundaries; without the latch this counts one per boundary.
+#[tokio::test]
+async fn auto_title_failure_is_not_retried_at_the_next_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = wcode_harness::session::Session::create(dir.path()).unwrap();
+    let t = Titler::new(three_tool_turns(), Err("always fails"));
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, _events) = run(
+        cfg_with_session(&mut session, t.stream_fn(), 2),
+        &mut ctx,
+    )
+    .await;
+
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    assert_eq!(
+        t.title_calls().len(),
+        1,
+        "the latch consumes the one attempt, so boundaries 2 and 3 do not retry: {:?}",
+        t.title_calls()
+    );
+    assert_eq!(title_entry_count(&session), 0);
+}

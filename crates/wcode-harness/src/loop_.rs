@@ -7,6 +7,7 @@ use crate::hooks::{HooksSet, ToolCall as HookToolCall};
 use crate::message::{AgentMessage, ContentBlock, StopReason, Usage};
 use crate::session::{Session, SessionEntry};
 use crate::streamfn::{LlmOpts, StreamFn};
+use crate::title;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Default per-run turn cap for [`LoopConfig::max_turns`]. Generous enough for
@@ -135,6 +136,12 @@ pub async fn run_loop(
 
     // Turns used so far, checked against `cfg.max_turns` at each turn start.
     let mut turns: usize = 0;
+    // W031 D1: has this run already attempted an auto-title? A per-run latch, NOT
+    // persisted — a `--resume` of an untitled session gets one more attempt
+    // (§5.4's deliberate pre-W031 backfill). It exists because a FAILED title
+    // stores nothing, so without it the trigger would re-fire at every later
+    // boundary and re-request forever (see `maybe_title`).
+    let mut title_tried = false;
     // Consecutive fed-back stream-error turns; see
     // [`DEFAULT_MAX_STREAM_ERROR_TURNS`]. Reset by any cleanly-completed turn.
     let mut consecutive_stream_errors: usize = 0;
@@ -415,70 +422,32 @@ pub async fn run_loop(
                 aborted = true;
             }
 
-            // ==== SKETCH (review-only, not real code) ==== W031 D1 — the trigger
-            // Goes HERE: immediately AFTER the `TurnEnd` send
-            // (`loop_.rs:400-407`, the block quoted above) and BEFORE the
-            // tool-call extraction below (`loop_.rs:409` `let calls: Vec<…> =
-            // assistant`). This is the turn boundary the brief names.
+            // W031 D1: the auto-title trigger, BLOCK INLINE (like auto-compaction
+            // above) — no spawn, no settle wrapper, no new exit path. This site is
+            // the turn boundary where the count is first satisfied, so a run that
+            // ENDS on this turn is still titled (a top-of-loop site would miss it).
             //
-            // D1 = BLOCK INLINE, like auto-compaction (`loop_.rs:177`
-            // `let outcome = compaction::compact_ctx(` … `.await;`). No spawn, no
-            // settle, no extra exit path: the 11 `return finish(…)` sites
-            // (`loop_.rs:124,141,433,444,460,475,705,709,725,731,737`) are
-            // untouched, and the title is settled before the run returns by
-            // construction — it is written before this turn's tools even run.
+            // The latch bounds it to ONE attempt per run, and it is set BEFORE the
+            // call so a failure consumes it. The price, stated: on this turn the
+            // round-trip sits between `TurnEnd` and the tool dispatch below, so
+            // that turn's tools start one request later. Bounded, once per run,
+            // and it happens after the reply is already on screen.
             //
-            // // THE LATCH (amends B3). Declare ONCE, outside the loop:
-            // //     let mut title_tried = false;      // before `'outer: loop` (see below)
-            // if !title_tried
-            //     && !aborted
-            //     && !matches!(stop, StopReason::Aborted | StopReason::Error)
-            // {
-            //     title_tried = true;
-            //     maybe_title(&mut cfg, ctx, &sink).await;
-            // }
-            //
-            // Why the latch is load-bearing: `maybe_title` changes NO state on
-            // `Err` (no entry is appended), so without it the trigger re-fires at
-            // EVERY later boundary once `assistant_turns >= title_after_turns` —
-            // one full model request per turn, forever, and the reasoning-model
-            // failure mode (thinking-only answer → `Err`) is exactly the case that
-            // never self-heals. That is the churn §3 rules out, and it silently
-            // breaks §5.3's "one request at turn 2".
-            //
-            // PER-RUN, NOT PERSISTED, and NOT `turns == title_after_turns`:
-            //   * per-run (`let mut title_tried = false;` in `run_loop`, next to
-            //     `let mut turns: usize = 0;`) so a `--resume` of an untitled
-            //     session gets ONE more attempt — §5.4's deliberate backfill;
-            //   * not `==` because a resumed session may already be past the
-            //     threshold (count 7, threshold 2) and must still get its backfill.
-            //
-            // Why the rest of the gate:
-            // * `!aborted` — the `TurnEnd` send just set `aborted` when the sink
-            //   is dead; a dead consumer must not cost a model request.
-            // * `stop` (`loop_.rs:374-378`, `let stop = if aborted { … }`) — an
-            //   aborted/failed turn is not a turn's worth of progress, and a
-            //   failure path must not add a second request. `ContentBlock`s from
-            //   a partial answer would otherwise title a session on garbage.
-            // * NOT gated on `calls.is_empty()`: a title is most useful on a long
-            //   agentic run, where turn 2 is mid-tool-loop. Do not move this
-            //   below the tool batch "to avoid a stall" — that is D1(b), rejected.
-            //
-            // BORROW ANSWER (the question the brief could not settle): this
-            // compiles. `maybe_title` takes `&mut LoopConfig`, exactly like
-            // `record_session` (`loop_.rs:835-846`
-            // `let Some(session) = cfg.session.as_deref_mut() else { return Ok(()) };`),
-            // and it takes its borrows SEQUENTIALLY — `cfg.session.as_deref()`
-            // for the existence check, dropped; `&cfg.stream_fn` + `&cfg.llm` for
-            // the await, dropped at the `.await`; then `cfg.session.as_deref_mut()`
-            // for the append. No `&mut` is held across the await, so the
-            // "cannot borrow `*cfg` as mutable because it is also borrowed as
-            // immutable" error does not arise. `ctx` is a separate `&mut
-            // Vec<AgentMessage>` parameter, so it never conflicts with `cfg`.
-            // What does NOT compile: passing `cfg.session.as_deref_mut()` into an
-            // async fn that also takes `&cfg.stream_fn` — i.e. one fn that both
-            // holds the session mutably and awaits the stream.
-            // ==== /SKETCH ====
+            // Not gated on `calls.is_empty()`: a title matters most on a long
+            // agentic run, where turn 2 is mid-tool-loop.
+            if !title_tried
+                && !aborted
+                && !matches!(stop, StopReason::Aborted | StopReason::Error)
+                // The count gate sits HERE as well as inside `maybe_title`:
+                // the latch is set BEFORE the call (so a failure consumes it),
+                // and entering the trigger on an earlier boundary — where the
+                // count is not yet reached — would burn the one attempt and the
+                // session would never be titled at all.
+                && assistant_turns(ctx) >= cfg.title_after_turns
+            {
+                title_tried = true;
+                maybe_title(&mut cfg, ctx, &sink).await;
+            }
 
             let calls: Vec<(String, String, serde_json::Value)> = assistant
                 .tool_calls()
@@ -919,118 +888,82 @@ fn record_session(cfg: &mut LoopConfig<'_>, msg: &AgentMessage) -> Result<(), Lo
         .map_err(LoopError::Session)
 }
 
-// ==== SKETCH (review-only, not real code) ==== W031 D1/D2 — the trigger body
-// Goes HERE: next to `record_session` (`loop_.rs:835-846`, above), which is the
-// only other fn that touches `cfg.session` from inside the loop.
-//
-// Imports: `use crate::title;` joins the block at `loop_.rs:1-10`. `SessionEntry`
-// is already in scope (`loop_.rs:8` `use crate::session::{Session, SessionEntry};`).
-//
-// /// Count `AgentMessage::Assistant` in `ctx` — W031 **D2**'s definition of "a
-// /// turn". Derived from persisted state, so it survives a `--resume` and agrees
-// /// with what the session file holds; a compaction cannot inflate it (the
-// /// synthetic summary is a `User` message, `message.rs:75-84`), and it counts a
-// /// long `-p` agentic run and a plain chat the same way — unlike the loop's own
-// /// `turns` counter (`loop_.rs:128` `let mut turns: usize = 0;`), which resets
-// /// every run so a plain chat would never reach 2.
-// fn assistant_turns(ctx: &[AgentMessage]) -> usize {
-//     ctx.iter()
-//         .filter(|m| matches!(m, AgentMessage::Assistant { .. }))
-//         .count()
-// }
-//
-// /// Append a `Title` entry and stream `AgentEvent::SessionTitle` — best-effort.
-// ///
-// /// # Contract (W031 D1 + §5.5)
-// /// * Silent no-op, in this order, when ANY of:
-// ///   - `cfg.title_after_turns == 0` (off);
-// ///   - there is no session (`--no-session`). Why: with no file there is no
-// ///     `Title` entry, so "no entry exists" would be true at EVERY boundary and
-// ///     the run would re-title and re-request forever — the churn §3 rules out;
-// ///   - `session.title().is_some()` — checked BEFORE any count, so a
-// ///     `--resume`ed titled session never re-titles and never restarts a
-// ///     counter (**D2**), and a `/rename` suppresses the auto-titler (§5.5);
-// ///   - `assistant_turns(ctx) < cfg.title_after_turns`.
-// /// * Else: `title::generate(&cfg.stream_fn, &cfg.llm, ctx).await`; on `Ok`,
-// ///   append `SessionEntry::Title { id: uuid, title: title.clone() }` through
-// ///   `cfg.session.as_deref_mut()` and `let _ = sink.send(AgentEvent::
-// ///   SessionTitle { title });`.
-// /// * On `Err`: NOTHING at all. Not a `Title` entry, not an `Error` event, not a
-// ///   return value. The run continues exactly as if the trigger did not exist —
-// ///   the `CompactionSkipped` precedent (`loop_.rs:192-199`, "Best-effort:
-// ///   report the miss and keep the run going. Deliberately NOT
-// ///   `AgentEvent::Error`"), with the difference that compaction reports and a
-// ///   title failure is silent (see FRICTION below).
-// /// * Never returns a `Result`: there is no failure path the loop can act on.
-// async fn maybe_title(
-//     cfg: &mut LoopConfig<'_>,
-//     ctx: &[AgentMessage],
-//     sink: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-// ) {
-//     // 1. cheap gates first (no request when any holds)
-//     //    if cfg.title_after_turns == 0 { return; }
-//     //    let Some(session) = cfg.session.as_deref() else { return; };
-//     //    if session.title().is_some() { return; }              // D2: BEFORE the count
-//     //    if assistant_turns(ctx) < cfg.title_after_turns { return; }
-//     // 2. the one call — TITLE-LOCAL opts (amends the reasoning-model gap):
-//     //    let mut title_llm = cfg.llm.clone();                  // LlmOpts is Clone
-//     //    title_llm.effort = None;                              // see FRICTION 3
-//     //    let Ok(title) = title::generate(&cfg.stream_fn, &title_llm, ctx).await else { return; };
-//     // 3. persist, then tell the UI (mutable borrow, after the await)
-//     //    let Some(session) = cfg.session.as_deref_mut() else { return; };
-//     //    if session
-//     //        .append(SessionEntry::Title {
-//     //            id: uuid::Uuid::new_v4().to_string(),
-//     //            title: title.clone(),
-//     //        })
-//     //        .is_err()
-//     //    {
-//     //        return;                                           // failed append: no event, no lie
-//     //    }
-//     //    let _ = sink.send(AgentEvent::SessionTitle { title });
-//
-// The `let Some(session) = … else { return; }` is NOT optional: the
-// `if let Some(session) = … && ….is_err() { return; }` form lets a `None` session
-// FALL THROUGH to `sink.send`, which would tell the UI a title the file does not
-// have — contradicting step 3's own comment. Write the `else` arm.
-// }
-//
-// FRICTION 1 — a failed auto-title is INVISIBLE. `CompactionSkipped` exists so a
-// miss is not mistaken for "compaction never ran"; the same argument applies here
-// and W031's scope lists only `AgentEvent::SessionTitle`, so the miss is silent.
-// If reviewers want the sibling event (`TitleSkipped { reason }`), it is a
-// 4-line addition here + an `event.rs` variant + a reducer arm + a repl print
-// arm — but it is NOT in the brief, so the sketch does not invent it.
-//
-// FRICTION 2 — the trigger costs a full round-trip at the WORST moment (turn 2,
-// when a human is most likely mid-typing). That is D1(a)'s accepted price,
-// mitigated by the W029 input queue (keystrokes are queued, not lost). Do not
-// "fix" it with a timeout wrapper here: a cancelled titler leaves the session
-// untitled AND re-fires at the next boundary, which is worse than the stall.
-//
-// FRICTION 3 — the reasoning-model gap, FIXED by the title-local opts (step 2
-// above): `title_llm.effort = None` so the titler is not asked to reason. What is
-// NOT the fix: falling back to `ThinkingDelta` text. A thinking block's first line
-// is planning prose ("The user is asking about…"), which would title a session
-// with a sentence about the request rather than the request. If `TextDelta` never
-// arrives, `Err("titler produced no text")` → latch consumed → no title. Safe.
-//
-// Test gates (W031 §6 step 3) — these live in `crates/wcode-harness/tests/`
-// (they need a real run), not in `loop_.rs`'s `mod cancel_in_tool_tests`:
-// #[tokio::test] async fn auto_title_fires_at_the_second_assistant_turn() { todo!() }
-// #[tokio::test] async fn auto_title_skips_a_session_that_already_has_one() { todo!() }
-// #[tokio::test] async fn auto_title_is_off_at_zero() { todo!() }
-// #[tokio::test] async fn auto_title_failure_leaves_no_entry_and_does_not_stop_the_run() { todo!() }
-// #[tokio::test] async fn auto_title_failure_is_not_retried_at_the_next_boundary() { todo!() }
-//   // THE LATCH GATE (B3): a StreamFn that returns Error for EVERY title-shaped
-//   // call (a title call = empty tool list + TITLE_PROMPT as system). Run three
-//   // boundaries past the threshold; assert EXACTLY ONE such call happened, that
-//   // the run still finished cleanly, and that no `Title` entry exists. Without
-//   // the latch this test fails by counting 1 per boundary.
-// #[tokio::test] async fn auto_title_is_settled_before_the_run_returns() { todo!() }
-//   // a StreamFn whose title call resolves AFTER the last TurnEnd; assert the
-//   // Title line is on disk before `run_loop` returns (no detached task).
-// ==== /SKETCH ====
+/// Count `AgentMessage::Assistant` in `ctx` — W031 **D2**'s definition of "a
+/// turn". Derived from persisted state, so it survives a `--resume` and agrees
+/// with what the session file holds; a compaction cannot inflate it (the
+/// synthetic summary is a `User` message), and it counts a long `-p` agentic run
+/// and a plain chat the same way — unlike the loop's own `turns` counter, which
+/// resets every run so a plain chat would never reach 2.
+fn assistant_turns(ctx: &[AgentMessage]) -> usize {
+    ctx.iter()
+        .filter(|m| matches!(m, AgentMessage::Assistant { .. }))
+        .count()
+}
+
+/// Append a `Title` entry and stream [`AgentEvent::SessionTitle`] — best-effort.
+///
+/// # Contract (W031 D1 + §5.5)
+///
+/// Silent no-op, in THIS order, when any of:
+/// - `cfg.title_after_turns == 0` (off);
+/// - there is no session (`--no-session`). Why: with no file there is no `Title`
+///   entry, so "no entry exists" would be true at EVERY boundary and the run
+///   would re-title and re-request at each one — the churn §3 rules out;
+/// - `session.title().is_some()` — checked BEFORE any count, so a `--resume`d
+///   titled session never re-titles and never restarts a counter (**D2**), and a
+///   `/rename` suppresses the auto-titler (§5.5);
+/// - `assistant_turns(ctx) < cfg.title_after_turns`.
+///
+/// Else one [`title::generate`] call with TITLE-LOCAL opts — the same model, with
+/// `effort` cleared so a reasoning model is not asked to think about a name. On
+/// `Ok`, append the entry through [`LoopConfig::session`] and stream the event; on
+/// `Err`, NOTHING at all — no entry, no event, no `AgentEvent::Error`. The
+/// caller's per-run latch is what keeps a persistent failure from becoming a
+/// per-turn retry storm.
+///
+/// Deliberately does NOT fall back to `ThinkingDelta` text: a thinking block's
+/// first line is planning prose ("The user is asking about…"), which would name
+/// the session after the request instead of the work.
+async fn maybe_title(
+    cfg: &mut LoopConfig<'_>,
+    ctx: &[AgentMessage],
+    sink: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+) {
+    if cfg.title_after_turns == 0 {
+        return;
+    }
+    let Some(session) = cfg.session.as_deref() else {
+        return;
+    };
+    if session.title().is_some() {
+        return;
+    }
+    if assistant_turns(ctx) < cfg.title_after_turns {
+        return;
+    }
+
+    let mut title_llm = cfg.llm.clone();
+    title_llm.effort = None;
+    let Ok(title) = title::generate(&cfg.stream_fn, &title_llm, ctx).await else {
+        return;
+    };
+
+    // `let … else`, not `if let`: a `None` session must NOT fall through to the
+    // event send, or the UI would announce a title the file does not have.
+    let Some(session) = cfg.session.as_deref_mut() else {
+        return;
+    };
+    if session
+        .append(SessionEntry::Title {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: title.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
+    let _ = sink.send(AgentEvent::SessionTitle { title });
+}
 
 /// Provider-reported input tokens of the most recent assistant message: the
 /// size of the last request, used to decide whether to compact.
