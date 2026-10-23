@@ -132,6 +132,8 @@ fn fixture() -> App {
         session: Some("9f3c1a7b2e4d".into()),
         context_limit: Some(200_000),
         plan: true,
+        // W031: this dump fixture is untitled.
+        title: None,
     });
     app.set_cwd(Some("wcode".into()));
     app.set_git(Some("main*".into()));

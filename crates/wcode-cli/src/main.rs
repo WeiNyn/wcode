@@ -1107,6 +1107,9 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         )
                         .map(|l| l.context),
                         plan: false,
+                        // W031: the SERVER owns this session, so the client has no
+                        // title yet — it learns one from the next `SessionTitle`.
+                        title: None,
                     };
                     let cwd = std::env::current_dir().ok().and_then(|p| {
                         p.file_name().map(|n| n.to_string_lossy().into_owned())
@@ -2017,6 +2020,9 @@ async fn dispatch(
                 )
                 .map(|l| l.context),
                 plan: false,
+                // W031: the LOCAL path knows the session, so the header can show
+                // its name from the first frame (a resumed session included).
+                title: agent.title(),
             };
             let cwd = std::env::current_dir().ok().and_then(|p| {
                 p.file_name().map(|n| n.to_string_lossy().into_owned())

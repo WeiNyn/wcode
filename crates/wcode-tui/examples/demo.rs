@@ -139,6 +139,8 @@ async fn main() -> std::io::Result<()> {
         session: Some("demo-session".into()),
         context_limit: Some(200_000),
         plan: false,
+        // W031: this example session is untitled.
+        title: None,
     };
     let options = wcode_tui::Options {
         status,

@@ -823,10 +823,17 @@ fn speaker_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 /// `session` → drop the branch → drop `effort` → truncate with `…`. The raw
 /// `head.session` is shortened via `short_id`.
 fn session_head_row(head: &SessionHead, width: usize) -> Line<'static> {
-    let session = head
-        .session
-        .as_deref()
-        .map(|id| format!(" · session {}", short_id(id)));
+    // W031: the TITLE wins the segment when the session has one — a name a human
+    // can read, not the opaque id. `short_id` is only the fallback. The render cap
+    // (`title_short`) is what keeps a long title from being dropped outright by
+    // the ladder below: a dropped segment is invisible, a truncated one is not.
+    let session = match head.title.as_deref() {
+        Some(title) => Some(format!(" · {}", title_short(title))),
+        None => head
+            .session
+            .as_deref()
+            .map(|id| format!(" · session {}", short_id(id))),
+    };
     let branch = head.branch.as_deref().map(|b| format!("⎇ {b}"));
     let effort = head.effort.as_deref();
 
@@ -2186,6 +2193,23 @@ fn format_ms(ms: u64) -> String {
 /// First 8 chars of a session id — enough to recognize, not enough to crowd.
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// Render cap for a session title in the header segment (W031), in CHARS. Unlike
+/// [`wcode_harness::title::sanitize`]'s stored cap, a RENDER cap may ellipsize:
+/// nothing is persisted from here, and a truncated name still identifies the row.
+/// Sized so `WCODE · <title>` + the far-right `project · ⎇ branch   model ·
+/// effort` group still fits at 80 columns — one ladder step wider than the
+/// `· session <short_id>` it replaces(+1 char), and far short of dropping it.
+const TITLE_SHORT: usize = 24;
+
+fn title_short(title: &str) -> String {
+    if title.chars().count() <= TITLE_SHORT {
+        return title.to_string();
+    }
+    let mut out: String = title.chars().take(TITLE_SHORT).collect();
+    out.push('…');
+    out
 }
 
 fn split_at_char(text: &str, n: usize) -> (String, String) {
@@ -4550,6 +4574,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             session: Some("abcdef0123456789".into()),
             context_limit: Some(1_000_000),
             plan: false,
+            title: None,
         });
         let text = buffer_text(&render(&mut app, 80, 14));
         // The composer is an open writing line over a foot line — NO box, NO
@@ -4643,6 +4668,70 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(
             reversed_cells(&terminal).is_empty(),
             "the `WCODE` head must not be reversed:\n{text}"
+        );
+    }
+
+    /// GATE (W031 §5.7): the render cap is what keeps a title VISIBLE at the most
+    /// common width. The ladder drops the whole session segment when the row does
+    /// not fit, so an uncapped 60-char title (the stored cap) would vanish.
+    #[test]
+    fn title_short_fits_the_header_at_80_cols() {
+        // The number is the contract, pinned through BEHAVIOUR (a constant
+        // assertion would be lint-only): 24 chars is the longest title kept
+        // whole, 25 the shortest that ellipsizes. A cap that creeps upward starts
+        // dropping the whole segment at 80 columns again.
+        let at_cap = "t".repeat(24);
+        assert_eq!(title_short(&at_cap), at_cap, "24 chars is kept whole");
+        let one_more = "t".repeat(25);
+        assert_eq!(
+            title_short(&one_more),
+            format!("{}…", "t".repeat(24)),
+            "25 chars ellipsizes at 24"
+        );
+
+        let status = |title: Option<String>| crate::app::Status {
+            model: "zephyr-9".into(),
+            effort: Some("high".into()),
+            session: Some("abcdef0123456789".into()),
+            context_limit: Some(1_000_000),
+            plan: false,
+            title,
+        };
+
+        // Exactly at the cap: kept WHOLE, at ladder level 0.
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        app.set_status(status(Some(at_cap.clone())));
+        let text = buffer_text(&render(&mut app, 80, 14));
+        let row0 = text.lines().next().unwrap_or_default();
+        assert!(row0.contains(&at_cap), "the full title at the cap: {row0:?}");
+        assert!(
+            !row0.contains("· session "),
+            "the title replaces the id segment: {row0:?}"
+        );
+        assert!(
+            row0.contains("zephyr-9") && row0.contains("high") && row0.contains("main*"),
+            "level 0 survives — the title did not push the rest down the ladder: {row0:?}"
+        );
+
+        // A LONG title (the stored clamp is 60) degrades to `…`, never disappears.
+        let long = "retry backoff fix for the flaky streaming test suite retries";
+        assert!(long.chars().count() > TITLE_SHORT);
+        let mut app = App::new();
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        app.set_status(status(Some(long.to_string())));
+        let text = buffer_text(&render(&mut app, 80, 14));
+        let row0 = text.lines().next().unwrap_or_default();
+        let capped = title_short(long);
+        assert_eq!(capped.chars().count(), TITLE_SHORT + 1, "cap + `…`");
+        assert!(capped.ends_with('…'), "{capped:?}");
+        assert!(row0.contains(&capped), "the truncated title: {row0:?}");
+        assert!(!row0.contains(long), "and not the whole thing: {row0:?}");
+        assert!(
+            !row0.contains("· session "),
+            "still the title, not the id: {row0:?}"
         );
     }
 
@@ -5864,16 +5953,17 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     /// BOTH, so a future styling change cannot desync them.
     #[test]
     fn help_rows_render_in_f1s_two_column_style() {
-        // Drawn tall enough that neither body clips ( `/help` is 48 rows, so it
-        // needs height ≥ 51 to show them all).
+        // Drawn tall enough that neither body clips: `/help` is one row per
+        // `COMMANDS` entry plus one per `KEYS` entry (49 + 33 at the time of
+        // writing, W031 added a command), so 64 leaves slack for a future one.
         let mut f1 = App::new();
         f1.handle(AppEvent::Key(Key::F(1)));
-        let f1_text = buffer_text(&render(&mut f1, 80, 56));
+        let f1_text = buffer_text(&render(&mut f1, 80, 64));
         // `/help`, the same size.
         let mut help = App::new();
         typed(&mut help, "/help");
         help.handle(AppEvent::Key(Key::Enter));
-        let help_frame = buffer_text(&render(&mut help, 80, 56));
+        let help_frame = buffer_text(&render(&mut help, 80, 64));
 
         // Every KEYS row of both modals is the exact two-column row.
         for (chord, what) in KEYS {

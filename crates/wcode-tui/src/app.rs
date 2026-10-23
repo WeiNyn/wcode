@@ -174,6 +174,9 @@ pub struct SessionHead {
     /// The **RAW** session id (matching `Status.session`); `session_head_row`
     /// (in `ui.rs`, where `short_id` lives) shortens it. `None` hides the group.
     pub session: Option<String>,
+    /// The session's semantic title (W031). When present the header shows it
+    /// INSTEAD of `· session <short_id>` — a name beats an opaque id.
+    pub title: Option<String>,
     /// The cwd (or `wcode`); **muted**.
     pub project: String,
     /// The branch, WITHOUT the `⎇` (the renderer adds it); `None` hides it.
@@ -197,6 +200,7 @@ impl SessionHead {
         let status = app.chrome_status();
         SessionHead {
             session: status.session.clone(),
+            title: status.title.clone(),
             project: app.cwd().unwrap_or("wcode").to_string(),
             branch: app.git().map(str::to_string),
             model: status.model.clone(),
@@ -790,6 +794,12 @@ const COMMANDS: &[Command] = &[
         summary: "resume a saved session",
     },
     Command {
+        name: "rename",
+        aliases: &[],
+        args: Some("<text>"),
+        summary: "name this session",
+    },
+    Command {
         name: "reload",
         aliases: &[],
         args: Some("[--no-session]"),
@@ -1231,6 +1241,13 @@ pub struct Status {
     /// Plan mode is on (the status line shows a `plan` chip). Optimistic on the
     /// client; the harness hook is the source of truth.
     pub plan: bool,
+    /// The session's semantic name, when it has one (W031). `None` = untitled, so
+    /// the header falls back to `· session <short_id>`.
+    ///
+    /// Client-side state: a LOCAL run seeds it from the agent (`main.rs`); a socket
+    /// client seeds `None` — the server owns the session, so the client learns the
+    /// title from the next `SessionTitle` event.
+    pub title: Option<String>,
 }
 
 impl Default for Status {
@@ -1241,6 +1258,7 @@ impl Default for Status {
             session: None,
             context_limit: None,
             plan: false,
+            title: None,
         }
     }
 }
@@ -1253,6 +1271,7 @@ impl Status {
             session: None,
             context_limit: None,
             plan: false,
+            title: None,
         }
     }
 }
@@ -1959,6 +1978,18 @@ impl Surface {
                     }
                     None => self.push_block(Block::Todos(todos)),
                 }
+                true
+            }
+            AgentEvent::SessionTitle { title } => {
+                // W031: local runs AND socket clients land here — the point of
+                // routing the title through the event seam (the `Todo` rationale).
+                // `true` is the whole dirty story: `handle`'s `AppEvent::Agent` arm
+                // flips `self.dirty` when `apply` returns true.
+                self.status.title = Some(title.clone());
+                // `Block::Transient`, not `App::transient`: this is a `Surface`
+                // method, and a transient block is what the App-level helper pushes
+                // (retired at the next submit).
+                self.push_block(Block::Transient(format!("renamed · {title}")));
                 true
             }
             AgentEvent::CompactionSkipped { reason } => {
@@ -4284,6 +4315,28 @@ impl App {
             "usage" => self.request_usage(),
             "changes" => self.open_changes_picker(),
             "resume" => self.open_session_picker(arg),
+            "rename" => match arg {
+                Some(t) if !t.trim().is_empty() => {
+                    // Only the Ask: the reducer applies the reply, and the actor
+                    // also STREAMS `SessionTitle` (so a socket client learns it
+                    // too). No optimistic `status.title` write, so no
+                    // revert-on-error dance (unlike `/plan`).
+                    self.actions.push(Action::Ask(Request::SetTitle {
+                        title: t.to_string(),
+                    }));
+                }
+                // Bare `/rename` shows the current name (`/effort`'s no-arg
+                // convention); it asks the backend nothing.
+                _ => {
+                    let current = self
+                        .focused()
+                        .status
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "(untitled)".to_string());
+                    self.transient(current);
+                }
+            },
             "reload" => match arg {
                 None => self.request_reload(false),
                 Some("--no-session") => self.request_reload(true),
@@ -6669,6 +6722,94 @@ mod tests {
     }
 
     #[test]
+    fn a_session_title_event_sets_the_status_title() {
+        let mut app = App::new();
+        assert_eq!(app.focused().status.title, None, "untitled to start");
+
+        // (a) the reducer must CLAIM the event. A missing arm falls into the
+        // `_ => false` catch-all in `Surface::apply` — the silent failure this
+        // test exists for.
+        app.focused_mut().status.title = None;
+        let claimed = app.focused_mut().apply(AgentEvent::SessionTitle {
+            title: "retry backoff fix".into(),
+        });
+        assert!(claimed, "(a) the reducer returns true, not the catch-all's false");
+
+        // (b) the title lands in `Status.title` …
+        assert_eq!(
+            app.focused().status.title.as_deref(),
+            Some("retry backoff fix"),
+            "(b) Status.title"
+        );
+
+        // … through the real handle path too (which also marks the frame dirty),
+        // and the transient carries it.
+        app.handle(AppEvent::Agent(
+            root(),
+            AgentEvent::SessionTitle {
+                title: "retry backoff fix".into(),
+            },
+        ));
+        assert!(
+            app.transcript().iter().any(
+                |b| matches!(b, Block::Transient(t) if t.contains("renamed · retry backoff fix"))
+            ),
+            "a `renamed · <title>` transient: {:?}",
+            app.transcript()
+        );
+
+        // (c) ROW 0 shows it — state alone is not the feature.
+        app.set_cwd(Some("wcode".into()));
+        app.set_git(Some("main*".into()));
+        let frame = crate::render_plain(&mut app, 80, 14);
+        let row0 = frame.lines().next().unwrap_or_default();
+        assert!(
+            row0.contains("retry backoff fix"),
+            "(c) the header segment renders the title: {row0:?}"
+        );
+        assert!(
+            !row0.contains("· session "),
+            "(c) the title REPLACES the id segment: {row0:?}"
+        );
+    }
+
+    #[test]
+    fn rename_command_asks_the_backend() {
+        let mut app = App::new();
+        submit(&mut app, "/rename w031 titles");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetTitle {
+                title: "w031 titles".into()
+            })],
+            "exactly one Ask, and nothing else"
+        );
+        assert!(
+            app.input().trim().is_empty(),
+            "the buffer is consumed by the submit: {:?}",
+            app.input()
+        );
+
+        // Bare `/rename` asks nothing — it reports the current name instead.
+        submit(&mut app, "/rename");
+        assert!(app.take_actions().is_empty(), "no request for a bare rename");
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Transient(t) if t == "(untitled)")),
+            "bare /rename shows the current name: {:?}",
+            app.transcript()
+        );
+
+        // And it is DISCOVERABLE: `/help` lists the row with its args.
+        assert!(
+            help_rows().iter().any(|r| matches!(r,
+                InfoRow::Item { label, .. } if label == "/rename <text>")),
+            "/help lists the rename row with its args"
+        );
+    }
+
+    #[test]
     fn slash_commands_emit_actions() {
         let mut app = App::new();
         submit(&mut app, "/model gpt-x");
@@ -8178,8 +8319,9 @@ mod tests {
         // Discovery: every command name is a `/`-prefixed label (the word the user
         // types) and every KEYS chord appears as a label (the loop above).
         for name in [
-            "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "reload",
-            "btw", "plan", "verify", "usage", "copy", "surface", "width", "team", "tasks", "help",
+            "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "rename",
+            "reload", "btw", "plan", "verify", "usage", "copy", "surface", "width", "team", "tasks",
+            "help",
         ] {
             let prefixed = format!("/{name}");
             assert!(
