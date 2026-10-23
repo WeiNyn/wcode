@@ -135,13 +135,10 @@ pub enum Command {
     /// `/skill <name> [args]` — force-load a skill's body as a turn, for when
     /// the model does not pick it up from the prompt section on its own.
     Skill(Option<String>),
-    // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — the command
-    // Goes HERE: the last variant of `Command` (`repl.rs:105-140`).
-    //
-    // /// `/rename <text>` — name this session (W031). `Some(text)` = set it,
-    // /// `None` = show the current one (the `/effort` arg convention).
-    // Rename(Option<String>),
-    // ==== /SKETCH ====
+    /// `/rename <text>` — name this session (W031). `Some(text)` = set it;
+    /// `None` = a bare call, which prints usage (the name is already visible in
+    /// the picker row and, in the TUI, the header).
+    Rename(Option<String>),
 }
 
 /// `/command` lines parse to a Command; anything else (including unknown
@@ -160,22 +157,9 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "models" => Some(Command::Models(arg)),
         "effort" => Some(Command::Effort(arg)),
         "resume" => Some(Command::Resume(arg)),
-        // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — the parse arm
-        // Goes HERE: in `parse_command` (`repl.rs:142-176`), beside `"resume"`
-        // (the anchor above), before `"sessions"`.
-        //
-        // "rename" => Some(Command::Rename(arg)),
-        //
-        // `arg` is already `Option<String>` and already trimmed (`repl.rs:145-151`),
-        // so `/rename` with no arg is `Rename(None)` = show, and `/rename fix the
-        // retry backoff` is `Rename(Some("fix the retry backoff"))`. Unlike
-        // `/plan`, there is no invalid arg — a title is free text.
-        //
-        // Test gate (W031 §6 step 5): in `parse_command_table` (`repl.rs:2027-2080`),
-        //   assert_eq!(parse_command("/rename"), Some(Command::Rename(None)));
-        //   assert_eq!(parse_command("/rename w031 titles"),
-        //              Some(Command::Rename(Some("w031 titles".into()))));
-        // ==== /SKETCH ====
+        // `/rename` takes free text: there is no invalid arg, and a bare
+        // `/rename` is `Rename(None)` — a usage line, not a read of the name.
+        "rename" => Some(Command::Rename(arg)),
         "sessions" if arg.is_none() => Some(Command::Sessions),
         "reload" => match arg.as_deref() {
             None => Some(Command::Reload { no_session: false }),
@@ -1179,53 +1163,30 @@ pub async fn run(
                 }
                 }
             }
-            // ==== SKETCH (review-only, not real code) ==== W031 §5.6 — dispatch + /sessions
-            // Goes HERE: the `Command` dispatch match, right before
-            // `Some(Command::Sessions)` (the arm the anchor below starts).
-            //
-            // Some(Command::Rename(title)) => match title {
-            //     None => println!("{}", current_title_note()),   // or "usage: /rename <text>"
-            //     Some(t) if t.trim().is_empty() => println!("usage: /rename <text>"),
-            //     Some(t) => match backend.ask(Request::SetTitle { title: t.clone() }).await {
-            //         // The actor answers with `SessionTitle` (it also STREAMS it, so a
-            //         // socket client's UI sees it). Print the reply, not the request:
-            //         // the stored title is the authority.
-            //         Ok(AgentEvent::SessionTitle { title }) => println!("title: {title}"),
-            //         Ok(AgentEvent::Error { message }) => eprintln!("rename: {message}"),
-            //         Ok(_) => eprintln!("rename: unexpected reply"),
-            //         Err(_) => eprintln!("rename: session closed"),
-            //     },
-            // },
-            //
-            // NO `if remote` GUARD — and that is the point (§5.6). `/resume` IS
-            // guarded (`repl.rs:997-1001` "/resume is unavailable over a socket (the
-            // server owns the session)") because it lists a client-side directory;
-            // a rename is a `Request` the SERVER applies to its own session file, so
-            // it works over a socket exactly as `/effort` does (`repl.rs:962-996`).
-            // Do not copy the `/resume` guard onto this arm.
-            //
-            // Then the `/sessions` row (`repl.rs:1166-1169`, quoted below) prints
-            // the title: replace the bare `file_name()` with the shared label
-            //   println!("{mark} {}", crate::session_label(&p));
-            // `session_label` stays PRIVATE (`main.rs:2508`); `repl` is a
-            // descendant module of the crate root, so it can call it as-is. Do not
-            // widen it to `pub(crate)`.
-            //
-            // HERMETIC-PINNING ANSWER (amendment 6): the REPL arm CANNOT be pinned
-            // by a unit test. `print_events` writes to real stdout
-            // (`repl.rs`'s `out(...)`), and the one test that observes its
-            // behaviour asserts a CACHE SIDE-EFFECT instead
-            // (`repl.rs:2852`-ish, the `last_todos` cache the `Todo` arm fills).
-            // Do NOT add a `last_title` sink just to have something to assert —
-            // that is test-only state in production code. Pin `/rename` with:
-            //   * a layer-2 grep: `AgentEvent::SessionTitle` appears inside
-            //     `print_events` (a missing arm hits `repl.rs:1618` `_ => {}` and
-            //     compiles silently), plus a print line for it;
-            //   * the live `--no-tui` check: run two turns, see the title line,
-            //     then `/rename x` and `/sessions` and see `x` in the row.
-            // (The title is only on disk after the agent has one; a session renamed
-            // in THIS process shows it because `SetTitle` appended before replying.)
-            // ==== /SKETCH ====
+            // W031: rename through the protocol, so it works over a socket exactly
+            // as `/effort` does — a rename is a `Request` the SERVER applies to its
+            // own session file. This is the deliberate contrast with `/resume`
+            // above, which is refused there because it lists a CLIENT-side
+            // directory. Do not copy that guard here.
+            Some(Command::Rename(arg)) => match arg.as_deref().map(str::trim) {
+                Some(t) if !t.is_empty() => {
+                    match backend
+                        .ask(Request::SetTitle {
+                            title: t.to_string(),
+                        })
+                        .await
+                    {
+                        // Print the REPLY, not the request: the stored title is the
+                        // authority (the actor appends before it answers, so an
+                        // append failure comes back as `Error`).
+                        Ok(AgentEvent::SessionTitle { title }) => println!("title: {title}"),
+                        Ok(AgentEvent::Error { message }) => eprintln!("rename: {message}"),
+                        Ok(_) => eprintln!("rename: unexpected reply"),
+                        Err(_) => eprintln!("rename: session closed"),
+                    }
+                }
+                _ => println!("usage: /rename <text>"),
+            },
             Some(Command::Sessions) => match list_sessions(&session_dir()) {
                 Ok(list) if list.is_empty() => {
                     println!("no sessions in {}", session_dir().display())
@@ -1243,10 +1204,11 @@ pub async fn run(
                         } else {
                             " "
                         };
-                        println!(
-                            "{mark} {}",
-                            p.file_name().unwrap_or_default().to_string_lossy()
-                        );
+                        // The shared picker row: a titled session leads with its
+                        // title, an untitled one keeps the pre-W031 shape.
+                        // `session_label` stays private in `main.rs` — this module
+                        // is a descendant of the crate root.
+                        println!("{mark} {}", crate::session_label(&p));
                     }
                 }
                 Err(e) => eprintln!("list sessions: {e}"),
@@ -1694,6 +1656,13 @@ async fn print_events(
             AgentEvent::Todo { todos } => {
                 // Cache for `/verify` (a client render of the last emitted list).
                 *last_todos.lock().unwrap_or_else(|e| e.into_inner()) = Some(todos);
+            }
+            AgentEvent::SessionTitle { title } => {
+                // W031: the auto-titler (and `/rename`, which replies with the same
+                // event) reports the name here. Without this arm the title falls
+                // into the catch-all below and `--no-tui` never learns it.
+                close_blocks(&mut p, &mut st);
+                out(&format!("{DIM}⋯ titled: {title}{RESET}\n"));
             }
             _ => {}
         }
@@ -2216,7 +2185,14 @@ mod tests {
             parse_command("/models gpt"),
             Some(Command::Models(Some("gpt".into())))
         );
-        assert_eq!(parse_command("/effort"), Some(Command::Effort(None)));
+        assert_eq!(parse_command("/rename x"), Some(Command::Rename(Some("x".into()))));
+assert_eq!(
+    parse_command("/rename  fix the retry backoff "),
+    Some(Command::Rename(Some("fix the retry backoff".into()))),
+    "the arg is trimmed, like every other /command"
+);
+assert_eq!(parse_command("/rename"), Some(Command::Rename(None)));
+assert_eq!(parse_command("/effort"), Some(Command::Effort(None)));
         assert_eq!(
             parse_command("/effort high"),
             Some(Command::Effort(Some("high".into())))
