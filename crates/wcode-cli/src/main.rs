@@ -2459,10 +2459,17 @@ fn session_items() -> Vec<wcode_tui::SessionItem> {
         .collect()
 }
 
-/// `<title> · id · age · first user line`, omitting whichever parts are
-/// unavailable. The TITLE leads when the session has one (W031): it is the
-/// semantic name the user is searching for, and without it the row is the old
-/// `id · age · first line`.
+/// The picker row for `path`, in one of two shapes:
+///
+/// * **titled** (W031) — `<title> · <age>`: the title STANDS IN for the id and
+///   the first user line, both of which it replaces (an opaque `{millis}_{uuid8}`
+///   a human cannot use, and the first line's noise). The age stays because two
+///   sessions can carry the same title, and that is what tells them apart;
+/// * **untitled** — `<id> · <age> · <first user line>`, exactly the pre-W031 row,
+///   so old sessions do not regress.
+///
+/// Parts are omitted when unavailable (no parseable age, no user line), so a row
+/// never ends on a dangling separator.
 ///
 /// Private on purpose — `repl` is a descendant of the crate root, so it reaches
 /// `crate::session_label` with no visibility change.
@@ -2476,16 +2483,16 @@ fn session_label(path: &Path) -> String {
     // ONE open for both halves: this runs for every row the picker lists, and a
     // second open per row would double the reads.
     let session = row_session(path);
-    let mut parts = vec![id.to_string()];
+    let age = age_millis(id).map(humanize_age);
+
     if let Some(title) = session.as_ref().and_then(|s| s.title()) {
-        parts.insert(0, title); // leads: the title IS the row
+        let mut parts = vec![title];
+        parts.extend(age);
+        return parts.join(" · ");
     }
-    if let Some(age) = age_millis(id) {
-        parts.push(humanize_age(age));
-    }
-    // The first line stays even next to a title: the title is the model's
-    // compression of the same text, so the two are not redundant to a reader
-    // scanning for a fallback, and keeping it is the smaller change.
+
+    let mut parts = vec![id.to_string()];
+    parts.extend(age);
     if let Some(first) = session.as_ref().and_then(first_user_line_of) {
         parts.push(first);
     }
@@ -4231,9 +4238,8 @@ mod tests {
         }
     }
 
-    /// GATE (W031 §6 step 7): a titled session's row LEADS with the title — that
-    /// is the whole point of the feature, since the title is the name a human
-    /// searches for.
+    /// GATE (W031 §6 step 7): a titled session's row is the TITLE and its age —
+    /// the title REPLACES the id and the first user line, it does not lead them.
     #[test]
     fn session_label_prefers_the_title() {
         let (_dir, path) = session_file(vec![
@@ -4243,17 +4249,52 @@ mod tests {
                 title: "retry backoff fix".into(),
             },
         ]);
+        let id = path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_end_matches(".jsonl")
+            .to_string();
 
         let label = session_label(&path);
+        assert_eq!(label, "retry backoff fix · 0s", "the titled shape, exactly");
+        // The parts the title stands in for are GONE: four-part rows are what
+        // gets truncated in the picker, and the id is unusable anyway.
         assert!(
-            label.starts_with("retry backoff fix"),
-            "the title leads the row: {label}"
+            !label.contains(&id),
+            "the opaque id is dropped: {label}"
         );
-        // The old parts are still there, after it.
-        assert!(label.contains(" · 0s · "), "{label}");
-        assert!(label.contains("make the retry backoff exponential"), "{label}");
-        // Exactly one leading title, not a repeat.
+        assert!(
+            !label.contains("make the retry backoff exponential"),
+            "the first user line is dropped: {label}"
+        );
         assert_eq!(label.matches("retry backoff fix").count(), 1, "{label}");
+    }
+
+    /// A titled session with NO parseable age (`root.jsonl`, as a group's root is
+    /// named) is the title alone — no dangling ` · `.
+    #[test]
+    fn session_label_titled_without_an_age_is_the_title_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session =
+            Session::create_named_with_cwd(dir.path(), "root", dir.path()).unwrap();
+        session
+            .append(wcode_harness::session::SessionEntry::Message {
+                id: "m1".into(),
+                parent_id: None,
+                message: AgentMessage::user_text("make the retry backoff exponential"),
+            })
+            .unwrap();
+        session
+            .append(wcode_harness::session::SessionEntry::Title {
+                id: "t1".into(),
+                title: "retry backoff fix".into(),
+            })
+            .unwrap();
+        let path = session.path().unwrap().to_path_buf();
+
+        let label = session_label(&path);
+        assert_eq!(label, "retry backoff fix", "no trailing separator: {label:?}");
     }
 
     /// GATE: with no title the row is today's `id · age · first line`, unchanged.
