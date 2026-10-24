@@ -1214,11 +1214,14 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize, gutter: &str) -> Vec<
 ///   rule), never silently: expansion is what shows it in full.
 /// - A multi-line value shows its FIRST logical line plus ` … +N lines`, and that
 ///   tail is priced into the budget. No `\n` char may reach a span.
+/// - **Exactly one `…` per row**, present whenever anything was folded or clipped
+///   — at every width. The fold mark is therefore NEVER a rung: it is a parameter
+///   of the last one.
 /// - The note ([`completion_note`], else the `summary_line` fallback) is capped at
 ///   40 chars (A4; the ONLY place the cap is applied). Crowding sheds in this
 ///   order and only this one: the note → the ms → the extra `key=value` params
-///   (from the tail) → the ` … +N lines` tail → a CLIPPED first value with a
-///   [`MIN_TOOL_VALUE_COLS`] floor. The **name never sheds**.
+///   (from the tail) → a CLIPPED first value with a [`MIN_TOOL_VALUE_COLS`] floor.
+///   The **name never sheds**.
 fn collapsed_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
     let prefix = gutter.to_string();
     let name_style = if tool.is_error { error_style() } else { tool_name() };
@@ -1236,16 +1239,19 @@ fn collapsed_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> 
     };
     // Flatten to ONE logical line: a heredoc `command` must never put a `\n` in a
     // span (a zero-width cell that mis-sizes the row).
-    let first_line = value.split('\n').next().unwrap_or("");
-    let hidden_lines = value.split('\n').count().saturating_sub(1);
+    let (first_line, hidden_lines) = fold_value(value);
     let highlight = |text: &str| match value_key {
         Some(key) => inline_param_value(tool, key, text),
         None => vec![Span::styled(text.to_string(), theme::theme().body)],
     };
-    let value_run = |text: &str, tail: bool| -> Vec<Span<'static>> {
+    // The fold mark is NON-NEGOTIABLE: it is priced as a parameter of the budget,
+    // never shed (shedding it would be the silent cut D038 forbids).
+    let tail = (hidden_lines > 0).then(|| lines_tail(hidden_lines));
+    let tail_w = tail.as_ref().map_or(0, |t| t.chars().count());
+    let value_run = |text: &str, with_tail: bool| -> Vec<Span<'static>> {
         let mut spans = highlight(text);
-        if tail && hidden_lines > 0 {
-            spans.push(Span::styled(lines_tail(hidden_lines), dim()));
+        if with_tail && let Some(t) = &tail {
+            spans.push(Span::styled(t.clone(), dim()));
         }
         spans
     };
@@ -1293,16 +1299,16 @@ fn collapsed_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> 
     let (keep, stats, value_row) = match chosen {
         Some((keep, stats)) => (keep, stats, full),
         None => {
-            // The last two rungs: shed the ` … +N lines` tail, then clip.
-            let bare = value_run(first_line, false);
-            if head_len + gap + span_width(&bare) <= width {
-                (0, "", bare)
-            } else {
-                let budget = width
-                    .saturating_sub(head_len + gap)
-                    .max(MIN_TOOL_VALUE_COLS);
-                (0, "", highlight(&truncate(first_line, budget)))
-            }
+            // Nothing fits whole, so the FIRST LINE clips into what the fold mark
+            // leaves (`budget` reserves `tail_w`, so the mark is never the thing
+            // that gets cut). One `…` per row: a clip REPLACES the tail, so the
+            // row never reads `… … +2 lines`.
+            let budget = width
+                .saturating_sub(head_len + gap + tail_w)
+                .max(MIN_TOOL_VALUE_COLS);
+            let clipped = truncate(first_line, budget);
+            let cut_here = first_line.chars().count() > budget;
+            (0, "", value_run(&clipped, !cut_here))
         }
     };
 
@@ -1328,6 +1334,18 @@ fn collapsed_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> 
     Line::from(spans)
 }
 
+/// A param value flattened to ONE logical line for the collapsed head (D038): its
+/// first line and how many lines FOLLOW it.
+///
+/// `lines()` — never a `\n` count — so the folded count can never disagree with
+/// what [`param_row`] expands: `"a\nb\n"` is one following line, not two (a
+/// heredoc's trailing newline is a terminator, not a line).
+fn fold_value(value: &str) -> (&str, usize) {
+    let mut lines = value.lines();
+    let first = lines.next().unwrap_or("");
+    (first, lines.count())
+}
+
 /// The ` … +N lines` tail of a multi-line param value in a collapsed head (D038):
 /// the fold is always marked, and singular/plural reads right.
 fn lines_tail(lines: usize) -> String {
@@ -1339,8 +1357,7 @@ fn lines_tail(lines: usize) -> String {
 /// contains a space, flattened to its first logical line plus a [`lines_tail`]
 /// (D038 — no `\n` reaches a span, and the tail is priced, never unpriced).
 fn extra_param_run(key: &str, raw: &str) -> Vec<Span<'static>> {
-    let first = raw.split('\n').next().unwrap_or("");
-    let hidden = raw.split('\n').count().saturating_sub(1);
+    let (first, hidden) = fold_value(raw);
     let shown = if first.contains(' ') {
         format!("\"{first}\"")
     } else {
@@ -5657,6 +5674,107 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     }
 
     #[test]
+    fn a_folded_head_keeps_its_mark_at_a_narrow_width() {
+        // The 40-col measure floor: the fold mark is a PARAMETER of the budget, not
+        // a rung, so an ordinary two-line command can never render unmarked (B2 —
+        // the silent shortening D038 forbids).
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "cargo test --all-targets\ncargo build" }),
+            "ok",
+        );
+        let rows = last_block_rows(&app, 40);
+        assert_eq!(rows.len(), 1, "still ONE row:\n{rows:#?}");
+        assert!(
+            rows[0].contains('…'),
+            "the fold is marked at 40 cols:\n{rows:?}"
+        );
+        assert_eq!(
+            rows[0].matches('…').count(),
+            1,
+            "exactly ONE `…` per row — never `… … +1 line`:\n{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_trailing_newline_is_a_terminator_not_a_folded_line() {
+        // B2b: `lines()` for the head AND for `param_row`, so the folded count can
+        // never disagree with what expansion draws (`"…\n"` = 2 lines, 1 folded).
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "echo a\necho b\n" }),
+            "ok",
+        );
+        let collapsed = last_block_rows(&app, 80);
+        assert_eq!(collapsed.len(), 1, "{collapsed:#?}");
+        assert!(
+            collapsed[0].contains(" … +1 line"),
+            "one following line, singular:\n{collapsed:?}"
+        );
+        assert!(
+            !collapsed[0].contains("+2"),
+            "a trailing newline is not a line:\n{collapsed:?}"
+        );
+        // Expansion draws exactly the two lines the count promised.
+        app.handle(AppEvent::Key(Key::Ctrl('t')));
+        let expanded = last_block_rows(&app, 80);
+        assert_eq!(
+            expanded.len(),
+            4,
+            "head + 2 command rows + 1 output row:\n{expanded:#?}"
+        );
+        assert!(expanded[1].ends_with("echo a"), "{expanded:#?}");
+        assert_eq!(expanded[2].trim(), "echo b", "{expanded:#?}");
+    }
+
+    #[test]
+    fn a_folded_head_carries_exactly_one_mark_at_every_width() {
+        // The class-killer: 20..=120 cols with a long folded command — ONE row and
+        // exactly ONE `…` at every width. No width may reach an unmarked head.
+        let mut app = App::new();
+        let cmd = "sh -c 'set -euo pipefail\nfor f in *.rs; do echo \"$f\"; done\ncargo test --workspace'";
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": cmd }),
+            "exit code: 0",
+        );
+        for width in 20..=120 {
+            let rows = last_block_rows(&app, width);
+            assert_eq!(rows.len(), 1, "one row at {width} cols:\n{rows:#?}");
+            assert_eq!(
+                rows[0].matches('…').count(),
+                1,
+                "exactly one `…` at {width} cols: {:?}",
+                rows[0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_clipped_value_keeps_its_eight_column_floor() {
+        // N2: `MIN_TOOL_VALUE_COLS`. At 20 cols, head + gap + the fold mark leave
+        // nothing, so the floor decides the value's width — were it `1`, the `…`
+        // would stand over a one-char stub.
+        let mut app = App::new();
+        let cmd = "sh -c 'set -euo pipefail\nfor f in *.rs; do echo \"$f\"; done";
+        push_panel(&mut app, "bash", serde_json::json!({ "command": cmd }), "ok");
+        let rows = last_block_rows(&app, 20);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        let value: String = rows[0].trim_end().chars().skip(9).collect();
+        assert_eq!(
+            value.chars().count(),
+            8,
+            "an 8-column floor for the clipped value: {value:?} in {rows:?}"
+        );
+        assert!(value.ends_with('…'), "{value:?}");
+    }
+
+    #[test]
     fn an_eighty_col_command_clips_to_one_row() {
         // An 84-col command at 60 cols: ONE row, the value clipped with `…`.
         let mut app = App::new();
@@ -6995,59 +7113,5 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert_eq!(before, after, "Focus is byte-identical when a member grows");
         assert!(after.contains("root prose"));
         assert!(!after.contains("compacted 22"), "Focus never merges a member");
-    }
-
-    #[test]
-    fn tmp_tool_region_row_cost() {
-        // ONE turn, 8 contiguous `bash` calls (a parallel batch), each carrying a
-        // multi-line 200+ col command: the tool region's ROW COUNT.
-        let mut app = App::new();
-        let cmd = "sh -c 'set -euo pipefail\n\
-            for f in $(git ls-files \"crates/**/*.rs\"); do\n\
-            \tawk -F: \"{print $1 \\\" \\\" $2}\" \"$f\";\n\
-            done | sort -u | uniq -c | sort -rn | head -40' && cargo test --workspace --all-targets";
-        let calls: Vec<ContentBlock> = (0..8)
-            .map(|i| ContentBlock::ToolCall {
-                id: format!("t{i}"),
-                name: "bash".into(),
-                arguments: serde_json::json!({ "command": cmd }),
-            })
-            .collect();
-        app.handle(AppEvent::Agent(
-            root(),
-            wcode_harness::event::AgentEvent::MessageEnd {
-                message: AgentMessage::Assistant {
-                    content: calls,
-                    stop_reason: wcode_harness::message::StopReason::ToolUse,
-                    usage: None,
-                    model: None,
-                },
-            },
-        ));
-        for i in 0..8 {
-            app.handle(AppEvent::Agent(
-                root(),
-                wcode_harness::event::AgentEvent::ToolExecutionStart {
-                    call_id: format!("t{i}"),
-                    name: "bash".into(),
-                },
-            ));
-            app.handle(AppEvent::Agent(
-                root(),
-                wcode_harness::event::AgentEvent::ToolExecutionEnd {
-                    call_id: format!("t{i}"),
-                    name: "bash".into(),
-                    output: "building…\nbuilt\nexit code: 0".into(),
-                    is_error: false,
-                    diff: None,
-                    path: None,
-                    duration_ms: Some(1200),
-                },
-            ));
-        }
-        let block = app.transcript().last().expect("a block");
-        for w in [100usize, 80, 60] {
-            println!("ROWCOST width={w} rows={}", block_lines(block, w).len());
-        }
     }
 }
