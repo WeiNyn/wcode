@@ -76,6 +76,8 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | thinking (in-flight annotation) | `thinking <t>` | dim row at col 3 + live cursor `▌` (D018; the marker glyph retired, D023) |
 | thinking (collapsed row) | `thinking` | dim |
 | tool head | `name  target  stats` | dim, flat at col 3 (no tree, D023); name `tool_name` |
+| elided run | `…`, ` … +N lines` | dim — a cut is never silent (D038); the same `…` as the `… +N more` hint |
+| tool run rail (D039) | `│` | dim at col **1**, content still col 3 — the fence's glyph, reused |
 | code fence / block quote | `│` | dim (kept — only the *tool* tree is gone, D023) |
 | tool error head | `✗ name  stats` | red |
 | compaction / retry | `⋯` | dim |
@@ -259,25 +261,44 @@ blank pane.
   monotonic**. **No disclosure** — the code always shows (the design's
   disclosure collapse is deferred). No new glyph (`plate`/`—`/the digits/`/` are
   ASCII; `─` is declared).
-- **Tools (inline, flat)** (D009/T1; amended by D023) — a tool renders **inline,
-  in call order**: at the **position it was called**, flowed with the prose. The
-  render walks the turn's `content` and emits tool `k` at the `k`-th `ToolCall`;
-  the inline tool at the call site is the locator (no reference mark — D021). A
-  tool renders as **one flat row at col 3** — `name  <params inlined>  …  <note ·
-  ms>` — the `note · ms` stats **right-aligned**; the tree (`├`/`│`/`└`) is
-  retired and so is the disclosure/copy affix with its mouse click geometry
-  (D023). **Expanded**, the head sits over its body (`key  value`
-  params + output/diff + a `… +N more` hint), all at the same column. The name
-  prints **once** — no ordinal, no separate `✓ name · note` row. The **`bash`
-  command is shown in full** (it wraps, never clips). A tool's **params are never
-  hidden**. **Collapsed**, they ride the head row: the first param's value prints
-  **bare** (its key dropped, its syntax highlight kept), the rest as `key=value`;
-  the head wraps on a col-3-aligned continuation when it overflows, so the `bash`
-  command still shows in full. **Expanded**, they re-draw as `key  value`
-  rows. `Ctrl-T` governs the tool's **output body** only
+- **Tools (inline, flat)** (D009/T1; amended by D023, D038, D039) — a tool renders
+  **inline, in call order**: at the **position it was called**, flowed with the
+  prose. The render walks the turn's `content` and emits tool `k` at the `k`-th
+  `ToolCall`; the inline tool at the call site is the locator (no reference mark —
+  D021). A tool renders as **ONE flat row at col 3** — `name  <first param value>
+  <key=value …>  …  <note · ms>` — the `note · ms` stats **right-aligned**; the
+  tree (`├`/`│`/`└`) is retired and so is the disclosure/copy affix with its mouse
+  click geometry (D023). The collapsed row is one row **always**: an over-long
+  head is **elided with `…`** (clip-not-wrap, the D027 rule) and a multi-line
+  value shows its first line plus ` … +N lines`. An elision is **always marked** —
+  never a silent cut. **Expanded**, the head sits over its body (`key  value`
+  params + output/diff + a `… +N more` hint), all at the same column: expansion is
+  the **complete record**, so a multi-line param keeps its real line breaks. The
+  name prints **once** — no ordinal, no separate `✓ name · note` row. A tool's
+  **params are never LOST: elided in the collapsed head, complete on expansion**
+  (D038 amends D019's *form*, keeps its invariant — nothing needs `Ctrl-T` to
+  exist). **Collapsed**, they ride the head row: the first param's value prints
+  **bare** (its key dropped, its syntax highlight kept), the rest as `key=value`.
+  A crowded head sheds in this order — the note, the ms, the extra `key=value`
+  params, then it **clips the first value** (with an 8-column floor); the name is
+  never shed. So a `bash` command's head is one row, its command clipped with `…`,
+  and the command in full one expansion away. **Expanded**, the params re-draw as
+  `key  value` rows. `Ctrl-T` governs the tool's **output body** only
   (params are the call's identity and never hide). A tool error is
   forced expanded. `Ctrl-T` toggles every tool's output; browse
   `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
+
+  **A run of calls carries a rail** (D039). A maximal span of ≥2 consecutive
+  `ToolCall` blocks in one turn is a **run**. A `Thinking` block inside a run is
+  **transparent** — it neither breaks the span nor stands outside it — while a
+  `Text` block (and the turn's end) does break it. Every row of a run's tools —
+  and the `thinking` row of a thinking block inside that run — carries ` │ ` at the
+  gutter (the `│` at **col 1**), where a lone tool keeps three blanks. Content
+  stays at **col 3** on every row, so no content column moves and browse's `▌` at
+  col 0 coexists. A lone tool is byte-identical to its D038 form. This is **not**
+  the retired D023 tree: the tree expressed hierarchy (call → output), which is
+  exactly what flattening removed; the rail expresses **batch continuity** —
+  "these calls were one batch" — and never nests.
 - **Thinking** (D33/D010; **amended by D018 and D023**) — **in flight** it is ONE
   dim annotation row, not an expansion: `   thinking 1.2s▌` —
   `thinking`, the live elapsed, and the live cursor `▌` closing the
@@ -313,7 +334,9 @@ blank pane.
 continuation lines align under the text). The
 gutter is also the natural home for a `▌` selection bar. A **tool**'s flat row
 sits at col 3 (no tree, D023); a thinking row is a plain `thinking` line at the
-same column (D010/D023).
+same column (D010/D023). A **tool run** (D039) puts `│` in the margin's col 1 and
+keeps cols 0 and 2 blank, so a run's rows read as one band while every content
+column stays put.
 
 **Browse mode** — `Ctrl-G` moves a `▌` selection over the committed transcript.
 The bar occupies the gutter's first column (the 1-col margin), *replacing* the
