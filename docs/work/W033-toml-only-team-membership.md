@@ -255,6 +255,14 @@ Gate: `cargo build` clean; `./target/debug/wcode --dump-config | grep -c '^team\
 Deliverable: per the chosen option, `main.rs:815-824` + `:857-874` deleted (A) or re-pointed at a separate `pool` (B); `team_overlay` (`:661`) and its comment removed under (A); `.with_team(...)` at `:1550` fed the roster (A) / the pool (B); the `:958-961` comment amended; `AgentPool`/`with_team`/`pool()`/`spawn` docs updated. **Do not** mix in the dead-code deletion.
 Gate: `cargo test --workspace` green (W4's rewrites land here or the diff does not compile — the old tests call a function that no longer exists); `cargo clippy --workspace --all-targets` clean; live dir-pair check (§10 A1/A2) shows the new rule.
 
+> **Amendment (second-layer, follow-up 3):** Step 4's "**Do not** mix in the
+> dead-code deletion" was wrong, and the implementer correctly overrode it.
+> Removing the fold leaves `agent_files::{discover, discover_project,
+> discover_global, load_members, collect_agent_files(_at)}` with no caller, and
+> Step 5's own gate bans a new `#[allow(dead_code)]` while the clippy gate bans
+> warnings — so **no** two-commit split can be clean in between. Steps 4 and 5
+> therefore share commit `3031ba8` by force, not convenience.
+
 **Step 5 — dead code (A only).**
 Deliverable: delete `discover`, `discover_project`, `discover_global`, `load_members`, `collect_agent_files(_at)`, `MAX_SCAN_DEPTH`, the `HashSet` import they use, and the three tests at `agent_files.rs:402`, `:422`, `:435`; rewrite `agent_files.rs:1-9`, `:113-118`, `:135-143` and the `[`discover`]` link.
 Gate: `cargo clippy --workspace --all-targets` clean with **no new `#[allow(dead_code)]`**; `cargo test --workspace` green; the commit message states the before/after test count (I measured neither — see §12).
@@ -285,7 +293,12 @@ Both cargo gates are mandatory and must be *clean*, not merely passing (`AGENTS.
 ```
 # R1 roster facts (this repo, after step 3, and again after step 4 — identical output)
 ./target/debug/wcode --dump-config | grep '^team\.'
-./target/debug/wcode --dump-system-prompt | sed -n '/^# Your team/,/^$/p'
+# The roster IS the `--dump-config` roster. `--dump-system-prompt` prints
+# `# Your team` followed by a BLANK line; the members sit under `Members:`, whose
+# roles carry their own `- ` bullets and blank lines — so neither
+# `sed -n '/^Members:/,/^$/p'` nor `grep '^- '` is a clean oracle (A9; second-layer
+# follow-up 1). Use the `--dump-config` list, plus `grep -c '^# Your team'` for
+# presence only.
 
 # R2 the workflow still validates on declared members
 ./target/debug/wcode --agents --config .wcode/workflow.toml --task "x" \
@@ -360,3 +373,39 @@ After W033 there is exactly one way to be a team member: be a `[[team]]` entry (
 ---
 
 *No code was written and no file was edited. The human's sign-off on §5 (A vs B, pool auto-enable = no, global scan = dead + declared in the global config) is the gate before the sketcher starts.*
+
+---
+
+## 13. Second-layer follow-ups (recorded, non-blocking)
+
+All five came out of the second-layer review; four are now fixed, one is filed.
+
+1. **§8 R1's roster command was vacuous — FIXED in §8.** `sed -n '/^# Your team/,/^$/p'`
+   prints only the header (the roster is under `Members:`, whose roles contain their
+   own `- ` bullets and blank lines, so both `/^Members:/,/^$/p` and `grep '^- '` are
+   also insufficient). The clean oracle is `--dump-config | grep '^team\.'`, with
+   `grep -c '^# Your team'` for presence only.
+2. **`tests/cli_flags.rs:116` said "a non-empty folded `[team]`" — FIXED** → "declared".
+   Same class as amendment A6.
+3. **§7's "Do not mix in the dead-code deletion" was wrong — FIXED in §7.** The merge
+   into `3031ba8` is forced; the plan text now says so.
+4. **`docs/book/11-teams-and-roles.html:98` figcaption pinned `agent_files.rs:23` —
+   FIXED** → `:22` (the deletions moved `AgentFrontmatter`). `check-book.py` re-run green.
+5. **`docs/book/appendix-decisions.html` lists D001–D034 — OPEN, deliberately out of
+   scope.** D035, D036 and D037 are all absent, so the table was already three ADRs
+   stale before W033; back-filling it is its own book task, not a W033 blocker.
+
+Also fixed while closing the two blockers: **`docs/decisions/D024-orchestrator-team-control.md`**
+gained a `## Amendment — D037 (W033)` section — its Context still taught `spawn { agent }`
+as "a discovered `.wcode/agents/<name>.md` role", which the plan named three times
+(`:124`, `:139`, `:263`) and the implementer skipped. Pattern matches D003/D005/D017.
+
+6. **A pre-existing flake surfaced in this gate — FILED as tracker row 99.**
+   `wcode-tui`'s `markdown.rs:1523` `install_syntax_theme_swaps_the_process_theme`
+   swaps a **process-global** `LazyLock<RwLock<&'static Theme>>`; a parallel
+   `markdown.rs:1225` `a_rust_fence_has_multiple_distinct_styles` renders while the
+   swapped theme is live and sees < 2 distinct token styles. One of three
+   consecutive `cargo test --workspace` runs on `7d6e4d2` reported `525 passed;
+   2 failed`; both pass in isolation and the next two full runs were green
+   (1457 passed). Unrelated to W033 — it makes "the gates are clean" a
+   timing-dependent statement, which is why it is filed rather than shrugged at.

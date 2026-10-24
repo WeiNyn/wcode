@@ -96,3 +96,15 @@ Two of the six needed a decision because the honest behaviour is narrower than
   1:1 map; `Spawn::spec_for` layers the resolved md on top, so an explicit arg
   always wins and only the fields the args left `None` come from the md. An
   unknown `agent` name errors, listing the available roles.
+
+## Amendment — D037 (W033): "discovered" becomes "declared"
+
+The Context above says the pool allowed spawning "from a discovered
+`.wcode/agents/<name>.md` role *by name*". That source is gone: the directory scan
+is deleted, so `spawn { agent }` resolves against the **declared** roster — the
+`[[team]]` entries, including `file =` ones (`spawn.rs:53-57`, `:313-314`). An
+unknown name still errors listing the available roles (`resolve_role` is
+unchanged); ad-hoc workers remain expressible through `spawn`'s own
+`role`/`model`/`tools` arguments. The six-tool decision itself — model-facing
+only, arg-over-pool, retire/compact semantics — is unchanged. See
+[D037](D037-toml-only-team-membership.md).

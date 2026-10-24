@@ -1680,7 +1680,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // nothing.
     if let Some(o) = &orchestrator {
         // The single distinct `judge` name across the workflow's edges (A12
-        // guarantees ≤1), resolved from the folded `[team]`; absent → `None` →
+        // guarantees ≤1), resolved from the declared `[team]`; absent → `None` →
         // the root template's model + the built-in judge contract.
         let judger = cfg.workflow.as_ref().and_then(|w| {
             let name = w.edges.iter().find_map(|e| {

@@ -113,7 +113,7 @@ fn wcode_project_config_env_off_disables_discovery() {
 
 #[test]
 fn a_project_team_auto_enables_agents_without_the_flag() {
-    // D-B1: a non-empty folded `[team]` turns agents mode on, so the
+    // D-B1: a non-empty declared `[team]` turns agents mode on, so the
     // `[team] requires --agents` guard must NOT fire (exit 2). The run proceeds
     // to a refused local port and fails on the provider, not the guard.
     let dir = project_dir();
