@@ -3,7 +3,9 @@
 Status: **agreed; implemented through P3; the D29–D36 redesign has shipped** (§1, §2, §4); **amended by D018** (W014: in-flight thinking as an annotation, the sidebar's root row, transient command notices) **and by D023** (W018: P5 "prose only, fully bare" — no band rules, plain head labels, treeless tools, a text gauge, a grey default with red the only hue) **and by D026** (information
 modals: `/help`, `/verify`, `/usage`, `/tasks`, `/team roster` open a scrollable
 popup) **and by D027** (the ` help ` body is `F1`'s two-column table — an item
-row per command and per key, prose for the rest). Companion to [`tui-plan.md`](tui-plan.md) (the
+row per command and per key, prose for the rest) **and by W032/D036** (a settings
+panel: an `F2` modal with a row cursor, one row grammar for both sections, and
+`›` admitted to §2). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -79,14 +81,16 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | compaction / retry | `⋯` | dim |
 | live cursor | `▌` | accent, steady |
 | selection bar (browse) | `▌` | accent |
+| row cursor (picker, settings) | `❯` | accent (the composer's `❯` is the `user prompt` row above; this is the same mark pointing at a *row*) |
 | mode indicator (browse) | `▤ browse` | accent |
 | spinner (running) | `⠋⠙⠹⠸…` | accent |
 | status separators | `·` | dim |
+| picker affordance (settings) | `›` | dim (on a row whose `Enter` opens a picker; the panel's only new glyph, W032) |
 | inline code / code block | `` ` `` | plain (monochrome by default; a coloured preset may tint, D023) |
 | table | `─` | header bold; three `─` rules (top / header / bottom); columns separated by a whitespace gutter; cells wrap |
 | overlay frame | `╭ ╮ ╰ ╯ ─ │` | border |
 | changes tree | `├ └ │ ─` | dim; leaf stats right-aligned |
-| todos | `☑ ☐` | dim |
+| todos / toggle affordance | `☑ ☐` | dim (checked / unchecked; the settings panel reuses the pair as a `Toggle` row's affordance) |
 | team state | `● ○ ✓ ✗` | running / idle / done / failed |
 | branch / plan | `⎇` / `⏻` | dim / accent |
 | idle / running | `⏸` / `⠹` | dim / accent |
@@ -420,9 +424,14 @@ message(s)` notice, pluralized to match the count (W029) · `Ctrl-Y` (`/copy`)
 copies the last reply (OSC-52) · `Ctrl-T` expands/collapses every tool's
 **output** (params stay visible — inlined on a collapsed tool's single row, as
 `key  value` rows when expanded; a failed tool always shows its error) ·
-`Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**, `Alt-1..9` focuses **member row N** (the numbered order, not the raw index; the unbadged root row above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
+`Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**
+(shadowed while the settings panel is open, where `Tab`/`BackTab` jump sections —
+`Esc` restores the cycle; see **Settings panel** below), `Alt-1..9` focuses
+**member row N** (the numbered order, not the raw index; the unbadged root row
+above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
-same `KEYS` table is printed by `/help`, in the same two-column style) ·
+same `KEYS` table is printed by `/help`, in the same two-column style) · `F2` opens the
+**settings panel** below, which `Esc` alone closes ·
 `/help`, `/verify`, `/usage`, `/tasks`, and `/team roster` open an
 **information modal** instead — `↑`/`↓`
 and `PgUp`/`PgDn` scroll its body (not the transcript), the wheel nudges it
@@ -475,6 +484,196 @@ overlay over the sessions on disk; choosing one quits and re-execs into it
   so an item's detail is budgeted to the ~39-col column the 64-col panel leaves
   (D027). The `F1` keymap modal (`Overlay::Help`) is unchanged: ` keys `,
   ` esc / F1 to close`, no `— N more —`.
+
+**Settings panel** (W032) — `F2` and `/settings` open an editable **settings
+panel**: a keyboard-driven list of the session's knobs, one row cursor, no dirty
+state (every act applies immediately through a setter that already exists, so
+`Esc` still closes and is still the only close key). It is an **overlay modal of
+the `F1`/`Info` family** — the same `draw_info_panel` helper, hence the same
+`Clear`, the same centered rounded border (width `area.width − 4` clamped to 64,
+height `visible + 3`), the same bare-lowercase title (` settings `), the same
+clip-not-wrap body — drawn over the base bands without reflowing them (§1.1) but
+**under** `overlay`: a `Pick` row opens the ordinary picker *on top of* the
+panel, so accepting a model returns you to the panel instead of ending it. It
+differs from `Info` structurally in two ways. It carries a **row cursor**, so its
+window follows the cursor (the picker's
+`selected.saturating_sub(visible - 1)` rule) rather than a free `scroll` field,
+and it passes `more: false` — no `— N more —`, because a cursor that walks the
+window is its own tell while an `Info` report is read top-down. And it carries a
+**hint line** in the footer slot where `Info` prints ` esc to close`: that row is
+the `+1` in `visible + 3`, the two borders being the other two. `Enter` is **not**
+swallowed here as it is in `Info` — it acts on the row; the `Info` swallow exists
+to protect the single `overlay` slot, and this panel is hosted outside it.
+
+**The cursor is the picker's `❯ ` in `accent()`** — not browse's `▌`, not the
+drag `REVERSED` style, and the reason is meaning rather than taste. A cursor names
+a *position*; browse's bar names a *selection of text* and occupies the
+transcript's 1-col gutter margin, which a panel has no equivalent of (its column
+0 is the border), while `REVERSED` paints a *range* and would invert the whole
+row — including the affordance column, giving it a background nothing else in the
+panel has. `❯` already means "you are here" in the composer and in the picker, so
+the panel adds no third meaning; §2's table gains the `row cursor` row.
+
+**The row body is `item_line` with the cursor column prepended.** Marker (`❯ ` in
+`accent()`, else two blanks) + the unchanged `item_line` row (one-space indent,
+`accent` label padded to `ITEM_LABEL_COLS`, `dim` detail), so the label column is
+identical on every row whether or not the cursor rests on it, and `F1`/`/help` do
+not shift by a column to make room for a mark they never draw. The label column
+is **the same 22 cols**, which is what makes the two sections line up; the detail
+field is `inner − 3 − 22` wide (37 cols at the 64-col panel, 17 at a 48-col
+terminal) and holds **value · gap · affordance**. Nothing wraps: an over-long
+value clips with `…`, exactly as `F1` clips. The affordance column is **reserved
+first** and the value clips into what is left; a `· pending` mark is reserved with
+the value, and when `mark + value` will not fit beside an affordance the
+**affordance** is dropped instead — a vanished mark would be a lie, and a row
+without its legend is still operable and still named by the hint line. The label
+column never narrows, and no value is ever silently shortened: the `…` is the
+tell. At draft C's 48 cols the panel keeps every column and loses only detail —
+`model` reads `qwen2.5-coder:…`, `tool output`'s `Ctrl-T expands / collapses
+all` clips, and an `effort` row sheds its `← →` while a `· pending` mark is
+showing.
+
+**The affordance column is right-flush and `dim`, and it names the movement, not
+a mouse.** `← →` on a `Nudge` or a `Cycle` row (the very arrows the hint line
+prints — no new glyph), `☐`/`☑` on a `Toggle` (the `todos` pair, §2: one column,
+where an ASCII `[ ]`/`[x]` would cost the value two), and `›` on a `Pick` — **the
+one new glyph this panel admits, and this row is its call site**: nothing in the
+vocabulary yet means "this row opens a picker". A `ReadOnly` row carries no
+affordance at all, which is how the two kinds read apart at a glance.
+
+**A deferred change shows `· pending` immediately after its value** —
+`effort  high · pending` — in `dim`, separated by §2's `·`, and *before* the
+affordance column so the affordance stays flush right on every row. Never a hue:
+`error` red is the only hue (§1.3), and `warn`/`success` are grey only under the
+bare palette — a preset would colour them, and "accepted, applies at the run
+boundary" is not a warning. The mark rides only the three rows that push a
+`Request` (`model`, `effort`, `plan`) while a run is in flight; a client-local
+row has no reply path, so it can never be pending (W032 §4.8).
+
+**Two sections, `session` then `config` — `config (this client)` over
+`--socket`**, where the only config the client can vouch for is its own. Each is
+headed by a `Prose` row — the bare lowercase label `/help` uses for
+`commands`/`keys`, body weight, at column 0, **no rule**: the sidebar's
+`── label ──` rule is a body-panel idiom, and a rule inside a bordered modal
+would draw a second frame. One blank `Prose` row sets the second section off, as
+`/help` separates its two tables. The cursor
+indexes **rows**, never a label or a blank, so `↑↓` walk across a heading and
+`Tab`/`BackTab` move the cursor to the first row of the next/previous section:
+the `❯` always lands on a row *beneath* a label, and the label is what tells you
+which section you crossed into. The `config` rows are **item** rows like the
+session rows, not prose — they take the cursor, and one row grammar is what lets
+the dump's own `key:` line up under `model`/`effort`. Nothing is re-worded: the
+label is the dump's key with its colon, the detail the rest of the line, so
+`--dump-config`'s text appears verbatim (a line with no `: ` becomes a label
+alone).
+
+**The hint line** — ` ↑↓ move · ←→ change · enter edit · tab section · esc
+close` — is the panel's footer row, not a fourth band and not a body row. It
+sheds whole clauses right-to-left by importance, like the foot row: `enter edit`
+first (the picker already taught that `Enter` acts), then `tab section`, then
+`←→ change`, then `↑↓ move`; `esc close` never drops, just as ` esc to close`
+never does on `Info`. At 48 cols it reads ` ↑↓ move · ←→ change · esc close`. A
+shed clause is never silent — the `F1`/`/help` keymap carries the panel's grammar
+in full (the `KEYS` rows below), which is the `⇥ N queued`-notice rationale
+applied to a legend.
+
+**The `theme` row prints the applied name, not a derived palette.** The palette
+is swappable at runtime and nothing stored which one, so `theme.rs` gains
+`active_name() -> Option<&'static str>`: the name the client last applied, `None`
+when the applied spec has none. It is recorded in **`set`** — the single writer
+both `install` and `set_preset` route through — derived from the spec by a
+`ThemeSpec::name(&self)`, never inside the `with_preset` builder (a builder is
+called and discarded, and `parse_theme_table` is a caller, not a writer), and
+re-bound to the catalogue's own `&'static str`, so a `[theme] name` from config
+and a `/theme` switch are the same fact. Palette B is **`None`**, and the word the
+row then shows — **`palette b`** — is a label `settings.rs` owns, not a value
+`theme.rs` returns: the theme module stays presentation-free. It is not
+`default`: `default` is a *pickable* catalogue entry, a row in the `/theme`
+picker, and it resolves to palette B itself — one palette, two sources — which is
+exactly why the row must not borrow its name. The name tracks the **source**, not
+the colours: a row reading `default` would claim an identity the client never
+applied, and the picker would offer a name it is already showing as current.
+An inline `[theme]` role override with no name is `palette b` as well (its roles
+are invisible to the row), and `omarchy` reads **`omarchy`**,
+verbatim: the sentinel is a name in `names()` and a row in the picker, so the row
+and the picker agree on one token. Never `omarchy (live)`: the desktop file is
+read once, at apply time, and the panel does not re-read it. There is no
+"before the first switch" state — `lib::run` installs a theme before the first
+draw — and under `NO_COLOR` the name is still recorded, because the row claims a
+name and not a rendering; a live-reading row would be new behaviour, not this row.
+
+**`F2` and `/settings`.** `KEYS` gains `("F2", "open the settings panel")` — not
+"toggle", since `Esc` alone closes — plus the panel's own grammar, scoped as the
+`(info)` rows are: `("↑↓ / ←→ (settings)", "move the cursor / change the
+value")`, `("enter / tab (settings)", "edit the setting / jump section")`,
+`("PgUp / PgDn (settings)", "move the cursor a page")` and `("wheel (settings)",
+"move the cursor three rows")` — four rows for the clauses the hint line sheds at
+48 cols. `COMMANDS` gains, after `view`, a `settings` entry — `args: None`, no
+aliases, `summary: "edit the session settings"` — so `command_label` renders the
+bare `/settings` and the `/help` row reads label `/settings`, detail `edit the
+session settings`. `/help`'s table, the completion popup and the `help_lists_…`
+gate all follow from `COMMANDS` for free.
+
+**`BackTab` is reassigned while the panel is open.** `Tab`/`BackTab` jump
+sections there, and because the panel swallows every key outside its grammar
+(`↑↓`, `←→`, `Enter`, `Tab`/`BackTab`, `PgUp`/`PgDn`, the wheel, `Esc`), the
+composer's `BackTab` (`focus_prev`, the other half of the surface cycle) is
+shadowed for the panel's lifetime — as `Ctrl-N`, `Alt-N`, `Ctrl-B` and `Ctrl-G`
+are. That is a **documented consequence, not a defect**: `Esc` closes the panel
+and restores the cycle, and no key both changes a value and switches a surface.
+The **Keys** block above carries the shadow note where the cycle's semantics
+live.
+
+At the 64-col panel, over the (hidden) base bands:
+
+```
+╭ settings ────────────────────────────────────────────────────╮
+│session                                                       │
+│❯  model                 qwen2.5-coder:7b                    ›│
+│   effort                high · pending                    ← →│
+│   plan                  off                                 ☐│
+│   theme                 nord                                ›│
+│   width                 68 cols                           ← →│
+│   view                  focus                             ← →│
+│   sidebar               shown                               ☑│
+│   tool output           Ctrl-T expands / collapses all       │
+│   context               128000                               │
+│                                                              │
+│config (this client)                                          │
+│   provider:             openai-compatible                    │
+│   endpoint:             chat (source: auto)                  │
+│   base_url:             http://localhost:11434/v1 (source: f…│
+│   model:                qwen2.5-coder:7b (source: config)    │
+│   api_key:              (none) (source: default)             │
+│   compaction budget:    60000                                │
+│   tools:                read, grep, find, bash, edit, write  │
+│ ↑↓ move · ←→ change · enter edit · tab section · esc close   │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+The `effort` row is drawn mid-run; `base_url` is drawn clipped — that is the
+clip-not-wrap rule at the panel's own width, not a transcription slip. The mock
+shows the `--socket` heading, `config (this client)`; a local app reads `config`.
+
+**Amendments to W032's drawn mock** (§5 of the brief), numbered so a reviewer can
+diff them. **(1)** The frame is the family's rounded border `╭ ╮ ╰ ╯ ─ │` with the
+hint line as the *inner* footer row; the brief draws bare top/bottom rules with
+the hint outside them, which is not a panel this codebase has — putting the hint
+inside the border is what makes the height `visible + 3`, as its `Info` siblings
+are. **(2)** `‹ ›` becomes `← →`: no new
+glyph for a meaning the arrow keys already carry in this vocabulary. **(3)**
+`[ ]`/`[x]` become `☐`/`☑` (the `todos` pair) — one column, where the value budget
+is tightest. **(4)** The `config` rows are item rows, not the brief's prose: they
+take the cursor, a prose line cannot carry the cursor column, and one row grammar
+is what lines the two sections up. **(5)** The section label sits at column 0 and
+the **first** section is labelled too: the brief indents `config (this client)`
+and leaves `session` implicit, but a `Prose` row is one unstyled span (the
+`/help` idiom), and a panel that labels only its second section makes the first
+look like the whole body. **(6)** The label field is `ITEM_LABEL_COLS` (22), not
+the sketch's ~16, because the row *is* `item_line` — values start where `F1`'s
+details start. **(7)** `KEYS` gains **five** rows, not the one the brief budgets
+(`F2` plus four `(settings)` grammar rows), since the hint line sheds clauses at
+48 cols and the keymap is the channel that cannot.
 
 ## 5. Decisions
 

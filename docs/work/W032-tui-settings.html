@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>W032 · An editable settings panel in the TUI — the wcode book</title>
+<link rel="stylesheet" href="../book/style.css">
+<link rel="icon" href="../book/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav class="booknav"><div class="in">
+  <a class="home" href="../book/index.html">wcode book</a>
+  <span class="here"><b>W032</b> · An editable settings panel in the TUI</span>
+  <span class="pn"><a href="W032-tui-settings.md">the markdown record</a><a href="../book/04-the-tui.html">04 The TUI →</a></span>
+</div></nav>
+
+<header class="chap">
+  <div class="in">
+    <div class="eyebrow">Work item · W032 · <b>brief v2 — awaiting sign-off</b></div>
+    <h1>An editable settings panel in the TUI</h1>
+    <p class="lede">
+      A row cursor, arrow keys, <code>Enter</code>, <code>Tab</code> — and seven settings you can
+      change without remembering a chord. Not a config editor: a face on the session setters that
+      already exist. The interesting work is not the rows, it is that a modal here would destroy
+      itself the moment it opened a picker.
+    </p>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section>
+  <h2><span class="num">1</span>The ask</h2>
+
+  <div class="callout">
+    <span class="label">verbatim</span>
+    <p>
+      the setting here is setting edit as model, control by keyboard (arrows, enter, tab etc)
+    </p>
+  </div>
+
+  <p>
+    Read precisely, that sentence contains three requirements and one analogy.
+    <b>Edit</b> — not merely see. <b>As model</b> — the panel is an editor in the sense the
+    <code>/model</code> picker is one: you land on a row, you change it, it takes effect.
+    <b>Keyboard</b> — arrows to move and change, <code>Enter</code> to act, <code>Tab</code> to
+    move between groups. And the analogy is the load-bearing part: whatever the panel does, it
+    must feel like the thing it is modelled on.
+  </p>
+
+  <p>
+    The problem it solves is dispersion. Seven knobs live on chords with no command —
+    <code>Alt-[</code> (<code>app.rs:4032</code>), <code>Alt-&lt;digit&gt;</code> (<code>:4034</code>),
+    <code>Ctrl-G</code> (<code>:4036</code>), <code>Ctrl-B</code> (<code>:4037</code>),
+    <code>Ctrl-O</code> (<code>:4043</code>), <code>Ctrl-T</code> (<code>:4046</code>) — and the
+    settings that <em>do</em> have commands (<code>/effort</code>, <code>/plan</code>,
+    <code>/theme</code>, <code>/width</code>, <code>/view</code>) are one-shot verbs you have to
+    already know. Nothing lists what is in effect, and nothing lets you change two of them without
+    typing two commands.
+  </p>
+
+  <div class="callout good">
+    <span class="label">the sentence that makes this cheap</span>
+    <p>
+      Every row this panel edits is <b>session state that already has a live setter</b>. Nothing
+      is written to <code>config.toml</code>, because nothing needs to be. Everything expensive
+      about "a central setting" — persistence, merging, validation of a human's hand-edited file
+      — is a different feature, and it is refused here on its own merits rather than smuggled in
+      as a side effect.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">2</span>What v1 got wrong</h2>
+
+  <div class="callout warn">
+    <span class="label">withdrawn · the error named, not buried</span>
+    <p>
+      v1 read the same sentence as "a place to <em>see</em> settings", recommended a read-only
+      view, and argued against an editor because <em>an editor implies a config writer</em>.
+      That inference was simply false — and it was used to refuse the feature that was actually
+      asked for.
+    </p>
+  </div>
+
+  <p>
+    The inference fails on a fact about this codebase: the editable set and the config-file set
+    barely overlap. Seven rows are session settings with existing setters. Of the four that also
+    appear in <code>config.toml</code>, every one already has a runtime override path —
+    <code>/model</code>, <code>/theme</code>, <code>/width</code>, <code>/view</code>. The
+    repository had already decided how that split works, three decisions ago:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">docs/decisions/D016-tui-width-setting.md:30</span><span class="tag">the split this panel inherits</span></figcaption>
+<pre><b>Config only.</b> No <span class="s">`--width`</span> flag … and nothing is persisted at runtime — <span class="s">`/width`</span>
+and <span class="s">`Alt-[`</span>/<span class="s">`Alt-]`</span> keep their role as the <i>session</i> override.</pre>
+  </figure>
+
+  <p>
+    So the refusal that survives is narrow and worth stating exactly: <b>no runtime
+    <code>config.toml</code> writer.</b> Not "no editing" — editing is the feature. The panel is
+    the session half of D016's split, given a face.
+  </p>
+
+  <p>
+    One thing survives from v1 intact, and it is now <em>load-bearing</em> rather than a
+    nice-to-have: the kernel getter. An editor that shows a value it cannot re-read is worse than
+    a read-only view — you would be pressing keys against a number that might be a lie. §8 is
+    that argument.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">3</span>The constraint that decides everything</h2>
+
+  <p>
+    A settings panel is a modal with a row cursor and, on the model row, an escape hatch into an
+    existing picker. The obvious implementation — a new <code>Overlay</code> variant — cannot do
+    that. Here is why, in three lines of code:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-tui/src/app.rs</span><span class="tag">a modal that cannot host a modal</span></figcaption>
+<pre><span class="c">// :483 — one slot, three shapes, no stack</span>
+<span class="k">pub enum</span> <span class="f2">Overlay</span> {
+    <span class="f2">Pick</span>(<span class="f2">Picker</span>),
+    <span class="f2">Help</span>,
+    <span class="f2">Info</span> { title: String, rows: <span class="k">Vec</span>&lt;<span class="f2">InfoRow</span>&gt;, scroll: <span class="k">u16</span> },
+}
+
+<span class="c">// :5109 — every opener assigns unconditionally</span>
+self.overlay = <span class="k">Some</span>(<span class="f2">Overlay</span>::<span class="f2">Pick</span>(<span class="f2">Picker</span>::<span class="f2">new</span>(<span class="f2">PickerKind</span>::<span class="f2">Theme</span>, <span class="s">"theme"</span>, items)));
+
+<span class="c">// :5203 — and accepting consumes the slot first</span>
+<span class="k">let</span> <span class="k">Some</span>(<span class="f2">Overlay</span>::<span class="f2">Pick</span>(picker)) = self.overlay.take() <span class="k">else</span> { … };</pre>
+  </figure>
+
+  <p>
+    So a panel that <em>is</em> the overlay is destroyed the instant one of its rows opens a
+    picker. Three ways out, and only one of them is cheap:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>host</th><th>verdict</th><th>why</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>Overlay::Settings(…)</code></td>
+          <td><b>rejected</b></td>
+          <td>Either a picker replaces the editor, or the variant carries its own sub-picker —
+          which forces <code>accept_picker</code> off <code>self.overlay.take()</code> and a
+          modal drawn inside a modal. More code than (c) for no gain.</td>
+        </tr>
+        <tr>
+          <td><code>Mode::Settings</code></td>
+          <td><b>rejected</b></td>
+          <td><code>Mode</code> is the <em>composer-ownership</em> axis
+          (<code>app.rs:2372</code>: "Input is the composer … Browse moves a selection over the
+          committed transcript"). A panel is a modal, not a third owner — and a
+          <code>Mode</code> sits <em>below</em> the completion popup in precedence.</td>
+        </tr>
+        <tr>
+          <td><b><code>App.settings: Option&lt;SettingsState&gt;</code></b></td>
+          <td><b>chosen</b></td>
+          <td>The panel's lifetime is independent of any modal's, so <code>Enter</code> on the
+          model row opens the ordinary picker and <b>the accept arm that already exists applies
+          it</b> (<code>app.rs:5217</code>–<code>:5221</code>): writes <code>Status.model</code>,
+          echoes a transient, pushes <code>Request::SetModel</code>. Closing the picker reveals
+          the still-open panel. Zero new accept code.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    The precedent for a second App-level lifetime beside <code>overlay</code> already exists —
+    <code>app.rs:2561</code> <code>usage_collect: Option&lt;UsageCollect&gt;</code>, the
+    <code>/usage</code> fan-out. The price of not building an overlay stack is one new field and
+    one extra tier in <code>on_key</code>:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-tui/src/app.rs:3969</span><span class="tag">the precedence chain, with the new tier</span></figcaption>
+<pre><span class="k">if</span> self.overlay.is_some() { … return; }    <span class="c">// :3971 — pickers, help, info</span>
+<span class="k">if</span> self.settings.is_some() { … return; }   <span class="c">// NEW — the panel</span>
+<span class="k">if</span> self.completion.is_some() { … }        <span class="c">// :3978</span>
+<span class="k">if</span> self.mode == <span class="f2">Mode</span>::<span class="f2">Browse</span> { … }      <span class="c">// :3983</span>
+<span class="c">// …then the composer</span></pre>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">4</span>The grammar</h2>
+
+  <p>
+    One cursor, no dirty state, no cancel. That is not a simplification — it is the only grammar
+    that keeps the panel's one existing invariant, which a test pins:
+    <code>app.rs:9532</code> <code>esc_closes_the_info_modal_and_nothing_else_does</code>, over
+    <code>app.rs:5164</code> <code>Key::Esc =&gt; self.overlay = None, // the only close key (Q2)</code>.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>key</th><th>action</th></tr></thead>
+      <tbody>
+        <tr><td><code>↑</code> / <code>↓</code>, <code>PgUp</code> / <code>PgDn</code>, wheel</td>
+          <td>move the cursor (clamped); the wheel moves three rows, as the transcript does</td></tr>
+        <tr><td><code>←</code> / <code>→</code></td>
+          <td>change the value on <code>Nudge</code> and <code>Cycle</code> rows; a no-op elsewhere</td></tr>
+        <tr><td><code>Enter</code></td>
+          <td>act per row kind: flip a toggle, advance a cycle, open a picker, set a hint on a
+          read-only row</td></tr>
+        <tr><td><code>Tab</code> / <code>BackTab</code></td>
+          <td>jump to the first row of the next / previous section (<code>session</code> ⇄
+          <code>config</code>)</td></tr>
+        <tr><td><code>Esc</code></td>
+          <td>close — the only close key, unchanged</td></tr>
+        <tr><td>anything else</td><td>swallowed</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    A two-level cursor (row, then cell) would force <code>Esc</code> to sometimes mean "cancel the
+    edit" — breaking a pinned invariant to buy a commit model <em>for setters that already apply
+    immediately</em>. So every act is immediate and <code>Esc</code> closes.
+  </p>
+
+  <div class="callout">
+    <span class="label">one invariant deliberately broken, one kept</span>
+    <p>
+      <b>Kept:</b> <code>Esc</code> is the only close key. <b>Broken:</b> "<code>Enter</code> is
+      swallowed". The <code>Info</code> modal swallows <code>Enter</code> for a mechanical reason
+      — <code>accept_picker</code>'s <code>take()</code> would destroy it
+      (<code>app.rs:9539</code>–<code>:9545</code>). In this host <code>take()</code> removes the
+      <em>picker</em>, not the panel, so <code>Enter</code> is safe. The <code>Info</code> test
+      stays green untouched; a parallel test pins the new behaviour.
+    </p>
+  </div>
+
+  <p>
+    <code>Tab</code> is new grammar with no precedent — it is handled only in the completion
+    popup (<code>app.rs:4417</code>), and <code>BackTab</code> only in the composer, where it means
+    <code>focus_prev</code> (<code>app.rs:4031</code>). Inside the panel both are free, but
+    because the panel swallows keys, <b><code>BackTab</code> no longer switches surfaces while it
+    is open</b>. That is a real consequence, named in <code>KEYS</code> so it is documented rather
+    than surprising.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">5</span>The rows are data, not a switch pile</h2>
+
+  <p>
+    Five kinds, one key behaviour each. The only <code>match</code> in the module is over the
+    kind — never over row ids — so adding a row is adding data:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">crates/wcode-tui/src/settings.rs (new)</span><span class="tag">the closed taxonomy</span></figcaption>
+<pre><span class="k">pub enum</span> <span class="f2">SettingKind</span> {
+    <span class="f2">Toggle</span>   { on: <span class="k">bool</span> },
+    <span class="f2">Cycle</span>    { value: <span class="f2">String</span>, options: <span class="k">&amp;</span><span class="s">'static</span> [<span class="k">&amp;</span><span class="s">'static str</span>] },
+    <span class="f2">Nudge</span>    { value: <span class="k">usize</span>, min: <span class="k">usize</span>, max: <span class="k">usize</span>, step: <span class="k">usize</span> },
+    <span class="f2">Pick</span>     { value: <span class="f2">String</span>, kind: <span class="f2">PickerKind</span> },   <span class="c">// Model | Theme</span>
+    <span class="f2">ReadOnly</span> { note: <span class="k">Option</span>&lt;<span class="k">&amp;</span><span class="s">'static str</span>&gt; },
+}</pre>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>row</th><th>kind</th><th>delegates to — a setter that already exists</th></tr></thead>
+      <tbody>
+        <tr><td><code>model</code></td><td><code>Pick</code></td>
+          <td><code>open_model_picker</code> <code>:5114</code> → accept <code>:5217</code></td></tr>
+        <tr><td><code>theme</code></td><td><code>Pick</code></td>
+          <td><code>open_theme_picker</code> <code>:5107</code> → accept <code>:5241</code></td></tr>
+        <tr><td><code>effort</code></td><td><code>Cycle</code></td>
+          <td>the <code>/effort</code> arm <code>:4252</code>–<code>:4261</code></td></tr>
+        <tr><td><code>plan</code></td><td><code>Toggle</code></td>
+          <td>the <code>/plan</code> arm <code>:4289</code>–<code>:4304</code></td></tr>
+        <tr><td><code>width</code></td><td><code>Nudge{40..=200, step 8}</code></td>
+          <td><code>set_measure</code> <code>:2704</code> (clamps), <code>MEASURE_STEP</code> <code>:2631</code></td></tr>
+        <tr><td><code>view</code></td><td><code>Cycle</code></td>
+          <td><code>set_view_mode</code> <code>:5460</code> (no-op when unchanged)</td></tr>
+        <tr><td><code>sidebar</code></td><td><code>Toggle</code></td>
+          <td><code>toggle_sidebar</code> <code>:5442</code></td></tr>
+        <tr><td><code>tool output</code></td><td><code>ReadOnly</code></td>
+          <td>— there is no global flag: expansion is per block (<code>app.rs:2803</code>)</td></tr>
+        <tr><td><code>context</code></td><td><code>ReadOnly</code></td>
+          <td>from the <code>Settings</code> reply (§8)</td></tr>
+        <tr><td><code>config …</code></td><td><code>ReadOnly</code> × N</td>
+          <td>the injected <code>--dump-config</code> string, one row per line</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Four of the seven act purely client-side (<code>theme</code>, <code>width</code>,
+    <code>view</code>, <code>sidebar</code>) and settle instantly. Three push a
+    <code>Request</code> (<code>model</code>, <code>effort</code>, <code>plan</code>) and can be
+    deferred by the harness — which is what §8 is about.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">6</span>The panel, drawn</h2>
+
+  <figure class="code">
+    <figcaption><span class="f">F2 · /settings</span><span class="tag">two sections, one cursor</span></figcaption>
+<pre> settings ───────────────────────────────────────────────────────
+   model          qwen2.5-coder:7b                        ›
+ <b>❯</b> effort         high · pending                        ‹ ›
+   plan           off                                   [ ]
+   theme          nord                                    ›
+   width          68 cols                               ‹ ›
+   view           focus                                 ‹ ›
+   sidebar        shown                                 [x]
+   tool output    Ctrl-T expands / collapses all
+   context        128000
+
+   config (this client)
+   provider: openai-compatible
+   endpoint: chat (source: auto)
+   base_url: http://localhost:11434/v1 (source: flag)
+   model: qwen2.5-coder:7b (source: config)
+   api_key: (none) (source: default)
+   compaction budget: 60000
+   …
+ ────────────────────────────────────────────────────────────────
+   ↑↓ move · ←→ change · enter edit · tab section · esc close</pre>
+  </figure>
+
+  <p>
+    The cursor is <code>❯ </code> in <code>accent()</code> — the picker's glyph
+    (<code>ui.rs:431</code>), chosen over browse's gutter bar <code>▌</code>
+    (<code>ui.rs:719</code>) and the mouse-drag <code>REVERSED</code> style
+    (<code>ui.rs:707</code>) so the panel inherits one of the three existing conventions rather
+    than inventing a fourth. Row bodies reuse <code>item_line</code>
+    (<code>ui.rs:253</code>–<code>:261</code>), so the panel reads like <code>F1</code> and
+    <code>/help</code>: accent label, padded, dim detail.
+  </p>
+
+  <p>
+    Affordances sit at the right in <code>dim</code> — <code>‹ ›</code> for a nudge or cycle,
+    <code>›</code> for a picker, <code>[ ]</code>/<code>[x]</code> for a toggle. The
+    <code>· pending</code> mark is dim too, never a hue: <code>error</code> red is the only
+    colour in the base palette (<code>docs/tui-design.md</code> §1), and a pending state is not an
+    error.
+  </p>
+
+  <div class="callout good">
+    <span class="label">one fewer thing to test</span>
+    <p>
+      The scroll offset is <b>derived from the cursor</b> in the renderer (keep-the-row-visible),
+      so <code>SettingsState</code> carries a single <code>usize</code> — no second
+      <code>scroll</code> field and no second clamp rule, unlike the <code>Info</code> modal whose
+      clamp arithmetic has two tests of its own (<code>app.rs:9553</code>,
+      <code>:9911</code>).
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">7</span>The one new vocabulary: effort</h2>
+
+  <p>
+    Everything else on the panel already has a value space somewhere. Effort does not — and that
+    is a small, real design decision rather than a lookup.
+  </p>
+
+  <div class="grid3">
+    <div class="card">
+      <h4>No list in the TUI</h4>
+      <p><code>/effort</code> takes free text with three clear-synonyms
+      (<code>"-" | "none" | "off"</code> → <code>None</code>, <code>app.rs:4255</code>).
+      <code>PickerKind</code> has no <code>Effort</code> arm, and there is no effort picker.</p>
+    </div>
+    <div class="card">
+      <h4>No validation in the kernel</h4>
+      <p><code>protocol.rs:262</code> <code>SetEffort { effort: Option&lt;String&gt; }</code> —
+      the harness accepts any string. Adding validation would be a <em>behaviour</em> change, and
+      behaviour is out of scope.</p>
+    </div>
+    <div class="card">
+      <h4>One list, in the other client</h4>
+      <p><code>editors/vscode/src/tab.ts:69</code> <code>EFFORT_LEVELS</code> — seven levels, with
+      its own caveat one line above: "the Responses enum; Chat is free-style".</p>
+    </div>
+  </div>
+
+  <p>
+    <b>Decision:</b> one <code>EFFORT_LEVELS</code> const in <code>settings.rs</code> holding those
+    seven, with a doc comment naming <code>tab.ts:69</code> as its twin, and the reciprocal
+    comment on the TS side. The duplication is real and named — the alternative, lifting the list
+    into the kernel, would make the kernel own a presentation vocabulary it deliberately does not
+    enforce.
+  </p>
+
+  <p>
+    <b>And an off-list value is preserved, not clamped.</b> A hand-set <code>medium-high</code>
+    renders verbatim; the first arrow press moves to <code>(none)</code>, with the new value
+    visible in the row. A deliberate action with a visible result — never a silent rewrite of
+    something the user typed.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">8</span>Two lies the panel would otherwise inherit</h2>
+
+  <div class="callout warn">
+    <span class="label">both are on screen today</span>
+    <p>
+      <b>(1)</b> <code>/effort high</code> pushes <code>Request::SetEffort</code> and never writes
+      <code>Status.effort</code> (<code>app.rs:4252</code>–<code>:4261</code>) — while the header
+      prints <code>model · effort</code> from it (<code>ui.rs:838</code>). <b>(2)</b>
+      <code>Status.context_limit</code> is seeded once at launch (<code>main.rs:2017</code>), so
+      the gauge's denominator is stale after any <code>/model</code> switch — and the panel would
+      render that stale number as a <code>ReadOnly</code> row.
+    </p>
+  </div>
+
+  <p>
+    Both are the same shape: a display field with no writer. The honest fix is to <b>read the
+    agent</b> rather than to mirror the request, which means one new read verb on the wire:
+  </p>
+
+  <figure class="code">
+    <figcaption><span class="f">protocol.rs · event.rs</span><span class="tag">four numbers, one reply</span></figcaption>
+<pre><span class="c">// protocol.rs — beside Status (:302) / Usage (:319); additive, PROTOCOL_VERSION stays 1</span>
+<span class="f2">Settings</span>,
+
+<span class="c">// event.rs — beside Status (:169); never streamed</span>
+<span class="f2">Settings</span> { model: <span class="f2">String</span>, effort: <span class="k">Option</span>&lt;<span class="f2">String</span>&gt;, plan: <span class="k">bool</span>, context_limit: <span class="k">Option</span>&lt;<span class="k">u64</span>&gt; },</pre>
+  </figure>
+
+  <p>
+    Answered from <code>agent.effort()</code> (<code>agent.rs:178</code>),
+    <code>agent.llm()</code> (<code>agent.rs:471</code>),
+    <code>PlanModeHandle::get()</code> (<code>hooks.rs:75</code>) and
+    <code>limits::model_limit(...)</code> (<code>limits.rs:63</code>) — and mid-run from the
+    read-only side handle (<code>actor.rs:530</code>), which is what lets a
+    <code>--socket</code> client show the <em>server's</em> model instead of its own startup seed.
+    An older peer catches the unknown verb as <code>Request::Unknown</code>
+    (<code>#[serde(other)]</code>, <code>protocol.rs:366</code>) and answers
+    <code>Ack</code> — which reads as "unavailable", never as a value.
+  </p>
+
+  <h3>8.1 What a row does mid-run — and a reversal</h3>
+
+  <p>
+    The harness <em>accepts</em> a settings mutation mid-run and applies it at the boundary:
+    <code>actor.rs:681</code>–<code>:691</code> sends <code>Ack</code> then
+    <code>deferred.push_back(Message::Tell { .. })</code> for
+    <code>SetModel | SetTitle | SetEffort | SetPlanMode</code>. So all three
+    <code>Request</code> rows are <b>optimistic with a pending mark</b>: the intended value goes
+    into <code>Status</code> immediately and the row shows <code>high · pending</code> until a
+    <code>Settings</code> reply confirms it, or until <code>AgentStart</code> (the boundary
+    passed) or <code>Error</code> (it failed) clears the mark.
+  </p>
+
+  <div class="callout">
+    <span class="label">v1 said the opposite, and v1 was right for v1</span>
+    <p>
+      v1 argued that <code>/effort</code> must <em>not</em> write <code>Status</code>
+      optimistically: with no on-screen editor, showing a target before it took effect was the
+      more deceptive option. With a panel, the user pressed <code>Enter</code> on a row they can
+      see — a panel that does not echo its own keystroke reads as broken. The pending mark is what
+      makes the echo honest, and it exists only because the <code>Settings</code> reply now exists
+      to settle it.
+    </p>
+  </div>
+
+  <p>
+    Two alternatives were rejected. <b>Refusing while running</b>: a run can be long, and mid-run
+    model/effort changes are the harness's explicitly supported path. <b>Showing old truth until
+    the boundary</b>: it makes the panel feel dead, and the user cannot tell a slow apply from a
+    dropped keystroke.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">9</span>What the panel refuses to claim</h2>
+
+  <p>
+    A "central setting" invites the belief that it is complete. It is not, and saying so is part
+    of the design.
+  </p>
+
+  <ul>
+    <li><b>Provenance on any editable row.</b> <code>ProviderProvenance</code> covers exactly four
+      fields (<code>config.rs:662</code>–<code>:668</code>), and from inside the client a
+      <code>--model</code> flag is indistinguishable from a <code>/model</code> override. So
+      session rows carry values and <em>durability</em> only ("session — not persisted"), and
+      provenance lives in the <code>config</code> section where the CLI already computed it.</li>
+    <li><b>Nine config tables with no TUI representation</b> — <code>[skills]</code>,
+      <code>[instructions]</code>, <code>[retry]</code>, <code>[compaction]</code>,
+      <code>[tools]</code>, <code>[models.&lt;id&gt;]</code> profiles, <code>[peers]</code>,
+      <code>[workflow]</code>, <code>[orchestrator]</code>. The <code>config</code> section is
+      exactly <code>--dump-config</code>'s scope, and nothing more.</li>
+    <li><b>A <code>tool-output</code> value.</b> Expansion is per block; the row carries the key
+      (<code>Ctrl-T</code>) and says it has no default setting.</li>
+    <li><b>The server's config, over a socket.</b> The section is labelled
+      <code>config (this client)</code> because the server's <code>config.toml</code> is not on
+      the wire. Only the session rows are server truth.</li>
+    <li><b>A typed field.</b> No reusable single-line input exists — the composer is an app-level
+      buffer with private edit methods (<code>app.rs:2493</code>–<code>:2495</code>,
+      <code>:4578</code>), and the other two buffers are cursor-less <code>String</code>s. So
+      integers nudge and effort cycles; <code>/width 96</code> and
+      <code>/effort high</code> stay the escape hatches, unchanged.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">10</span>Plan</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>step</th><th>the gate that proves it</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><b>Host + skeleton</b> — <code>settings.rs</code> types,
+          <code>App.settings</code>, the new precedence tier, <code>F2</code> at all three sites,
+          an empty panel that closes on <code>Esc</code></td>
+          <td>the precedence trio + a manual <code>F2</code>/<code>Esc</code> round trip</td></tr>
+        <tr><td>2</td><td><b>Taxonomy + the four client-local rows</b> — nudge clamps at 40/200,
+          cycles wrap, toggles flip, <code>plan</code> pushes its request</td>
+          <td>pure <code>settings.rs</code> unit tests (no terminal) + two integration tests</td></tr>
+        <tr><td>3</td><td><b><code>Pick</code> rows</b> — <code>Enter</code> opens the existing
+          picker, accepting applies, <b>and the panel is still open</b></td>
+          <td><code>enter_on_the_model_row_opens_the_picker_and_returns_to_the_panel</code></td></tr>
+        <tr><td>4</td><td><b>Effort cycle</b> — the const + the TS twin, <code>(none)</code>, the
+          off-list rule, the payload</td>
+          <td>cycle-wrap, off-list-preserved, payload assertions</td></tr>
+        <tr><td>5</td><td><b>The getter + the two defects</b> — wire both ways, idle and mid-run
+          actor arms, <code>context_limit</code> refreshed on <code>/model</code></td>
+          <td>two TUI regressions that <b>fail on today's tree</b> + the harness pair</td></tr>
+        <tr><td>6</td><td><b>Pending marks</b> — settle on reply, clear on
+          <code>AgentStart</code>/<code>Error</code>, absent on client-local rows</td>
+          <td>the mid-run test + a live check against a slow model</td></tr>
+        <tr><td>7</td><td><b>Read-only config section</b> — the injected string at both TUI sites,
+          plus the <code>compaction budget</code> line in the shared builder</td>
+          <td><code>--dump-config</code> gains exactly one line and loses none</td></tr>
+        <tr><td>8</td><td><b>Discovery + docs</b> — <code>COMMANDS</code>, <code>KEYS</code>,
+          README, <code>tui-design.md</code> §4, the TS mirror, D036, the tracker row</td>
+          <td><code>--dump-system-prompt</code> byte-identical; second-layer APPROVED</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Steps 2–3 are the demo-able core: if an early look is wanted, land 1–3 and stop for feedback
+    before step 5, which is the only step that touches another crate's public surface.
+  </p>
+</section>
+
+<section>
+  <h2><span class="num">11</span>Proving it</h2>
+
+  <figure class="code">
+    <figcaption><span class="f">live verification</span><span class="tag">seven checks, one TTY</span></figcaption>
+<pre><span class="c"># (a) the editor, no model needed — F2, then ↓↓↓ →→→ (width), Tab, Esc</span>
+WCODE_BASE_URL=http://localhost:11434/v1 ./target/debug/wcode --tui
+
+<span class="c"># (b) "edit as model" — the check that proves the host decision</span>
+./target/debug/wcode --tui        <span class="c"># F2 → Enter on model → pick → the panel is still there</span>
+
+<span class="c"># (c) the two defects: header effort and gauge denominator follow the panel</span>
+wcode --no-session --base-url http://localhost:11434/v1 --tui
+
+<span class="c"># (d) pending, mid-run: submit a long prompt, then F2 → effort → →</span>
+wcode --no-session --base-url http://localhost:11434/v1 --tui
+
+<span class="c"># (e) a socket client shows the SERVER's model, not its own startup seed</span>
+./target/debug/wcode serve --socket /tmp/w.sock &amp;
+./target/debug/wcode --socket /tmp/w.sock --tui
+
+<span class="c"># (f) the flag and the panel agree — one builder, one new line</span>
+./target/debug/wcode --dump-config
+
+<span class="c"># (g) a dead endpoint must not hang the panel</span>
+WCODE_RETRY_MAX=2 ./target/debug/wcode --base-url http://127.0.0.1:9/v1 --tui</pre>
+  </figure>
+
+  <p>
+    Check <b>(b)</b> is the one that justifies §3: without the host decision, pressing
+    <code>Enter</code> on the model row would close the editor — precisely the thing the ask
+    modelled the whole panel on.
+  </p>
+
+  <div class="callout">
+    <span class="label">the traps the tests must pin</span>
+    <p>
+      Two are compile errors, one is silent. <code>ui.rs:235</code>'s
+      <code>match app.overlay()</code> is exhaustive, and <code>actor.rs:497</code> is the
+      <code>Request</code> tail — a forgotten arm there does not build. But
+      <code>on_overlay_key</code> is <code>if matches! { … }</code> plus <code>_ =&gt; {}</code>
+      (<code>app.rs:5149</code>–<code>:5175</code>), so a variant routed there <b>swallows every
+      key with no compile error</b>. The test must therefore assert <em>positive movement</em> —
+      the cursor advanced, the value changed — not merely that the panel is open.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">12</span>The fork</h2>
+
+  <div class="callout warn">
+    <span class="label">awaiting sign-off · the only question that changes the plan</span>
+    <p>
+      <b>Does a change stick for the next launch?</b>
+    </p>
+    <p>
+      <b>No (this brief, all eight steps)</b> — session-scoped, no writer. It is the
+      D016-consistent reading, it is what "edit as model" describes
+      (<code>/model</code> does not persist either), and it is the whole reason the panel is
+      cheap.
+    </p>
+    <p>
+      <b>Yes</b> — a different, roughly twice-as-large item: this repository's
+      <em>first</em> <code>config.toml</code> write path. A <code>Serialize</code> on
+      <code>FileConfig</code> (today <code>Deserialize</code> only, <code>config.rs:567</code>), a
+      target choice (global vs project overlay), merge-vs-replace against a partially hand-edited
+      file, atomic write, per-row validation, its own record — and a subtlety that argues for
+      keeping it separate: over <code>--socket</code> it would write the <em>client's</em> config
+      while the agent lives on the server, so "stick" would not mean what the user expects.
+    </p>
+  </div>
+
+  <div class="callout">
+    <span class="label">orchestrator's read</span>
+    <p>
+      Ship it session-scoped. The panel is worth having on its own terms, and persistence is the
+      one part of it that puts a human's only hand-edited file at risk. Sequencing the two means
+      the second can be refused without the first being wasted — and the getter, which is the
+      genuinely reusable piece, lands in either case.
+    </p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">13</span>Unverified</h2>
+
+  <p>
+    Named so nobody mistakes them for checked facts. Everything came from reading source;
+    <b>no build, test, clippy, or binary ran</b> during recon or briefing.
+  </p>
+
+  <ul>
+    <li><b>Both staleness defects are code-inferred, not observed.</b> No writer exists outside
+      the two startup seeds — re-verified by grep — but nobody watched a header go stale.</li>
+    <li><code>ui.rs</code> (~6000 lines) was not read end to end; another
+      <code>Status</code>-derived readout is possible.</li>
+    <li>The exhaustive-vs-silent claim covers <code>ui.rs:235</code>,
+      <code>actor.rs:497</code> and <code>app.rs:5149</code> — not every other
+      <code>match</code> on <code>Overlay</code>/<code>Mode</code>/<code>Request</code> in the
+      workspace, so a third silent site is possible.</li>
+    <li><code>editors/vscode/</code> was swept, not read: whether the extension already displays
+      model/effort somewhere that would also be stale is unknown, as is whether adding a union
+      member alone keeps <code>npm test</code> green.</li>
+    <li><b>Real-terminal <code>F2</code> delivery</b> is unverified — the same class of risk
+      <code>F1</code> already carries, and the reason <code>/settings</code> is a second door.</li>
+    <li><code>context_limit</code> is <code>None</code> for most models today
+      (<code>limits::model_limit</code> recognises one provider's catalogue), so the
+      <code>context</code> row will usually read <code>unknown</code> and the gauge fix is
+      invisible on a local model. An honest <code>unknown</code> still beats a stale number.</li>
+    <li>The <code>omarchy</code> theme label is undecided — it is a sentinel, not a catalogue
+      entry, and nothing stores the active name today.</li>
+    <li><code>help_lists_…</code>'s name list is already incomplete (it omits
+      <code>view</code>) while its count is derived, so adding <code>/settings</code> will not
+      fail it — which changes what that gate proves.</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">14</span>Status</h2>
+
+  <p>
+    <b>Brief v2, draft.</b> No sketch, no code, no commits. The markdown record is
+    <a href="W032-tui-settings.md">W032-tui-settings.md</a>; the tracker row is
+    <code>docs/next-steps.md</code> item 95. v1 — a read-only view that argued against this —
+    is withdrawn, and §2 keeps the error rather than editing it away.
+  </p>
+
+  <p>
+    The next gate is the human's: the fork in §12. On a yes, the designer sets the panel's visual
+    grammar against <code>docs/tui-design.md</code>, the sketcher drafts
+    <code>settings.rs</code>'s interface, and the reviewer checks it against D036 before a line of
+    implementation exists.
+  </p>
+
+  <div class="callout">
+    <span class="label">also worth reading</span>
+    <p>
+      <a href="../book/04-the-tui.html">04 The TUI</a> for the bands and the modal grammar;
+      <a href="../book/15-configuration-reference.html">15 Configuration reference</a> for the
+      tables the panel reports and the nine it cannot;
+      <a href="../decisions/D016-tui-width-setting.md">D016</a> for the config/session split this
+      panel inherits.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="bookfoot"><div class="wrap"><div class="row">
+  <span class="grow">wcode book · <a href="../book/index.html">contents</a> · <a href="W032-tui-settings.md">the markdown record</a></span>
+  <span>next · <a href="../book/04-the-tui.html">04 The TUI →</a></span>
+</div></div></footer>
+</body>
+</html>
