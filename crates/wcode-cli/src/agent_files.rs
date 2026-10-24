@@ -1,22 +1,20 @@
-//! Discover + parse markdown agent definitions into [`config::TeamMember`].
+//! Parse markdown agent role definitions into [`config::TeamMember`].
 //!
-//! Location (D-C1, working dir only — no repo-root walk-up):
-//!   project: `./.wcode/agents/**/*.md`
-//!   global:  `<home>/agents/**/*.md` (recursive)
+//! A role file becomes a team MEMBER only when a `[[team]]` entry points at it —
+//! `[[team]] file = ".wcode/agents/<role>.md"`, resolved at boot by
+//! `main.rs::resolve_team_files` and in the `team` tool by
+//! [`resolve_member_files`]. `.wcode/agents/` is a CONVENTION, not a mechanism:
+//! a `.md` nobody references contributes nothing (W033/D037 — membership is
+//! declared, never discovered).
 //!
-//! Precedence (high → low, D-C2/A2): folded TOML `[team]` > project `.md` >
-//! global `.md`. `discover` returns the LOW-precedence set with PROJECT first
-//! (they win), and `main.rs::load_config_raw` folds it UNDER the TOML `[team]`.
+//! The frontmatter supplies `name`, `model`, `tools`, `effort`, `read_only`,
+//! `base_url` and `api_key`; the body becomes the member's `role` (D-C3/D-C4).
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::config::TeamMember;
-
-/// Max directory depth scanned under an agents root (mirrors `skills.rs`).
-const MAX_SCAN_DEPTH: usize = 4;
 
 /// Raw YAML frontmatter of an agent `.md`. Unknown keys (`license`, …) are
 /// ignored — serde's default, matching `SKILL.md`.
@@ -98,7 +96,7 @@ pub fn parse_agent_md(text: &str) -> Option<TeamMember> {
     Some(TeamMember {
         name,
         // D003: `file` is a load-time routing hint, resolved (and cleared) by
-        // `main.rs::resolve_team_files`; a scanned `.md` member is already inline.
+        // `main.rs::resolve_team_files`.
         file: None,
         model: fm.model,
         role,
@@ -110,32 +108,14 @@ pub fn parse_agent_md(text: &str) -> Option<TeamMember> {
     })
 }
 
-/// Discover agent members for `cwd`, HIGHEST-precedence-first: project `.md`s
-/// first (they WIN over global), then global `.md`s; deduped by `name` with the
-/// first seen winning (D-C2/A2). The caller folds this UNDER the TOML `[team]`.
-/// A same-name file *within one directory* is dropped with a `warning:` on stderr
-/// (A3 — never `ConfigError::DuplicateTeamMember`, which stays TOML-only).
-/// `home` is the `.config/wcode` dir (`config_dir()`); `None` skips the global scan.
-pub fn discover(cwd: &Path, home: Option<&Path>) -> Vec<TeamMember> {
-    let mut out = discover_project(cwd);
-    let mut seen: HashSet<String> = out.iter().map(|m| m.name.clone()).collect();
-    if let Some(home) = home {
-        for member in discover_global(home) {
-            // Project already won a name clash; a global file loses silently.
-            if seen.insert(member.name.clone()) {
-                out.push(member);
-            }
-        }
-    }
-    out
-}
-
-/// Resolve an agent NAME against the discovered pool. `Ok(&TeamMember)` when
+/// Resolve an agent NAME against the declared pool. `Ok(&TeamMember)` when
 /// found; `Err` naming the available names otherwise (`spawn { agent }`, op 5).
+/// After W033/D037 the pool IS the `[[team]]` roster, so only a DECLARED role can
+/// be named here; an unknown name is the intended error.
 ///
-/// Pure: no filesystem access — the pool is the folded `[team]` + `.wcode/
-/// agents/*.md` set already built by [`discover`] + [`parse_agent_md`] at
-/// startup. Names are listed SORTED.
+/// Pure: no filesystem access — the pool was built from the `[[team]]`
+/// declarations by `main.rs::resolve_team_files` + [`parse_agent_md`] at startup.
+/// Names are listed SORTED.
 pub fn resolve_role<'a>(pool: &'a [TeamMember], name: &str) -> Result<&'a TeamMember, String> {
     pool.iter().find(|m| m.name == name).ok_or_else(|| {
         let mut names: Vec<&str> = pool.iter().map(|m| m.name.as_str()).collect();
@@ -217,101 +197,10 @@ pub fn resolve_member_files(team: &mut [TeamMember], cwd: &Path) -> Result<(), S
     Ok(())
 }
 
-/// Project scan only: `cwd/.wcode/agents/**/*.md`.
-fn discover_project(cwd: &Path) -> Vec<TeamMember> {
-    let mut files = Vec::new();
-    collect_agent_files(&cwd.join(".wcode/agents"), &mut files);
-    load_members(&files)
-}
-
-/// Global scan only: `<home>/agents/**/*.md`.
-///
-/// `pub(crate)` because `main.rs::fold_discovered_members` calls it directly
-/// under `--no-project-config` (D005): the opt-out governs PROJECT discovery, so
-/// the global agent dir survives it — as the global `config.toml` always does.
-pub(crate) fn discover_global(home: &Path) -> Vec<TeamMember> {
-    let mut files = Vec::new();
-    collect_agent_files(&home.join("agents"), &mut files);
-    load_members(&files)
-}
-
-/// Read + parse `files` in order, keeping the FIRST member seen per name and
-/// warning on a same-scan collision (A3). Unreadable/unparseable files are
-/// skipped with a warning.
-fn load_members(files: &[PathBuf]) -> Vec<TeamMember> {
-    let mut out: Vec<TeamMember> = Vec::new();
-    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    for file in files {
-        let text = match std::fs::read_to_string(file) {
-            Ok(text) => text,
-            Err(e) => {
-                eprintln!("warning: skipping agent file {}: {e}", file.display());
-                continue;
-            }
-        };
-        let Some(member) = parse_agent_md(&text) else {
-            eprintln!(
-                "warning: skipping agent file {}: missing or invalid frontmatter/`name`",
-                file.display()
-            );
-            continue;
-        };
-        if let Some(first) = seen.get(&member.name) {
-            eprintln!(
-                "warning: skipping agent file {}: duplicate member `{}` (keeping {})",
-                file.display(),
-                member.name,
-                first.display()
-            );
-            continue;
-        }
-        seen.insert(member.name.clone(), file.clone());
-        out.push(member);
-    }
-    out
-}
-
-/// Recursively collect `*.md` under `depth`-bounded `root` (dot-dirs skipped,
-/// sorted for determinism). Mirrors `skills.rs`'s `collect_skill_files`; the
-/// design leaves depth open, so this reuses the same `MAX_SCAN_DEPTH` bound.
-fn collect_agent_files(root: &Path, out: &mut Vec<PathBuf>) {
-    collect_agent_files_at(root, 0, out);
-}
-
-fn collect_agent_files_at(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > MAX_SCAN_DEPTH || !dir.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut subdirs: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let hidden = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with('.'));
-            if !hidden {
-                subdirs.push(path);
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            files.push(path);
-        }
-    }
-    files.sort();
-    subdirs.sort();
-    out.extend(files);
-    for sub in subdirs {
-        collect_agent_files_at(&sub, depth + 1, out);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn write_md(dir: &Path, name: &str, body: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
@@ -394,52 +283,6 @@ mod tests {
                 "{empty:?} must be an explicit empty allow-list"
             );
         }
-    }
-
-    // --- discover (collision rules, D-C2/A2/A3) -------------------------------
-
-    #[test]
-    fn project_md_beats_global_md_with_the_same_name() {
-        let cwd = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        write_md(
-            &cwd.path().join(".wcode/agents"),
-            "dup.md",
-            "---\nname: dup\n---\nproject\n",
-        );
-        write_md(
-            &home.path().join("agents"),
-            "dup.md",
-            "---\nname: dup\n---\nglobal\n",
-        );
-
-        let members = discover(cwd.path(), Some(home.path()));
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].role.as_deref(), Some("project"));
-    }
-
-    #[test]
-    fn same_name_within_one_dir_keeps_the_first() {
-        let cwd = tempfile::tempdir().unwrap();
-        let agents = cwd.path().join(".wcode/agents");
-        // Sorted read order: `a.md` first.
-        write_md(&agents, "a.md", "---\nname: dup\n---\nfirst\n");
-        write_md(&agents, "b.md", "---\nname: dup\n---\nsecond\n");
-
-        let members = discover(cwd.path(), None);
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].role.as_deref(), Some("first"));
-    }
-
-    #[test]
-    fn global_scan_is_skipped_when_home_is_none() {
-        let cwd = tempfile::tempdir().unwrap();
-        write_md(
-            &cwd.path().join(".wcode/agents"),
-            "glob.md",
-            "---\nname: g\n---\nbody\n",
-        );
-        assert_eq!(discover(cwd.path(), None).len(), 1);
     }
 
     // --- resolve_role (op 5) --------------------------------------------------

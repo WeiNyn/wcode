@@ -154,9 +154,50 @@ fn a_project_team_auto_enables_agents_without_the_flag() {
     );
 }
 
-/// A temp cwd shipping an agent `.md` (and a temp `$HOME`). `toml`, when
-/// non-empty, is written to `.wcode/team.toml` so a TOML/`.md` collision can be
-/// exercised.
+#[test]
+fn a_team_of_md_files_without_a_team_toml_does_not_enable_agents() {
+    // W033 §3.8 / §5.2 — the deliberate break, owned loudly: a repo full of
+    // `.wcode/agents/*.md` and no `[[team]]` must NOT switch agents mode on. It is
+    // the D-B1 test above with the declaration taken away.
+    let dir = project_with_agent_md("");
+    let run = Command::new(env!("CARGO_BIN_EXE_wcode"))
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("WCODE_RETRY_MAX", "0")
+        .env_remove("WCODE_PROJECT_CONFIG")
+        .env_remove("WCODE_CONFIG")
+        .args([
+            "--no-session",
+            "-p",
+            "hi",
+            "--model",
+            "test",
+            "--base-url",
+            "http://127.0.0.1:9/v1",
+        ])
+        .output()
+        .expect("spawn the wcode binary");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    // (1) The `[team] requires --agents` guard cannot fire — there is no team.
+    assert_ne!(run.status.code(), Some(2), "{stderr}");
+    // (2) Nothing was instantiated: a booted team prints `team: <names>`.
+    assert!(
+        !stderr.lines().any(|l| l.starts_with("team: ")),
+        "agents mode must not switch on without a declaration: {stderr}"
+    );
+    // (3) And the config oracle agrees: no `team.` line in that cwd.
+    assert!(
+        !dump_config(&dir, &[]).contains("team."),
+        "a `.md` on disk is not a declaration"
+    );
+}
+
+/// A temp cwd shipping two agent `.md`s nobody has declared (`explorer`, body
+/// `recon body`; `hidden`, body `hidden body`) plus a temp `$HOME`. `toml`, when
+/// non-empty, is written to `.wcode/team.toml` — that is the ONLY thing that can
+/// make a `.md` here a team member (W033/D037), so the tests below are its
+/// declared/undeclared pair. `hidden` is the tooth: it is uniquely named, so a
+/// re-introduced directory scan cannot hide behind the fold's name-dedup.
 fn project_with_agent_md(toml: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let wcode = dir.path().join(".wcode");
@@ -167,10 +208,38 @@ fn project_with_agent_md(toml: &str) -> tempfile::TempDir {
         "---\nname: explorer\ndescription: recon\n---\nrecon body\n",
     )
     .unwrap();
+    std::fs::write(
+        agents.join("hidden.md"),
+        "---\nname: hidden\n---\nhidden body\n",
+    )
+    .unwrap();
     if !toml.is_empty() {
         std::fs::write(wcode.join("team.toml"), toml).unwrap();
     }
     dir
+}
+
+/// `--dump-config` prints one `team.<name>:` line per member and NO other line
+/// contains `team.`, so `contains("team.")` is a clean roster-empty oracle and
+/// `matches("team.").count()` a clean member-count one. It needs a model
+/// (`--dump-system-prompt` does not).
+fn dump_config(dir: &tempfile::TempDir, extra: &[&str]) -> String {
+    let mut args: Vec<&str> = extra.to_vec();
+    args.extend(["--model", "m", "--dump-config"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_wcode"))
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env_remove("WCODE_PROJECT_CONFIG")
+        .env_remove("WCODE_CONFIG")
+        .args(&args)
+        .output()
+        .expect("spawn the wcode binary");
+    assert!(
+        output.status.success(),
+        "--dump-config must exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn dump_prompt(dir: &tempfile::TempDir, extra: &[&str]) -> String {
@@ -188,45 +257,72 @@ fn dump_prompt(dir: &tempfile::TempDir, extra: &[&str]) -> String {
 }
 
 #[test]
-fn an_agent_md_is_discovered_into_the_team() {
+fn an_agent_md_alone_boots_no_team() {
+    // W033/D037: one way to be a member — a `[[team]]` entry. A `.md` on disk
+    // that nothing references contributes nothing, on either surface.
     let dir = project_with_agent_md("");
-    let stdout = dump_prompt(&dir, &[]);
-    assert!(stdout.contains("# Your team"), "{stdout}");
-    // Body → role (D-C4), rendered on the roster line.
-    assert!(stdout.contains("- explorer — recon body"), "{stdout}");
-}
-
-#[test]
-fn a_toml_team_member_beats_a_same_named_agent_md() {
-    let dir = project_with_agent_md("[[team]]\nname = \"explorer\"\nrole = \"from-toml\"\n");
-    let stdout = dump_prompt(&dir, &[]);
-    assert!(stdout.contains("from-toml"), "the TOML member must win: {stdout}");
-    assert!(!stdout.contains("recon body"), "the same-named .md must lose: {stdout}");
-}
-
-/// D017: an explicit `--team <name>` is the session's team — the project
-/// `.wcode/agents/` pool must NOT fold in underneath it. The named team can
-/// still OPT INTO a project role with `[[team]] file =`, so nothing is
-/// unreachable; an inline member stays exactly as written.
-#[test]
-fn an_explicit_team_replaces_the_project_agent_pool() {
-    // The helper ships `.wcode/agents/explorer.md` (discoverable).
-    let dir = project_with_agent_md("");
-    std::fs::create_dir_all(dir.path().join(".wcode/teams")).unwrap();
-    std::fs::write(
-        dir.path().join(".wcode/teams/recon.toml"),
-        "[[team]]\nname = \"scout\"\nrole = \"recon-lead\"\n",
-    )
-    .unwrap();
-
-    let stdout = dump_prompt(&dir, &["--team", "recon"]);
+    let prompt = dump_prompt(&dir, &[]);
+    assert!(!prompt.contains("# Your team"), "no roster block: {prompt}");
+    assert!(!prompt.contains("recon body"), "no member line: {prompt}");
+    assert!(!prompt.contains("hidden body"), "no scanned member: {prompt}");
+    // The other surface, so this cannot rot into an absence-only assertion.
+    let config = dump_config(&dir, &[]);
     assert!(
-        stdout.contains("- scout — recon-lead"),
-        "the named team must render: {stdout}"
+        !config.contains("team."),
+        "an unreferenced `.wcode/agents/*.md` is not a member: {config}"
+    );
+}
+
+#[test]
+fn a_declared_file_member_boots_the_role() {
+    // The SAME cwd plus one line of declaration: now it is a team.
+    let dir = project_with_agent_md("[[team]]\nfile = \".wcode/agents/explorer.md\"\n");
+    let prompt = dump_prompt(&dir, &[]);
+    assert!(
+        prompt.contains("# Your team"),
+        "roster block missing: {prompt}"
+    );
+    // Body → role (D-C4) still holds: the file supplies the member.
+    assert!(prompt.contains("- explorer — recon body"), "{prompt}");
+    let config = dump_config(&dir, &[]);
+    assert!(
+        config.contains("team.explorer:"),
+        "roster line missing: {config}"
+    );
+    // Exactly one member, and NOT the undeclared sibling on disk: a re-introduced
+    // directory scan would make this 2 (and would print `team.hidden:`).
+    assert_eq!(
+        config.matches("team.").count(),
+        1,
+        "one declaration is one member: {config}"
     );
     assert!(
-        !stdout.contains("- explorer —"),
-        "the project agent pool must not append under --team: {stdout}"
+        !config.contains("team.hidden:"),
+        "`hidden.md` is on disk but undeclared: {config}"
+    );
+}
+
+#[test]
+fn an_unreferenced_same_named_md_is_not_a_member() {
+    // No fold, so nothing "beats" anything: the inline member renders because it
+    // is declared, and the same-named `.md` is simply not a member.
+    let dir = project_with_agent_md("[[team]]\nname = \"explorer\"\nrole = \"from-toml\"\n");
+    let prompt = dump_prompt(&dir, &[]);
+    // Positive: the DECLARED member renders, with its inline role.
+    assert!(prompt.contains("- explorer — from-toml"), "{prompt}");
+    // The `.md` body is nowhere — being on disk is not membership.
+    assert!(!prompt.contains("recon body"), "{prompt}");
+    // Positive count on the other surface: one declaration, one member — and the
+    // undeclared `hidden.md` never appears (a scan would add it).
+    let config = dump_config(&dir, &[]);
+    assert_eq!(
+        config.matches("team.").count(),
+        1,
+        "exactly one declared member: {config}"
+    );
+    assert!(
+        !config.contains("team.hidden:"),
+        "an unreferenced `.wcode/agents/*.md` is not a member: {config}"
     );
 }
 
@@ -251,13 +347,6 @@ fn a_named_team_still_resolves_a_file_member() {
         !stdout.contains("- scout"),
         "the helper writes no scout; sanity that only file roles are present: {stdout}"
     );
-}
-
-#[test]
-fn no_project_config_disables_agent_md_discovery() {
-    let dir = project_with_agent_md("");
-    let stdout = dump_prompt(&dir, &["--no-project-config"]);
-    assert!(!stdout.contains("# Your team"), "{stdout}");
 }
 
 /// A temp `$HOME` whose GLOBAL `~/.config/wcode/config.toml` carries one

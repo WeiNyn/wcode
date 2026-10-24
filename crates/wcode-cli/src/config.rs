@@ -1056,9 +1056,8 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
     }
     // `[workflow]` STRUCTURE only (D14): the shape of the graph is checked
     // here. Membership (`member` names a `[team]` entry) needs the FINAL team
-    // — the `.wcode/agents/*.md` fold and `[[team]] file =` resolution happen
-    // later, in `main.rs::load_config_raw` — so it runs there, via
-    // `validate_workflow_members`.
+    // — `[[team]] file =` resolution happens later, in `main.rs::load_config_raw`
+    // — so it runs there, via `validate_workflow_members`.
     if let Some(workflow) = &file.workflow {
         validate_workflow_structure(workflow)?;
     }
@@ -1138,9 +1137,9 @@ pub fn merge(env: EnvLike, file: FileConfig) -> Result<Config, ConfigError> {
 /// most one distinct `judge` name); an edge carries exactly one condition mode;
 /// a `gate` has ≥1 incoming edge; and the graph is ACYCLIC. Membership is NOT
 /// checked here — a `member` node may name a team entry supplied by a
-/// `.wcode/agents/*.md` file or a `[[team]] file = …`, which fold/resolve AFTER
-/// `merge`; see [`validate_workflow_members`], called from
-/// `main.rs::load_config_raw` on the FINAL team. `Err(ConfigError::Workflow(msg))`.
+/// `[[team]] file = …`, which `resolve_team_files` settles AFTER `merge`; see
+/// [`validate_workflow_members`], called from `main.rs::load_config_raw` on the
+/// FINAL team. `Err(ConfigError::Workflow(msg))`.
 pub(crate) fn validate_workflow_structure(w: &Workflow) -> Result<(), ConfigError> {
     let bad = ConfigError::Workflow;
     if w.nodes.is_empty() {
@@ -1233,9 +1232,9 @@ pub(crate) fn validate_workflow_structure(w: &Workflow) -> Result<(), ConfigErro
 }
 
 /// Reject a `[workflow]` whose `member` nodes name no `[team]` entry —
-/// checked against the FINAL team (folded TOML + `.wcode/agents/*.md` +
-/// resolved `[[team]] file = …`), so call it from
-/// `main.rs::load_config_raw` after all folds/resolution. EVERY `member` node
+/// checked against the FINAL team (the declared `[[team]]` set, every
+/// `file =` entry resolved — W033/D037: there is no discovery fold to add to
+/// it), so call it from `main.rs::load_config_raw` after `resolve_team_files`. EVERY `member` node
 /// must match a team name: a `[workflow]` that reaches here with no team and a
 /// `member` node is still an error (a `script`-only workflow trivially passes).
 /// `Err(ConfigError::Workflow(msg))`.

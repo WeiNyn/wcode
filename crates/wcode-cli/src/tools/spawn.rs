@@ -50,10 +50,11 @@ pub struct SpawnArgs {
     #[serde(default)]
     effort: Option<String>,
 
-    /// Spawn from a discovered agent `.md` (`.wcode/agents/<name>.md`) BY NAME:
-    /// the resolved [`TeamMember`](crate::config::TeamMember) fills the spec
-    /// fields NOT set explicitly here (an explicit arg still wins). An unknown
-    /// name is an error listing the available names.
+    /// Spawn from a DECLARED team role BY NAME: the resolved
+    /// [`TeamMember`](crate::config::TeamMember) fills the spec fields NOT set
+    /// explicitly here (an explicit arg still wins). W033/D037: the pool is the
+    /// `[[team]]` roster — inline or `file =` — so only a declared role can be
+    /// named; an unknown name is an error listing the declared names.
     #[serde(default)]
     agent: Option<String>,
 }
@@ -84,8 +85,8 @@ pub struct Spawn {
     factory: Arc<SessionFactory>,
     me: SessionId,
     phonebook: Phonebook,
-    /// The resolved agent pool (`cfg.team`) — `agent` resolves against it.
-    /// `Arc`, so the clone from `Orchestrator::tools` is cheap.
+    /// The declared agent pool (the `[[team]]` roster, `cfg.team`) — `agent`
+    /// resolves against it. `Arc`, so the clone from `Orchestrator::tools` is cheap.
     pool: AgentPool,
 }
 
@@ -108,7 +109,7 @@ impl Spawn {
     /// filling only what the args left `None` (an explicit arg wins).
     ///
     /// # Errors
-    /// `agent` names no pool member → `Err` listing the available names.
+    /// `agent` names no DECLARED team role → `Err` listing the declared names.
     fn spec_for(&self, args: &SpawnArgs) -> Result<WorkerSpec, String> {
         let mut spec = args.to_worker_spec();
         if let Some(name) = &args.agent {
@@ -310,8 +311,8 @@ impl TypedTool for Spawn {
          always kept; an unknown tool name is rejected), `base_url`/`api_key` \
          put it on its own provider, `read_only` refuses the mutating tools and \
          mutating `bash`/`bg`, `effort` overrides its reasoning effort (`-`/ \
-         `none`/`off` clears it), `agent` spawns from a discovered \
-         `.wcode/agents/<name>.md` role (an explicit arg still wins), and `to` \
+         `none`/`off` clears it), `agent` spawns a DECLARED team role by name \
+         (`[[team]]`, inline or `file =`; an explicit arg still wins), and `to` \
          defines it on a served peer (a `--peer`/`[peers]` name or `agent:<id>`) \
          instead of in-process."
     }

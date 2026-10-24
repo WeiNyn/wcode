@@ -90,9 +90,10 @@ pub fn short_name(address: &SessionId) -> String {
         .to_string()
 }
 
-/// The resolved agent pool — the FOLDED `[team]` + `.wcode/agents/*.md` set
-/// (`cfg.team`), captured at startup. `spawn { agent }` (op 5) resolves against
-/// it. `Arc`, so each tool's clone is cheap.
+/// The resolved agent pool — the DECLARED `[team]` roster (`cfg.team`) with every
+/// `file =` entry resolved, captured at startup (W033/D037: nothing discovers, so
+/// the pool and the boot roster are the same vector). `spawn { agent }` (op 5)
+/// resolves against it. `Arc`, so each tool's clone is cheap.
 pub type AgentPool = std::sync::Arc<Vec<crate::config::TeamMember>>;
 
 /// The shared "a team is applied" cell ([`Orchestrator::applied_team`]). The
@@ -597,8 +598,9 @@ pub struct Orchestrator {
     id: SessionId,
     phonebook: Phonebook,
     tasks: TaskList,
-    /// The resolved agent pool — the FOLDED `[team]` + `.wcode/agents/*.md` set
-    /// (`cfg.team`), captured at startup. `spawn { agent }` resolves against it.
+    /// The resolved agent pool — the DECLARED `[team]` roster (`cfg.team`) with
+    /// every `file =` entry resolved, captured at startup. W033/D037: this IS the
+    /// boot roster, not a superset of it. `spawn { agent }` resolves against it.
     pool: AgentPool,
     /// Whether this session already HAS a team — set at startup when `cfg.team`
     /// is non-empty (the marker `"[config]"`), and by a successful live `team`
@@ -649,10 +651,12 @@ impl Orchestrator {
         &self.cancel
     }
 
-    /// Builder over [`Self::with_tasks`]: set the resolved md pool and whether
+    /// Builder over [`Self::with_tasks`]: set the declared member pool and whether
     /// the session STARTED with a team (`!cfg.team.is_empty()`). Called once in
     /// `build_runtime`. `started_with_team` seeds `team_applied` with the startup
     /// marker, so the `team` tool refuses a re-apply on a config-team session.
+    /// W033/D037: `pool` is the `[[team]]` roster itself — there is no second,
+    /// discovery-fed pool.
     pub fn with_team(mut self, pool: AgentPool, started_with_team: bool) -> Self {
         self.pool = pool;
         if started_with_team {
@@ -661,7 +665,7 @@ impl Orchestrator {
         self
     }
 
-    /// The resolved md pool — `spawn { agent }` reads it. The `Spawn` tool holds
+    /// The declared member pool — `spawn { agent }` reads it. The `Spawn` tool holds
     /// the `AgentPool` directly, so this accessor is for callers that want the
     /// slice (and for tests); `#[allow(dead_code)]` mirrors [`Self::new`].
     #[allow(dead_code)]

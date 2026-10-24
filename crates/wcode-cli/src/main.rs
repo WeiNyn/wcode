@@ -636,10 +636,11 @@ pub(crate) fn context_window_line(
 fn load_config_raw(args: &mut Args) -> Config {
     // `--model` rescues a config that only lacks the model; other config
     // errors (unreadable/corrupt) still surface.
-    // D005: `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables PROJECT
-    // auto-discovery only — the `./.wcode/` overlays and the `./.wcode/agents/`
-    // scan. The global `config.toml` and the global `~/.config/wcode/agents/` scan
-    // are not project config, and still load.
+    // D005: `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables the
+    // PROJECT config overlays only — `[.wcode/config.toml, .wcode/team.toml]`
+    // below. The global `config.toml` is not project config and still loads, and
+    // a `[[team]] file =` it declares still resolves (`resolve_team_files` sits
+    // outside this guard). W033/D037: no `agents/` scan exists to gate.
     let project = !project_config_opt_out(
         args.no_project_config,
         std::env::var("WCODE_PROJECT_CONFIG").ok().as_deref(),
@@ -656,9 +657,11 @@ fn load_config_raw(args: &mut Args) -> Config {
         eprintln!("error: --team and --config/WCODE_CONFIG are mutually exclusive");
         std::process::exit(1);
     }
-    // An explicit named team (`--team <name>`). The flag survives the match below
-    // (only `args.config` is rewritten), so capture it for the discovery fold.
-    let team_overlay = args.team.is_some();
+    // `--team <name>` resolves `./.wcode/teams/<name>.toml` and loads it as a
+    // WHOLESALE overlay: a `[[team]]` array is replaced at merge time, never
+    // merged, so the named team IS this session's team. Its `[[team]] file =`
+    // entries are declarations like any other and resolve below — that is how a
+    // named team reaches a project role (W033/D037: no scan to suppress).
     let explicit: Option<PathBuf> = match args.team.as_deref() {
         Some(name) => {
             let path = teams::overlay_path(name);
@@ -788,10 +791,11 @@ fn load_config_raw(args: &mut Args) -> Config {
         eprintln!("error: {e}");
         std::process::exit(2);
     }
-    // D003: resolve `[[team]] file = "<path>"` members BEFORE the discovery fold
-    // (and outside the `--no-project-config` guard), so a file member wins over a
-    // discovered same-named `.md` (D-C2's "TOML wins") instead of self-colliding,
-    // and a global `[[team]] file =` still resolves under `--no-project-config`.
+    // D003: resolve every `[[team]] file = "<path>"` member from its agent `.md`.
+    // W033/D037: this is the ONLY path from a role file on disk to a member —
+    // nothing scans `./.wcode/agents/` or `~/.config/wcode/agents/` any more.
+    // Unconditional (outside the `--no-project-config` guard), so a global
+    // `[[team]] file =` still resolves under the opt-out.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         if let Err(e) = resolve_team_files(&mut cfg.team, &cwd) {
@@ -799,87 +803,35 @@ fn load_config_raw(args: &mut Args) -> Config {
             std::process::exit(1);
         }
     }
-    // D-C2: fold discovered `.md` members UNDER the TOML `[team]` (a TOML member
-    // of the same name wins, so it is never overwritten). `discover` already
-    // returns project `.md`s ahead of global ones. `--no-project-config` skips
-    // the whole `.wcode/agents/` scan too.
-    //
-    // D017 (amended): an explicit `--team <name>` suppresses the PROJECT scan
-    // as well — the named team is the team for this session ("use this team
-    // instead": the `[[team]]` array is replaced wholesale at merge time, and a
-    // post-merge fold would silently re-append the project pool, defeating
-    // it). A named team that WANTS a project role writes
-    // `[[team]] file = ".wcode/agents/<role>.md"` — resolved by
-    // `resolve_team_files` above, regardless of the scan. The GLOBAL scan
-    // still folds: it is not project config (D005).
-    {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        fold_discovered_members(
-            &mut cfg.team,
-            &cwd,
-            config_dir().as_deref(),
-            project,
-            team_overlay,
-        );
-    }
-    // Change 1 (F2): membership validation needs the FINAL team — the folded
-    // TOML `[team]` plus the `.wcode/agents/*.md` members discovered above (and,
-    // later, `[[team]] file =` members). `merge` only checks the graph’s
-    // STRUCTURE — it cannot see md-sourced names — so a `member` node that
-    // names no final team entry is a fatal config error HERE, after the fold.
-    // Errors exit 1, the same shape as a `merge` error.
+    // Change 1 (F2): membership validation needs the FINAL team — the declared,
+    // file-resolved `[[team]]` set above. `merge` only checks the graph's
+    // STRUCTURE, and a `file` member contributes an empty `name` there, so a
+    // `member` node naming no declared entry is fatal HERE. Errors exit 1, the
+    // same shape as a `merge` error.
     if let Some(w) = &cfg.workflow
         && let Err(e) = crate::config::validate_workflow_members(w, &cfg.team)
     {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
-    // D-B1: a non-empty folded `[team]` auto-enables agents mode, so `wcode`
-    // in a repo shipping `.wcode/team.toml` "just works" without `--agents`.
+    // D-B1: a non-empty DECLARED `[team]` auto-enables agents mode, so `wcode` in
+    // a repo whose `.wcode/team.toml` declares members "just works" without
+    // `--agents`. W033/D037: the input is declarations only — no `.wcode/agents/`
+    // scan can make this true, so a repo that ships only agent `.md` files (and no
+    // `[[team]]`) no longer turns agents on.
     args.agents |= !cfg.team.is_empty();
     cfg
 }
 
-/// D-C2: fold discovered `.md` members UNDER the TOML `[team]` — a member of the
-/// same name already present wins, so a discovered file never overwrites an
-/// inline (or `[[team]] file =`-resolved) one. `discover` already returns project
-/// `.md`s ahead of global ones.
-///
-/// D005: `project = false` (the `--no-project-config` opt-out) governs PROJECT
-/// discovery only — the global `<config-dir>/agents/` scan survives it, exactly
-/// as the global `config.toml` (layer 1) always loads. `home` is the config dir.
-///
-/// D017: `team_overlay = true` (an explicit `--team <name>`) suppresses the
-/// PROJECT scan for the same reason — the named team is the session's team, so
-/// the project `.wcode/agents/` pool must not append underneath it. A named
-/// team reaches a project role through `[[team]] file =` (resolved before this
-/// fold), not through the pool. The GLOBAL scan survives both opt-outs.
-fn fold_discovered_members(
-    team: &mut Vec<TeamMember>,
-    cwd: &Path,
-    home: Option<&Path>,
-    project: bool,
-    team_overlay: bool,
-) {
-    let discovered = if project && !team_overlay {
-        agent_files::discover(cwd, home)
-    } else {
-        home.map(agent_files::discover_global).unwrap_or_default()
-    };
-    for member in discovered {
-        if !team.iter().any(|t| t.name == member.name) {
-            team.push(member);
-        }
-    }
-}
-
 /// D003: resolve every `[[team]] file = "<path>"` member from its agent `.md`.
 ///
-/// Called from `load_config_raw` BEFORE the `.wcode/agents/*.md` discovery fold
-/// and OUTSIDE the `--no-project-config` guard, so (a) a file member wins over a
-/// discovered same-named `.md` — the fold's dedup compares the RESOLVED name, so
-/// D-C2's "TOML wins" holds instead of self-colliding — and (b) a global
-/// `[[team]] file =` still resolves when project discovery is off.
+/// W033/D037: this is the ONLY path from a role file on disk to a member —
+/// nothing discovers, so an unreferenced same-named `.md` under
+/// `./.wcode/agents/` matters only if some `[[team]]` entry points at it.
+///
+/// Called from `load_config_raw` UNCONDITIONALLY (outside the
+/// `--no-project-config` guard), so a global `[[team]] file =` still resolves
+/// when project config is off.
 ///
 /// The path is relative to `cwd` unless absolute. The file supplies `name`,
 /// `role`, `tools`, `model`, `effort`, `read_only`, `base_url` and `api_key`; a
@@ -955,10 +907,11 @@ fn resolve_team_files(team: &mut [TeamMember], cwd: &Path) -> Result<(), ConfigE
         ));
     }
 
-    // The FINAL team's names must be unique: `merge` saw only the inline names (a
-    // `file` member contributed `""` there), so a `file`/inline collision is
-    // visible only now. A collision with a DISCOVERED `.md` is handled by the
-    // fold's own dedup, which runs after this and compares the resolved name.
+    // The FINAL team's names must be unique — and after W033/D037 this is the
+    // ONLY duplicate guard: there is no discovery fold to dedup against, because
+    // `.wcode/agents/*.md` is a convention, not a source. `merge` saw only the
+    // inline names (a `file` member contributed `""` there), so a `file`/inline
+    // collision is visible only here.
     let mut seen = std::collections::HashSet::new();
     for member in team.iter() {
         if !seen.insert(member.name.as_str()) {
@@ -3552,13 +3505,15 @@ mod tests {
         ));
     }
 
-    /// The ordering property (D003 + D-C2): `resolve_team_files` runs BEFORE the
-    /// discovery fold, so a `[[team]] file =` member wins over a discovered
-    /// same-named `.md` instead of self-colliding.
+    /// After W033/D037 `resolve_team_files` is the ONLY path from a role file on
+    /// disk to a member: a `[[team]] file =` entry resolves exactly once, and a
+    /// `.md` under `./.wcode/agents/` that no entry references is not a member —
+    /// same name as the declared role or not.
     #[test]
-    fn a_file_member_wins_over_a_discovered_md_of_the_same_name() {
+    fn a_file_member_resolves_and_a_same_named_md_is_irrelevant() {
         let dir = tempfile::tempdir().unwrap();
-        // The role file lives OUTSIDE the scanned root; a same-named one INSIDE it.
+        // The DECLARED role file lives outside `./.wcode/agents/`; a same-named
+        // role and a differently-named one sit inside the directory nobody scans.
         write_agent_md(
             &dir.path().join("roles"),
             "judge.md",
@@ -3569,84 +3524,29 @@ mod tests {
             "judge.md",
             "---\nname: judge\n---\nFrom the scan.\n",
         );
-
-        let mut team = vec![tm_with_file("roles/judge.md")];
-        resolve_team_files(&mut team, dir.path()).unwrap();
-        fold_discovered_members(&mut team, dir.path(), None, true, false);
-
-        assert_eq!(team.len(), 1, "the discovered same-name member is skipped");
-        assert_eq!(team[0].role.as_deref(), Some("From the file entry."));
-    }
-
-    /// The fold adds a member the TOML never named.
-    #[test]
-    fn fold_adds_a_discovered_member() {
-        let dir = tempfile::tempdir().unwrap();
         write_agent_md(
             &dir.path().join(".wcode/agents"),
             "scout.md",
             "---\nname: scout\n---\nScout.\n",
         );
 
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, dir.path(), None, true, false);
-        assert_eq!(team.len(), 1);
-        assert_eq!(team[0].name, "scout");
+        let mut team = vec![tm_with_file("roles/judge.md")];
+        resolve_team_files(&mut team, dir.path()).unwrap();
 
-        // No `home` and no project discovery: nothing to scan.
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, dir.path(), None, false, false);
-        assert!(team.is_empty(), "the opt-out skips the project scan");
-
-        // An explicit `--team` suppresses the project scan the same way
-        // (D017): the named team IS the team, so the pool must not append.
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, dir.path(), None, true, true);
+        // Positive: the declaration resolved, exactly once. The LENGTH is the
+        // teeth — a scan re-introduced inside `resolve_team_files` breaks it.
+        assert_eq!(team.len(), 1, "one declaration is one member");
+        assert_eq!(team[0].name, "judge");
+        assert_eq!(team[0].role.as_deref(), Some("From the file entry."));
         assert!(
-            team.is_empty(),
-            "a named-team overlay must not fold the project pool: {team:?}"
+            !team.iter().any(|m| m.name == "scout"),
+            "an unreferenced `.wcode/agents/*.md` is not a member: {team:?}"
+        );
+        assert!(
+            !team.iter().any(|m| m.role.as_deref() == Some("From the scan.")),
+            "being on disk is not membership: {team:?}"
         );
     }
-
-    /// D005: `--no-project-config` governs PROJECT discovery only — the global
-    /// agent dir (under the config dir) survives it, as the global `config.toml`
-    /// always does.
-    #[test]
-    fn the_opt_out_keeps_the_global_agent_scan() {
-        let cwd = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        write_agent_md(
-            &cwd.path().join(".wcode/agents"),
-            "project.md",
-            "---\nname: project-only\n---\nProject.\n",
-        );
-        write_agent_md(
-            &home.path().join("agents"),
-            "global.md",
-            "---\nname: global-only\n---\nGlobal.\n",
-        );
-
-        // Discovery on: both are found.
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true, false);
-        let mut names: Vec<_> = team.iter().map(|m| m.name.clone()).collect();
-        names.sort();
-        assert_eq!(names, vec!["global-only", "project-only"]);
-
-        // Opted out: the project member is gone, the global one remains.
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), false, false);
-        assert_eq!(team.len(), 1);
-        assert_eq!(team[0].name, "global-only");
-
-        // D017: an explicit `--team` drops the project member but the GLOBAL
-        // scan still folds (it is not project config, D005).
-        let mut team = Vec::new();
-        fold_discovered_members(&mut team, cwd.path(), Some(home.path()), true, true);
-        assert_eq!(team.len(), 1);
-        assert_eq!(team[0].name, "global-only");
-    }
-
 
     #[test]
     fn record_root_meta_sets_model_effort_window() {
@@ -4160,23 +4060,18 @@ mod tests {
         );
     }
 
+    /// F2: `validate_workflow_members` runs on the team `resolve_team_files`
+    /// leaves behind, so a `[workflow]` `member` node must name a DECLARED
+    /// `[[team]]` entry. This guards the `resolve_team_files` →
+    /// `validate_workflow_members` seam and the exact `"node `{}`: member `{m}`
+    /// is not a [team] member"` text (config.rs:1236-1254) — it does NOT claim a
+    /// `.md`-only repo fails membership (that repo simply has no members, and the
+    /// process-level tests in `tests/cli_flags.rs` own the declaration rule).
     #[test]
-    fn f2_workflow_naming_an_md_only_member_loads() {
+    fn a_workflow_member_needs_a_declaration() {
         use crate::config::{Workflow, WorkflowNode};
-        // A `[workflow]` whose member is supplied ONLY by a `.wcode/agents/*.md`
-        // file (no TOML `[team]`) must pass membership once the md fold has run.
-        // Before the F2 split this failed at `merge` (which never saw the fold);
-        // now `validate_workflow_members` runs on the FINAL team.
-        let dir = tempfile::tempdir().unwrap();
-        let agents = dir.path().join(".wcode/agents");
-        std::fs::create_dir_all(&agents).unwrap();
-        std::fs::write(
-            agents.join("judge.md"),
-            "---\nname: judge\n---\nYou judge the change.\n",
-        )
-        .unwrap();
-        let team = agent_files::discover(dir.path(), None);
-        assert_eq!(team.len(), 1, "the md member was discovered");
+        // Unchanged F2 property: the check runs on the FINAL team. What changed
+        // (W033/D037) is what can BE in that team.
         let w = Workflow {
             max_attempts: None,
             timeout_secs: None,
@@ -4187,13 +4082,36 @@ mod tests {
                 ..Default::default()
             }],
         };
-        // The discovered team is the FINAL team -> membership passes.
+
+        // (1) DECLARED: `[[team]] file = ".wcode/agents/judge.md"` resolves, so
+        // the node's member is a real member and membership passes.
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_md(
+            &dir.path().join(".wcode/agents"),
+            "judge.md",
+            "---\nname: judge\n---\nYou judge the change.\n",
+        );
+        let mut team = vec![tm_with_file(".wcode/agents/judge.md")];
+        resolve_team_files(&mut team, dir.path()).unwrap();
+        assert_eq!(team.len(), 1, "the declared file member resolved");
         assert!(
             crate::config::validate_workflow_members(&w, &team).is_ok(),
-            "an md-only member must satisfy membership after the fold"
+            "a declared member must satisfy workflow membership"
         );
-        // Without the fold (an empty team) the SAME node is a fatal error.
-        assert!(crate::config::validate_workflow_members(&w, &[]).is_err());
+
+        // (2) UNDECLARED: the very same `.md` is still on disk, but no `[[team]]`
+        // entry points at it — membership now FAILS, naming node and member.
+        assert!(
+            dir.path().join(".wcode/agents/judge.md").is_file(),
+            "the file is still there; it is simply not a member"
+        );
+        let err = crate::config::validate_workflow_members(&w, &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("node `review`"), "{msg}");
+        assert!(
+            msg.contains("member `judge` is not a [team] member"),
+            "the undeclared member must be named: {msg}"
+        );
     }
 
     #[test]
