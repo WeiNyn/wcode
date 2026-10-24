@@ -300,6 +300,25 @@ pub enum Request {
     /// [`Request::GetHistory`]). A `member`-style peek: the reply is one small
     /// string, not the whole history. Reply: [`AgentEvent::Status`].
     Status,
+    /// Read the agent's OWN settings — model, reasoning effort, plan mode and
+    /// the model's context window — WITHOUT shipping the transcript. The
+    /// [`Request::Status`] rationale applies (a folded summary, one small
+    /// payload, no baseline), and the [`Request::Usage`] answer rule does too:
+    /// a `Settings` arriving mid-run is answered from the turn-boundary
+    /// snapshot, never deferred, because the TUI repaints from it.
+    ///
+    /// Why it exists at all: two client-side `Status` fields are written once,
+    /// at launch (`main.rs:1099` / `:2013`), and never again — `effort` (which
+    /// `ui.rs:838` prints as `model · effort`) and `context_limit` (the gauge's
+    /// denominator) — so a client that cannot READ them renders a stale number
+    /// wherever it shows one. A settings panel would only make that lie more
+    /// prominent.
+    ///
+    /// Reply: [`crate::event::AgentEvent::Settings`]. Additive on the wire (a
+    /// peer that predates it catches `#[serde(other)] Unknown` at `:366` and
+    /// answers `Ack`, read as "unavailable" — never as a value), so
+    /// [`PROTOCOL_VERSION`] stays 1, exactly as `Usage` argues at `:316`-`:319`.
+    Settings,
 
     /// Read this session's usage report: turns, summed tokens, the cache hit
     /// rate, per-tool `calls`/`errors`/`result_bytes`, and a `$` cost when the
@@ -443,6 +462,7 @@ mod tests {
             "set_effort",
         );
         roundtrip(Request::SetEffort { effort: None }, "set_effort");
+        roundtrip(Request::Settings, "settings");
         roundtrip(
             Request::Compact {
                 instructions: Some("focus on the parser".into()),
@@ -569,6 +589,7 @@ roundtrip(Request::SetTitle { title: "w031 titles".into() }, "set_title");
         assert!(!is_inbound(&Request::GetHistory));
         assert!(!is_inbound(&Request::Status));
         assert!(!is_inbound(&Request::Usage));
+        assert!(!is_inbound(&Request::Settings));
         assert!(!is_inbound(&Request::SideAsk { text: "x".into() }));
         assert!(!is_inbound(&Request::SetPlanMode { on: true }));
 assert!(!is_inbound(&Request::SetTitle { title: "x".into() }));

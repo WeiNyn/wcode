@@ -488,6 +488,16 @@ async fn dispatch(
         Request::Status => AgentEvent::Status {
             last_assistant_text: crate::message::last_assistant_text(agent.messages()),
         },
+        Request::Settings => AgentEvent::Settings {
+            model: agent.llm().model.clone(),
+            effort: agent.effort().map(str::to_string),
+            plan: agent.plan_mode().get(),
+            context_limit: crate::limits::model_limit(
+                agent.llm().base_url.as_deref(),
+                &agent.llm().model,
+            )
+            .map(|limit| limit.context),
+        },
         Request::Usage => usage_reply(agent.messages(), agent.llm()),
         // A served peer is defined by a socket server's injected handler; an
         // in-process session has no factory, so it can only refuse.
@@ -528,6 +538,10 @@ async fn run(
     let hooks = agent.hooks().clone();
     // Read-only handle for mid-run `GetHistory`/`SideAsk` (see the arms below).
     let side = agent.side_handle();
+    // Plan mode is NOT on the `SideHandle`, so the mid-run `Settings` arm needs
+    // the shared handle cloned beside `hooks` — same reason, same place (both are
+    // `Clone`d before `agent.run` borrows the agent).
+    let plan = agent.plan_mode();
 
     let mut run = Box::pin(agent.run(text, sink_tx));
     let result = loop {
@@ -631,6 +645,31 @@ async fn run(
                     } => {
                         let _ = reply.send(AgentEvent::Status {
                             last_assistant_text: side.last_assistant_text(),
+                        });
+                    }
+                    // The mid-run twin of the idle `Settings` arm: answered AT
+                    // ONCE from the read-only handles, never deferred (the `Usage`
+                    // rationale below). It MUST sit above the mutation arm below —
+                    // that matcher is a catch-all for mutations, so a `Settings`
+                    // placed after it would be queued as "apply at the boundary"
+                    // and the panel would learn nothing until the run ended, which
+                    // is exactly the staleness this request exists to fix.
+                    Message::Ask {
+                        request: Request::Settings,
+                        reply,
+                        ..
+                    } => {
+                        let llm = side.llm();
+                        let model = llm.model.clone();
+                        let _ = reply.send(AgentEvent::Settings {
+                            context_limit: crate::limits::model_limit(
+                                llm.base_url.as_deref(),
+                                &model,
+                            )
+                            .map(|limit| limit.context),
+                            model,
+                            effort: llm.effort.clone(),
+                            plan: plan.get(),
                         });
                     }
                     // The mid-run twin of the idle arm: answered AT ONCE from the
@@ -1870,6 +1909,124 @@ mod tests {
         assert_eq!(stats.turns, 1);
         assert_eq!(stats.input_tokens, 10);
         assert_eq!(stats.cost, None, "no base_url ⇒ no price, never $0");
+    }
+
+    #[tokio::test]
+    async fn settings_reply_reports_the_agents_live_state() {
+        // A getter, not a constant: the four fields are the agent's own state, so
+        // each setter moves what the next read reports (W032 §4.5).
+        let rec = Recorder::default();
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![]);
+        cfg.llm.effort = Some("high".into());
+        let handle = SessionActor::spawn(Agent::new(cfg));
+
+        let AgentEvent::Settings {
+            model,
+            effort,
+            plan,
+            context_limit,
+        } = handle.ask(Request::Settings).await.unwrap()
+        else {
+            panic!("expected Settings");
+        };
+        assert_eq!(model, "m1");
+        assert_eq!(effort.as_deref(), Some("high"));
+        assert!(!plan, "plan mode is off at launch");
+        assert_eq!(
+            context_limit, None,
+            "an unknown window is `None`, never 0 and never a guess \
+             (`limits::model_limit` knows one endpoint family)"
+        );
+
+        handle
+            .ask(Request::SetModel {
+                model: "m2".into(),
+            })
+            .await
+            .unwrap();
+        handle
+            .ask(Request::SetEffort { effort: None })
+            .await
+            .unwrap();
+        handle
+            .ask(Request::SetPlanMode { on: true })
+            .await
+            .unwrap();
+
+        let AgentEvent::Settings {
+            model,
+            effort,
+            plan,
+            ..
+        } = handle.ask(Request::Settings).await.unwrap()
+        else {
+            panic!("expected Settings");
+        };
+        assert_eq!(model, "m2", "the model switch is visible");
+        assert_eq!(effort, None, "clearing effort is visible");
+        assert!(plan, "plan mode is visible");
+    }
+
+    #[tokio::test]
+    async fn settings_is_answered_mid_run_from_the_side_handle() {
+        // The panel must not learn nothing until the run ends — that staleness is
+        // exactly what `Request::Settings` exists to fix, so the mid-run arm is
+        // answered AT ONCE, from the handles cloned before `agent.run`.
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "gate".into(),
+                arguments: json!({ "text": "hi" }),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("done".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = erased(GateTool {
+            entered: entered_tx,
+            release: release.clone(),
+        });
+        let mut cfg = agent_config(fake_stream_fn(&rec), vec![gate]);
+        cfg.llm.effort = Some("low".into());
+        let handle = SessionActor::spawn(Agent::new(cfg));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "a".into() }).unwrap();
+
+        entered_rx.recv().await.unwrap(); // the run is inside the tool
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), handle.ask(Request::Settings))
+            .await
+            .expect("settings must not wait for the run")
+            .unwrap();
+        let AgentEvent::Settings {
+            model,
+            effort,
+            plan,
+            ..
+        } = reply
+        else {
+            panic!("expected Settings, got {reply:?}");
+        };
+        assert_eq!(model, "m1");
+        assert_eq!(effort.as_deref(), Some("low"));
+        assert!(
+            !plan,
+            "plan mode is read from the handle cloned beside `hooks`"
+        );
+
+        release.notify_one();
+        wait_for_end(&mut rx).await;
     }
 
     #[tokio::test]

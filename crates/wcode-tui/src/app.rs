@@ -2078,12 +2078,10 @@ impl Surface {
                 self.plan_pending = None;
                 false
             }
-            // ==== SKETCH (review-only, not real code) ====
-            // W032 step 5 (§4.5, "Fix: read truth"). The panel's live source and
-            // the fix for BOTH `Status` staleness defects: the four fields are
-            // written from the harness's own state, so `ui.rs:838`'s
-            // `model · effort` header and the gauge's denominator stop lying
-            // after `/effort` and `/model`.
+            // The panel's live source and the fix for BOTH `Status` staleness
+            // defects: the four fields are written from the harness's own state,
+            // so the `model · effort` header and the gauge's denominator stop
+            // lying after `/effort` and `/model`.
             //
             // Explicit, not `_`-caught: the match ends `_ => false,` below, so a
             // missing arm would silently render a stale panel with no compile
@@ -2097,17 +2095,23 @@ impl Surface {
             // NOTE the deliberate split of duties: this arm writes ONLY
             // `Status`. The pending marks are App-level and are settled by
             // `App::handle` (the `settle_deferred_setting` call beside `let
-            // ended = matches!(&event, AgentEvent::AgentEnd);` at `:4049`) —
-            // a `Surface` cannot reach `App.settings`/`App.deferred_settings`.
-            //
-            // AgentEvent::Settings { model, effort, plan, context_limit } => {
-            //     self.status.model = model;
-            //     self.status.effort = effort;
-            //     self.status.plan = plan;
-            //     self.status.context_limit = context_limit;
-            //     true
-            // }
-            // ==== /SKETCH ====
+            // ended = matches!(&event, AgentEvent::AgentEnd);`) — a `Surface`
+            // cannot reach `App.settings`/`App.deferred_settings`.
+            AgentEvent::Settings {
+                model,
+                effort,
+                plan,
+                context_limit,
+            } => {
+                self.status.model = model;
+                self.status.effort = effort;
+                self.status.context_limit = context_limit;
+                // Plan mode has its own optimistic path (`plan_pending`, reverted
+                // by `Error`): the reply is the truth, so it settles that too.
+                self.status.plan = plan;
+                self.plan_pending = None;
+                true
+            }
             // Other start/reply events need no per-surface state.
             _ => false,
         }
@@ -2658,6 +2662,22 @@ pub struct App {
     /// the `overlay` slot and leaves this one alone, so the editor survives its
     /// own sub-modal.
     settings: Option<crate::settings::SettingsState>,
+    /// A settings mutation the TUI has ASKED for and not yet read back: its
+    /// `Ack` triggers ONE `Request::Settings` read (W032 §4.5).
+    ///
+    /// The two `Status` fields this exists for — `effort` (the header's
+    /// `model · effort`) and `context_limit` (the gauge's denominator) — have no
+    /// other writer outside launch, so a `/effort` or `/model` change would
+    /// otherwise leave both drawn values stale. Reading them back is honest
+    /// where echoing the request would be a guess.
+    ///
+    /// One flag, cleared by the read it triggers (or by a `Settings` reply), so
+    /// an OLD peer — which answers `Ack` to `Settings` itself, the additive-wire
+    /// rule — cannot make the two ping-pong.
+    //
+    // STEP 6: `deferred_settings` subsumes this — it stores the same fact (a
+    // change accepted, not yet confirmed) for the pending marks.
+    reread_settings: bool,
     // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
     // The row id + INTENDED VALUE of a change the harness ACCEPTED and will
     // apply at the run boundary (`actor.rs:681`-`:691` `Ack` +
@@ -2811,6 +2831,7 @@ impl App {
             usage_collect: None,
             // Closed at startup; `F2` / `/settings` opens the panel.
             settings: None,
+            reread_settings: false,
             // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
             // The second initializer beside `settings` above: no change is in
             // flight at startup, so the set is empty.
@@ -3024,9 +3045,10 @@ impl App {
     fn open_settings(&mut self) {
         if self.settings.is_none() {
             self.settings = Some(crate::settings::SettingsState::new());
-            // STEP 5: `self.actions.push(Action::Ask(Request::Settings));` — the
-            // instant-command budget (`ask_budget`), because it is a read, not a
-            // model call (B5).
+            // Ask exactly once per open (first-layer B5), so the reply settles the
+            // rows — and, step 6, their `· pending` marks. `ask_budget` gives it
+            // the instant budget: it is a read, not a model call.
+            self.actions.push(Action::Ask(Request::Settings));
         }
         self.dirty = true;
     }
@@ -4165,6 +4187,23 @@ impl App {
                     // let reask = !self.deferred_settings.is_empty()
                     //     && (clear_all || ended || matches!(&event, AgentEvent::Error { .. }));
                     // ==== /SKETCH ====
+                    // W032 §4.5: an `Ack` for a mutation the TUI just asked for
+                    // means the harness accepted it, so ONE read of the truth
+                    // follows — `Status.effort` (the header) and `context_limit`
+                    // (the gauge) have no other writer outside launch. Mid-run the
+                    // `Ack` means "applied at the run boundary", and this read is
+                    // still honest: it reports what IS true now, and step 6's
+                    // pending marks keep the row's intent visible on top of it.
+                    if self.reread_settings && matches!(&event, AgentEvent::Ack) {
+                        self.reread_settings = false;
+                        self.actions.push(Action::AskTo(id.clone(), Request::Settings));
+                    }
+                    // The reply this flag waits for (and any other) clears it: an
+                    // OLD peer answers `Ack` to `Settings` itself, so the flag must
+                    // not survive that ack.
+                    if matches!(&event, AgentEvent::Settings { .. }) {
+                        self.reread_settings = false;
+                    }
                     // Route to the surface that owns this session; an unknown id
                     // is ignored (a stray/duplicate event must not panic).
                     if let Some(idx) = self.surface_index(&id) {
@@ -4548,9 +4587,13 @@ impl App {
             "new" => self.request_new(),
             "exit" => self.should_quit = true,
             "model" => match arg {
-                Some(m) => self.actions.push(Action::Ask(Request::SetModel {
-                    model: m.to_string(),
-                })),
+                Some(m) => {
+                    self.actions.push(Action::Ask(Request::SetModel {
+                        model: m.to_string(),
+                    }));
+                    // The switch moves what the gauge draws; read it back (§4.5).
+                    self.reread_settings = true;
+                }
                 None => self.open_model_picker(),
             },
             "theme" => match arg {
@@ -4573,6 +4616,11 @@ impl App {
                         _ => Some(level.to_string()),
                     };
                     self.actions.push(Action::Ask(Request::SetEffort { effort }));
+                    // NOT written to `Status` optimistically: nothing here knows
+                    // whether the harness accepted the level, and the header
+                    // prints it. The `Ack` triggers one `Settings` read, which
+                    // does know — that is §4.5's fix for the effort staleness.
+                    self.reread_settings = true;
                 }
                 None => self.transient("usage: /effort <level> ('-' clears)"),
             },
@@ -5601,6 +5649,12 @@ impl App {
             // §4.5 fixes — that write arrives with the `Settings` reply (step 5).
             crate::settings::SettingAction::SetEffort(effort) => {
                 self.actions.push(Action::Ask(Request::SetEffort { effort }));
+                // The row keeps drawing `Status`, and nothing here knows whether
+                // the harness accepted the level — so the `Ack` triggers one
+                // `Settings` read and the row follows the truth (§4.5). Writing
+                // it optimistically here would be the same guess `/effort`
+                // refuses to make.
+                self.reread_settings = true;
             }
             crate::settings::SettingAction::SetPlan(on) => {
                 let prev = self.focused().status.plan;
@@ -5634,6 +5688,10 @@ impl App {
                 self.transient(format!("model: {selected}"));
                 self.actions
                     .push(Action::Ask(Request::SetModel { model: selected }));
+                // The model's window is NOT on the picker's row: read the
+                // harness's own view back so the gauge's denominator moves with
+                // the switch (§4.5).
+                self.reread_settings = true;
             }
             PickerKind::Change => self.show_change(&selected),
             PickerKind::Surface => {
@@ -9307,6 +9365,98 @@ mod tests {
     }
 
     #[test]
+    fn the_header_effort_follows_the_settings_reply() {
+        // W032 §4.5, defect 1: `Status.effort` had NO writer outside launch, so
+        // `ui.rs` printed a stale `model · effort`. Driven through
+        // `app.handle(AppEvent::Agent(..))` — never `Surface::apply` — so the
+        // `_ => false,` swallow at the end of that match is guarded too.
+        let mut app = App::new();
+        app.set_status(Status {
+            model: "old-model".into(),
+            effort: None,
+            ..Status::default()
+        });
+        assert_eq!(app.chrome_status().effort, None, "the header starts bare");
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "new-model".into(),
+                effort: Some("high".into()),
+                plan: true,
+                context_limit: Some(200_000),
+            },
+        ));
+        // `chrome_status` is exactly what the header renders (`SessionHead::of`).
+        let head = app.chrome_status();
+        assert_eq!(head.effort.as_deref(), Some("high"), "the header follows");
+        assert_eq!(head.model, "new-model");
+        assert!(head.plan, "plan mode follows the reply");
+        assert_eq!(head.context_limit, Some(200_000));
+        // The reply is the truth, so an optimistic plan toggle is settled by it.
+        assert_eq!(app.focused().plan_pending, None);
+    }
+
+    #[test]
+    fn a_model_switch_refreshes_the_context_limit() {
+        // W032 §4.5, defect 2: `Status.context_limit` was seeded once, so the
+        // gauge's denominator stayed at the LAUNCH model's window. A switch now
+        // triggers one `Settings` read, whose reply moves it.
+        let mut app = App::new();
+        app.set_status(Status {
+            model: "old-model".into(),
+            context_limit: Some(128_000),
+            ..Status::default()
+        });
+        typed(&mut app, "/model new-model");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "new-model".into()
+            })],
+            "the switch asks"
+        );
+        assert_eq!(
+            app.chrome_status().context_limit,
+            Some(128_000),
+            "the gauge still shows the OLD window until the read lands"
+        );
+        // The harness accepts it…
+        app.handle(AppEvent::Agent(SessionId::agent("root"), AgentEvent::Ack));
+        // …and the client reads the truth back, rather than guessing the window.
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::AskTo(
+                SessionId::agent("root"),
+                Request::Settings
+            )],
+            "one Settings read, on the instant budget"
+        );
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "new-model".into(),
+                effort: None,
+                plan: false,
+                context_limit: Some(1_000_000),
+            },
+        ));
+        assert_eq!(
+            app.chrome_status().context_limit,
+            Some(1_000_000),
+            "the gauge's denominator follows the switch"
+        );
+        // An old peer answers `Ack` to `Settings` itself: one flag, one read, so
+        // the two cannot ping-pong.
+        app.handle(AppEvent::Agent(SessionId::agent("root"), AgentEvent::Ack));
+        assert_eq!(
+            app.take_actions(),
+            vec![],
+            "a stale peer's ack does not re-ask"
+        );
+    }
+
+    #[test]
     fn the_settings_panel_answers_keys_rather_than_swallowing_them() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(2)));
@@ -9339,6 +9489,12 @@ mod tests {
         let mut app = App::new();
         app.set_models(vec!["a-model".into(), "b-model".into()]);
         app.handle(AppEvent::Key(Key::F(2)));
+        // Opening the panel asks for its settings, exactly once (B5).
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::Settings)],
+            "one Settings read per open"
+        );
         app.handle(AppEvent::Key(Key::Enter));
         // The ordinary picker, over the panel.
         assert!(
@@ -9376,6 +9532,7 @@ mod tests {
     fn the_effort_row_cycles_and_asks_without_writing_status() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions(); // the panel's own read (asserted above)
         app.handle(AppEvent::Key(Key::Down)); // `effort`
         assert_eq!(app.status().effort, None, "the session has no effort set");
         app.handle(AppEvent::Key(Key::Right));
@@ -9400,6 +9557,29 @@ mod tests {
             "the row still reads `Status`"
         );
         assert!(app.settings().is_some(), "the panel survives the ask");
+        // The harness accepts it; the client then reads the truth back, so the
+        // row (`Status.effort`) follows the harness rather than an echo.
+        app.take_actions();
+        app.handle(AppEvent::Agent(SessionId::agent("root"), AgentEvent::Ack));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::AskTo(SessionId::agent("root"), Request::Settings)],
+            "one Settings read after the accepted change"
+        );
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "wcode".into(),
+                effort: Some("minimal".into()),
+                plan: false,
+                context_limit: None,
+            },
+        ));
+        assert_eq!(
+            app.status().effort.as_deref(),
+            Some("minimal"),
+            "the row now draws the harness's own value"
+        );
         // The frame still repaints: the client changes nothing it owns here, so
         // the `dirty` flag cannot be left to a setter (a key with no frame is the
         // swallow this tier exists to avoid).
@@ -9413,6 +9593,7 @@ mod tests {
     fn enter_on_the_plan_row_turns_plan_mode_on_and_asks() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions(); // the panel's own read (asserted above)
         app.handle(AppEvent::Key(Key::Down));
         app.handle(AppEvent::Key(Key::Down)); // on `plan`
         assert!(!app.status().plan, "plan starts off");

@@ -170,6 +170,28 @@ pub enum AgentEvent {
         last_assistant_text: Option<String>,
     },
 
+    /// Reply: the agent's own settings, answering a
+    /// [`crate::protocol::Request::Settings`]. Never streamed (see
+    /// [`AgentEvent::Ack`]) — one reply, correlated by the transport, exactly
+    /// like [`AgentEvent::Status`]; what ships is four scalars, not the
+    /// transcript, so a mid-session read needs no baseline and compaction
+    /// cannot invalidate it.
+    ///
+    /// `context_limit: None` means the window is UNKNOWN — never `0`, and
+    /// never a guess. Today `limits::model_limit` recognises one endpoint
+    /// family (`limits.rs:63`), so `None` is the common case and the panel
+    /// renders the honest absence (`docs/work/W032-tui-settings.md` §11.8).
+    ///
+    /// Purely additive on the wire (`{"type":"settings","model":…}`) — an
+    /// older peer drops the frame — so `PROTOCOL_VERSION` stays 1, the same
+    /// argument `Usage` records above.
+    Settings {
+        model: String,
+        effort: Option<String>,
+        plan: bool,
+        context_limit: Option<u64>,
+    },
+
     /// Reply: this session's usage report — turns, summed input/output/cache
     /// tokens, the cache hit rate, per-tool `calls`/`errors`/`result_bytes`, and
     /// a `$` cost when the model is priced (all inside [`crate::stats::SessionStats`]).
@@ -372,6 +394,25 @@ mod tests {
                 last_assistant_text: Some("last said".into()),
             },
             "status",
+        );
+        roundtrip(
+            AgentEvent::Settings {
+                model: "m1".into(),
+                effort: Some("high".into()),
+                plan: true,
+                context_limit: Some(200_000),
+            },
+            "settings",
+        );
+        // The unknown-window spelling survives the wire as `null`, not `0`.
+        roundtrip(
+            AgentEvent::Settings {
+                model: "m1".into(),
+                effort: None,
+                plan: false,
+                context_limit: None,
+            },
+            "settings",
         );
         roundtrip(
             AgentEvent::Usage {

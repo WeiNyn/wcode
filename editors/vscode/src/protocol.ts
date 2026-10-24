@@ -61,6 +61,13 @@ export type Request =
   | { type: "side_ask"; text: string }
   | { type: "get_history" }
   | { type: "status" }
+  /**
+   * Read the agent's OWN settings (reply: `settings`) — W032. The client's
+   * config knows nothing about the server's model/effort/plan/window, so a
+   * settings panel has to ask. Additive: an older peer answers `ack`, which the
+   * panel reads as "unavailable", never as a value.
+   */
+  | { type: "settings" }
   | { type: "list_sessions" }
   /** Ask the transport for the provider's model catalog (reply: `models`). */
   | { type: "list_models" }
@@ -123,6 +130,17 @@ export type AgentEvent =
   | { type: "side_answer"; text: string; usage: Usage | null }
   | { type: "history"; messages: AgentMessage[] }
   | { type: "status"; last_assistant_text: string | null }
+  /**
+   * The agent's own settings, answering `settings` (W032). `context_limit` is
+   * `null` when the window is UNKNOWN — never `0`, never a guess.
+   */
+  | {
+      type: "settings";
+      model: string;
+      effort: string | null;
+      plan: boolean;
+      context_limit: number | null;
+    }
   | { type: "sessions"; sessions: SessionInfo[] }
   /** The provider's model catalog, answering a `list_models` request. */
   | { type: "models"; models: string[] }

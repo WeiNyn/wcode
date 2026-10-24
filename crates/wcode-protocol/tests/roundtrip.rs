@@ -167,6 +167,45 @@ async fn a_remote_client_drives_the_session() {
     );
 }
 
+/// W032 §4.5: the assert that makes a `--socket` settings panel honest. The
+/// client's OWN config knows nothing about the server's model — only a read of
+/// the SERVER's settings can put the truth in the panel's rows.
+#[tokio::test]
+async fn a_socket_client_reads_the_servers_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("wcode.sock");
+
+    // `agent()` pins "m1"; move the SERVER's model to an id no client config
+    // could guess, so the assertion cannot pass by coincidence.
+    let mut cfg = agent(Vec::new());
+    cfg.set_model("server-only-model".into()).unwrap();
+    let handle = SessionActor::spawn(cfg);
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    serve_static(vec![(SessionId::new("test"), handle)], listener);
+
+    let client = Client::connect(&sock).await.unwrap();
+    let reply = client
+        .ask_within(Request::Settings, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let AgentEvent::Settings {
+        model,
+        effort,
+        plan,
+        context_limit,
+    } = reply
+    else {
+        panic!("expected Settings over the socket, got {reply:?}");
+    };
+    assert_eq!(model, "server-only-model", "the client learns the SERVER's model");
+    assert_eq!(effort, None, "no effort on the server");
+    assert!(!plan, "plan mode is off on the server");
+    assert_eq!(
+        context_limit, None,
+        "an unknown window is `None` — honest absence, never a guessed number"
+    );
+}
+
 #[tokio::test]
 async fn a_second_client_observes_the_same_session() {
     let dir = tempfile::tempdir().unwrap();

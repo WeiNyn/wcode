@@ -179,6 +179,14 @@ impl Agent {
         self.llm.effort.as_deref()
     }
 
+    /// The shared plan-mode switch — the read side of [`Agent::set_plan_mode`].
+    /// The actor clones it before `agent.run` borrows the agent (as it does
+    /// `hooks`), so a mid-run `Request::Settings` can report plan mode without
+    /// the `&mut`.
+    pub(crate) fn plan_mode(&self) -> PlanModeHandle {
+        self.plan_mode.clone()
+    }
+
     /// Assistant turns before the auto-titler fires (`0` = off) — the resolved
     /// `[session] title_after_turns` this agent was built with (W031).
     pub fn title_after_turns(&self) -> usize {
