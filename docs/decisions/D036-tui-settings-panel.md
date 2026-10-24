@@ -1,6 +1,6 @@
 # D036 — The settings panel edits SESSION state, and nothing persists
 
-- **Status:** accepted (human sign-off 2026-10-24, session-scoped; shipped in `8221ea9`…)
+- **Status:** accepted (human sign-off 2026-10-24, session-scoped) and **shipped** — `8221ea9` … `b8cd0bc` + `d1b20d6` (code/docs), with the second-layer fixes in `8becfc2`; second layer **APPROVED**
 - **Date:** this session
 - **Relates to:**
   [`crates/wcode-tui/src/settings.rs`](../../crates/wcode-tui/src/settings.rs)
@@ -87,3 +87,26 @@ for its own config and nothing else.
 - **Forecloses:** the writer (above), editable-`config` rows, and a typed numeric
   or text field (a named follow-up — `/width <cols>` and `/effort <level>` remain
   the escape hatches). No confirmations, no approval flow, no per-row "apply?".
+
+## What the review added to the decision
+
+Two pieces of behaviour shipped that the record above does not derive, both
+ratified by the second layer as *requirements*, not extras:
+
+- **`restore_pending_intents`.** A `Settings` reply is written into `Status`
+  before the settle block runs, so a *stale* mid-run reply would otherwise
+  overwrite the row's echo with a value the user never asked for while the mark
+  still said "pending". The unsettled intents are restored after each reply, so
+  the row shows the **intent plus the mark** — which is what "the intended value
+  is written optimistically" has to mean across a stale reply.
+- **The mark is drawn only while a run is in flight** (`pending` is empty at
+  idle). At idle the harness applies the mutation in the same `dispatch` that
+  answers `Ack`, so a mark there would claim a deferral that never happened. The
+  *intent* is still stored at idle — it is what triggers the one read — so state
+  and display are deliberately different facts.
+
+And one thing the review could not close, recorded so it is not overstated: the
+VS Code `tsc --noEmit` + test-suite gate was run by the implementer, **not**
+independently re-run by the reviewer (`editors/vscode/node_modules` is absent and
+installing is a mutation for a read-only role). The TS diff is 18 additive
+declaration lines with no consumer.

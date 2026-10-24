@@ -506,6 +506,12 @@ WCODE_RETRY_MAX=2 ./target/debug/wcode --base-url http://127.0.0.1:9/v1 --tui
 ## 13. Sign-off log
 
 - **2026-10-24 — APPROVED, session-scoped.** "approve, go". The §10 fork is resolved at its default: **no runtime `config.toml` writer**; every row edits session state through a setter that already exists. All eight plan steps proceed in order (§5); steps 1–3 are the demo-able core, step 5 is the only one touching another crate's public surface.
+- **2026-10-24 — SHIPPED, second layer APPROVED.** Ten commits (§15); one BLOCK
+  at the diff gate, on six stale comments and the missing z-order pixel guard,
+  both fixed in `8becfc2`. The `theme` row's `palette b` rests on source identity
+  (A9, corrected). `restore_pending_intents` and the running-gated mark were
+  ratified as requirements. VS Code and the live-endpoint gap are recorded in §15
+  as *not independently verified*.
 - **2026-10-24 — DELIVERED.** All eight plan steps landed in order, one commit each:
   `8221ea9` (host + skeleton) → `34b0cbd` (rows) → `b1526ce` (pickers, plus the
   `Nudge`/`Cycle` machine-value fix folded in) → `12be09f` (effort cycle) →
@@ -578,3 +584,60 @@ checklist.
 - **A14** `settings()`/`settings_snapshot()` are `pub(crate)` (a `pub` method returning a private module's type is a `private_interfaces` warning; clippy stays clean with no `#[allow]`).
 - **A15** `draw_settings`'s borrow: copy the scalars out before `set_settings_page` (a `&App` borrow and a `&mut App` call cannot coexist).
 - **A16** doc drift to close by step 8: this file's §5 step-2 sentence (done, above), `tui-design.md`'s "`default` before the first switch" (A9), the tracker row's "only open question" tail, the `W014a` paragraph's "`--dump-config` prints no `[compaction] budget`", and `settings.rs`'s module doc's "SKETCH (review-only) … NOT registered".
+
+---
+
+## 15. Delivery and review record
+
+**Shipped.** Ten commits, each second-layer reviewed at item level; the second
+layer returned **BLOCK once** (two blockers, both documentation/coverage — no
+behaviour defect) and **APPROVED** on the fix.
+
+| commit | what |
+|---|---|
+| `d0fb094` | the brief v2 + the settings-panel spec (`docs/tui-design.md` §4) |
+| `8221ea9` | host, key tier, empty frame — `App.settings`, the precedence tier, `F2` ×3 |
+| `34b0cbd` | the rows: `rows()`, `apply_setting`, the drawn body, the affordance column |
+| `b1526ce` | the picker rows (and the `Nudge`/`Cycle` machine-value fix) |
+| `12be09f` | the effort cycle with its off-list rule |
+| `8d827b4` | the wire: `Request::Settings`/`AgentEvent::Settings`, both `Status` defects fixed |
+| `5bbc66d` | the `· pending` marks and the four retirement paths |
+| `179751d` | the read-only `config` section from the one `--dump-config` builder |
+| `b8cd0bc` | discovery: `/settings`, the five `KEYS` rows, A11/A11b |
+| `d1b20d6` | D036, the README, the tracker, the doc drift |
+| `8becfc2` | the second layer's two blockers: six stale comments + the z-order pixel test |
+
+**Gates.** `cargo test --workspace` **1462 passed / 4 ignored**; `cargo clippy
+--workspace --all-targets` clean; `cargo build --bin wcode` clean; **0 `SKETCH`
+markers** in `crates/` and `editors/`; `--dump-config` gained exactly one line
+(`compaction budget:`, both `Some`/`None` renderings); `--dump-system-prompt`
+byte-identical.
+
+**Live.** On a pty: `F2` drew the panel and its rows; `↓`/`→` nudged `width`
+68 → 76 → 84…; `Enter` on `theme` opened the picker and returned to the panel with
+the new palette; `Tab` landed on the first `config` row and `Enter` showed the
+read-only hint; mid-run `effort` showed `· pending`, the mark survived `Esc` +
+reopen, and cancelled with the row settled and the mark gone; `--model`/
+`--effort` on a real provider moved the header to `glm-5.2 · high` and the
+`context` row to `1000000`.
+
+**What the reviews changed in the design, not just the code.** Seven first-layer
+blockers (the total `AgentEvent` match, `Option<u64>` in the budget line,
+`Section.heading`, the missing `Settings` ask, two unsketched `F2` sites, the
+`ReadOnly` arrow trap, a reformatted line), sixteen amendments, and one corrected
+premise: `default` and palette B are the *same colours*, so the `theme` row's
+refusal of the word `default` rests on **source identity**, not rendering. Two
+behaviours were added by review as *requirements*: `restore_pending_intents`, and
+the running-gated mark.
+
+**Not independently verified** — recorded so it is not overstated: the VS Code
+gate (`tsc --noEmit` + 244 tests) was run by the implementer only
+(`editors/vscode/node_modules` is absent, and installing is a mutation for a
+read-only reviewer); and no live model endpoint existed in this environment, so
+every mid-run observation used a refused port with retries holding the run in
+flight — "a mark survives a natural `AgentEnd`" is proven by test, not by hand.
+
+**Follow-ups filed, not smuggled:** item 96 (the pre-existing 0×0
+`draw_info_panel` panic — now reachable from `F2` as a second call-site) and item
+97 (a reusable live-TUI driver: 13 near-identical pty scripts were written during
+this item, none of them reusable).

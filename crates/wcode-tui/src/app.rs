@@ -5567,8 +5567,9 @@ impl App {
             // The `/effort` payload PLUS the optimistic echo and its intent.
             // The echo is safe only because the tell travels with it: the row
             // shows `· pending` while a run defers the change, and the read this
-            // arms retires the mark and corrects `Status` if the harness refused
-            // it (§4.5 — the intent comparison, never `Status` vs the reply).
+            // arm triggers retires the mark and corrects `Status` if the harness
+            // refused it (§4.5 — the intent comparison, never `Status` vs the
+            // reply).
             crate::settings::SettingAction::SetEffort(effort) => {
                 // Optimistic, WITH a tell (§4.5): the row echoes the keystroke it
                 // just received — a panel that does not reads as broken — and while
