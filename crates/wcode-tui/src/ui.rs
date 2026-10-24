@@ -1477,6 +1477,9 @@ fn content_lines(
 /// right-aligned to the row's edge — the name prints ONCE. On success the name
 /// sits at col 3; an error prepends the red `✗ ` mark. The target is inlined on the
 /// head only when the params block is empty (otherwise it rides the params rows).
+///
+/// The gutter stays `dim()` even on an error head (D039/N1): only the `✗ ` mark
+/// takes `error_style`, so the rail reads as one continuous band.
 fn tool_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
     let stats = tool_stats(tool);
     // An errored tool's head carries the `✗` mark (red) in place of the retired
@@ -1486,7 +1489,6 @@ fn tool_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
     } else {
         ("", dim(), tool_name())
     };
-    let prefix = format!("{gutter}{mark}");
     // The target inlines on the head ONLY as a fallback for a call whose args
     // miss its per-tool key list, so `params` is empty (W015) — otherwise the
     // value rides the always-visible params rows.
@@ -1495,14 +1497,15 @@ fn tool_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
         _ => tool.name.clone(),
     };
     // The stats run to the row's right edge (`fill + stats`), no glyph cells.
-    let left_len = prefix.chars().count() + label.chars().count();
+    let left_len = gutter.chars().count() + mark.chars().count() + label.chars().count();
     let tail_len = stats.chars().count();
     let pad = width.saturating_sub(left_len + tail_len).max(1);
-    let mut spans = vec![
-        Span::styled(prefix, mark_style),
-        Span::styled(label, name_style),
-        Span::styled(" ".repeat(pad), dim()),
-    ];
+    let mut spans = vec![Span::styled(gutter.to_string(), dim())];
+    if !mark.is_empty() {
+        spans.push(Span::styled(mark, mark_style));
+    }
+    spans.push(Span::styled(label, name_style));
+    spans.push(Span::styled(" ".repeat(pad), dim()));
     if !stats.is_empty() {
         spans.push(Span::styled(stats, dim()));
     }
@@ -1735,7 +1738,10 @@ fn param_row(
         let pad = value_col.saturating_sub(indent + key.chars().count());
         format!("{prefix}{key}{}", " ".repeat(pad))
     };
-    let cont = " ".repeat(value_col);
+    // Continuation rows keep BOTH the rail (D039: every row of a run's tools) and
+    // the value column — `value_col - indent` is exactly the key column + 2, so
+    // the value starts where it did.
+    let cont = format!("{gutter}{}", " ".repeat(value_col - indent));
     let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     // `lines()` drops a trailing `\n` and a `\r`; the fallback keeps the empty
@@ -6019,6 +6025,101 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                 row.chars().nth(1),
                 Some('│'),
                 "the {needle} row carries the rail: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_param_continuation_carries_the_rail() {
+        // B3/D039: the params block was the lone holdout — row 0 was railed, a
+        // wrapped continuation rendered a blank gutter. Every row of a run's tool
+        // carries ` │ `, and the value column must not move for it.
+        let mk = || {
+            let mut t = a_tool("echo one", "ok");
+            t.expanded = true;
+            t.params = vec![(
+                "command".to_string(),
+                "echo one two three four five six seven eight nine ten".to_string(),
+            )];
+            t
+        };
+        let lone = rows_of(&turn_with(vec![a_call("c1", "bash")], vec![mk()]), 40);
+        let railed = rows_of(
+            &turn_with(
+                vec![a_call("c1", "bash"), a_call("c2", "bash")],
+                vec![mk(), a_tool("echo two", "ok")],
+            ),
+            40,
+        );
+        // rows[0] head · rows[1] the `command ` key row · rows[2] its continuation.
+        let cont = &railed[2];
+        assert_eq!(
+            cont.chars().nth(1),
+            Some('│'),
+            "the continuation keeps the rail: {cont:?}"
+        );
+        assert!(
+            cont.chars().skip(3).take(9).all(|c| c == ' '),
+            "the value column is unchanged (blank up to col 12): {cont:?}"
+        );
+        assert!(
+            cont.contains("six seven"),
+            "the wrapped remainder rides the continuation:\n{railed:#?}"
+        );
+        // …and the value column is unchanged: same content from col 3 in both.
+        let tail = |r: &String| r.chars().skip(3).collect::<String>();
+        for i in 0..4 {
+            assert_eq!(
+                tail(&railed[i]),
+                tail(&lone[i]),
+                "row {i} keeps the value column: {:?} vs {:?}",
+                railed[i],
+                lone[i]
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_head_rail_is_dim_and_only_the_mark_is_red() {
+        // N1: `tool_head_row` styled the whole `gutter + ✗ ` run with the mark's
+        // style, making the rail red; the glyph table says `│` is dim at col 1.
+        let mut bad = a_tool("echo one", "boom");
+        bad.is_error = true;
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![a_tool("echo two", "ok"), bad],
+        );
+        let line = block_lines(&block, 70)
+            .into_iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains('✗')))
+            .expect("the error head");
+        assert_eq!(line.spans[0].content.as_ref(), " │ ", "the rail cell");
+        assert_eq!(line.spans[0].style, dim(), "the rail stays dim");
+        assert_eq!(line.spans[1].content.as_ref(), "✗ ", "the mark");
+        assert_eq!(line.spans[1].style, error_style(), "only the mark is red");
+    }
+
+    #[test]
+    fn a_running_tool_s_live_tail_carries_the_rail() {
+        // N2: the running tool's ONE live-tail row (`ui.rs`'s `last_line` push),
+        // inside a run.
+        let mut running = a_tool("echo one", "step 1\nstep 2");
+        running.done = false;
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![running, a_tool("echo two", "ok")],
+        );
+        let rows = rows_of(&block, 70);
+        assert_eq!(rows.len(), 3, "head + live tail + the second head:\n{rows:#?}");
+        assert!(
+            rows[1].contains("step 2"),
+            "the live tail is the last output line:\n{rows:#?}"
+        );
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row.chars().nth(1),
+                Some('│'),
+                "row {i} carries the rail: {row:?}"
             );
         }
     }
