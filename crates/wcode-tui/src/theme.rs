@@ -128,9 +128,34 @@ static THEME: RwLock<Theme> = RwLock::new(Theme::colored());
 /// Bumped by every [`set`]; the TUI cache-invalidation watches it (`app.rs`).
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The NAME the last [`set`] applied — `None` for palette B. Its own lock (not a
+/// field on `Theme`) because a `Theme` carries resolved colours, and because it
+/// must survive `NO_COLOR`'s `Theme::plain()`, where the colours say nothing
+/// about the requested name (W032 A9).
+static ACTIVE_NAME: RwLock<Option<&'static str>> = RwLock::new(None);
+
 /// The current theme generation — the cache-invalidation signal.
 pub(crate) fn generation() -> u64 {
     GENERATION.load(Ordering::Relaxed)
+}
+
+/// The active palette's catalogue name, recorded by [`set`] — `None` for
+/// palette B or an inline `[theme]` palette, neither of which has a name to show
+/// (W032 first-layer A9).
+///
+/// # Contracts
+/// - `None` is a real answer, not a failure: palette B (and an inline `[theme]`
+///   with no name) has no catalogue name. The `Some` case is always a
+///   `&'static str` — the applied name is either a `CATALOG` entry or the
+///   [`OMARCHY`] sentinel — so it re-binds through the catalogue, and a
+///   `[theme] name` from config and a `/theme` switch are the same fact.
+/// - The row's word for `None` (`palette b`) is `settings.rs`'s label, NOT a
+///   value this returns: `theme.rs` stays presentation-free.
+/// - Reflects the LAST [`set`] — [`install`] and [`set_preset`] both route
+///   through it. Under `NO_COLOR` the name is still recorded: the row claims a
+///   name, not a rendering.
+pub fn active_name() -> Option<&'static str> {
+    *ACTIVE_NAME.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The active theme — a COPY (the lock scope is one deref-copy).
@@ -148,6 +173,10 @@ pub(crate) fn theme() -> Theme {
 /// generation so caches invalidate.
 pub(crate) fn set(spec: ThemeSpec) {
     let palette = spec.palette();
+    // Recorded DERIVED FROM THE SPEC (A9), before `resolve` consumes it: no side
+    // effect leaks out of a builder, and a `with_preset` that is called and
+    // discarded records nothing.
+    *ACTIVE_NAME.write().unwrap_or_else(PoisonError::into_inner) = spec.name();
     *THEME.write().unwrap_or_else(PoisonError::into_inner) = resolve(spec, no_color());
     let syntax = palette
         .as_ref()
@@ -736,6 +765,22 @@ impl ThemeSpec {
     pub fn with_preset(mut self, name: &str) -> Result<ThemeSpec, String> {
         self.source = resolve_source(name)?;
         Ok(self)
+    }
+
+    /// The catalogue NAME this spec came from — `None` for palette B, and
+    /// [`OMARCHY`] for an inline palette (only [`omarchy_source`] builds one).
+    /// Recorded by [`set`] and read by [`active_name`] (W032 A9).
+    fn name(&self) -> Option<&'static str> {
+        match &self.source {
+            Source::PaletteB => None,
+            // Re-bound to the CATALOG's own `&'static str`, so the value is a
+            // name the `/theme` picker also offers.
+            Source::Named(name) => CATALOG
+                .iter()
+                .find(|(n, _)| *n == &**name)
+                .map(|(n, _)| *n),
+            Source::Inline { .. } => Some(OMARCHY),
+        }
     }
 
     /// The palette this spec resolves to, if it has one — a catalog preset or a

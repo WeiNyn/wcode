@@ -19,6 +19,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 use crate::TeamState;
 use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
+use crate::settings::{Setting, SettingKind};
 use crate::markdown;
 use crate::theme;
 
@@ -292,22 +293,34 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
-/// The hint line's fallback: the footer slot's key legend while no `ReadOnly`
-/// act has set a hint (`SettingsState::hint`). The panel's own grammar rows in
-/// `F1` carry the full keymap; `esc close` never drops (W032 §4.2), and the
-/// remaining clauses — `←→ change · enter edit · tab section` — join it with the
-/// rows that make them act (step 2).
-const HINT_LEGEND: &str = " ↑↓ move · esc close";
+/// The hint line — the panel's footer, the row that `Info` spends on
+/// ` esc to close`. Each entry is a LONGER legend than the one after it: the
+/// line sheds whole clauses right-to-left by importance (`enter edit` first,
+/// then `tab section`, then `←→ change`, then `↑↓ move`), and `esc close` never
+/// drops — the same rule as the foot row's (W032 §4.2, `tui-design.md` §4).
+const HINT_LEGENDS: &[&str] = &[
+    " ↑↓ move · ←→ change · enter edit · tab section · esc close",
+    " ↑↓ move · ←→ change · tab section · esc close",
+    " ↑↓ move · ←→ change · esc close",
+    " ↑↓ move · esc close",
+    " esc close",
+];
+
+/// The longest legend that fits `width` cells — `esc close` always fits, so the
+/// last entry is the floor.
+fn hint_legend(width: usize) -> &'static str {
+    HINT_LEGENDS
+        .iter()
+        .copied()
+        .find(|legend| legend.chars().count() <= width)
+        .unwrap_or(HINT_LEGENDS[HINT_LEGENDS.len() - 1])
+}
 
 /// Draw the settings panel over the whole terminal — an overlay of the
 /// `F1`/`Info` family, built on the same [`draw_info_panel`] so the frame, the
 /// `Clear`, the rounded border, the bare-lowercase ` settings ` title and the
 /// clip-not-wrap body are the family's, never a re-implementation
 /// (`tui-design.md` §4 "settings panel").
-///
-/// **Step 1 draws the two section headings and the hint line**; the row body
-/// (cursor glyph, affordance column, `· pending` mark) is `tui-design.md` §4 and
-/// arrives with the rows (step 2).
 ///
 /// # Contracts
 /// - One `Line` per DRAWN line: a section heading, a blank separator, and one row
@@ -321,7 +334,8 @@ const HINT_LEGEND: &str = " ↑↓ move · esc close";
 ///   cursor that walks the window is its own tell (the designer's amendment 1).
 /// - Publishes the body height through `app.set_settings_page(visible)` so
 ///   `PgUp`/`PgDn` move one screen (the `set_terminal_width` precedent).
-/// - Footer = `state.hint()` when a `ReadOnly` act set one, else [`HINT_LEGEND`].
+/// - Footer = `state.hint()` when a `ReadOnly` act set one, else the longest
+///   [`HINT_LEGENDS`] entry the panel's inner width allows.
 /// - FIRST-LAYER A15 — the borrow order decides whether this compiles:
 ///   `app.settings()` holds `&App`, so `app.set_settings_page(..)` (which needs
 ///   `&mut`) cannot be called while that borrow lives. The scalars are copied
@@ -334,6 +348,11 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
     // A15: scalars out, then the `&App` borrow ends.
     let (cursor, hint) = (state.cursor(), state.hint());
     let sections = app.settings_sections();
+    // The family's panel geometry (mirroring `draw_info_panel`), because the
+    // rows need the detail column's width: 2 borders, the 2-cell cursor column,
+    // `item_line`'s 1-cell indent and its 22-cell label column.
+    let inner = panel_inner_width(area);
+    let detail = inner.saturating_sub(3 + ITEM_LABEL_COLS);
     let mut lines: Vec<Line> = Vec::new();
     for (i, section) in sections.iter().enumerate() {
         if i > 0 {
@@ -341,10 +360,13 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
             // its two tables.
             lines.push(Line::default());
         }
+        // A `Prose` row: bare, lowercase, body weight, at column 0 — the
+        // `/help` idiom, and the first section is labelled too (amendment 5).
         lines.push(Line::from(section.heading.to_string()));
-        // STEP 2: one `item_line`-plus-cursor row per `section.rows` entry —
-        // `❯ ` in `accent()`, the unchanged `item_line` body, then the
-        // right-flush affordance column.
+        for (n, setting) in section.rows.iter().enumerate() {
+            let index: usize = sections[..i].iter().map(|s| s.rows.len()).sum::<usize>() + n;
+            lines.push(setting_line(setting, index == cursor, detail));
+        }
     }
     let (cursor_line, total) = crate::settings::line_of(&sections, cursor);
     let visible = info_visible_rows(total, area.height);
@@ -357,11 +379,86 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
             title: "settings",
             lines,
             scroll: start as u16,
-            footer: hint.unwrap_or(HINT_LEGEND),
+            footer: hint.unwrap_or_else(|| hint_legend(inner)),
             more: false,
         },
     );
 }
+
+/// The panel's inner width — the same arithmetic `draw_info_panel` uses, so the
+/// row builder's detail budget and the drawn frame can never disagree.
+fn panel_inner_width(area: Rect) -> usize {
+    area.width.saturating_sub(4).clamp(1, 64).saturating_sub(2) as usize
+}
+
+/// One drawn row: the cursor column (`❯ ` in `accent()`, else two blanks) then
+/// the unchanged [`item_line`] body, so the label column is identical whether or
+/// not the cursor rests on it (`tui-design.md` §4).
+fn setting_line(setting: &Setting, focused: bool, detail: usize) -> Line<'static> {
+    let marker = if focused {
+        Span::styled("❯ ", accent())
+    } else {
+        Span::raw("  ")
+    };
+    let affordance = match &setting.kind {
+        // The `todos` pair, one column (amendment 3).
+        SettingKind::Toggle { on: true, .. } => "☑",
+        SettingKind::Toggle { on: false, .. } => "☐",
+        // The very arrows the hint line prints — no new glyph (amendment 2).
+        SettingKind::Cycle { .. } | SettingKind::Nudge { .. } => "← →",
+        // The ONE new glyph this panel admits: "this row opens a picker".
+        SettingKind::Pick { .. } => "›",
+        // A `ReadOnly` row carries no affordance — that is how the two kinds
+        // read apart at a glance.
+        SettingKind::ReadOnly { .. } => "",
+    };
+    let mut line = item_line(
+        &setting.label,
+        &detail_column(&setting.value, setting.pending, affordance, detail),
+    );
+    line.spans.insert(0, marker);
+    line
+}
+
+/// The detail field: `value · pending · gap · affordance`, right-flush.
+///
+/// # Contracts
+/// - The affordance is reserved FIRST (its cells plus one space of gap) and the
+///   value clips into what is left, so a long `base_url` never pushes the
+///   affordance out of the panel.
+/// - When value + `· pending` will not fit beside the affordance, the
+///   AFFORDANCE is dropped, never the mark: a vanished mark would be a lie, a
+///   vanished legend is still operable and still named by the hint line.
+/// - An over-long value clips with `…` (clip-not-wrap, D027) — no silent
+///   shortening.
+fn detail_column(value: &str, pending: bool, affordance: &str, budget: usize) -> String {
+    let mark = if pending { " · pending" } else { "" };
+    let mark_len = mark.chars().count();
+    let needs = value.chars().count() + mark_len;
+    let mut affordance = affordance;
+    let mut reserved = if affordance.is_empty() {
+        0
+    } else {
+        affordance.chars().count() + 1
+    };
+    if needs + reserved > budget {
+        affordance = "";
+        reserved = 0;
+    }
+    let room = budget.saturating_sub(reserved);
+    let text = if needs <= room {
+        format!("{value}{mark}")
+    } else {
+        // The mark survives; the value is what clips.
+        let keep = room.saturating_sub(mark_len + 1);
+        let clipped: String = value.chars().take(keep).collect();
+        format!("{clipped}…{mark}")
+    };
+    let pad = room.saturating_sub(text.chars().count());
+    let space = " ".repeat(pad);
+    format!("{text}{space}{affordance}")
+}
+
 /// Draw the info modal body `rows` at `scroll`, under a rounded ` title ` panel.
 ///
 /// The door used by the `Overlay::Info` dispatch arm: it maps each [`InfoRow`] to
@@ -6028,6 +6125,30 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         panic!("{needle:?} not found in the frame");
     }
 
+    /// W032 §4.2 — the hint line drops whole clauses as the panel narrows and
+    /// never drops `esc close`.
+    #[test]
+    fn the_hint_line_sheds_clauses_when_the_panel_narrows() {
+        // The 64-col panel leaves 62 inner cells: everything fits.
+        assert_eq!(
+            hint_legend(62),
+            " ↑↓ move · ←→ change · enter edit · tab section · esc close",
+            "the full legend at the 64-col panel"
+        );
+        // A 48-col terminal leaves 42: `enter edit` and `tab section` go.
+        assert_eq!(
+            hint_legend(42),
+            " ↑↓ move · ←→ change · esc close",
+            "`esc close` never drops"
+        );
+        assert_eq!(hint_legend(10), " esc close");
+        // Monotonic: a narrower panel never picks a longer legend, and the floor
+        // always fits.
+        for width in 0..64 {
+            assert!(hint_legend(width).chars().count() <= width.max(10));
+        }
+    }
+
     /// W032 first-layer A8 — the draw tripwire for a panel that is NOT an
     /// `Overlay` variant: `draw_overlay`'s exhaustive match cannot catch a
     /// missing draw, so the assertion is on PIXELS, never on
@@ -6035,6 +6156,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     #[test]
     fn the_settings_panel_draws_its_title_and_hides_when_closed() {
         let mut app = App::new();
+        // The sidebar shown, so BOTH toggle glyphs (`☐`/`☑`) are on screen.
+        app.handle(AppEvent::Key(Key::Ctrl('b')));
         let closed = buffer_text(&render(&mut app, 80, 24));
         assert!(
             !closed.contains(" settings "),
@@ -6043,11 +6166,21 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         app.handle(AppEvent::Key(Key::F(2)));
         let open = buffer_text(&render(&mut app, 80, 24));
         assert!(open.contains(" settings "), "the padded title:\n{open}");
-        // The empty body still carries BOTH section headings (the first one is
-        // labelled too, `tui-design.md` §4 amendment 5) and the hint line.
+        // Both section headings (the first one is labelled too, §4 amendment 5)
+        // and the hint line.
         assert!(open.contains("session"), "the session heading:\n{open}");
         assert!(open.contains("config"), "the config heading:\n{open}");
         assert!(open.contains("↑↓ move"), "the hint line:\n{open}");
+        // The rows themselves: the cursor column on the first row, a value, and
+        // the three affordance glyphs (`☐`/`☑` toggle, `← →` cycle/nudge, `›`
+        // pick).
+        assert!(open.contains("❯  model"), "the cursor row:\n{open}");
+        assert!(open.contains("68 cols"), "the width value:\n{open}");
+        assert!(open.contains('☐'), "the plan toggle's unchecked glyph:\n{open}");
+        assert!(open.contains('☑'), "the sidebar toggle's glyph:\n{open}");
+        assert!(open.contains("← →"), "the nudge/cycle arrows:\n{open}");
+        assert!(open.contains('›'), "the pick affordance:\n{open}");
+        assert!(open.contains("tool output"), "a read-only row:\n{open}");
         // Drawn OVER the bands without reflowing them: the frame's top row (the
         // pinned head band, outside the centered panel) is byte-identical.
         assert_eq!(

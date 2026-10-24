@@ -2762,14 +2762,10 @@ pub const DEFAULT_MEASURE: usize = 68;
 /// `Alt-[` / `Alt-]` keys.
 pub const MEASURE_MIN: usize = 40;
 pub const MEASURE_LIMIT: usize = 200;
-/// Columns an `Alt-[` / `Alt-]` key press moves the measure.
-// ==== SKETCH (review-only, not real code) ====
-// FIRST-LAYER A13: this line becomes `pub(crate) const MEASURE_STEP: usize = 8;`
-// — `settings.rs`'s `width` row steps by the SAME number, and two copies of `8`
-// would let `Alt-]` and the panel disagree. `WHEEL_LINES` (above) gets the same
-// treatment, so `settings::WHEEL_ROWS` reuses it instead of restating `3`.
-// ==== /SKETCH ====
-const MEASURE_STEP: usize = 8;
+/// Columns an `Alt-[` / `Alt-]` key press moves the measure — and the step the
+/// settings panel's `width` row nudges by (`crate::settings`), so the two can
+/// never disagree (first-layer A13; `WHEEL_LINES` above is the twin case).
+pub(crate) const MEASURE_STEP: usize = 8;
 
 /// One DRAWN sidebar row, as a positional tuple: `(surface index, label, state,
 /// focused, live action, is_root)`. Named only because clippy counts six fields
@@ -5537,7 +5533,8 @@ impl App {
     /// - Builds the rows ONCE, from `&self`, before taking `&mut` on `settings` —
     ///   that is why `settings::on_key` takes `&[Section]` and not the snapshot
     ///   (`settings.rs`, `on_key`'s first contract).
-    /// - `KeyOutcome::Act` (step 2+) joins this match as `self.apply_setting(a)`.
+    /// - `Act(a)` → `apply_setting(a)` — the flat match over the effect
+    ///   vocabulary, so this function never re-derives an act.
     fn on_settings_key(&mut self, key: Key) {
         let sections = self.settings_sections();
         let Some(state) = self.settings.as_mut() else {
@@ -5548,38 +5545,43 @@ impl App {
         // and the handlers below may take `&mut self` again.
         match outcome {
             crate::settings::KeyOutcome::Close => self.close_settings(),
+            crate::settings::KeyOutcome::Act(action) => self.apply_setting(action),
+            // `None`/`Moved`: a swallowed key costs one no-op frame, exactly as
+            // `on_overlay_key`'s `self.dirty = true` does.
             _ => self.dirty = true,
         }
     }
 
-    // ==== SKETCH (review-only, not real code) — the effect executor (steps 2–4) ====
-    // /// Execute one [`crate::settings::SettingAction`] — a FLAT match, one arm
-    // /// per variant, each arm one existing setter. This is the whole of the
-    // /// panel's write surface: `settings.rs` names no setter and no `Request`, so
-    // /// a new effect is a new enum variant and the compiler asks for its arm.
-    // ///
-    // /// # Contracts
-    // /// - Four arms settle instantly and never mark pending (§4.8): `SetWidth` →
-    // ///   `set_measure` (`:2704`), `SetView` → `set_view_mode` (`:5460`),
-    // ///   `ToggleSidebar` → `toggle_sidebar` (`:5442`), `OpenPicker` →
-    // ///   `open_model_picker` (`:5114`) / `open_theme_picker` (`:5107`).
-    // /// - `SetEffort` and `SetPlan` are the DEFERRABLE pair (§4.5): write the
-    // ///   intended value to `Status` optimistically — `SetPlan` exactly as `/plan`
-    // ///   does at `:4303` (`plan_pending` + `status.plan`), `SetEffort` as the
-    // ///   `/effort` arm at `:4252`-`:4261` does NOT (that omission is one of the
-    // ///   two defects this panel fixes) — push the `Action::Ask(Request::…)`, and
-    // ///   if `self.running()` (`:5502`) push the row id onto `deferred_settings`,
-    // ///   which the row build renders as `· pending`.
-    // /// - `SetPlan`'s revert path is already wired: `AgentEvent::Error` restores
-    // ///   `plan_pending` (`:1961`), `AgentStart` drops it (`:1932`).
-    // /// - The `model` row's pending mark is NOT set here: `OpenPicker(Model)`
-    // ///   raises no request. It is set by `accept_picker`'s `PickerKind::Model`
-    // ///   arm (`:5217`-`:5221`), which is where `Request::SetModel` is actually
-    // ///   pushed — one line there, guarded by the same `self.running()`.
-    // fn apply_setting(&mut self, action: crate::settings::SettingAction) {
-        // todo!()
-    // }
-    // ==== /SKETCH ====
+    /// Execute one [`crate::settings::SettingAction`] — a FLAT match, one arm
+    /// per variant, each arm one existing setter. This is the whole of the
+    /// panel's write surface: `settings.rs` names no setter and no `Request`, so
+    /// a new effect is a new enum variant and the compiler asks for its arm.
+    ///
+    /// # Contracts
+    /// - `SetWidth`/`SetView`/`ToggleSidebar` settle instantly and never mark
+    ///   pending (§4.8): each is one client-local setter.
+    /// - `SetPlan` is the DEFERRABLE one (§4.5) and runs the `/plan` arm's body:
+    ///   write `Status.plan` optimistically, remember the previous value in
+    ///   `plan_pending` (the `AgentEvent::Error` revert), and ask the harness.
+    ///
+    /// STEP 6: while `self.running()`, the deferrable act also records its
+    /// intended value in `deferred_settings`, which is what the row's `· pending`
+    /// mark reads.
+    fn apply_setting(&mut self, action: crate::settings::SettingAction) {
+        match action {
+            crate::settings::SettingAction::SetWidth(cols) => self.set_measure(cols),
+            crate::settings::SettingAction::SetView(view) => self.set_view_mode(view),
+            crate::settings::SettingAction::ToggleSidebar => self.toggle_sidebar(),
+            crate::settings::SettingAction::SetPlan(on) => {
+                let prev = self.focused().status.plan;
+                let surface = self.focused_mut();
+                surface.plan_pending = Some(prev);
+                surface.status.plan = on;
+                self.actions.push(Action::Ask(Request::SetPlanMode { on }));
+                self.dirty = true;
+            }
+        }
+    }
 
     /// Apply the highlighted row and dismiss the modal.
     fn accept_picker(&mut self) {
@@ -5921,8 +5923,27 @@ impl App {
     /// - `config_heading` is `settings::CONFIG_HEADING_CLIENT` when `self.remote`
     ///   (`set_remote`), else `…_LOCAL` (§4.6/§4.8: a socket client shows its own
     ///   config and says so).
-    fn settings_snapshot(&self) -> crate::settings::SettingsSnapshot {
+    fn settings_snapshot(&self) -> crate::settings::SettingsSnapshot<'_> {
+        let status = &self.focused().status;
         crate::settings::SettingsSnapshot {
+            model: &status.model,
+            effort: status.effort.as_deref(),
+            plan: status.plan,
+            // `None` = palette B, or a `[theme]` inline palette: neither has a
+            // catalogue name, and the row's word for that (`palette b`) is
+            // `settings.rs`'s label (A9).
+            theme: crate::theme::active_name(),
+            width: self.measure,
+            view: self.view,
+            sidebar: self.sidebar,
+            context: status.context_limit,
+            // STEP 7: `&self.config` — the finished `--dump-config` body, injected
+            // by the CLI (`Options.config`). Empty today, so the panel shows its
+            // one placeholder row.
+            config: "",
+            // STEP 6: `&self.deferred_settings` ids — nothing is deferred until
+            // the pending marks land, so every row reads settled.
+            pending: &[],
             config_heading: if self.remote {
                 crate::settings::CONFIG_HEADING_CLIENT
             } else {
@@ -9233,6 +9254,58 @@ mod tests {
         // NOT asserted here: a picker opened OVER the panel (step 3). Until the
         // `model`/`theme` rows exist no picker can be raised from inside it, so
         // the `overlay`-wins half of this test arrives with `OpenModelPicker`.
+    }
+
+    #[test]
+    fn the_settings_panel_answers_keys_rather_than_swallowing_them() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(2)));
+        assert_eq!(app.settings().expect("open").cursor(), 0, "opens on `model`");
+        // `↓` moves the PANEL's cursor — the App-layer guard for the `_ => {}`
+        // swallow class: a key that reaches `KeyOutcome::None` is invisible here.
+        app.handle(AppEvent::Key(Key::Down));
+        assert_eq!(app.settings().expect("open").cursor(), 1, "on `effort`");
+        // Walk to `width` (model, effort, plan, theme, width) and step it: the act
+        // reaches `set_measure`, so the transcript's measure really changes.
+        for _ in 0..3 {
+            app.handle(AppEvent::Key(Key::Down));
+        }
+        let before = app.measure();
+        app.handle(AppEvent::Key(Key::Right));
+        assert_eq!(
+            app.measure(),
+            before + 8,
+            "→ on `width` steps the measure by MEASURE_STEP"
+        );
+        assert!(app.settings().is_some(), "an act keeps the panel open");
+        // `Tab` crosses to the config section rather than switching surfaces.
+        app.handle(AppEvent::Key(Key::Tab));
+        assert_eq!(app.settings().expect("open").cursor(), 9, "the first config row");
+        assert_eq!(app.focus(), 0, "Tab did not move the surface focus");
+    }
+
+    #[test]
+    fn enter_on_the_plan_row_turns_plan_mode_on_and_asks() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Down)); // on `plan`
+        assert!(!app.status().plan, "plan starts off");
+        app.handle(AppEvent::Key(Key::Enter));
+        // Optimistic: the row and the status chip flip at once, and the ask
+        // carries the same intent.
+        assert!(app.status().plan, "plan flipped on");
+        let asks = app.take_actions();
+        assert_eq!(
+            asks,
+            vec![Action::Ask(Request::SetPlanMode { on: true })],
+            "one SetPlanMode ask"
+        );
+        assert!(app.settings().is_some(), "the panel survives its own act");
+        // `Esc` closes the panel; the optimistic value stays.
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.settings().is_none());
+        assert!(app.status().plan, "closing does not revert");
     }
 
     #[test]
