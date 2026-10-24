@@ -645,7 +645,7 @@ At the 64-col panel, over the (hidden) base bands:
 │   base_url:             http://localhost:11434/v1 (source: f…│
 │   model:                qwen2.5-coder:7b (source: config)    │
 │   api_key:              (none) (source: default)             │
-│   compaction budget:    60000                                │
+│   compaction budget:    60000 tokens                         │
 │   tools:                read, grep, find, bash, edit, write  │
 │ ↑↓ move · ←→ change · enter edit · tab section · esc close   │
 ╰──────────────────────────────────────────────────────────────╯

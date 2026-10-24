@@ -511,10 +511,10 @@ WCODE_RETRY_MAX=2 ./target/debug/wcode --base-url http://127.0.0.1:9/v1 --tui
   `Nudge`/`Cycle` machine-value fix folded in) → `12be09f` (effort cycle) →
   `8d827b4` (`Request::Settings` + the two `Status` defects) → `5bbc66d` (pending
   marks) → `179751d` (the read-only `config` section) → step 8 (discovery, docs,
-  this record). Gates at the end: `cargo test --workspace` **1459 passed / 4
+  this record). Gates at the end: `cargo test --workspace` **1462 passed / 4
   ignored**, `cargo clippy --workspace --all-targets` clean, `cargo build --bin
   wcode` clean, `--dump-system-prompt` byte-identical, `--dump-config` exactly one
-  added line, VS Code `typecheck` + **244 tests** green, **zero `SKETCH` markers**
+  added line, VS Code `typecheck` + **244 tests** green, **zero `SKETCH` markers in `crates/` and `editors/`**
   left in the repo.
   Live-verified on a pty (no model endpoint here, so every check ran against a
   refused port or client state): the panel's nine rows with their affordances,

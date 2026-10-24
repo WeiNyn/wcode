@@ -9,24 +9,29 @@
 //! cursor glyph, affordance column, hint line, narrow-width drops — is
 //! `docs/tui-design.md` §4 "settings panel" and is NOT specified here.
 //!
-//! # Real so far (steps 1–2) versus still sketch
+//! # What is here
 //!
-//! Real: the row ids, the taxonomy ([`SettingKind`] / [`Setting`] /
+//! All of it: the row ids, the taxonomy ([`SettingKind`] / [`Setting`] /
 //! [`Section`]), [`rows`] with every `session` row and the `config` section's
 //! line-per-dump split, [`SettingsState`], [`SettingsSnapshot`], [`line_of`],
-//! [`KeyOutcome`], [`on_key`]'s movement + `Tab`/`BackTab` + `←`/`→`/`Enter`
-//! grammar, and [`SettingAction`]'s effects — the four client-local ones, the two
-//! `Pick` rows' existing pickers, and the effort cycle with its off-list rule.
+//! [`KeyOutcome`], the whole key grammar of §4.2, and [`SettingAction`]'s
+//! effects — the four client-local ones, the two `Pick` rows' existing pickers,
+//! and the effort cycle with its off-list rule. No sketch text remains.
 //!
-//! Nothing of the panel's model is left as a sketch: the taxonomy, all nine
-//! rows, the `config` section, the pickers and the effort cycle are real. Only
-//! step 6's pending-mark test is still commented at the foot of this file — the
-//! `· pending` mark itself already renders, and `App` feeds it an empty set until
-//! `deferred_settings` lands.
-//! They cannot be *declared* before they are constructed: `dead_code` fires on
-//! an unconstructed enum variant inside a private module, and this crate may not
-//! answer that with `#[allow]` (W032 §6). The step that constructs them brings
-//! them back in one edit, because the sketch text is kept verbatim.
+//! The module owns the *model* only. The values come in through
+//! [`SettingsSnapshot`] (`model`/`effort`/`plan`/`context` are the **focused**
+//! session; `width`/`view`/`sidebar` are app-global), the effects go out through
+//! [`SettingAction`] and are executed by `App::apply_setting`, and nothing here
+//! names a `Request`, an `App` type or a terminal. The `· pending` mark is
+//! *drawn* here from [`SettingsSnapshot::pending`] but *owned* by `App`, because
+//! it must outlive the panel: `Esc` closes by dropping `App.settings`, and `Esc`
+//! is not a clearer (§4.5).
+//!
+//! One note for a future edit: prefer one value per place. `Setting::value` is
+//! the DRAWN column (formatted, with its unit), and `SettingKind`'s
+//! `Nudge::current` / `Cycle::current` are the MACHINE values the keys step from.
+//! Input must never parse display text — an earlier cut did, and a formatter
+//! change would have silently disabled the `width` row.
 //!
 //! # Who calls this
 //!
@@ -627,13 +632,13 @@ pub enum KeyOutcome {
 /// # Contracts
 /// - Every variant maps to ONE setter that already exists (§4.3's table); the
 ///   panel adds no behaviour, only a face.
-/// - `SetPlan` is the DEFERRABLE one: the caller writes `Status` optimistically
-///   and, when `App::running()`, marks the row pending (§4.5). The others settle
-///   instantly and never mark pending (§4.8).
+/// - `SetPlan`/`SetEffort` are the two DEFERRABLE arms: the caller writes
+///   `Status` optimistically **and** records the value as a deferred intent, so
+///   the row can carry a `· pending` mark while a run defers it and the reply can
+///   settle it (§4.5). The four client-local arms settle instantly and never mark
+///   pending (§4.8).
 /// - `SetWidth`'s value is already clamped to the row's `min..=max`; the caller's
 ///   `set_measure` clamps again (harmless, `app.rs:2705`).
-/// - `SetEffort` (step 4) is its own step's arm; its sketch is at the foot of
-///   this file.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingAction {
     /// `width`: `App::set_measure(cols)` (`app.rs:2704`).
@@ -657,12 +662,10 @@ pub enum SettingAction {
     OpenThemePicker,
     /// `effort`: the `/effort <level>` payload, byte-identical (the `/effort`
     /// arm, `app.rs:4569`-`:4578`) — `None` for the `(none)` stop, which the wire
-    /// spells as `effort: None`.
-    ///
-    /// STEP 5: `/effort` today writes NO `Status.effort`, so neither does the
-    /// panel — writing it here would show a value the harness never confirmed,
-    /// which is the defect §4.5 exists to fix. The row therefore keeps drawing
-    /// `Status` until the `Settings` reply lands.
+    /// spells as `effort: None`. The caller echoes the value into `Status`
+    /// optimistically **and** records the intent, so the echo always carries a
+    /// tell: `· pending` while a run defers it, then a `Settings` reply that
+    /// settles or corrects it (§4.5).
     SetEffort(Option<String>),
     /// `plan`: the `/plan` arm's body — `plan_pending`, `Status.plan`, and
     /// `Request::SetPlanMode` (`app.rs:4289`–`:4304`).

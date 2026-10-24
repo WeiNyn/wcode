@@ -183,6 +183,11 @@ impl Agent {
     /// The actor clones it before `agent.run` borrows the agent (as it does
     /// `hooks`), so a mid-run `Request::Settings` can report plan mode without
     /// the `&mut`.
+    ///
+    /// Distinct from [`crate::agent::AgentConfig::plan_mode`], which is the
+    /// STARTUP flag (`[plan] on` in config); this is the live handle that flag
+    /// seeds. Two names, two facts — kept apart rather than aliased, so a reader
+    /// cannot mistake the config's intent for the session's current state.
     pub(crate) fn plan_mode(&self) -> PlanModeHandle {
         self.plan_mode.clone()
     }

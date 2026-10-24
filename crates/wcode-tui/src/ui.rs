@@ -6222,6 +6222,41 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert_eq!(shut, closed, "closing left a residue");
     }
 
+    /// W032 A8's SECOND assertion — the z-order, which is the invariant that
+    /// justified hosting the panel OUTSIDE `Overlay` (D036: "`Enter` on the `model`
+    /// row opens the ordinary picker **on top of** the panel"). Without it, moving
+    /// `draw_settings` after `draw_overlay` would keep every other test green while
+    /// the panel painted over its own picker.
+    #[test]
+    fn the_settings_panel_draws_below_a_picker_and_above_the_bands() {
+        let mut app = App::new();
+        app.set_models(vec![
+            "alpha".to_string(),
+            "bravo".to_string(),
+            "charlie".to_string(),
+        ]);
+        app.handle(AppEvent::Key(Key::F(2)));
+        // The cursor opens on `model`, so `Enter` raises the ordinary picker.
+        app.handle(AppEvent::Key(Key::Enter));
+        let frame = buffer_text(&render(&mut app, 80, 30));
+        // The PICKER's title row, told apart from the panel's own `model` row by
+        // the absence of the panel's cursor glyph — both panels are 64 cols wide,
+        // so the picker's `Clear` must have wiped the panel at those cells.
+        let picker_row = frame
+            .lines()
+            .find(|line| line.contains(" model ") && !line.contains('❯'))
+            .unwrap_or_else(|| panic!("no picker title drawn over the panel:\n{frame}"));
+        for panel_text in ["effort", "width", "view", "sidebar"] {
+            assert!(
+                !picker_row.contains(panel_text),
+                "the panel painted over the picker ({panel_text:?} on {picker_row:?}):\n{frame}"
+            );
+        }
+        // …and the panel is still drawn where the picker is not: its footer hint
+        // sits below the shorter picker's rect.
+        assert!(frame.contains("↑↓ move"), "the panel's hint line:\n{frame}");
+    }
+
     /// The heart of D027: a `/help` ITEM row and an `F1` row render identically —
     /// same indent, same 22-col label column, same detail. Asserted by drawing
     /// BOTH, so a future styling change cannot desync them.

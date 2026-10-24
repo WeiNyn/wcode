@@ -2986,10 +2986,10 @@ impl App {
     ///   `/settings`) are below it.
     /// - Idempotent: opening twice is a no-op rather than a reset, so a scrolled
     ///   panel is not silently rewound.
-    /// - FIRST-LAYER B5 — it ASKS, exactly once per open, so the reply can settle
-    ///   the panel's rows and its `· pending` marks. `Request::Settings` lands
-    ///   with the wire variant (step 5); until then there is nothing to ask for,
-    ///   and the panel reads what the client already knows.
+    /// - FIRST-LAYER B5 — it ASKS, exactly once per open, so the reply settles
+    ///   the panel's rows and their `· pending` marks. Without that push nothing
+    ///   would ever refresh `Status.effort`/`context_limit` from the harness, and
+    ///   no mark could be retired (first-layer blocker 1's whole subject).
     fn open_settings(&mut self) {
         if self.settings.is_none() {
             self.settings = Some(crate::settings::SettingsState::new());
@@ -5542,16 +5542,18 @@ impl App {
     /// - `OpenModelPicker`/`OpenThemePicker` raise the ordinary `Overlay::Pick`
     ///   and nothing else: the accept arm that already exists applies the value,
     ///   and the panel survives because it is not the `overlay` slot (§4.1).
-    /// - `SetEffort` pushes the `/effort` payload only. It deliberately does NOT
-    ///   write `Status.effort` (step 5's defect fix): an optimistic value the
-    ///   harness never confirmed is the lie §4.5 exists to remove.
-    /// - `SetPlan` is the DEFERRABLE one (§4.5) and runs the `/plan` arm's body:
-    ///   write `Status.plan` optimistically, remember the previous value in
-    ///   `plan_pending` (the `AgentEvent::Error` revert), and ask the harness.
-    ///
-    /// STEP 6: while `self.running()`, the deferrable act also records its
-    /// intended value in `deferred_settings`, which is what the row's `· pending`
-    /// mark reads.
+    /// - `SetEffort`/`SetPlan` are the two DEFERRABLE arms (§4.5): each writes
+    ///   its value to `Status` **optimistically** (a panel that does not echo its
+    ///   own keystroke reads as broken), records that value as a deferred
+    ///   *intent*, and asks the harness. The echo is never bare — the intent is
+    ///   both the `· pending` mark's source (drawn only while a run is in flight,
+    ///   because at idle the harness applies before acking) and what triggers the
+    ///   `Request::Settings` read that settles the row against the harness's own
+    ///   answer. `SetPlan` additionally keeps the previous value in
+    ///   `plan_pending` for `AgentEvent::Error`'s revert.
+    /// - Nothing here invents behaviour: every arm is one setter that already
+    ///   existed, which is what keeps the panel a face on the session rather than
+    ///   a second write surface.
     fn apply_setting(&mut self, action: crate::settings::SettingAction) {
         match action {
             crate::settings::SettingAction::SetWidth(cols) => self.set_measure(cols),
@@ -5562,10 +5564,11 @@ impl App {
             // the PICKER, so the panel is still open underneath (§4.1's payoff).
             crate::settings::SettingAction::OpenModelPicker => self.open_model_picker(),
             crate::settings::SettingAction::OpenThemePicker => self.open_theme_picker(),
-            // The `/effort` payload, and nothing else: `Status.effort` is NOT
-            // written here. `/effort` does not write it either, because a value
-            // the harness has not confirmed is exactly the stale-status defect
-            // §4.5 fixes — that write arrives with the `Settings` reply (step 5).
+            // The `/effort` payload PLUS the optimistic echo and its intent.
+            // The echo is safe only because the tell travels with it: the row
+            // shows `· pending` while a run defers the change, and the read this
+            // arms retires the mark and corrects `Status` if the harness refused
+            // it (§4.5 — the intent comparison, never `Status` vs the reply).
             crate::settings::SettingAction::SetEffort(effort) => {
                 // Optimistic, WITH a tell (§4.5): the row echoes the keystroke it
                 // just received — a panel that does not reads as broken — and while
@@ -5928,10 +5931,11 @@ impl App {
     }
 
     /// The panel's live values, gathered from the sources the panel must NOT
-    /// own: `Status` for model/effort/plan/context, the view bits for
-    /// width/view/sidebar, `theme::active_name()` for the palette, the injected
-    /// dump, and `deferred_settings` for the marks — those field adds are steps
-    /// 2–7, so today only the heading is resolved.
+    /// own: `Status` (**focused**, not `chrome_status()` — every setter is
+    /// `focused_mut()`, so the panel must describe the session it edits) for
+    /// model/effort/plan/context, the app-global view bits for width/view/sidebar,
+    /// `theme::active_name()` for the palette, the injected `--dump-config` body,
+    /// and `deferred_settings` for the marks.
     ///
     /// # Contracts
     /// - Borrows `&self` only, so it can run BEFORE the `&mut` on `settings`
