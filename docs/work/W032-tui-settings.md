@@ -295,7 +295,7 @@ v1 said command-only. With an editor, that is too slow for a panel you use while
    base_url: http://localhost:11434/v1 (source: flag)
    model: qwen2.5-coder:7b (source: config)
    api_key: (none) (source: default)
-   compaction budget: 60000
+   compaction budget: 60000 tokens
    …
  ────────────────────────────────────────────────────────────────
    ↑↓ move · ←→ change · enter edit · tab section · esc close
@@ -506,6 +506,34 @@ WCODE_RETRY_MAX=2 ./target/debug/wcode --base-url http://127.0.0.1:9/v1 --tui
 ## 13. Sign-off log
 
 - **2026-10-24 — APPROVED, session-scoped.** "approve, go". The §10 fork is resolved at its default: **no runtime `config.toml` writer**; every row edits session state through a setter that already exists. All eight plan steps proceed in order (§5); steps 1–3 are the demo-able core, step 5 is the only one touching another crate's public surface.
+- **2026-10-24 — DELIVERED.** All eight plan steps landed in order, one commit each:
+  `8221ea9` (host + skeleton) → `34b0cbd` (rows) → `b1526ce` (pickers, plus the
+  `Nudge`/`Cycle` machine-value fix folded in) → `12be09f` (effort cycle) →
+  `8d827b4` (`Request::Settings` + the two `Status` defects) → `5bbc66d` (pending
+  marks) → `179751d` (the read-only `config` section) → step 8 (discovery, docs,
+  this record). Gates at the end: `cargo test --workspace` **1459 passed / 4
+  ignored**, `cargo clippy --workspace --all-targets` clean, `cargo build --bin
+  wcode` clean, `--dump-system-prompt` byte-identical, `--dump-config` exactly one
+  added line, VS Code `typecheck` + **244 tests** green, **zero `SKETCH` markers**
+  left in the repo.
+  Live-verified on a pty (no model endpoint here, so every check ran against a
+  refused port or client state): the panel's nine rows with their affordances,
+  `Enter` on `model` opening the picker over the panel and returning to it,
+  `Enter` on `theme` applying a preset and repainting the frame, `/model`/`/effort`
+  moving the gauge and the header (`glm-5 · high`), `config context: 202752 →
+  1000000`, the `· pending` mark appearing mid-run and retiring at the boundary,
+  and the `config` section showing the `--dump-config` text verbatim through
+  `compaction budget: (the model window)`. Not verified by hand: a mark surviving a
+  *natural* `AgentEnd` (the refused-port run retries for tens of seconds, so that
+  re-ask is proven by test), and any run against a live model.
+  Two defects were found by these live checks and fixed in their own steps: an
+  `Act` that changed no client-owned value produced no frame at all (`SetEffort`,
+  step 4), and the panel's `SetEffort` had no read-back while `/effort` did
+  (step 5). The sketch also fought the code twice: `dead_code` forbade declaring
+  the row taxonomy before a row existed to construct it (step 1 resolved it by
+  registering only what it could construct), and `agent.rs:47`'s `pub plan_mode`
+  is `AgentConfig`'s field, not `Agent`'s — the fix was a new accessor, not a
+  reworded citation.
 
 ---
 

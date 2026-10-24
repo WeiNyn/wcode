@@ -382,7 +382,8 @@ wcode --no-instructions      # run without loading instruction files
 wcode --dump-system-prompt   # print the composed system prompt, exit
 wcode --detect-endpoint      # when base_url is unset, probe common local endpoints
 wcode --title "retry fix"    # name this session up front (distinct from --name, the A2A address)
-wcode --dump-config          # print the resolved endpoint/base_url/model and key SOURCES, exit
+wcode --dump-config          # print the resolved endpoint/base_url/model and key SOURCES
+                             # (plus the effective `compaction budget`), exit
 wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
 wcode --tui                  # force the full-screen TUI (default on a TTY)
@@ -413,7 +414,16 @@ prev, `g`/`G` first/last, `Home`/`End` jump to the top/bottom block in view,
 `Esc`/`q`/`Ctrl-G` leave). The mouse is captured: click a block to select it in
 browse, click a sidebar row to focus that surface, drag across the transcript to
 select and copy its text (left button only; a modal owns the mouse). `F1` (or
-`/help`) opens the full keymap. The rounded input box carries the chrome in its
+`/help`) opens the full keymap, and `F2` (or `/settings`) opens the **settings
+panel** — a keyboard-driven list of the session's knobs (`↑↓` cursor, `←→`/`Enter`
+act, `Tab` between the `session` and `config` sections, `Esc` close) that edits
+model, effort, plan, theme, width, view and sidebar through the setters each
+already has, and shows a read-only `config` section built from the same string
+`--dump-config` prints (over `--socket` it is labelled `config (this client)`).
+Nothing is written to `config.toml`: every row is session state, so a change lasts
+as long as the session (D036). A change the harness accepts mid-run shows a dim
+`· pending` mark until its reply confirms it. The rounded input box carries the
+chrome in its
 four corners (project · ⎇ branch · model · effort · the context gauge · the
 mode/state), and a **working-team band** sits above the box — one dim row per
 member while it runs. The input
@@ -421,7 +431,8 @@ box wraps and grows (capped at 8 rows, or half the screen, then scrolls to the
 cursor); a paste over 100 chars or more than 3 lines collapses to a `❰ pasted … ❱`
 chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit`, `/model <id>`, `/effort
 [level]`, `/theme [name]` (bare `/theme` opens a picker), `/compact [text]`, `/usage`, `/copy`, `/team`,
-`/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/rename <text>`, `/help` — the
+`/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/rename <text>`, `/settings`,
+`/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session; the
 CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
