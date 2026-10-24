@@ -2662,45 +2662,28 @@ pub struct App {
     /// the `overlay` slot and leaves this one alone, so the editor survives its
     /// own sub-modal.
     settings: Option<crate::settings::SettingsState>,
-    /// A settings mutation the TUI has ASKED for and not yet read back: its
-    /// `Ack` triggers ONE `Request::Settings` read (W032 §4.5).
+    /// The row id + INTENDED VALUE of a change the harness ACCEPTED and will
+    /// apply at the run boundary (`actor.rs` `Ack` + `deferred.push_back`),
+    /// rendered as the dim `· pending` mark (W032 §4.5).
     ///
-    /// The two `Status` fields this exists for — `effort` (the header's
-    /// `model · effort`) and `context_limit` (the gauge's denominator) — have no
-    /// other writer outside launch, so a `/effort` or `/model` change would
-    /// otherwise leave both drawn values stale. Reading them back is honest
-    /// where echoing the request would be a guess.
+    /// App-level, NOT inside `settings`: `Esc` drops that `Option` and `Esc` is
+    /// not a clearer, so a mark must outlive the panel.
     ///
-    /// One flag, cleared by the read it triggers (or by a `Settings` reply), so
-    /// an OLD peer — which answers `Ack` to `Settings` itself, the additive-wire
-    /// rule — cannot make the two ping-pong.
-    //
-    // STEP 6: `deferred_settings` subsumes this — it stores the same fact (a
-    // change accepted, not yet confirmed) for the pending marks.
-    reread_settings: bool,
-    // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
-    // The row id + INTENDED VALUE of a change the harness ACCEPTED and will
-    // apply at the run boundary (`actor.rs:681`-`:691` `Ack` +
-    // `deferred.push_back`), rendered as the dim `· pending` mark. Ordered,
-    // deduped per id, at most three (`settings::ids::MODEL` / `EFFORT` / `PLAN`).
-    //
-    // FIRST-LAYER A5 — the VALUE is why this is a tuple, not an id. "Settle
-    // every mark the reply agrees with" is unimplementable: the reply is applied
-    // to `Status` BEFORE this arm runs (`app.rs` `Surface::apply`, the `Settings`
-    // arm), so `reply == Status` is true by construction and every mark would
-    // settle. The rule is instead **settle iff the reply's field equals the
-    // stored intent, else keep the mark** — so a second `→` mid-run (`xhigh`)
-    // survives a pre-boundary reply naming `high`.
-    //
-    // App-level, NOT inside `settings`: the deferral outlives the panel
-    // (§4.5: `Esc` is not a clearer).
-    // Written by `apply_setting` + the model picker's accept arm, read by
-    // `settings_snapshot`, settled by the `AgentEvent::Settings` arm.
-    //
-    // /// The in-flight changes the harness accepted but has not applied yet —
-    // /// read by `settings_snapshot` as the rows' `pending` set.
-    // deferred_settings: Vec<(&'static str, String)>,
-    // ==== /SKETCH ====
+    /// One mechanism, two jobs. It is the pending set [`App::settings_snapshot`]
+    /// hands to [`crate::settings::rows`] (drawn only while a run is in flight —
+    /// at idle the harness applied the change at once, so a mark would be a
+    /// lie), and it is the trigger for the ONE `Settings` read that follows a
+    /// mutation, so the client never guesses a value it could read.
+    ///
+    /// The VALUE is why this is a tuple, not an id (first-layer A5): settling
+    /// compares a reply's field against the intent, and comparing against
+    /// `Status` would be true by construction — `Surface::apply` has already
+    /// written the reply there by the time the settle runs.
+    ///
+    /// Ordering and de-duplication: a second act on the same row REPLACES its
+    /// intent (the last keypress is what the user last asked for); at most three
+    /// entries (`settings::ids::{MODEL, EFFORT, PLAN}`).
+    deferred_settings: Vec<(&'static str, String)>,
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
     /// The open browse search prompt, if any — see [`BrowseSearch`].
@@ -2831,13 +2814,8 @@ impl App {
             usage_collect: None,
             // Closed at startup; `F2` / `/settings` opens the panel.
             settings: None,
-            reread_settings: false,
-            // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
-            // The second initializer beside `settings` above: no change is in
-            // flight at startup, so the set is empty.
-            //
-            // deferred_settings: Vec::new(),
-            // ==== /SKETCH ====
+            // No change is in flight at startup.
+            deferred_settings: Vec::new(),
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -4129,81 +4107,44 @@ impl App {
                 // `AgentEvent::Ack => { self.plan_pending = None; false }`) and a
                 // `Usage`-ask `Error` must not paint a failed run.
                 if !self.absorb_usage(&id, &event) {
-                    // ==== SKETCH (review-only, not real code) ====
                     // W032 §4.5: the panel's pending marks are App state, and the
-                    // three clear events are here — NOT in `Surface::apply`, which
-                    // is handed the event by value and cannot reach `App`.
+                    // four retirement paths are here — NOT in `Surface::apply`,
+                    // which is handed the event by value and cannot reach `App`.
                     //
                     // Captured BEFORE `apply` consumes the event, exactly like
-                    // `ended` below. Two peeks, two rules (FIRST-LAYER P1 — this header
-                    // used to say "`AgentStart`/`Error` → clear EVERY mark" and "settle
-                    // every id whose value the reply agrees with"; both are refuted by (a)
-                    // and (b) below, and copying them reinstates the very regression (b)
-                    // forbids):
-                    //  - `AgentStart` ALONE → clear EVERY mark (the previous boundary
-                    //    passed, so every deferral applied). **`Error` is NOT in this
-                    //    rule** — see (b).
-                    //  - `Settings { .. }` → settle a mark IFF the reply's field EQUALS
-                    //    the stored INTENT, and keep it otherwise (never "what the reply
-                    //    agrees with": `Surface::apply` has already written the reply into
-                    //    `Status`, so that test is true by construction). Per-row, so an
-                    //    unrelated still-queued `SetPlanMode` is untouched.
+                    // `ended` below:
+                    //  - `started` → clear EVERY mark (the previous boundary
+                    //    passed, so every deferral applied). **`Error` is NOT in
+                    //    this rule**: a `/btw` failure reaches the reducer with
+                    //    truthful marks, and "clear the marks it can explain" is
+                    //    undecidable — `AgentEvent::Error { message }` carries no
+                    //    request correlation.
+                    //  - `reply` → settle a mark IFF the reply's field EQUALS the
+                    //    stored INTENT, and keep it otherwise (never "what the
+                    //    reply agrees with": `apply` has already written the reply
+                    //    into `Status`, so that test is true by construction).
+                    //    Per-row, so an unrelated still-queued `SetPlanMode` is
+                    //    untouched.
+                    //  - `had_marks` → the peek's answer to "does a boundary owe a
+                    //    read?", taken before any path below clears the set.
                     //
                     // A stray `Error` from a `/usage` fan-out never reaches here
                     // (`absorb_usage` drained it above), so a fan-out failure
                     // cannot wipe the panel's marks.
-                    //
-                    // FIRST-LAYER A5 — three corrections to the first cut:
-                    //
-                    //  (a) `Settings { .. }` settles a mark IFF the reply's field
-                    //      equals the STORED INTENT (`deferred_settings` is
-                    //      `Vec<(id, intended_value)>`), and keeps it otherwise —
-                    //      never "settle what the reply agrees with", because
-                    //      `Surface::apply` has already written the reply into
-                    //      `Status`, so that test is true by construction.
-                    //  (b) `Error` must NOT clear every mark blindly: a `/btw`
-                    //      failure DOES reach here (`absorb_usage` drains only the
-                    //      `/usage` fan-out), and wiping a truthful mark leaves an
-                    //      optimistic value with no tell. And "clear the marks it can explain"
-                    //      is UNDECIDABLE — `AgentEvent::Error { message }` carries
-                    //      no request correlation — so that sentence would be prose no code
-                    //      can implement. The retirement rule is instead the IDLE-REPLY rule
-                    //      in the settle block below: once `!self.running()`, an unconfirmed
-                    //      mark is dead (a failed deferral is RETURNED, never broadcast —
-                    //      `actor.rs:521`).
-                    //  (c) `AgentEnd` must ask too. Nothing else asks after the run
-                    //      boundary, so a mid-run edit would show `· pending`
-                    //      forever for a change that HAS been applied — the same
-                    //      lie-class as the two defects this item fixes.
-                    //
-                    // The rule, in one place: whenever the mark set may have
-                    // changed state (a `Settings` reply, `AgentStart`, `Error`, or
-                    // `AgentEnd` with marks outstanding), ask once for truth and
-                    // settle against it. One `Action::AskTo(idx, Request::Settings)`
-                    // per boundary is cheap (a read; instant budget, `lib.rs:707`).
-                    //
-                    // let clear_all = matches!(&event, AgentEvent::AgentStart);
-                    // let ended = matches!(&event, AgentEvent::AgentEnd);
-                    // let reask = !self.deferred_settings.is_empty()
-                    //     && (clear_all || ended || matches!(&event, AgentEvent::Error { .. }));
-                    // ==== /SKETCH ====
-                    // W032 §4.5: an `Ack` for a mutation the TUI just asked for
-                    // means the harness accepted it, so ONE read of the truth
-                    // follows — `Status.effort` (the header) and `context_limit`
-                    // (the gauge) have no other writer outside launch. Mid-run the
-                    // `Ack` means "applied at the run boundary", and this read is
-                    // still honest: it reports what IS true now, and step 6's
-                    // pending marks keep the row's intent visible on top of it.
-                    if self.reread_settings && matches!(&event, AgentEvent::Ack) {
-                        self.reread_settings = false;
-                        self.actions.push(Action::AskTo(id.clone(), Request::Settings));
-                    }
-                    // The reply this flag waits for (and any other) clears it: an
-                    // OLD peer answers `Ack` to `Settings` itself, so the flag must
-                    // not survive that ack.
-                    if matches!(&event, AgentEvent::Settings { .. }) {
-                        self.reread_settings = false;
-                    }
+                    let started = matches!(&event, AgentEvent::AgentStart);
+                    // `ended` (below) already captures `AgentEnd` for the dequeue.
+                    let acked = matches!(&event, AgentEvent::Ack);
+                    let errored = matches!(&event, AgentEvent::Error { .. });
+                    let had_marks = !self.deferred_settings.is_empty();
+                    let reply = match &event {
+                        AgentEvent::Settings {
+                            model,
+                            effort,
+                            plan,
+                            ..
+                        } => Some((model.clone(), effort.clone(), *plan)),
+                        _ => None,
+                    };
                     // Route to the surface that owns this session; an unknown id
                     // is ignored (a stray/duplicate event must not panic).
                     if let Some(idx) = self.surface_index(&id) {
@@ -4234,60 +4175,57 @@ impl App {
                         // its `Block::Error`), so the turn keeps the lower ordinal.
                         self.touch_open_turn(idx, open);
                         self.stamp_new(idx, before);
-                        // ==== SKETCH (review-only, not real code) ====
-                        // The settles the peek above scheduled, acted on AFTER
-                        // `apply` — but against the STORED INTENT, never against
-                        // `Status` (first-layer A5; see the peek's comment).
+                        // The retirement paths, acted on AFTER `apply` — so
+                        // `running()` is the post-event truth (`AgentEnd` clears it
+                        // there) — and against the STORED INTENT, never against
+                        // `Status` (first-layer A5).
                         //
-                        // `event` was MOVED into `apply`, so the reply's values must
-                        // be captured beside the peek: three clones, no borrow of a
-                        // moved value.
+                        // 1. `AgentStart`: the previous boundary passed, so every
+                        //    deferral applied.
+                        if started {
+                            self.clear_deferred_settings();
+                        }
+                        // 2. A `Settings` reply settles a mark IFF its field equals
+                        //    the intent. Effort's `(none)` stop is the empty string
+                        //    on both sides (the wire spells it `None`).
+                        if let Some((model, effort, plan)) = &reply {
+                            let plan = if *plan { "on" } else { "off" };
+                            let effort = effort.clone().unwrap_or_default();
+                            self.settle_deferred_setting(crate::settings::ids::MODEL, model);
+                            self.settle_deferred_setting(crate::settings::ids::EFFORT, &effort);
+                            self.settle_deferred_setting(crate::settings::ids::PLAN, plan);
+                        }
+                        // 3. An IDLE reply retires what it did not confirm. This is
+                        //    the FAILURE path no line above covers: a deferred
+                        //    mutation that fails at the boundary emits NOTHING (the
+                        //    re-queued `Tell`'s `Err` is RETURNED, never broadcast),
+                        //    so intent comparison alone would keep a mark forever for
+                        //    a change that was refused. Once `!self.running()` the
+                        //    harness has drained every deferral, so an unconfirmed
+                        //    mark is dead. An `Ack` counts the same way: at idle the
+                        //    harness applied the mutation before acking.
                         //
-                        // if clear_all {
-                        //     self.clear_deferred_settings();   // AgentStart: the
-                        //     // previous boundary passed, so every deferral applied.
-                        // }
-                        // if let Some(reply) = &reply_values {
-                        //     // `settle_deferred_setting` now takes the row's INTENT and
-                        //     // compares: model == reply.model, effort == reply.effort
-                        //     // (None = "(none)"), plan == reply.plan.
-                        //     self.settle_deferred_setting(settings::ids::MODEL, &reply.model);
-                        //     self.settle_deferred_setting(settings::ids::EFFORT, &effort_word);
-                        //     self.settle_deferred_setting(settings::ids::PLAN, &plan_word);
-                        // }
-                        // if reask {
-                        //     self.actions.push(Action::AskTo(idx, Request::Settings));
-                        // }
-                        //
-                        // FIRST-LAYER BLOCKER 1 — the FAILURE path, which no line
-                        // above covers. A deferred mutation that fails at the
-                        // boundary emits NOTHING: the re-queued `Tell`'s `Err` is
-                        // RETURNED, never broadcast (`actor.rs:521` `if let Some(reply)
-                        // = reply { let _ = reply.send(event); }`, and a `Tell` caller
-                        // drops the return, `:308`). So intent `gpt-x` stays stored,
-                        // the re-ask's reply names the OLD model, the intent
-                        // comparison keeps the mark, and the row claims a change is
-                        // in flight that was refused — permanently, until the next
-                        // `AgentStart`. The same lie-class this item exists to remove.
-                        //
-                        // The reply is authoritative once the harness is IDLE: an idle
-                        // harness has drained every deferral, so a mark it does not
-                        // confirm is dead. (`Error` still does NOT clear on its own —
-                        // a `/btw` failure reaches here with truthful marks.)
-                        //
-                        // if !self.running() {
-                        //     self.clear_deferred_settings();
-                        // }
-                        //
-                        // `running()` is `focused().running`, cleared by `AgentEnd`, so
-                        // the three cases fall out: a MID-RUN reply keeps an
-                        // unconfirmed mark (the deferral is still queued — right);
-                        // the `AgentEnd`/open reply retires it (right); a new run's
-                        // `AgentStart` clears it (right). Test:
-                        // `a_settled_reply_clears_only_matching_marks` gains the
-                        // failed-mutation case (intent `x`, reply `y`, not running →
-                        // no mark, `Status` shows `y`).
-                        // ==== /SKETCH ====
+                        //    `Error` alone does NOT clear (see the peek above): a
+                        //    `/btw` failure reaches here with truthful marks — and it
+                        //    re-asks below, whose reply settles or retires them.
+                        if !self.running() && (reply.is_some() || acked) {
+                            self.clear_deferred_settings();
+                        }
+                        // 4. A reply that settled nothing must not stomp the rows it
+                        //    did not settle: the intent stays, with its mark.
+                        if reply.is_some() {
+                            self.restore_pending_intents();
+                            self.dirty = true;
+                        }
+                        // 5. One read per boundary while a mark is (or was just)
+                        //    outstanding, so the rows and the two `Status` fields stop
+                        //    guessing. `AgentEnd` is in the list on purpose: nothing
+                        //    else asks after the boundary, and a mid-run edit would
+                        //    otherwise show `· pending` for a change already applied.
+                        let reask = had_marks && (started || ended || errored || (acked && !self.running()));
+                        if reask {
+                            self.actions.push(Action::AskTo(id.clone(), Request::Settings));
+                        }
                         if ended {
                             self.dequeue_next(idx);
                         }
@@ -4591,8 +4529,10 @@ impl App {
                     self.actions.push(Action::Ask(Request::SetModel {
                         model: m.to_string(),
                     }));
-                    // The switch moves what the gauge draws; read it back (§4.5).
-                    self.reread_settings = true;
+                    // The switch moves what the gauge draws, and the window is not
+                    // on the picker's row: note the intent, which triggers the one
+                    // `Settings` read that refreshes it (§4.5).
+                    self.note_deferred_setting(crate::settings::ids::MODEL, m.to_string());
                 }
                 None => self.open_model_picker(),
             },
@@ -4615,12 +4555,14 @@ impl App {
                         "-" | "none" | "off" => None,
                         _ => Some(level.to_string()),
                     };
+                    // The intent, which triggers ONE `Settings` read when the
+                    // harness acks — the read that moves the header's
+                    // `model · effort` (§4.5). Not written to `Status` here: the
+                    // command has no row to echo, so an optimistic value would be
+                    // a guess with nothing to correct it.
+                    let wire = effort.clone().unwrap_or_default();
+                    self.note_deferred_setting(crate::settings::ids::EFFORT, wire);
                     self.actions.push(Action::Ask(Request::SetEffort { effort }));
-                    // NOT written to `Status` optimistically: nothing here knows
-                    // whether the harness accepted the level, and the header
-                    // prints it. The `Ack` triggers one `Settings` read, which
-                    // does know — that is §4.5's fix for the effort staleness.
-                    self.reread_settings = true;
                 }
                 None => self.transient("usage: /effort <level> ('-' clears)"),
             },
@@ -5648,19 +5590,29 @@ impl App {
             // the harness has not confirmed is exactly the stale-status defect
             // §4.5 fixes — that write arrives with the `Settings` reply (step 5).
             crate::settings::SettingAction::SetEffort(effort) => {
+                // Optimistic, WITH a tell (§4.5): the row echoes the keystroke it
+                // just received — a panel that does not reads as broken — and while
+                // a run is in flight the `· pending` mark says the value is the
+                // intent, not the harness's answer. At idle there is no mark,
+                // because the harness applies it before acking; the intent still
+                // triggers the read that settles it.
+                self.focused_mut().status.effort = effort.clone();
+                self.note_deferred_setting(
+                    crate::settings::ids::EFFORT,
+                    effort.clone().unwrap_or_default(),
+                );
                 self.actions.push(Action::Ask(Request::SetEffort { effort }));
-                // The row keeps drawing `Status`, and nothing here knows whether
-                // the harness accepted the level — so the `Ack` triggers one
-                // `Settings` read and the row follows the truth (§4.5). Writing
-                // it optimistically here would be the same guess `/effort`
-                // refuses to make.
-                self.reread_settings = true;
             }
             crate::settings::SettingAction::SetPlan(on) => {
                 let prev = self.focused().status.plan;
                 let surface = self.focused_mut();
                 surface.plan_pending = Some(prev);
                 surface.status.plan = on;
+                // The same intent the optimistic chip needs a tell for (§4.5).
+                self.note_deferred_setting(
+                    crate::settings::ids::PLAN,
+                    if on { "on" } else { "off" }.to_string(),
+                );
                 self.actions.push(Action::Ask(Request::SetPlanMode { on }));
                 self.dirty = true;
             }
@@ -5688,10 +5640,13 @@ impl App {
                 self.transient(format!("model: {selected}"));
                 self.actions
                     .push(Action::Ask(Request::SetModel { model: selected }));
-                // The model's window is NOT on the picker's row: read the
-                // harness's own view back so the gauge's denominator moves with
-                // the switch (§4.5).
-                self.reread_settings = true;
+                // The model's window is NOT on the picker's row: note the intent,
+                // which triggers the one `Settings` read that moves the gauge's
+                // denominator with the switch (§4.5).
+                self.note_deferred_setting(
+                    crate::settings::ids::MODEL,
+                    self.focused().status.model.clone(),
+                );
             }
             PickerKind::Change => self.show_change(&selected),
             PickerKind::Surface => {
@@ -6029,9 +5984,15 @@ impl App {
             // by the CLI (`Options.config`). Empty today, so the panel shows its
             // one placeholder row.
             config: "",
-            // STEP 6: `&self.deferred_settings` ids — nothing is deferred until
-            // the pending marks land, so every row reads settled.
-            pending: &[],
+            // The marks ride only while a run is in flight (§4.5): at IDLE the
+            // harness applies a mutation at once, so an intent that survives the
+            // ack would be a mark claiming a deferral that never happened. The
+            // stored intent still triggers the read — it just is not drawn.
+            pending: if self.running() {
+                &self.deferred_settings
+            } else {
+                &[]
+            },
             config_heading: if self.remote {
                 crate::settings::CONFIG_HEADING_CLIENT
             } else {
@@ -6057,40 +6018,78 @@ impl App {
         }
     }
 
-    // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
-    // /// Record that `id`'s change is accepted-but-not-yet-applied (§4.5) — the
-    // /// pending trigger, called from `apply_setting` and the model picker's
-    // /// accept arm, both guarded by `self.running()`.
-    // ///
-    // /// # Contracts
-    // /// - Takes the INTENDED VALUE, not just the id (first-layer A5): settling
-    // ///   compares the reply against it, so an id alone cannot tell a stale reply
-    // ///   from a fresh one.
-    // /// - Dedupes per id (a second `→` REPLACES the intent — the last key wins,
-    // ///   which is what the user last asked for); never holds an id outside
-    // ///   `settings::ids::{MODEL, EFFORT, PLAN}`.
-    // fn note_deferred_setting(&mut self, id: &'static str, intent: String) {
-        // todo!()
-    // }
+    /// Record that `id`'s change is accepted-but-not-yet-applied (§4.5) — the
+    /// pending trigger, called from `apply_setting` and the model picker's accept
+    /// arm.
+    ///
+    /// # Contracts
+    /// - Takes the INTENDED VALUE, not just the id (first-layer A5): settling
+    ///   compares a reply against it, so an id alone cannot tell a stale reply
+    ///   from a fresh one.
+    /// - Dedupes per id: a second act on the same row REPLACES the intent — the
+    ///   last keypress is what the user last asked for — so the set never exceeds
+    ///   three entries. Never holds an id outside
+    ///   `settings::ids::{MODEL, EFFORT, PLAN}`.
+    /// - Recorded whether or not a run is in flight: at idle it is what triggers
+    ///   the ONE `Settings` read that settles it. The `· pending` mark is drawn
+    ///   only while `running()` (see `settings_snapshot`) — at idle the harness
+    ///   applies the change before acking, so a mark there would be a lie.
+    fn note_deferred_setting(&mut self, id: &'static str, intent: String) {
+        match self.deferred_settings.iter_mut().find(|(rid, _)| *rid == id) {
+            Some(slot) => slot.1 = intent,
+            None => self.deferred_settings.push((id, intent)),
+        }
+    }
 
-    // /// Settle ONE mark IFF the reply's value equals the stored intent (§4.5,
-    // /// first-layer A5) — called from the `AppEvent::Agent` arm, never from
-    // /// `Surface::apply` (which cannot see App, and which has already written the
-    // /// reply into `Status`, so `Status` cannot be the comparison).
-    // ///
-    // /// # Contracts: a mismatch KEEPS the mark (a later deferral is still queued);
-    // /// an id with no mark is a no-op.
-    // fn settle_deferred_setting(&mut self, id: &'static str, applied: &str) {
-        // todo!()
-    // }
+    /// Settle ONE mark IFF the reply's value equals the stored intent (§4.5,
+    /// first-layer A5) — called from the `AppEvent::Agent` arm, never from
+    /// `Surface::apply` (which cannot see App, and which has already written the
+    /// reply into `Status`, so `Status` cannot be the comparison).
+    ///
+    /// # Contracts: a mismatch KEEPS the mark (a later deferral may still be
+    /// queued, and a stale reply must not erase a fresh intent); an id with no
+    /// mark is a no-op.
+    fn settle_deferred_setting(&mut self, id: &'static str, applied: &str) {
+        self.deferred_settings
+            .retain(|(rid, intent)| *rid != id || intent != applied);
+    }
 
-    // /// Clear EVERY mark: a new run means the previous boundary passed, and any
-    // /// error means the mutation failed (§4.5). Called from the `AppEvent::Agent`
-    // /// arm on `AgentStart` and `Error`.
-    // fn clear_deferred_settings(&mut self) {
-        // todo!()
-    // }
-    // ==== /SKETCH ====
+    /// Clear EVERY mark: a new run means the previous boundary passed, and an
+    /// idle reply means the harness has drained every deferral (§4.5).
+    fn clear_deferred_settings(&mut self) {
+        self.deferred_settings.clear();
+    }
+
+    /// Re-assert the still-pending intents over a reply that did NOT settle them
+    /// (§4.5, first-layer A5).
+    ///
+    /// `Surface::apply` writes every `Settings` reply into `Status`, so a reply
+    /// naming an older value would otherwise replace the row's echo with a value
+    /// the user never asked for. The row keeps showing the INTENT — which the
+    /// `· pending` mark marks as an intent, not as the harness's answer — until
+    /// the reply that matches it arrives.
+    fn restore_pending_intents(&mut self) {
+        for (id, intent) in self.deferred_settings.clone() {
+            match id {
+                crate::settings::ids::MODEL => {
+                    self.focused_mut().status.model.clone_from(&intent);
+                }
+                crate::settings::ids::EFFORT => {
+                    // The wire spells the `(none)` stop as `None`, so the empty
+                    // intent restores it.
+                    self.focused_mut().status.effort = if intent.is_empty() {
+                        None
+                    } else {
+                        Some(intent)
+                    };
+                }
+                crate::settings::ids::PLAN => {
+                    self.focused_mut().status.plan = intent == "on";
+                }
+                _ => {}
+            }
+        }
+    }
 
     /// The focused surface's queued-prompt count — the composer foot's
     /// `⇥ N queued` segment (W029). Focused, not chrome: the enqueue is a
@@ -6224,6 +6223,18 @@ mod tests {
         for c in s.chars() {
             app.handle(AppEvent::Key(Key::Char(c)));
         }
+    }
+
+    /// The row ids the panel would draw a `· pending` mark on — read through the
+    /// SNAPSHOT, exactly as the renderer does, so a mark that `rows` would not
+    /// draw cannot pass a test.
+    fn pending_ids(app: &App) -> Vec<&'static str> {
+        app.settings_sections()
+            .iter()
+            .flat_map(|s| &s.rows)
+            .filter(|r| r.pending)
+            .map(|r| r.id)
+            .collect()
     }
 
     /// The default root surface's id (`App::new`'s single surface).
@@ -9529,12 +9540,20 @@ mod tests {
     }
 
     #[test]
-    fn the_effort_row_cycles_and_asks_without_writing_status() {
+    fn the_effort_row_echoes_its_keystroke_and_reads_the_truth_back() {
+        // At IDLE there is no `· pending` mark (§4.5: the harness applies the
+        // change before acking, so a mark would claim a deferral that never
+        // happened) — but the row still echoes the keystroke, because a panel
+        // that does not reads as broken. ONE read then settles it.
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(2)));
-        app.take_actions(); // the panel's own read (asserted above)
+        app.take_actions(); // the panel's own read (asserted elsewhere)
         app.handle(AppEvent::Key(Key::Down)); // `effort`
         assert_eq!(app.status().effort, None, "the session has no effort set");
+        assert!(
+            !pending_ids(&app).contains(&crate::settings::ids::EFFORT),
+            "no mark at idle"
+        );
         app.handle(AppEvent::Key(Key::Right));
         assert_eq!(
             app.take_actions(),
@@ -9543,29 +9562,129 @@ mod tests {
             })],
             "one SetEffort ask, the `/effort minimal` payload"
         );
-        // Deliberately NOT written optimistically: `/effort` writes no `Status`
-        // either, and an unconfirmed value is the defect step 5 fixes. So the row
-        // still reads `Status`, and a second press asks the same thing — honest,
-        // and the panel never shows a value the harness has not confirmed.
-        assert_eq!(app.status().effort, None, "no optimistic write");
-        app.handle(AppEvent::Key(Key::Right));
         assert_eq!(
-            app.take_actions(),
-            vec![Action::Ask(Request::SetEffort {
-                effort: Some("minimal".into())
-            })],
-            "the row still reads `Status`"
+            app.status().effort.as_deref(),
+            Some("minimal"),
+            "the row echoes the keystroke"
         );
-        assert!(app.settings().is_some(), "the panel survives the ask");
-        // The harness accepts it; the client then reads the truth back, so the
-        // row (`Status.effort`) follows the harness rather than an echo.
-        app.take_actions();
+        // The harness accepts it, so ONE read follows — the intent is what asks.
         app.handle(AppEvent::Agent(SessionId::agent("root"), AgentEvent::Ack));
         assert_eq!(
             app.take_actions(),
             vec![Action::AskTo(SessionId::agent("root"), Request::Settings)],
             "one Settings read after the accepted change"
         );
+        // …and the reply is the truth, even when it contradicts the echo.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "wcode".into(),
+                effort: Some("high".into()),
+                plan: false,
+                context_limit: None,
+            },
+        ));
+        assert_eq!(
+            app.status().effort.as_deref(),
+            Some("high"),
+            "the row follows the harness, not its own echo"
+        );
+        assert!(
+            pending_ids(&app).is_empty(),
+            "an idle reply retires every mark"
+        );
+        // The frame still repaints: the client changed nothing it owns beyond the
+        // echo, so `dirty` cannot be left to a setter (a key with no frame is the
+        // swallow this tier exists to avoid).
+        app.clear_dirty();
+        app.handle(AppEvent::Key(Key::Right));
+        assert!(app.dirty(), "an act repaints the panel");
+    }
+
+    #[test]
+    fn a_mid_run_setting_shows_pending_until_the_reply() {
+        // §4.5: mid-run the harness ACCEPTS a settings mutation and applies it at
+        // the boundary, so the row shows the intent with a `· pending` mark as its
+        // tell — and loses the mark when the truth arrives.
+        let mut app = App::new();
+        submit(&mut app, "long prompt");
+        assert!(app.running(), "a run is in flight");
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions();
+        app.handle(AppEvent::Key(Key::Down)); // `effort`
+        app.handle(AppEvent::Key(Key::Right));
+        app.take_actions();
+        assert_eq!(
+            app.status().effort.as_deref(),
+            Some("minimal"),
+            "the optimistic value"
+        );
+        assert_eq!(
+            pending_ids(&app),
+            vec![crate::settings::ids::EFFORT],
+            "marked while the run is in flight"
+        );
+        // A reply naming the SAME value settles the mark.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "wcode".into(),
+                effort: Some("minimal".into()),
+                plan: false,
+                context_limit: None,
+            },
+        ));
+        assert!(pending_ids(&app).is_empty(), "settled by the reply");
+        // A fresh intent is cleared by the next run's `AgentStart`.
+        app.handle(AppEvent::Key(Key::Right));
+        app.take_actions();
+        assert_eq!(pending_ids(&app), vec![crate::settings::ids::EFFORT]);
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::AgentStart,
+        ));
+        assert!(pending_ids(&app).is_empty(), "AgentStart clears every mark");
+        // And `AgentEnd` with a mark outstanding asks once for the truth.
+        app.handle(AppEvent::Key(Key::Right));
+        app.take_actions();
+        assert!(!pending_ids(&app).is_empty());
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::AgentEnd,
+        ));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::AskTo(SessionId::agent("root"), Request::Settings)],
+            "AgentEnd asks, so a mid-run edit cannot keep its mark forever"
+        );
+    }
+
+    #[test]
+    fn a_settled_reply_clears_only_matching_marks() {
+        let mut app = App::new();
+        submit(&mut app, "long prompt");
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions();
+        app.handle(AppEvent::Key(Key::Down));
+        // Two presses: the LAST intent (`low`) is what the user last asked for.
+        app.handle(AppEvent::Key(Key::Right)); // minimal
+        app.handle(AppEvent::Key(Key::Right)); // low
+        app.take_actions();
+        assert_eq!(
+            pending_ids(&app),
+            vec![crate::settings::ids::EFFORT],
+            "one mark"
+        );
+        // De-duped per id, LAST keypress wins — the stored set, not just the
+        // drawn row (two entries would still draw one mark).
+        assert_eq!(app.deferred_settings.len(), 1, "one entry per id");
+        assert_eq!(
+            app.deferred_settings[0].1, "low",
+            "the last keypress is the intent"
+        );
+        // A reply naming `minimal` does NOT settle an intent of `low` — the
+        // comparison is against the intent, never against `Status` (which the
+        // reply has already overwritten).
         app.handle(AppEvent::Agent(
             SessionId::agent("root"),
             AgentEvent::Settings {
@@ -9576,17 +9695,93 @@ mod tests {
             },
         ));
         assert_eq!(
-            app.status().effort.as_deref(),
-            Some("minimal"),
-            "the row now draws the harness's own value"
+            pending_ids(&app),
+            vec![crate::settings::ids::EFFORT],
+            "a stale reply keeps the newer intent"
         );
-        // The frame still repaints: the client changes nothing it owns here, so
-        // the `dirty` flag cannot be left to a setter (a key with no frame is the
-        // swallow this tier exists to avoid).
+        assert_eq!(
+            app.status().effort.as_deref(),
+            Some("low"),
+            "and the row keeps echoing the intent, not the stale reply"
+        );
+        // A reply naming `low` settles it.
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "wcode".into(),
+                effort: Some("low".into()),
+                plan: false,
+                context_limit: None,
+            },
+        ));
+        assert!(pending_ids(&app).is_empty(), "the matching reply settles");
+        // FIRST-LAYER A5b — the FAILURE path: intent `x`, an idle reply naming
+        // `y` → no mark, and `Status` shows the truth (`y`).
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::AgentEnd,
+        ));
         app.take_actions();
-        app.clear_dirty();
+        app.handle(AppEvent::Key(Key::Right)); // a fresh intent at idle
+        app.take_actions();
+        assert!(!app.running(), "idle again");
+        // The intent IS recorded (it is what triggers the read) …
+        assert_eq!(app.deferred_settings.len(), 1, "the intent is stored at idle");
+        // … but never drawn: at idle the harness applies a change at once, so a
+        // mark could only claim a deferral that never happened (§4.5).
+        assert!(
+            pending_ids(&app).is_empty(),
+            "an idle intent is not a pending mark"
+        );
+        app.handle(AppEvent::Agent(
+            SessionId::agent("root"),
+            AgentEvent::Settings {
+                model: "wcode".into(),
+                effort: Some("xhigh".into()),
+                plan: false,
+                context_limit: None,
+            },
+        ));
+        assert!(
+            app.deferred_settings.is_empty(),
+            "an idle reply that does not confirm retires the mark"
+        );
+        assert_eq!(
+            app.status().effort.as_deref(),
+            Some("xhigh"),
+            "and `Status` shows what the harness actually has"
+        );
+    }
+
+    #[test]
+    fn a_pending_mark_survives_closing_the_panel() {
+        // Why the storage is App-level and not inside `App.settings`: `Esc` drops
+        // that `Option`, and `Esc` is not a clearer (§4.5).
+        let mut app = App::new();
+        submit(&mut app, "long prompt");
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions();
+        app.handle(AppEvent::Key(Key::Down));
         app.handle(AppEvent::Key(Key::Right));
-        assert!(app.dirty(), "an act repaints the panel");
+        app.take_actions();
+        assert_eq!(pending_ids(&app), vec![crate::settings::ids::EFFORT]);
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.settings().is_none(), "the panel is closed");
+        // Reopening re-reads the panel from App state: the mark is still there.
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.take_actions();
+        assert_eq!(
+            pending_ids(&app),
+            vec![crate::settings::ids::EFFORT],
+            "the mark outlived the panel"
+        );
+        let sections = app.settings_sections();
+        let row = sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .find(|r| r.id == crate::settings::ids::EFFORT)
+            .expect("the effort row");
+        assert!(row.pending, "and it is drawn on the row");
     }
 
     #[test]

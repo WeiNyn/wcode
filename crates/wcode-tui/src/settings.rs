@@ -333,10 +333,12 @@ pub struct SettingsSnapshot<'a> {
     /// The finished `--dump-config` text, injected by the CLI
     /// (`Options.config`). Split into `ReadOnly` rows by [`rows`].
     pub config: &'a str,
-    /// Row ids whose change the harness ACCEPTED and has not applied yet — App's
-    /// `deferred_settings` (§4.5). Empty when nothing is in flight; never longer
-    /// than three, because only `model`/`effort`/`plan` go through the harness.
-    pub pending: &'a [&'static str],
+    /// The changes the harness ACCEPTED and has not applied yet — App's
+    /// `deferred_settings` (§4.5): the row id AND the intended value, because
+    /// settling compares a reply against the intent. Empty when nothing is in
+    /// flight, and never longer than three: only `model`/`effort`/`plan` go
+    /// through the harness.
+    pub pending: &'a [(&'static str, String)],
     /// [`CONFIG_HEADING_LOCAL`] or [`CONFIG_HEADING_CLIENT`] — App picks from
     /// `App::remote`.
     pub config_heading: &'static str,
@@ -491,7 +493,7 @@ pub fn rows(snapshot: &SettingsSnapshot<'_>) -> Vec<Section> {
     for section in &mut sections {
         for row in &mut section.rows {
             row.pending = !matches!(row.kind, SettingKind::ReadOnly { .. })
-                && snapshot.pending.contains(&row.id);
+                && snapshot.pending.iter().any(|(id, _)| *id == row.id);
         }
     }
     sections
@@ -1535,6 +1537,43 @@ mod tests {
     }
 
     #[test]
+    fn only_the_three_request_rows_can_be_pending() {
+        // With the three Request rows marked, exactly those three are pending and
+        // every other row is `false` — including all `config` rows and
+        // `tool output`/`context` (§4.8). The `ReadOnly` rows hard-code it, so a
+        // caller cannot mark one by passing its id.
+        let pending = [
+            (ids::MODEL, "m2".to_string()),
+            (ids::EFFORT, "high".to_string()),
+            (ids::PLAN, "on".to_string()),
+            (ids::TOOL_OUTPUT, "x".to_string()),
+            (ids::CONTEXT, "y".to_string()),
+            (ids::CONFIG, "z".to_string()),
+        ];
+        let sections = rows(&SettingsSnapshot {
+            pending: &pending,
+            ..snap()
+        });
+        for (id, expected) in [
+            (ids::MODEL, true),
+            (ids::EFFORT, true),
+            (ids::PLAN, true),
+            (ids::THEME, false),
+            (ids::WIDTH, false),
+            (ids::VIEW, false),
+            (ids::SIDEBAR, false),
+            (ids::TOOL_OUTPUT, false),
+            (ids::CONTEXT, false),
+        ] {
+            assert_eq!(row(&sections, id).pending, expected, "{id}");
+        }
+        assert!(
+            sections[1].rows.iter().all(|r| !r.pending),
+            "a config row is never pending, even when its id is passed"
+        );
+    }
+
+    #[test]
     fn esc_closes_and_only_esc_does() {
         let sections = rows(&snap());
         let mut state = SettingsState::new();
@@ -1553,18 +1592,3 @@ mod tests {
 }
 
 
-// ==== SKETCH (review-only, not real code) — the pending-mark test (step 6) ====
-//
-// #[test]
-// fn only_the_three_request_rows_can_be_pending() {
-//     todo!()
-//     // With `snap().pending = &[ids::MODEL, ids::EFFORT, ids::PLAN]`, exactly
-//     // those three rows are `pending` and every other row is `false` —
-//     // including all `config` rows and `tool output`/`context` (§4.8).
-//     //
-//     // The CLOSE-survival half of §4.5 (`Esc` clears no mark) is App-level —
-//     // `App.deferred_settings` is not inside the `Option` that close drops —
-//     // and is pinned by `a_mid_run_setting_shows_pending_until_the_reply` in
-//     // `app.rs`'s tests, where `App::handle` is reachable.
-// }
-// ==== /SKETCH ====
