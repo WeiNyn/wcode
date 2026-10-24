@@ -3,6 +3,16 @@
 Status: **design locked (orchestrator)** — open to first-layer review before any
 code is written. Tracker: [`next-steps.md`](next-steps.md) item 52.
 
+> **Partly superseded by [D037](decisions/D037-toml-only-team-membership.md)
+> (W033).** Part A (the `./.wcode/{config,team}.toml` overlay fold) stands. The
+> *discovery* half of this document — every rule that put a `.md` into the team
+> by being on disk (D-B1's "or ≥ 1 discovered agent `.md` member" clause, D-C2's
+> precedence ladder, D-C1's scan, D005's global-scan carve-out) — is **dead**.
+> Team membership is now a declaration: a `[[team]]` entry, inline or
+> `file = "<path>"`, and nothing else. The notes below are kept as written so the
+> history stays readable; each superseded rule carries an inline **D037** amendment.
+
+
 ## Motivation
 
 Today a team is only used when you pass it explicitly:
@@ -51,6 +61,10 @@ existing `merge_values` semantics are unchanged):
   (`~/.config/wcode/agents/**/*.md`, Part C) is not project config, so it
   survives the opt-out — as the global `config.toml` (layer 1) always does. The
   shipped `--help` text said otherwise and was corrected.
+  **Superseded by [D037](decisions/D037-toml-only-team-membership.md):** there is
+  no global scan to carve out. The opt-out still governs the two project
+  overlays, and `[[team]] file =` resolution runs unconditionally, so a global
+  role declared in `~/.config/wcode/config.toml` survives the opt-out.
 
 ## Part B — a team auto-enables agents mode
 
@@ -58,6 +72,11 @@ existing `merge_values` semantics are unchanged):
   a non-empty `[team]` (TOML) **or** ≥ 1 discovered agent `.md` member — no
   `--agents` required. This makes `wcode` (and `wcode --agents`) "just work" in a
   repo that ships `.wcode/team.toml`.
+  **Amended by [D037](decisions/D037-toml-only-team-membership.md):** the "or ≥ 1
+  discovered agent `.md` member" clause is deleted. The trigger is a DECLARED
+  `[[team]]` only, so a repo that ships agent `.md` files and no `[[team]]` no
+  longer turns agents mode on (`tests/cli_flags.rs:
+  a_team_of_md_files_without_a_team_toml_does_not_enable_agents`).
 - The `[team] requires --agents` guard stays as a safety net; with D-B1 it is
   normally already satisfied. `[workflow]` / `[orchestrator]` guards are unchanged
   (a workflow/orchestrator-only config still needs an explicit `--agents`).
@@ -67,19 +86,34 @@ existing `merge_values` semantics are unchanged):
 - **Open (D-B2):** whether a *global* `[[team]]` (layer 1) should also auto-enable
   agents, or only project-discovered ones. v1: any non-empty folded `[team]`.
 
-## Part C — markdown agent files (`.wcode/agents/*.md`)
+## Part C — markdown agent files (`.wcode/agents/*.md`) — **superseded (D037)**
 
-### Location & discovery
+> **D037 amendment — this whole Part.** The `.md` *format* stands (frontmatter →
+> `TeamMember`, body → `role`); the *discovery* does not. A role file becomes a
+> team member only when a `[[team]]` entry points at it —
+> `[[team]] file = ".wcode/agents/<role>.md"` — resolved by
+> `main.rs::resolve_team_files` (boot) and `agent_files::resolve_member_files`
+> (the live `team` tool). `.wcode/agents/` remains the conventional home for the
+> files; it is a directory, not a source of membership. No scan, no precedence
+> ladder, no collision rules.
 
-- **project:** `./.wcode/agents/**/*.md` (recursive)
-- **global:** `~/.config/wcode/agents/**/*.md` (recursive)
-- **D-C1 — depth:** working dir only (consistent with D-A1). Walk-up to the repo
-  root (the `skills.rs::project_dirs` pattern) is a possible follow-up.
-- **D-C2 — collision:** a member is keyed by its `name`. Lowest→highest:
+### Location & discovery — ~~superseded~~
+
+- ~~**project:** `./.wcode/agents/**/*.md` (recursive)~~
+- ~~**global:** `~/.config/wcode/agents/**/*.md` (recursive)~~
+- **D-C1 — depth:** ~~working dir only (consistent with D-A1). Walk-up to the repo
+  root (the `skills.rs::project_dirs` pattern) is a possible follow-up.~~
+  **D037:** moot without a scan — a `file =` path is cwd-relative (absolute
+  allowed), so depth has no meaning.
+- **D-C2 — collision:** ~~a member is keyed by its `name`. Lowest→highest:
   global md < project md < the folded TOML `[team]` (layer 2–4 of Part A). So the
   explicit `[[team]]` TOML wins over a same-named `.md`; a project `.md` beats a
   global one. Same-name files *within* one dir: first in read order wins (log a
-  warning). Reuses the existing duplicate-name rule (`ConfigError::DuplicateTeamMember`).
+  warning). Reuses the existing duplicate-name rule (`ConfigError::DuplicateTeamMember`).~~
+  **D037:** one tier, so nothing can collide across tiers. The
+  `[[team]]`-name uniqueness check in `resolve_team_files` is the only duplicate
+  guard (`ConfigError::DuplicateTeamMember`), and an unreferenced same-named
+  `.md` is simply not a member.
 
 ### Frontmatter → `TeamMember`
 
@@ -143,10 +177,13 @@ Reference by function (lines drift):
 - `main.rs` — `load_config_raw`: assemble the ordered list (global is inside
   `Config::load*`; append `./.wcode/config.toml`, `./.wcode/team.toml`, then the
   explicit overlay); skip missing auto files; honor `--no-project-config`. After
-  folding, discover agent `.md`s, merge them under the TOML `[team]` (D-C2), and
+  folding, ~~discover agent `.md`s, merge them under the TOML `[team]` (D-C2), and~~
+  **D037: resolve every `[[team]] file =` and nothing else**, then
   set `args.agents |= team present` (D-B1) before `build_runtime`.
-- new `crates/wcode-cli/src/agent_files.rs` — discover + parse `.wcode/agents/*.md`
-  → `Vec<TeamMember>` (uses `frontmatter.rs` + `TeamMember`).
+- new `crates/wcode-cli/src/agent_files.rs` — ~~discover +~~ parse
+  `.wcode/agents/*.md` → `Vec<TeamMember>` (uses `frontmatter.rs` +
+  `TeamMember`). **D037:** the `discover` half is deleted; `parse_agent_md`,
+  `resolve_role` and `resolve_member_files` remain.
 - new `crates/wcode-cli/src/frontmatter.rs` — shared frontmatter split.
 - `skills.rs` — `parse_frontmatter` / `load_skill` refactored onto `frontmatter.rs`
   (behavior unchanged).
@@ -177,8 +214,9 @@ Reference by function (lines drift):
 
 - D-A1 working-dir scope · D-A2 team over config · D-A3 explicit on top ·
   D-A4 silent skip of missing auto files · D-A5 `--no-project-config` opt-out.
-- D-B1 team ⇒ agents on.
-- D-C1 cwd-only agents dir · D-C2 TOML `[team]` > project `.md` > global `.md` ·
+- D-B1 team ⇒ agents on. **Amended by D037:** a *declared* team only.
+- D-C1 cwd-only agents dir · D-C2 TOML `[team]` > project `.md` > global `.md` —
+  **D-C1/D-C2 superseded by D037** (no scan, one tier) ·
   D-C3 CSV-or-list tools, lowercase names · D-C4 body→role, description fallback.
 
 ## Open for first-layer review

@@ -68,7 +68,7 @@ effort = <span class="s">"high"</span></pre>
         <tr><td><code>tools</code></td><td>Allow-list. <code>message</code> is always kept — a worker with no way to report is a bug.</td></tr>
         <tr><td><code>read_only</code></td><td>Refuses the mutating tools and mutating <code>bash</code>/<code>bg</code> (<code>ReadOnlyHooks</code>).</td></tr>
         <tr><td><code>model</code> · <code>effort</code> · <code>base_url</code> · <code>api_key</code></td><td>Per-member provider knobs; absent inherits the root's.</td></tr>
-        <tr><td><code>file</code></td><td>Point at a role file outside the scanned roots (cwd-relative or absolute); sibling keys override it.</td></tr>
+        <tr><td><code>file</code></td><td>Point at a markdown role file (cwd-relative or absolute); sibling keys override it. This is what makes the file a member.</td></tr>
       </tbody>
     </table>
   </div>
@@ -77,18 +77,19 @@ effort = <span class="s">"high"</span></pre>
 <section>
   <h2><span class="num">11.2</span>Roles are markdown files</h2>
   <p>
-    Frontmatter supplies the member's fields; the body becomes its <code># Role</code>. They are
-    discovered from two roots, and folded <em>under</em> the TOML roster — so a TOML member of the
-    same name wins wholesale.
+    Frontmatter supplies the member's fields; the body becomes its <code># Role</code>.
+    <code>.wcode/agents/</code> is where these files are kept, but the directory is a
+    <em>convention</em>, not a mechanism: a role file is a team member only when a
+    <code>[[team]]</code> entry points at it. There is one tier, so there is no precedence to
+    resolve — and no scan, so a <code>.md</code> nobody references contributes nothing.
   </p>
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Precedence</th><th>Source</th></tr></thead>
+      <thead><tr><th>Way to be a member</th><th>Source</th></tr></thead>
       <tbody>
-        <tr><td>highest</td><td>the folded TOML <code>[[team]]</code></td></tr>
-        <tr><td></td><td><code>./.wcode/agents/**/*.md</code> (project)</td></tr>
-        <tr><td>lowest</td><td><code>~/.config/wcode/agents/**/*.md</code> (global — a team that travels)</td></tr>
+        <tr><td>inline</td><td><code>[[team]]</code> + <code>name</code> / <code>role</code> / … in the TOML</td></tr>
+        <tr><td>file-backed</td><td><code>[[team]] file = ".wcode/agents/&lt;role&gt;.md"</code></td></tr>
       </tbody>
     </table>
   </div>
@@ -124,12 +125,13 @@ quoted snippet, and say plainly what you did **not** verify.</pre>
   </figure>
 
   <div class="callout warn">
-    <span class="label">The shadowing trap</span>
+    <span class="label">A role file alone is not a member</span>
     <p>
-      A <code>[[team]]</code> entry of the same name as an <code>.md</code> role replaces it
-      <em>wholesale</em> — not per field. A TOML member with only <code>name</code> and
-      <code>model</code> silently drops the file's body, tools and <code>read_only</code>. If a role
-      "stopped working", look for a TOML stub with the same name.
+      Dropping a <code>.md</code> into <code>.wcode/agents/</code> does nothing. It becomes a team
+      member only when a <code>[[team]] file = "…"</code> entry points at it, and a sibling TOML
+      key in that same entry <em>replaces</em> the file's field wholesale (not per field) — so a
+      stub with only <code>name</code> and <code>model</code> drops the file's body, tools and
+      <code>read_only</code>. If a role "stopped working", look for a half-written entry.
     </p>
   </div>
 </section>
@@ -152,8 +154,9 @@ quoted snippet, and say plainly what you did **not** verify.</pre>
     </table>
   </div>
   <p>
-    Selecting a named team replaces the project <code>team.toml</code> wholesale and suppresses the
-    project <code>./.wcode/agents/</code> scan — "use this team instead" means exactly that.
+    Selecting a named team replaces the project <code>team.toml</code> wholesale — a
+    <code>[[team]]</code> array is never merged — so "use this team instead" means exactly that,
+    with no scan to suppress and no pool to re-append.
   </p>
 </section>
 

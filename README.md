@@ -312,7 +312,8 @@ members are addressed by name with `message`. The root also gets `member`:
 puts a tool-free question to the member's own model, and `op = "cancel"` stops its
 in-flight run — all three work while the member is mid-run (a read comes from its
 last turn boundary, a cancel takes effect without waiting for the run to end). A
-non-empty `[team]` auto-enables agents mode — no `--agents` needed — and a served
+non-empty `[team]` — DECLARED members, inline or `file =`, never a directory
+listing — auto-enables agents mode, so no `--agents` is needed; a served
 `--owner` worker never sees the block. An
 `[orchestrator] guidelines` string is appended as a `# Orchestrator workflow`
 section after the team roster, so the workflow can reference the team.
@@ -322,41 +323,39 @@ then `./.wcode/team.toml` (team wins where they overlap), folded over the global
 config, with an explicit `--config`/`WCODE_CONFIG` overlay still layered on top.
 Agent definitions are authored as markdown — YAML frontmatter (`name`, `model`,
 `effort`, `tools`, `read_only`, `base_url`, `api_key`) plus a body that becomes
-the member's `role`. They are discovered from two roots:
-
-1. **project** — `./.wcode/agents/**/*.md`, folded **under** the TOML `[team]`
-   (a TOML member of the same name wins);
-2. **global** — `~/.config/wcode/agents/**/*.md`, the lowest precedence, so a
-   team travels with you across repos.
-
-A `[[team]]` entry may also point at a file outside either root, which is how a
-preset references a role that lives elsewhere:
+the member's `role`. `.wcode/agents/` is where a repo keeps them, but the
+directory is a **convention, not a mechanism**: a role file becomes a team member
+only when a `[[team]]` entry points at it — inline, or with `file =`:
 
 ```toml
 [[team]]
-file = "roles/judge.md"     # cwd-relative (absolute allowed)
-model = "claude-haiku-4-5"  # a sibling key overrides the file's
+file = ".wcode/agents/reviewer.md"  # cwd-relative (absolute allowed)
+model = "claude-haiku-4-5"          # a sibling key overrides the file's
 ```
 
 The file supplies the member; a sibling key overrides it. A `name` given both
 inline and in the file must agree, and a missing or unparseable file is a hard
-error (unlike a scanned `.md`, which is skipped with a warning).
+error. A `.md` that no entry references is inert — it is not a member, it does
+not boot, and it cannot turn agents mode on. A global role is declared the same
+way in `~/.config/wcode/config.toml` (with an absolute `file =` path).
 
 `--no-project-config` (or `WCODE_PROJECT_CONFIG=off`) disables **project**
-auto-discovery only — the `./.wcode/{config,team}.toml` overlays and the
-`./.wcode/agents/` scan. The global `config.toml` and the global
-`~/.config/wcode/agents/` scan are not project config and still load.
+config only — the `./.wcode/{config,team}.toml` overlays, and therefore any role
+they declare. The global `config.toml` and its `[[team]]` declarations are not
+project config and still load; `[[team]] file =` resolution is unconditional, so
+a global role keeps working under the opt-out.
 
 Named project teams are one file per team under `./.wcode/teams/<name>.toml`,
-selected with `--team <name>` (mutually exclusive with `--config`); its
-`[[team]]` replaces the project `team.toml`'s wholesale and suppresses the
-project `./.wcode/agents/` scan ("use this team instead"). The directory is the
-name list the TUI/VS Code `/team` picker walks.
+selected with `--team <name>` (mutually exclusive with `--config`). A `[[team]]`
+array is replaced wholesale at merge time, so the named team's array IS this
+session's team — the same team in one file, not an addition. The directory is
+the name list the TUI/VS Code `/team` picker walks.
 
-The repo ships `.wcode/team.toml` as exactly this — the `[orchestrator]` guidelines
-and `[tools] grep/find = true`, with the members in `.wcode/agents/*.md` and the
-provider/model left in the global config — so here `wcode` (or `wcode --agents`)
-starts the full team with no flags. It also ships the named teams
+The repo ships `.wcode/team.toml` as exactly this — the `[orchestrator]`
+guidelines, `[tools] grep/find = true`, and six `[[team]] file =` entries
+pointing at `.wcode/agents/*.md`, with the provider/model left in the global
+config — so here `wcode` (or `wcode --agents`) starts the full team with no
+flags. It also ships the named teams
 `.wcode/teams/{recon,pair,full-stack}.toml` and `.wcode/workflow.toml`, a
 `[workflow]` plan template for `--config .wcode/workflow.toml --task "…"`.
 

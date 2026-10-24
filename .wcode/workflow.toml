@@ -52,9 +52,10 @@
 # see [orchestrator] guidelines in .wcode/team.toml and the `brainstorm-brief`
 # skill.
 #
-# The members are NOT declared here: each role is a markdown agent definition
-# under .wcode/agents/*.md, auto-discovered and folded in. A `[[team]]` entry of
-# the same name would win wholesale and silently drop the role.
+# Members are DECLARED in .wcode/team.toml, one `[[team]] file =` entry per role
+# (W033/D037: membership is a declaration, never a filesystem side effect). The
+# role files happen to live under .wcode/agents/, which is a convention, not a
+# mechanism — an undeclared .md there is inert.
 #
 # Overlays fold over the global config — auto-discovered ./.wcode/config.toml,
 # then ./.wcode/team.toml, then the explicit --config/WCODE_CONFIG on top — so
@@ -138,7 +139,8 @@ correct. The reviewer's role is where judgment lives — read the diff, run
 `cargo test --workspace` and `cargo clippy --workspace --all-targets`, and reject
 with `file:anchor` evidence rather than approving on the gate's existence.
 
-Each member keeps its role (see .wcode/agents/*.md). Keep the kernel
+Each member keeps its role (declared in .wcode/team.toml as `[[team]] file =`,
+pointing at .wcode/agents/*.md). Keep the kernel
 (crates/wcode-harness) free of presentation concerns; the CLI stays thin. One
 logical change per commit (imperative, area-prefixed: harness:/cli:/tui:/docs:);
 every change must keep `cargo test --workspace` and

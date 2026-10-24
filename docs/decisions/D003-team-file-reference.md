@@ -48,6 +48,20 @@ so a member cannot know which file it came from.
 
 ## Consequences
 
-- Enables relocatable-ish presets and kills the silent shadowing trap.
+- Enables relocatable-ish presets. **D037:** the collision hazard it was meant
+  to prevent cannot arise — there is no scan left to shadow, because a role file
+  is a member only when a `[[team]] file =` entry names it (see the amendment
+  below).
 - One new fatal error class (missing/mismatched explicitly named file) next to
-  the lenient scan.
+  ~~the lenient scan~~ **nothing** — the lenient path is deleted (D037).
+
+## Amendment — D037 (W033): the scan this contrasted with is gone
+
+`[[team]] file = "<path>"` is now the **only** way a role file becomes a member:
+the lenient `scan-discovered` path this ADR contrasted against no longer exists
+(`agent_files::discover` & friends are deleted). So every "fatal vs. warn"
+asymmetry above is one-sided — a declared file that is missing or malformed is
+fatal, and a `.md` nobody declares is not read at all. The format decision
+itself (cwd-relative, sibling keys override, name mismatch fatal, no
+TOML-file-relative resolution) is unchanged. See
+[D037](D037-toml-only-team-membership.md).

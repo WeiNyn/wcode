@@ -1,29 +1,46 @@
 ---
 name: agent-roles
-description: "Use when authoring or editing an agent role file under .wcode/agents/*.md — the frontmatter fields, what each one does, how the body becomes the worker's `# Role`, the tools allow-list form, and the TOML `[[team]]` shadowing trap. Not for authoring a SKILL.md and not for the [workflow] plan template."
+description: "Use when authoring or editing an agent role file under .wcode/agents/ — the frontmatter fields, what each one does, how the body becomes the worker's `# Role`, the tools allow-list form, and how to DECLARE the role as a team member (`[[team]] file =`). Not for authoring a SKILL.md and not for the [workflow] plan template."
 ---
 
 # Agent roles
 
-An **agent role** is a markdown file under `.wcode/agents/**/*.md`: YAML
-frontmatter (the member's fields) plus a markdown body that becomes the worker's
-`role` — the text appended to its system prompt as `# Role`.
+An **agent role** is a markdown file under `.wcode/agents/`: YAML frontmatter
+(the member's fields) plus a markdown body that becomes the worker's `role` —
+the text appended to its system prompt as `# Role`.
 
 A team is assembled from roles; the roles themselves are reusable across
 sessions and presets. Authoring a role is how a member's identity, tools, model,
 and read-only posture are defined **once**.
 
-## §0 — Where roles live (discovery)
+## §0 — Where roles live (a convention, not a scan)
 
-- **project:** `./.wcode/agents/**/*.md` (recursive).
-- **global:** `~/.config/wcode/agents/**/*.md` (recursive).
+- **project:** `./.wcode/agents/<role>.md` — the convention this repo uses.
+- **global:** `~/.config/wcode/agents/<role>.md` — the same convention, under
+  the config dir.
 
-Discovery is cwd-scoped and bounded to depth 4
-(`crates/wcode-cli/src/agent_files.rs:CKCbg`, `:jmdEk`, `:H1065`). Precedence,
-high → low: the folded TOML `[[team]]` > a project `.md` > a global `.md`
-(`crates/wcode-cli/src/agent_files.rs:ambBy`). A file with no `name`, or
-unparseable YAML, is **skipped with a warning** — never fatal
-(`crates/wcode-cli/src/agent_files.rs:tyJaU`).
+Neither path is a mechanism. **A role file is a team member only when a
+`[[team]]` entry declares it** (W033/D037 — membership is declared, never
+discovered):
+
+```toml
+[[team]]
+file = ".wcode/agents/<role>.md"   # relative to the working dir
+```
+
+`[[team]] file =` is resolved at boot by `main.rs::resolve_team_files` (and in
+the live `team` tool by `agent_files::resolve_member_files`). A `.md` that no
+entry points at is **inert**, however it is named and wherever it sits — a
+directory listing creates nothing. Two consequences worth knowing:
+
+- An unparseable file (no `name`, bad YAML) that IS declared is a **hard boot
+  error** (`ConfigError::TeamMemberFile`), not a warning.
+- A repo whose roles are all `.md` and whose `[[team]]` array is empty has **no
+  team**, and does not auto-enable agents mode.
+
+A declared file keeps its own `name`; give the `[[team]]` entry a `name` only
+when you want to assert it (a mismatch is fatal). Names must be unique across
+the whole final team (`ConfigError::DuplicateTeamMember`).
 
 ## §1 — The frontmatter
 
@@ -94,43 +111,49 @@ Watch the two failure modes:
   — if the body says "non-mutating bash", `bash` must be in `tools` **and**
   enabled.
 
-## §4 — The TOML `[[team]]` shadowing trap
+## §4 — Declaring the role (and what an undeclared file does)
 
-A same-named TOML `[[team]]` entry **wins wholesale** over an `.md` member
-(D-C2). The fold keeps the existing TOML member and drops the discovered one
-entirely — it does **not** merge fields:
+Writing the `.md` is half the job: the other half is the **declaration**. Add
+one entry per role — a project file in `.wcode/team.toml`, a global one in
+`~/.config/wcode/config.toml`:
 
-```rust
-if !cfg.team.iter().any(|t| t.name == member.name) {
-    cfg.team.push(member);
-}
+```toml
+[[team]]
+file = ".wcode/agents/reviewer.md"
 ```
 
-(`crates/wcode-cli/src/main.rs`, `fold_discovered_members` — the `t.name ==
-member.name` guard). So during migration from TOML to `.md`,
-deleting the TOML block is part of the change: leaving both silently discards
-the markdown role. `[[team]] file = "<path>"` (D003) is the resolver that makes
-a TOML entry point at a `.md` file explicitly — implement that rather than
-shadowing.
+Two facts that used to be traps and are now structural (W033/D037):
+
+- **A `.md` that no `[[team]]` entry references is inert.** Dropping a file into
+  `.wcode/agents/` used to add a member on every boot; it no longer does
+  anything at all. There is no directory scan left to shadow, so no shadowing
+  trap: a `[[team]]` entry either points at a file or it does not.
+- **A `[[team]]` array is REPLACED wholesale at merge time**, not merged. An
+  overlay that declares members therefore *is* the team — a global `[[team]]`
+  array contributes nothing once a project overlay declares one. Declare the
+  complete set where you want it to apply.
 
 ## §5 — Checklist
 
-- [ ] The file is under `.wcode/agents/**/*.md`.
-- [ ] `name` is present, unique, and matches the intended address.
+- [ ] The file lives under `.wcode/agents/`.
+- [ ] A `[[team]] file = "…"` entry declares it — the ONLY thing that makes it a member.
+- [ ] `name` is present and unique across the final team.
 - [ ] The body states the job, the boundaries, and the output format.
 - [ ] `tools`, if given, lists **lowercase** wcode names; `message` is assumed.
 - [ ] Any `tools` name that is off by default is enabled in `[tools]`.
 - [ ] The body does not promise a tool the `tools` list omits.
 - [ ] `read_only: true` for a recon/review role that must not mutate.
-- [ ] No same-named TOML `[[team]]` block shadows the file.
 
 ## References
 
-- `docs/project-team-loading.md` (Part C) — the discovery/parse design.
+- `docs/project-team-loading.md` (Part C) — the frontmatter/parse design.
 - `docs/team-and-tui-plan.md` (F2/F3) — what each field maps to.
-- `crates/wcode-cli/src/agent_files.rs` — the parser and the collision rules.
+- `crates/wcode-cli/src/agent_files.rs` — the parser (`parse_agent_md`) and the
+  declared-file resolver (`resolve_member_files`).
 - `README.md` §"Configure" — the `[team]` field table.
 - `docs/decisions/D003-team-file-reference.md` — `[[team]] file = "<path>"`.
+- `docs/decisions/D037-toml-only-team-membership.md` — why a `.md` alone is not
+  a member (W033).
 
 ## Editing this file
 

@@ -61,7 +61,9 @@
   </figure>
   <p>
     <code>~/.config/wcode/</code> holds <code>config.toml</code> (provider, behaviour flags),
-    <code>agents/</code> (global role files) and <code>wcode.sock</code> when serving.
+    <code>agents/</code> (the conventional home for global role files — declared in
+    <code>config.toml</code> as <code>[[team]] file = "/abs/path/role.md"</code>) and
+    <code>wcode.sock</code> when serving.
     Sessions go somewhere else — <code>~/.local/share/wcode/sessions</code>
     (<code>repl.rs:278</code>), deliberately using <code>~/.local/share</code> even on macOS so
     the layout is identical everywhere.
@@ -76,13 +78,15 @@
     </li>
     <li>
       <b>Project overlays, auto-discovered</b> <span class="where">./.wcode/config.toml, then ./.wcode/team.toml</span>
-      Folded over the global config, team second. Plus the <code>./.wcode/agents/**/*.md</code>
-      scan. Disable all of it with <code>--no-project-config</code>.
+      Folded over the global config, team second. Every team member is a <code>[[team]]</code>
+      entry — inline, or <code>file = "…md"</code> — never a file the directory happens to hold.
+      Disable the two overlays with <code>--no-project-config</code>.
     </li>
     <li>
       <b>A named project team</b> <span class="where">--team &lt;name&gt; → ./.wcode/teams/&lt;name&gt;.toml</span>
-      Replaces the project <code>team.toml</code> wholesale and suppresses the project agents
-      scan. Mutually exclusive with <code>--config</code>.
+      Replaces the project <code>team.toml</code> wholesale — a <code>[[team]]</code> array is
+      never merged — so its roster is the session's team. Mutually exclusive with
+      <code>--config</code>.
     </li>
     <li>
       <b>An explicit overlay</b> <span class="where">--config &lt;path&gt; / WCODE_CONFIG</span>
@@ -256,7 +260,7 @@ wcode -p <span class="s">"reply ok"</span> --model llama3.1 --base-url http://lo
         <tr><td><code>OPENAI_API_KEY</code></td><td>the key, as a fallback</td></tr>
         <tr><td><code>WCODE_CONFIG</code></td><td>the explicit overlay path (<code>--config</code> wins)</td></tr>
         <tr><td><code>WCODE_ENDPOINT</code> · <code>WCODE_EFFORT</code></td><td>the toml globals</td></tr>
-        <tr><td><code>WCODE_PROJECT_CONFIG=off</code></td><td>disables project auto-discovery only</td></tr>
+        <tr><td><code>WCODE_PROJECT_CONFIG=off</code></td><td>disables the two project overlays only</td></tr>
         <tr><td><code>WCODE_GREP</code> / <code>WCODE_FIND</code></td><td><code>[tools] grep</code>/<code>find</code></td></tr>
         <tr><td><code>WCODE_RETRY_*</code></td><td>the <code>[retry]</code> table</td></tr>
         <tr><td><code>NO_COLOR</code></td><td>the TUI's entire palette</td></tr>

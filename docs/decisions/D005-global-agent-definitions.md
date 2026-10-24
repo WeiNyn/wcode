@@ -34,3 +34,13 @@ overlays and the project `./.wcode/agents/` scan). The `--help` text and
 - `~` is not governed by a project-scoped switch — the global scan always runs.
 - One behaviour changes: an opt-out that used to suppress the global agents scan
   no longer does.
+
+## Amendment — D037 (W033): the global *scan* carve-out is superseded
+
+There is no global agents scan left to carve out: `~/.config/wcode/agents/**`
+is no longer read. A global role is **declared** in
+`~/.config/wcode/config.toml` as `[[team]] file = "/abs/path/role.md"`, which
+still resolves under `--no-project-config` because `resolve_team_files` runs
+outside that guard. The surviving half of this decision is the one that
+mattered — the global *config* is not project config, so the opt-out never
+disables it. See [D037](D037-toml-only-team-membership.md).

@@ -8,8 +8,9 @@
 
 ## Context
 
-A project team is `./.wcode/team.toml`, auto-discovered and folded over the
-global config; `--config <path>` is an explicit overlay on top. That gives ONE
+A project team is `./.wcode/team.toml`, auto-discovered and layered over the
+global config (tables merge, arrays replace); `--config <path>` is an explicit
+overlay on top. That gives ONE
 team per working dir — there was no way to keep **several named teams** and pick
 one. The TUI's `/team` **already existed**, but it *listed the roster*
 (`app.rs`, `summary: "list the team"`), so the name was taken.
@@ -80,3 +81,15 @@ Sub-decisions (the brainstorm's five, all confirmed):
 - Live-verified: `.wcode/team.toml` alone → `team.base`; `--team scout` → the
   team is REPLACED; `--team nope` → a loud error listing the available teams;
   `--team` + `--config` → refused.
+
+## Amendment — D037 (W033): the fold-suppression amendment is structurally moot
+
+`--team <name>` used to suppress the project `./.wcode/agents/` scan
+(`team_overlay` → `fold_discovered_members`). Both are deleted: there is no fold
+any more, so there is nothing for a named team to suppress, and the `/new`
+asymmetry this amendment described (the resolved path stashed into
+`args.config` while `team_overlay` keyed off `args.team`) cannot manifest. A
+named team is a wholesale `[[team]]` array; a project role enters it only via
+`[[team]] file =`. The rest of this ADR (one file per team, the picker, the
+`--config` mutual exclusion) is unchanged. See
+[D037](D037-toml-only-team-membership.md).

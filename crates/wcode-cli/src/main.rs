@@ -66,10 +66,10 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
    --no-skills        don't discover skills (SKILL.md)
-   --no-project-config  disable PROJECT auto-discovery: ./.wcode/{config,team}.toml
-                        and ./.wcode/agents/ (also WCODE_PROJECT_CONFIG=off) —
-                        the global config.toml, the global ~/.config/wcode/agents/,
-                        and an explicit --config still load
+   --no-project-config  disable PROJECT config: ./.wcode/{config,team}.toml
+                        (also WCODE_PROJECT_CONFIG=off) — the global config.toml
+                        and an explicit --config still load, and a `[[team]] file =`
+                        still resolves from either
   --dump-system-prompt  print the composed system prompt and exit
   --detect-endpoint  probe common local endpoints (OLLAMA_HOST, :11434, :1234) when base_url is unset; opt-in
   --dump-config      print the resolved endpoint/base_url/model and key SOURCES (never the secret), then exit
@@ -92,8 +92,9 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
 
 config: ~/.config/wcode/config.toml
   (project overlays auto-discovered: ./.wcode/config.toml, then
-   ./.wcode/team.toml, then agent .md files under ./.wcode/agents/;
-   --config or --team layers on top; --no-project-config opts out)
+   ./.wcode/team.toml; --config or --team layers on top; --no-project-config
+   opts out. A team member is a DECLARED `[[team]]` entry — inline or
+   `file = \"<path>\"` — never a file found in a directory)
   model = \"...\"      (required)
   base_url = \"...\"   (optional, any OpenAI-compatible endpoint)
   api_key = \"...\"    (optional)
@@ -132,7 +133,7 @@ env: WCODE_RTK overrides the toml hooks.rtk (auto|true|false)
 env: WCODE_GREP and WCODE_FIND override the toml tools.grep/find (true|false)
 env: WCODE_INSTRUCTIONS overrides the toml instructions.file (a name/path, or \"off\")
 env: WCODE_SKILLS discovers skills from extra roots, or \"off\" disables
-env: WCODE_PROJECT_CONFIG=off disables PROJECT auto-discovery (./.wcode/{config,team}.toml, ./.wcode/agents/); the global config.toml and ~/.config/wcode/agents/ still load
+env: WCODE_PROJECT_CONFIG=off disables PROJECT config (./.wcode/{config,team}.toml); the global config.toml still loads and either one's `[[team]] file =` still resolves
 env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
@@ -187,10 +188,11 @@ struct Args {
     /// agents (A2A, §10.1).
     agents: bool,
     /// `--no-project-config` / `WCODE_PROJECT_CONFIG=off`: disable PROJECT
-    /// auto-discovery — the `./.wcode/{config,team}.toml` overlays and the
-    /// `./.wcode/agents/` scan (D005). The global `config.toml`, the global
-    /// `~/.config/wcode/agents/` scan, and the explicit `--config` overlay still
-    /// load.
+    /// config — the `./.wcode/{config,team}.toml` overlays (D005), and with them
+    /// any role THEY declare. The global `config.toml` and the explicit
+    /// `--config` overlay still load, and `[[team]] file =` resolution runs
+    /// unconditionally, so a global role keeps working under the opt-out.
+    /// W033/D037: there is no `agents/` scan left for this flag to gate.
     no_project_config: bool,
     /// `--peer <name>=<socket>`: register a remote peer (a served session) so
     /// A2A messages reach it over its socket (§8, S4-4). Repeatable.

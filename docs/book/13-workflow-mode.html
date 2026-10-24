@@ -102,7 +102,7 @@ to = <span class="s">"review-sketch"</span>                 <span class="c"># Râ
       <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>[[workflow.node]] id</code></td><td>Unique label; edges name it.</td></tr>
-        <tr><td><code>member</code> | <code>script</code></td><td>Exactly one. A member must exist in the folded team.</td></tr>
+        <tr><td><code>member</code> | <code>script</code></td><td>Exactly one. A member must name a DECLARED <code>[[team]]</code> entry.</td></tr>
         <tr><td><code>gate</code></td><td>Its <code>reject</code> re-opens its deps. A gate needs â‰¥1 incoming edge.</td></tr>
         <tr><td><code>title</code></td><td>Dispatched as <code>#&lt;id&gt; &lt;title&gt;</code>. The one placeholder is <code>{{task}}</code>; scripts are never templated.</td></tr>
         <tr><td><code>timeout_secs</code></td><td>Opt-in per-node bound. Absent or <code>0</code> = unbounded.</td></tr>
@@ -147,8 +147,8 @@ to = <span class="s">"review-sketch"</span>                 <span class="c"># Râ
     </li>
     <li>
       <b>Members</b> <span class="where">config.rs:1155 validate_workflow_members</span>
-      Every <code>member</code> must resolve in the folded team, so a typo cannot create an
-      undispatchable node.
+      Every <code>member</code> must resolve in the declared team (a <code>[[team]]</code> entry,
+      <code>file =</code> members resolved first), so a typo cannot create an undispatchable node.
     </li>
     <li>
       <b>Instantiate</b> <span class="where">main.rs:2951</span>
