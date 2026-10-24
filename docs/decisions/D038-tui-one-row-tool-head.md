@@ -114,6 +114,17 @@ Two further defects sat in the same code:
   call **text**.
 - The `bash` command is still reachable in full: `Ctrl-T` / browse `Enter`
   expands the params block, which now honours real line breaks.
+- **A clipped head reserves `tail_w` it may not then spend** (raised at review,
+  non-blocking). When the clip fires, the tail it was reserving room for is
+  suppressed — so a two-line `command = "cargo test --all-targets\ncargo build"` at
+  a 40-col band cuts its first line at 20 columns while the row has 31 for the
+  value. That is the correct trade, not slack to reclaim: the reservation is what
+  guarantees **no path overflows** while the tail is still a candidate, and
+  re-inflating the budget after a clip breaks exactly that — first line 24 cols at
+  width 40, re-inflated budget 31 ≥ 24, the clip un-fires, the tail prints,
+  9 + 24 + 11 = 44 > 40. Optimising this "away" re-introduces the overflow; leave
+  it. (The one-`…`-per-row rule is what makes the trade safe to observe: the row is
+  shorter, never unmarked.)
 - **Foreclosed:** a config knob for the head's clip width (behaviour is code, per
   `AGENTS.md`); a second, params-specific text-container rule beside `truncate`;
   keeping the wrapper behind a threshold ("wrap up to N rows, then clip") — a

@@ -272,9 +272,9 @@ blank pane.
   head is **elided with `…`** (clip-not-wrap, the D027 rule) and a multi-line
   value shows its first line plus ` … +N lines`. An elision is **always marked** —
   never a silent cut, and **exactly one `…` per row**: a clip replaces the fold
-  tail rather than stacking on it. **Expanded**, the head sits over its body (`key
-  value` params + output/diff + a `… +N more` hint), all at the same column:
-  expansion is
+  tail rather than stacking on it (the below-floor overrun is D038 §7).
+  **Expanded**, the head sits over its body (`key  value` params + output/diff + a
+  `… +N more` hint), all at the same column: expansion is
   the **complete record**, so a multi-line param keeps its real line breaks. The
   name prints **once** — no ordinal, no separate `✓ name · note` row. A tool's
   **params are never LOST: elided in the collapsed head, complete on expansion**
