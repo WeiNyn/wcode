@@ -1,16 +1,21 @@
-# wcode's own development team (F3c). This repo auto-discovers it: it adds the
-# team, orchestrator guidelines, and tools below on top of your global
-# ~/.config/wcode/config.toml (provider/model stay there), so `wcode` (or
-# `wcode --agents`) starts the team with no flags. Elsewhere, load it via:
+# wcode's own development team (F3c). `wcode` picks this file up automatically in
+# this repo, so `wcode` (or `wcode --agents`) starts the team with no flags.
+# Elsewhere, load it via:
 #   wcode --agents --config .wcode/team.toml
 #   WCODE_CONFIG=.wcode/team.toml wcode --agents
 #
-# The members are NOT declared here. Each role is a markdown agent definition
-# under .wcode/agents/*.md — YAML frontmatter (name/model/tools/effort/read_only/
-# base_url/api_key) plus a body that becomes the member's `role`. They are
-# auto-discovered and folded in, so add or edit a role THERE, not here. A
-# `[[team]]` entry of the same name would win wholesale and silently drop the
-# role — which is why this file declares none.
+# The members ARE declared here (W033/D037: membership is a declaration, never a
+# filesystem side effect). Each entry points at one markdown role file under
+# .wcode/agents/ — YAML frontmatter (name/model/tools/effort/read_only/base_url/
+# api_key) plus a body that becomes the member's `role`. Add or rename a role by
+# adding or editing a `[[team]] file =` entry HERE; a `.md` that no entry
+# references is inert, however it is named.
+#
+# Merge note: a `[[team]]` array is REPLACED wholesale at merge time (a scalar or
+# array is replaced, tables recurse — config.rs:1344-1346), so the six entries
+# below ARE the whole team: a `[[team]]` array in your global
+# ~/.config/wcode/config.toml does not contribute while you are in this repo.
+# `[orchestrator]` and `[tools]` below are tables, so they still layer normally.
 #
 # Sketch convention (sketcher): a sketch may be (a) a NEW file (full module)
 # or (b) an IN-PLACE comment block in an existing file — the sketch may not
@@ -21,6 +26,32 @@
 #   // ==== /SKETCH ====
 # The developer replaces each block with real code and deletes the markers;
 # ZERO `SKETCH` markers remaining is a second-layer review precondition.
+
+# Declared ALPHABETICALLY, deliberately: boot order, the `team: <names>` notice,
+# `--dump-config` and `# Your team` all print in VECTOR order, so declaring them
+# in the order the old directory scan produced keeps this change behaviour-neutral.
+[[team]]
+file = ".wcode/agents/brainstormer.md"
+
+[[team]]
+file = ".wcode/agents/designer.md"
+
+[[team]]
+file = ".wcode/agents/developer.md"
+
+[[team]]
+file = ".wcode/agents/explorer.md"
+
+[[team]]
+file = ".wcode/agents/reviewer.md"
+
+[[team]]
+file = ".wcode/agents/sketcher.md"
+
+# Workflow note: .wcode/workflow.toml names `explorer`, `sketcher`, `reviewer` and
+# `developer`. All four are declared above, so a `member` node cannot fail
+# validation (`"node ...: member ... is not a [team] member"`). Drop one of those
+# six entries and this repo exits 1 at startup.
 
 [orchestrator]
 guidelines = """
