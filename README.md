@@ -75,7 +75,10 @@ keep_recent_turns = 2      # complete turns always kept, whatever their size
 # turns the model names the session from the opening exchange and the name is
 # appended to the transcript as a `title` entry (last-write-wins, so `/rename`
 # overrules it). A titled row reads `<title> · <age>`; an untitled one keeps the
-# old `<id> · <age> · <first user line>`.
+# old `<id> · <age> · <first user line>`, and either may end ` · team` (the group
+# carries members) and/or ` · workflow` (launched headless with `--task`). A
+# session with no user message yet is not listed at all — the fresh one you are
+# sitting in included.
 title_after_turns = 2      # optional; assistant turns before auto-titling.
                            # 0 disables it. Range 0..=50 (a bad value is a
                            # startup error). WCODE_TITLE_AFTER_TURNS wins.
@@ -433,8 +436,8 @@ chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit
 `/surface`, `/btw <question>`, `/plan [on|off]`, `/verify`, `/tasks`, `/rename <text>`, `/settings`,
 `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
-the files this run changed, re-showing a diff), `/resume` (pick a session; the
-CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
+the files this run changed, re-showing a diff), `/resume` (pick a session — rows
+carry the title and ` · team` / ` · workflow`; the CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
 group for a team — by re-exec'ing with no `--resume`; refused over a socket), and
 `/reload [--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
 refused over a socket). The remaining session-lifecycle commands below stay in
