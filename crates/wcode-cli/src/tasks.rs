@@ -397,13 +397,27 @@ impl Inner {
 /// `deps` (directly or transitively), excluding `id` itself; sorted ascending.
 /// A free function so `depends` can run it while holding the `tasks` lock.
 fn cone(tasks: &[Task], id: u32) -> Vec<u32> {
+    // Reverse adjacency: dep_id -> dependents. One pass over edges.
+    let mut dependents: std::collections::BTreeMap<u32, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for t in tasks {
+        for d in &t.deps {
+            dependents.entry(d.id()).or_default().push(t.id);
+        }
+    }
     let mut out: Vec<u32> = Vec::new();
-    let mut frontier = vec![id];
-    while let Some(cur) = frontier.pop() {
-        for t in tasks {
-            if t.id != id && t.deps.iter().any(|d| d.id() == cur) && !out.contains(&t.id) {
-                out.push(t.id);
-                frontier.push(t.id);
+    let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut stack: Vec<u32> = vec![id];
+    while let Some(cur) = stack.pop() {
+        if let Some(deps) = dependents.get(&cur) {
+            for &dep in deps {
+                if dep == id {
+                    continue;
+                }
+                if seen.insert(dep) {
+                    out.push(dep);
+                    stack.push(dep);
+                }
             }
         }
     }
@@ -1176,6 +1190,30 @@ impl TaskList {
         self.inner.tasks.lock().unwrap().clone()
     }
 
+    /// One task by id (one lock, one clone of a single node).
+    #[allow(dead_code)]
+    pub(crate) fn task(&self, id: u32) -> Option<Task> {
+        self.inner
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+    }
+
+    /// The `Failed` nodes, in creation order.
+    pub fn failed_tasks(&self) -> Vec<Task> {
+        self.inner
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|t| t.state == TaskState::Failed)
+            .cloned()
+            .collect()
+    }
+
     /// A receiver **seeded** with the current tasks and updated on every mutation
     /// (a `watch`, like `Registry::subscribe`).
     pub fn subscribe(&self) -> watch::Receiver<Vec<Task>> {
@@ -1186,9 +1224,9 @@ impl TaskList {
     /// `send_replace` so the value survives with no receiver yet (mirrors
     /// `Registry`'s roster channel).
     fn publish(&self) {
-        let snapshot = self.snapshot();
-        self.inner.updates.send_replace(snapshot.clone());
+        let snapshot = self.inner.tasks.lock().unwrap().clone();
         self.inner.maybe_compact(&snapshot);
+        self.inner.updates.send_replace(snapshot);
     }
 }
 

@@ -235,7 +235,8 @@ impl Scheduler {
             let _ = updates.borrow_and_update();
             // A14/R1: drop `unjudgeable` entries whose `reset_epoch` moved, BEFORE
             // computing the frontier, so a `task reset` re-arms its node.
-            self.prune_unjudgeable();
+            let prune_snap = self.tasks.snapshot();
+            self.prune_unjudgeable(&prune_snap);
             let ready = self.frontier();
             self.dispatch(&ready).await;
             // Escalate ONCE per Failed set: a real stall (something terminal and
@@ -351,8 +352,7 @@ impl Scheduler {
     /// `task reset` bumps that epoch, so the entry no longer matches and the node
     /// returns to the frontier for a FRESH judge run. Called at the TOP of every
     /// `run` iteration, before [`Scheduler::frontier`].
-    fn prune_unjudgeable(&mut self) {
-        let snap = self.tasks.snapshot();
+    fn prune_unjudgeable(&mut self, snap: &[Task]) {
         self.unjudgeable
             .retain(|id, epoch| snap.iter().any(|t| t.id == *id && t.reset_epoch == *epoch));
     }
@@ -363,6 +363,7 @@ impl Scheduler {
     /// clear `judging`, record the node `unjudgeable` (keyed by its CURRENT
     /// `reset_epoch`), and escalate ONCE.
     async fn on_verdict(&mut self, id: u32, verdict: crate::judge::Verdict) {
+        let snap = self.tasks.snapshot();
         self.judging.remove(&id);
         match verdict {
             Some(true) => self.dispatch_one(id).await,
@@ -370,16 +371,12 @@ impl Scheduler {
                 let _ = self.tasks.skip(id);
             }
             None => {
-                let epoch = self
-                    .tasks
-                    .snapshot()
+                let epoch = snap
                     .iter()
                     .find(|t| t.id == id)
                     .map_or(0, |t| t.reset_epoch);
                 if self.unjudgeable.insert(id, epoch).is_none() {
-                    let title = self
-                        .tasks
-                        .snapshot()
+                    let title = snap
                         .iter()
                         .find(|t| t.id == id)
                         .map(|t| t.title.clone())
@@ -407,11 +404,7 @@ impl Scheduler {
 
     /// The `Failed` nodes, in creation order (for the escalation text).
     fn failed_tasks(&self) -> Vec<Task> {
-        self.tasks
-            .snapshot()
-            .into_iter()
-            .filter(|t| t.state == TaskState::Failed)
-            .collect()
+        self.tasks.failed_tasks()
     }
     /// Evaluate each ready node's INCOMING edges (AND-ed), then dispatch the
     /// admitted ones. See [`EdgeGate`].
@@ -428,16 +421,13 @@ impl Scheduler {
                 // Block-and-escalate ONCE (A13/A14): the node stays Todo and is
                 // excluded from the frontier until a reset bumps its epoch.
                 EdgeGate::Unjudgeable(tail) => {
-                    let epoch = self
-                        .tasks
-                        .snapshot()
+                    let snap = self.tasks.snapshot();
+                    let epoch = snap
                         .iter()
                         .find(|t| t.id == id)
                         .map_or(0, |t| t.reset_epoch);
                     if self.unjudgeable.insert(id, epoch).is_none() {
-                        let title = self
-                            .tasks
-                            .snapshot()
+                        let title = snap
                             .iter()
                             .find(|t| t.id == id)
                             .map(|t| t.title.clone())
@@ -2441,7 +2431,8 @@ mod tests {
             "an unjudgeable node is not re-dispatched"
         );
         tasks.reset(a).unwrap();
-        scheduler.prune_unjudgeable();
+        let snap = tasks.snapshot();
+        scheduler.prune_unjudgeable(&snap);
         assert_eq!(scheduler.frontier(), vec![a], "a reset re-arms it");
     }
 }
