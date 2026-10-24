@@ -858,28 +858,12 @@ const COMMANDS: &[Command] = &[
         args: Some("<all|focus>"),
         summary: "set the transcript view (all = merged)",
     },
-    // ==== SKETCH (review-only, not real code) ====
-    // W032 §4.7: placed AFTER `view` "so the settings cluster reads
-    // contiguously". `args: None`, so `command_label` (`:1122`) emits the bare
-    // `/settings`; `/help` and the completion popup both derive from this table
-    // (`help_rows()` `:1119`), so discovery is free.
-    //
-    // Two tests need an edit here, both named in §7.1/§11.6:
-    //  - `help_lists_every_command_and_the_keymap_from_the_tables` (`:8288`)
-    //    asserts `rows.len() == COMMANDS.len() + KEYS.len() + 3` — DERIVED, so
-    //    the count needs no edit; its hardcoded NAME LIST (`:8321`) does, and it
-    //    already omits `view` today.
-    //  - `command()` (`:4308`ff) needs a `"settings" => self.open_settings(),`
-    //    arm; the giant `match` has no `_` fallback for a known name, so a
-    //    missing arm is caught by the unknown-command hint, not the compiler.
-    //
-    // Command {
-    //     name: "settings",
-    //     aliases: &[],
-    //     args: None,
-    //     summary: "edit the session settings",
-    // },
-    // ==== /SKETCH ====
+    Command {
+        name: "settings",
+        aliases: &[],
+        args: None,
+        summary: "edit the session settings",
+    },
     Command {
         name: "team",
         aliases: &[],
@@ -1105,25 +1089,15 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("{ / } (browse)", "previous / next block"),
     ("/ (browse)", "search the transcript (n / N repeat)"),
     ("F1", "toggle this help"),
-    // ==== SKETCH (review-only, not real code) ====
-    // W032 §4.7 + `tui-design.md` §4 amendment 7: FIVE rows, not the brief's one
-    // (the hint line sheds whole clauses at 48 cols; the keymap is the channel
-    // that cannot). FIRST-LAYER A11: the `F2` wording is the DESIGNER's — not
-    // "toggle", since `Esc` alone closes. All five labels fit
-    // `ITEM_LABEL_COLS` (22), so no detail column shifts.
-    //
-    // ("F2", "open the settings panel"),
-    // ("↑↓ / ←→ (settings)", "move the cursor / change the value"),
-    // ("enter / tab (settings)", "edit the setting / jump section"),
-    // ("PgUp / PgDn (settings)", "move the cursor a page"),
-    // ("wheel (settings)", "move the cursor three rows"),
-    //
-    // A11b: `help_rows_render_in_f1s_two_column_style` (`ui.rs`) renders at 80x64
-    // and asserts every `KEYS` row is present. The body is 54 lines today and
-    // `info_visible_rows(60, 64) == 61` after these five — ONE row of margin. Set
-    // that test's height from the data (`help_rows().len() as u16 + 4`) rather
-    // than the literal 64, or it clips for the next person who adds a chord.
-    // ==== /SKETCH ====
+    // The settings panel's grammar, scoped as the `(info)` rows are: the hint
+    // line sheds whole clauses at 48 cols, and the keymap is the channel that
+    // cannot (`tui-design.md` §4 amendment 7 — five rows, not one). `F2` says
+    // "open", not "toggle": `Esc` alone closes.
+    ("F2", "open the settings panel"),
+    ("↑↓ / ←→ (settings)", "move the cursor / change the value"),
+    ("enter / tab (settings)", "edit the setting / jump section"),
+    ("PgUp / PgDn (settings)", "move the cursor a page"),
+    ("wheel (settings)", "move the cursor three rows"),
     ("Ctrl-Y", "copy the last reply"),
     ("Esc", "cancel a run (no-op when idle)"),
     ("Ctrl-C", "cancel a run; quit when idle"),
@@ -4578,6 +4552,13 @@ impl App {
                 Some(Err(e)) => self.transient(e),
                 None => self.transient("usage: /view <all|focus>"),
             },
+            "settings" => {
+                // `/settings` and `F2` share one door (`open_settings`), exactly
+                // as `/help` and `F1` share `open_help`. Not `None =>` here: the
+                // panel takes no argument, and a stray one is ignored rather than
+                // making the command lie about its own grammar.
+                self.open_settings();
+            }
             "compact" => self.actions.push(Action::Ask(Request::Compact {
                 instructions: arg.map(str::to_string),
             })),
@@ -6166,46 +6147,21 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    // ==== SKETCH (review-only, not real code) ====
-    // W032 first-layer A12: the App-layer tests §7.1 requires. §7.1's prose named
-    // one of these and its own list omitted it — so the list is here, once.
+    // W032's App-layer tests live here; the settings-panel ones assert
+    // BEHAVIOUR, never `settings.is_some()`, because the panel's key handler ends
+    // in `_ => {}` — a swallowed key is invisible to a presence check. Two of
+    // them are load-bearing beyond their own feature:
     //
-    // MUST assert BEHAVIOUR, never `settings.is_some()`:
-    //
-    // - slash_settings_opens_the_panel
-    //     `run_command` (`:4444` `match cmd.name`) FALLS THROUGH to
-    //     `None => self.transient(format!("unknown command: {name}"))` (`:4437`),
-    //     so a `COMMANDS` entry with no arm is invisible to `/help`, completion and
-    //     the count assertion. §7.1 had no `/settings` test at all.
-    // - the_settings_panel_answers_keys_rather_than_swallowing_them
-    //     the ONLY App-layer guard for the `_ => {}` swallow class: `↑` puts the
-    //     cursor on `effort`; `→` on `width` CHANGES the value (68 → 76).
-    // - opening_the_panel_asks_for_the_settings_once
-    //     exactly one `Action::Ask(Request::Settings)` per open (pins B5).
-    // - a_settled_reply_clears_only_matching_marks
-    //     pins A5's intent comparison, INCLUDING the second-deferral case
-    //     (`xhigh` queued, a `high` reply must NOT clear it).
-    // - a_mid_run_setting_shows_pending_until_the_reply
-    //     the brief's §7.1 version, extended with the `AgentEnd` ask.
-    // - the_header_effort_follows_the_settings_reply
-    //     must drive `app.handle(AppEvent::Agent(..))`, NOT `Surface::apply`
-    //     directly — otherwise it cannot catch the `_ => false,` arm at `:2099`
-    //     silently dropping the new event.
-    // - a_model_switch_refreshes_the_context_limit
-    //     the same route; `context_limit` is the gauge's denominator.
-    // - the_panel_reports_the_focused_surface_in_all_mode
-    //     `settings_snapshot` reads `self.status()` (focused), NOT
-    //     `chrome_status()` (the root in All) — every setter is
-    //     `focused_mut()`/`Action::Ask`, so a "what the header shows" reflex would
-    //     make the panel describe a surface it does not edit. State that contract
-    //     in `settings.rs`'s module doc too: model/effort/plan/context are the
-    //     FOCUSED session; width/view/sidebar are App-global.
-    // - enter_on_the_model_row_opens_the_picker_and_returns_to_the_panel
-    // - f2_opens_the_panel_from_the_composer_browse_and_search  (three sites)
-    // - esc_closes_the_settings_panel_and_nothing_else_does
-    //     (and `Enter` on a Toggle DOES act — the deliberate divergence from
-    //     `Info`, `:9532`'s invariant; that test stays green untouched)
-    // ==== /SKETCH ====
+    // - `the_header_effort_follows_the_settings_reply` and
+    //   `a_model_switch_refreshes_the_context_limit` must drive
+    //   `app.handle(AppEvent::Agent(..))`, never `Surface::apply` directly —
+    //   otherwise they cannot catch that match's `_ => false,` silently dropping
+    //   the event.
+    // - `the_panel_reports_the_focused_surface_in_all_mode` pins that
+    //   `settings_snapshot` reads `self.status()` (focused), NOT
+    //   `chrome_status()` (the root in `ViewMode::All`): every setter is
+    //   `focused_mut()`/`Action::Ask`, so a "what the header shows" reflex would
+    //   make the panel describe a surface it does not edit.
     use super::*;
     use crate::ui::ITEM_LABEL_COLS;
     use wcode_harness::message::StopReason;
@@ -8948,16 +8904,29 @@ mod tests {
         }
         assert_eq!(rows.len(), COMMANDS.len() + KEYS.len() + 3, "2 headers + 1 blank");
         // Discovery: every command name is a `/`-prefixed label (the word the user
-        // types) and every KEYS chord appears as a label (the loop above).
+        // types) and every KEYS chord appears as a label (the loop above). The list
+        // is the readable half of the assertion — the count above is derived — so
+        // it must name EVERY command: `view` was missing here (W032 A11).
         for name in [
             "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "rename",
-            "reload", "btw", "plan", "verify", "usage", "copy", "surface", "width", "team", "tasks",
-            "help",
+            "reload", "btw", "plan", "verify", "usage", "copy", "surface", "width", "view",
+            "settings", "team", "tasks", "help",
         ] {
             let prefixed = format!("/{name}");
             assert!(
                 rows.iter().any(|r| matches!(r, InfoRow::Item { label, .. } if label.starts_with(&prefixed))),
                 "{name} missing from /help: {rows:?}"
+            );
+        }
+        // The list above is the READABLE half. This is the complete half: every
+        // name in the table must appear, so a command added later cannot slip past
+        // a hand-maintained list (how `view` went missing, W032 A11).
+        for cmd in COMMANDS {
+            let prefixed = format!("/{}", cmd.name);
+            assert!(
+                rows.iter().any(|r| matches!(r, InfoRow::Item { label, .. } if label.starts_with(&prefixed))),
+                "{} is in COMMANDS but not in /help",
+                cmd.name
             );
         }
     }
@@ -9096,11 +9065,14 @@ mod tests {
     }
     #[test]
     fn completion_matches_a_leading_prefix_only() {
-        // `/s` is a prefix of the `/sessions` alias (`/resume`) and of the
-        // `/surface` name; `/z` is a prefix of nothing.
+        // `/s` is a prefix of the `/sessions` alias (`/resume`), the `/surface`
+        // name and `/settings`; `/z` is a prefix of nothing.
         let mut app = App::new();
         typed(&mut app, "/s");
-        assert_eq!(completion_labels(&app), vec!["/resume", "/surface"]);
+        assert_eq!(
+            completion_labels(&app),
+            vec!["/resume", "/surface", "/settings"]
+        );
 
         let mut app = App::new();
         typed(&mut app, "/z");
@@ -9125,13 +9097,18 @@ mod tests {
 
     #[test]
     fn an_alias_match_carries_the_alias_hint() {
+        // `/se` matches the `/sessions` ALIAS (shown as `/resume`, with the alias
+        // as its hint) and — since W032 — the `/settings` canonical name, which
+        // has no alias and a highlighted prefix.
         let mut app = App::new();
         typed(&mut app, "/se");
         let rows = app.completion_rows();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, "/resume");
         assert_eq!(rows[0].alias, Some("sessions"));
         assert!(rows[0].range.is_none(), "no canonical-name prefix to highlight");
+        assert_eq!(rows[1].label, "/settings");
+        assert_eq!(rows[1].alias, None);
     }
 
     #[test]
@@ -9455,6 +9432,84 @@ mod tests {
             app.take_actions(),
             vec![],
             "a stale peer's ack does not re-ask"
+        );
+    }
+
+    #[test]
+    fn slash_settings_opens_the_panel() {
+        // `run_command`'s `match cmd.name` has no `_` fallback for a known name:
+        // a `COMMANDS` entry with no arm falls through to
+        // `None => self.transient("unknown command: …")`, which is invisible to
+        // /help, the completion popup and the count assertion.
+        let mut app = App::new();
+        submit(&mut app, "/settings");
+        assert!(app.settings().is_some(), "`/settings` opens the panel");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::Settings)],
+            "through the same door as F2, ask included"
+        );
+        // No "unknown command" hint was pushed.
+        assert!(
+            !app.focused().transcript.iter().any(|b| matches!(
+                b,
+                Block::Notice(text) if text.contains("unknown command")
+            )),
+            "the dispatch arm exists"
+        );
+        // `/settings` takes no argument; a stray one is ignored, not an error.
+        let mut app = App::new();
+        submit(&mut app, "/settings now");
+        assert!(app.settings().is_some());
+    }
+
+    #[test]
+    fn the_panel_reports_the_focused_surface_in_all_mode() {
+        // `settings_snapshot` reads the FOCUSED surface's `Status`, never
+        // `chrome_status()` (the root in `ViewMode::All`): every setter is
+        // `focused_mut()`/`Action::Ask`, so a panel showing the header's surface
+        // would describe something it does not edit.
+        let mut app = App::new();
+        app.set_surfaces(vec![
+            SurfaceInfo {
+                id: root(),
+                label: "wcode".into(),
+                model: "root-model".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("w1"),
+                label: "w1".into(),
+                model: "member-model".into(),
+                is_root: false,
+            },
+        ]);
+        app.set_focus(1);
+        app.set_view_mode(ViewMode::All);
+        // A member carries its own model in `Status`; the root keeps the launched
+        // one, which is what the chrome (`chrome_status`) reads in All mode.
+        assert_eq!(app.focused().status.model, "member-model");
+        assert_eq!(
+            app.chrome_status().model,
+            Status::default().model,
+            "the chrome shows the root in All mode"
+        );
+        let reply = AgentEvent::Settings {
+            model: "member-model-2".into(),
+            effort: Some("high".into()),
+            plan: false,
+            context_limit: None,
+        };
+        app.handle(AppEvent::Agent(SessionId::agent("w1"), reply));
+        let sections = app.settings_sections();
+        let model = sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .find(|r| r.id == crate::settings::ids::MODEL)
+            .expect("the model row");
+        assert_eq!(
+            model.value, "member-model-2",
+            "the panel follows the FOCUSED member, not the chrome's root"
         );
     }
 

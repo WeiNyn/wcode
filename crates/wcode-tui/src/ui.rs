@@ -6227,17 +6227,19 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     /// BOTH, so a future styling change cannot desync them.
     #[test]
     fn help_rows_render_in_f1s_two_column_style() {
-        // Drawn tall enough that neither body clips: `/help` is one row per
-        // `COMMANDS` entry plus one per `KEYS` entry (49 + 33 at the time of
-        // writing, W031 added a command), so 64 leaves slack for a future one.
+        // Drawn tall enough that neither body clips — the height is DERIVED from
+        // the body, not a literal, so the next person who adds a chord (or a
+        // command) cannot silently clip the assertion (W032 A11b: five `KEYS` rows
+        // took the body to 60 against `visible == 61` at h=64, one row of margin).
+        let height = help_rows().len() as u16 + 8;
         let mut f1 = App::new();
         f1.handle(AppEvent::Key(Key::F(1)));
-        let f1_text = buffer_text(&render(&mut f1, 80, 64));
+        let f1_text = buffer_text(&render(&mut f1, 80, height));
         // `/help`, the same size.
         let mut help = App::new();
         typed(&mut help, "/help");
         help.handle(AppEvent::Key(Key::Enter));
-        let help_frame = buffer_text(&render(&mut help, 80, 64));
+        let help_frame = buffer_text(&render(&mut help, 80, height));
 
         // Every KEYS row of both modals is the exact two-column row.
         for (chord, what) in KEYS {
