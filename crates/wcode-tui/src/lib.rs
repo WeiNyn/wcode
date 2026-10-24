@@ -15,6 +15,7 @@ pub mod app;
 mod clipboard;
 mod event;
 mod markdown;
+mod settings;
 mod terminal;
 mod theme;
 mod ui;
@@ -299,6 +300,21 @@ pub struct Options {
     pub theme: ThemeSpec,
     /// The `[tui]` presentation spec (D016): the initial transcript measure.
     pub tui: TuiSpec,
+    // ==== SKETCH (review-only, not real code) ====
+    // W032 §4.6: the finished `--dump-config` text, injected by the composition
+    // root so the settings panel's read-only `config` section and the
+    // `--dump-config` flag are ONE builder (`main.rs:504` `fn config_dump(cfg:
+    // &Config) -> String`). The TUI never sees `Config` — the same seam that
+    // already carries `models`/`sessions`/`teams`/`theme`/`tui` (`:283`-`:314`).
+    //
+    // Empty = not injected (a socket client on an older peer, or a test); the
+    // panel renders ONE placeholder row rather than an empty section, so `Tab`
+    // always has somewhere to land (`settings::rows`'s contract).
+    //
+    // /// The `--dump-config` body this CLIENT resolved — shown read-only in the
+    // /// settings panel (W032). `String::new()` when not injected.
+    // pub config: String,
+    // ==== /SKETCH ====
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
     /// Where the root's prompt history is persisted (`None` keeps it in memory).
     pub history: Option<PathBuf>,
@@ -382,6 +398,9 @@ pub async fn run(
         remote,
         cwd,
         git,
+        // ==== SKETCH (review-only, not real code) ====
+        // config,   // W032 — the injected `--dump-config` body (see `Options::config`)
+        // ==== /SKETCH ====
     } = options;
     // Install the theme before the terminal is entered and anything draws.
     theme::install(theme);
@@ -407,6 +426,13 @@ pub async fn run(
     app.set_remote(remote);
     app.set_cwd(cwd);
     app.set_git(git);
+    // ==== SKETCH (review-only, not real code) ====
+    // W032: the injected config body, beside the other `set_*` seeds. Order is
+    // free (nothing reads it before the first draw, and `set_config` marks the
+    // app dirty exactly as `set_git` does).
+    //
+    // app.set_config(config);
+    // ==== /SKETCH ====
 
     let backends: Vec<(SessionId, Backend)> = surfaces
         .iter()

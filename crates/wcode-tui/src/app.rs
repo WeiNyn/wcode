@@ -23,7 +23,12 @@ use ratatui::text::Line;
 use crate::{SurfaceInfo, TeamState};
 
 /// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
-const WHEEL_LINES: usize = 3;
+///
+/// `pub(crate)` (first-layer A13) because the settings panel's row cursor moves
+/// by the same notch (`crate::settings` `const WHEEL_ROWS: usize =
+/// crate::app::WHEEL_LINES;`): one number, so a wheel notch means the same thing
+/// in the transcript and in the panel.
+pub(crate) const WHEEL_LINES: usize = 3;
 
 /// A key the app understands — decoupled from crossterm so this module stays
 /// terminal-free (`event.rs` translates).
@@ -853,6 +858,28 @@ const COMMANDS: &[Command] = &[
         args: Some("<all|focus>"),
         summary: "set the transcript view (all = merged)",
     },
+    // ==== SKETCH (review-only, not real code) ====
+    // W032 §4.7: placed AFTER `view` "so the settings cluster reads
+    // contiguously". `args: None`, so `command_label` (`:1122`) emits the bare
+    // `/settings`; `/help` and the completion popup both derive from this table
+    // (`help_rows()` `:1119`), so discovery is free.
+    //
+    // Two tests need an edit here, both named in §7.1/§11.6:
+    //  - `help_lists_every_command_and_the_keymap_from_the_tables` (`:8288`)
+    //    asserts `rows.len() == COMMANDS.len() + KEYS.len() + 3` — DERIVED, so
+    //    the count needs no edit; its hardcoded NAME LIST (`:8321`) does, and it
+    //    already omits `view` today.
+    //  - `command()` (`:4308`ff) needs a `"settings" => self.open_settings(),`
+    //    arm; the giant `match` has no `_` fallback for a known name, so a
+    //    missing arm is caught by the unknown-command hint, not the compiler.
+    //
+    // Command {
+    //     name: "settings",
+    //     aliases: &[],
+    //     args: None,
+    //     summary: "edit the session settings",
+    // },
+    // ==== /SKETCH ====
     Command {
         name: "team",
         aliases: &[],
@@ -1078,6 +1105,25 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("{ / } (browse)", "previous / next block"),
     ("/ (browse)", "search the transcript (n / N repeat)"),
     ("F1", "toggle this help"),
+    // ==== SKETCH (review-only, not real code) ====
+    // W032 §4.7 + `tui-design.md` §4 amendment 7: FIVE rows, not the brief's one
+    // (the hint line sheds whole clauses at 48 cols; the keymap is the channel
+    // that cannot). FIRST-LAYER A11: the `F2` wording is the DESIGNER's — not
+    // "toggle", since `Esc` alone closes. All five labels fit
+    // `ITEM_LABEL_COLS` (22), so no detail column shifts.
+    //
+    // ("F2", "open the settings panel"),
+    // ("↑↓ / ←→ (settings)", "move the cursor / change the value"),
+    // ("enter / tab (settings)", "edit the setting / jump section"),
+    // ("PgUp / PgDn (settings)", "move the cursor a page"),
+    // ("wheel (settings)", "move the cursor three rows"),
+    //
+    // A11b: `help_rows_render_in_f1s_two_column_style` (`ui.rs`) renders at 80x64
+    // and asserts every `KEYS` row is present. The body is 54 lines today and
+    // `info_visible_rows(60, 64) == 61` after these five — ONE row of margin. Set
+    // that test's height from the data (`help_rows().len() as u16 + 4`) rather
+    // than the literal 64, or it clips for the next person who adds a chord.
+    // ==== /SKETCH ====
     ("Ctrl-Y", "copy the last reply"),
     ("Esc", "cancel a run (no-op when idle)"),
     ("Ctrl-C", "cancel a run; quit when idle"),
@@ -2032,6 +2078,36 @@ impl Surface {
                 self.plan_pending = None;
                 false
             }
+            // ==== SKETCH (review-only, not real code) ====
+            // W032 step 5 (§4.5, "Fix: read truth"). The panel's live source and
+            // the fix for BOTH `Status` staleness defects: the four fields are
+            // written from the harness's own state, so `ui.rs:838`'s
+            // `model · effort` header and the gauge's denominator stop lying
+            // after `/effort` and `/model`.
+            //
+            // Explicit, not `_`-caught: the match ends `_ => false,` below, so a
+            // missing arm would silently render a stale panel with no compile
+            // error — the same silent trap class as `on_overlay_key`.
+            //
+            // `context_limit` is `Option<u64>`: `None` = the harness does not
+            // know the window (today `limits::model_limit` recognizes one
+            // endpoint family, `limits.rs:63`) and the panel renders the honest
+            // absence rather than a stale number.
+            //
+            // NOTE the deliberate split of duties: this arm writes ONLY
+            // `Status`. The pending marks are App-level and are settled by
+            // `App::handle` (the `settle_deferred_setting` call beside `let
+            // ended = matches!(&event, AgentEvent::AgentEnd);` at `:4049`) —
+            // a `Surface` cannot reach `App.settings`/`App.deferred_settings`.
+            //
+            // AgentEvent::Settings { model, effort, plan, context_limit } => {
+            //     self.status.model = model;
+            //     self.status.effort = effort;
+            //     self.status.plan = plan;
+            //     self.status.context_limit = context_limit;
+            //     true
+            // }
+            // ==== /SKETCH ====
             // Other start/reply events need no per-surface state.
             _ => false,
         }
@@ -2559,6 +2635,52 @@ pub struct App {
     // Not on `Surface`: the body is one document over every surface, and a
     // surface cannot see its peers (see `UsageCollect`).
     usage_collect: Option<UsageCollect>,
+    // The settings panel (W032 §4.1, host (c)), a SECOND App-level lifetime
+    // beside `overlay` — precedent: the field above
+    // (`usage_collect: Option<UsageCollect>`). `overlay` stays FREE so a picker
+    // opened from the `model`/`theme` row draws ON TOP of the panel and its
+    // existing accept arm applies the value while the panel survives.
+    //
+    // Precedence is `overlay` → `settings` → `completion` → `Mode::Browse` →
+    // composer (the tier is in `on_key`).
+    //
+    // `None` = the panel is closed. `SettingsState` holds the cursor, the hint
+    // line and the published page height — never a value: the values come from
+    // `Status` and the view bits each frame, via `App::settings_snapshot`.
+    //
+    // NOTE: the pending marks are deliberately NOT in here. `Esc` closes by
+    // dropping this `Option`, and §4.5 does not list `Esc` among the clearers —
+    // so the marks live beside this field (see `deferred_settings` below), where
+    // only `AgentStart`/`Error`/a `Settings` reply can reach them.
+    //
+    /// The open settings panel (W032) — `F2` / `/settings`. Independent of
+    /// [`App::overlay`] on purpose: a picker opened from the `model` row takes
+    /// the `overlay` slot and leaves this one alone, so the editor survives its
+    /// own sub-modal.
+    settings: Option<crate::settings::SettingsState>,
+    // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
+    // The row id + INTENDED VALUE of a change the harness ACCEPTED and will
+    // apply at the run boundary (`actor.rs:681`-`:691` `Ack` +
+    // `deferred.push_back`), rendered as the dim `· pending` mark. Ordered,
+    // deduped per id, at most three (`settings::ids::MODEL` / `EFFORT` / `PLAN`).
+    //
+    // FIRST-LAYER A5 — the VALUE is why this is a tuple, not an id. "Settle
+    // every mark the reply agrees with" is unimplementable: the reply is applied
+    // to `Status` BEFORE this arm runs (`app.rs` `Surface::apply`, the `Settings`
+    // arm), so `reply == Status` is true by construction and every mark would
+    // settle. The rule is instead **settle iff the reply's field equals the
+    // stored intent, else keep the mark** — so a second `→` mid-run (`xhigh`)
+    // survives a pre-boundary reply naming `high`.
+    //
+    // App-level, NOT inside `settings`: the deferral outlives the panel
+    // (§4.5: `Esc` is not a clearer).
+    // Written by `apply_setting` + the model picker's accept arm, read by
+    // `settings_snapshot`, settled by the `AgentEvent::Settings` arm.
+    //
+    // /// The in-flight changes the harness accepted but has not applied yet —
+    // /// read by `settings_snapshot` as the rows' `pending` set.
+    // deferred_settings: Vec<(&'static str, String)>,
+    // ==== /SKETCH ====
     /// The active input mode (composer vs transcript browse).
     mode: Mode,
     /// The open browse search prompt, if any — see [`BrowseSearch`].
@@ -2571,6 +2693,19 @@ pub struct App {
     /// `branch`, with a trailing `*` when the worktree is dirty. Display-only;
     /// never refreshed after startup.
     git: Option<String>,
+    // ==== SKETCH (review-only, not real code) ====
+    // The finished `--dump-config` text, injected by the CLI (`Options.config`)
+    // and split into the settings panel's read-only `config` section one line per
+    // row (W032 §4.6). A blob, not a table: the section is never edited, so it
+    // needs no columns — and a `Vec<ConfigRow>` refactor would rewrite a 90-line
+    // builder whose exact bytes are the `--dump-config` contract.
+    //
+    // /// The `--dump-config` text this CLIENT resolved (see [`Options::config`]),
+    // /// shown read-only in the settings panel. Empty = not injected (the panel
+    // /// renders one placeholder row). Over `--socket` this is the CLIENT's config,
+    // /// which is why the section heading says so.
+    // config: String,
+    // ==== /SKETCH ====
     /// The docked left sidebar is open. OFF by default, so the base layout
     /// (transcript · rule · [team strip] · input · status) is byte-identical
     /// while it is closed. Toggled only by `Ctrl-B` (see `on_key` / `KEYS`).
@@ -2628,6 +2763,12 @@ pub const DEFAULT_MEASURE: usize = 68;
 pub const MEASURE_MIN: usize = 40;
 pub const MEASURE_LIMIT: usize = 200;
 /// Columns an `Alt-[` / `Alt-]` key press moves the measure.
+// ==== SKETCH (review-only, not real code) ====
+// FIRST-LAYER A13: this line becomes `pub(crate) const MEASURE_STEP: usize = 8;`
+// — `settings.rs`'s `width` row steps by the SAME number, and two copies of `8`
+// would let `Alt-]` and the panel disagree. `WHEEL_LINES` (above) gets the same
+// treatment, so `settings::WHEEL_ROWS` reuses it instead of restating `3`.
+// ==== /SKETCH ====
 const MEASURE_STEP: usize = 8;
 
 /// One DRAWN sidebar row, as a positional tuple: `(surface index, label, state,
@@ -2672,6 +2813,14 @@ impl App {
             force_quit: false,
             actions: Vec::new(),
             usage_collect: None,
+            // Closed at startup; `F2` / `/settings` opens the panel.
+            settings: None,
+            // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
+            // The second initializer beside `settings` above: no change is in
+            // flight at startup, so the set is empty.
+            //
+            // deferred_settings: Vec::new(),
+            // ==== /SKETCH ====
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -2858,6 +3007,40 @@ impl App {
     /// Open the keymap overlay (`F1`).
     fn open_help(&mut self) {
         self.overlay = Some(Overlay::Help);
+        self.dirty = true;
+    }
+
+    /// Open the settings panel (`F2` / `/settings`, W032 §4.7). A fresh
+    /// [`crate::settings::SettingsState`] every time, so the cursor starts on the
+    /// first row and no stale hint survives a close — the pending marks are
+    /// App-level, so closing keeps them.
+    ///
+    /// # Contracts
+    /// - Never opens on top of a modal: `on_key` routes `overlay` first, so the
+    ///   only reachable callers (`F2` in the composer/browse/search tiers, and
+    ///   `/settings`) are below it.
+    /// - Idempotent: opening twice is a no-op rather than a reset, so a scrolled
+    ///   panel is not silently rewound.
+    /// - FIRST-LAYER B5 — it ASKS, exactly once per open, so the reply can settle
+    ///   the panel's rows and its `· pending` marks. `Request::Settings` lands
+    ///   with the wire variant (step 5); until then there is nothing to ask for,
+    ///   and the panel reads what the client already knows.
+    fn open_settings(&mut self) {
+        if self.settings.is_none() {
+            self.settings = Some(crate::settings::SettingsState::new());
+            // STEP 5: `self.actions.push(Action::Ask(Request::Settings));` — the
+            // instant-command budget (`ask_budget`), because it is a read, not a
+            // model call (B5).
+        }
+        self.dirty = true;
+    }
+
+    /// Close the settings panel (`Esc`, the only close key). Clears the panel and
+    /// marks the frame dirty; it does NOT touch `Status`, the pending marks, or
+    /// any setter — every act already applied (§4.2: there is no dirty/commit
+    /// state).
+    fn close_settings(&mut self) {
+        self.settings = None;
         self.dirty = true;
     }
 
@@ -3270,6 +3453,9 @@ impl App {
             // Global: the keymap overlay and the panic button. Neither leaves
             // browse — closing help returns to the mode you opened it from.
             Key::F(1) | Key::Char('?') => self.open_help(),
+            // `F2` is global like `F1` (W032 §4.7, site 2 of 3): it opens the
+            // panel ABOVE the mode and leaves the browse selection where it was.
+            Key::F(2) => self.open_settings(),
             Key::Ctrl('c') => self.interrupt(true),
             // Act on the selected block.
             Key::Enter | Key::Char(' ') => self.toggle_selected(),
@@ -3307,6 +3493,9 @@ impl App {
         match key {
             Key::Esc => self.close_search(),
             Key::F(1) | Key::Char('?') => self.open_help(),
+            // `F2` site 3 of 3 (W032 §4.7): global like `F1`, and it does not
+            // close the prompt, so `Esc` after the panel returns you to the search.
+            Key::F(2) => self.open_settings(),
             Key::Ctrl('c') => self.interrupt(true),
             Key::Enter => self.accept_search(),
             Key::Char(c) => {
@@ -3922,6 +4111,64 @@ impl App {
                 // `AgentEvent::Ack => { self.plan_pending = None; false }`) and a
                 // `Usage`-ask `Error` must not paint a failed run.
                 if !self.absorb_usage(&id, &event) {
+                    // ==== SKETCH (review-only, not real code) ====
+                    // W032 §4.5: the panel's pending marks are App state, and the
+                    // three clear events are here — NOT in `Surface::apply`, which
+                    // is handed the event by value and cannot reach `App`.
+                    //
+                    // Captured BEFORE `apply` consumes the event, exactly like
+                    // `ended` below. Two peeks, two rules (FIRST-LAYER P1 — this header
+                    // used to say "`AgentStart`/`Error` → clear EVERY mark" and "settle
+                    // every id whose value the reply agrees with"; both are refuted by (a)
+                    // and (b) below, and copying them reinstates the very regression (b)
+                    // forbids):
+                    //  - `AgentStart` ALONE → clear EVERY mark (the previous boundary
+                    //    passed, so every deferral applied). **`Error` is NOT in this
+                    //    rule** — see (b).
+                    //  - `Settings { .. }` → settle a mark IFF the reply's field EQUALS
+                    //    the stored INTENT, and keep it otherwise (never "what the reply
+                    //    agrees with": `Surface::apply` has already written the reply into
+                    //    `Status`, so that test is true by construction). Per-row, so an
+                    //    unrelated still-queued `SetPlanMode` is untouched.
+                    //
+                    // A stray `Error` from a `/usage` fan-out never reaches here
+                    // (`absorb_usage` drained it above), so a fan-out failure
+                    // cannot wipe the panel's marks.
+                    //
+                    // FIRST-LAYER A5 — three corrections to the first cut:
+                    //
+                    //  (a) `Settings { .. }` settles a mark IFF the reply's field
+                    //      equals the STORED INTENT (`deferred_settings` is
+                    //      `Vec<(id, intended_value)>`), and keeps it otherwise —
+                    //      never "settle what the reply agrees with", because
+                    //      `Surface::apply` has already written the reply into
+                    //      `Status`, so that test is true by construction.
+                    //  (b) `Error` must NOT clear every mark blindly: a `/btw`
+                    //      failure DOES reach here (`absorb_usage` drains only the
+                    //      `/usage` fan-out), and wiping a truthful mark leaves an
+                    //      optimistic value with no tell. And "clear the marks it can explain"
+                    //      is UNDECIDABLE — `AgentEvent::Error { message }` carries
+                    //      no request correlation — so that sentence would be prose no code
+                    //      can implement. The retirement rule is instead the IDLE-REPLY rule
+                    //      in the settle block below: once `!self.running()`, an unconfirmed
+                    //      mark is dead (a failed deferral is RETURNED, never broadcast —
+                    //      `actor.rs:521`).
+                    //  (c) `AgentEnd` must ask too. Nothing else asks after the run
+                    //      boundary, so a mid-run edit would show `· pending`
+                    //      forever for a change that HAS been applied — the same
+                    //      lie-class as the two defects this item fixes.
+                    //
+                    // The rule, in one place: whenever the mark set may have
+                    // changed state (a `Settings` reply, `AgentStart`, `Error`, or
+                    // `AgentEnd` with marks outstanding), ask once for truth and
+                    // settle against it. One `Action::AskTo(idx, Request::Settings)`
+                    // per boundary is cheap (a read; instant budget, `lib.rs:707`).
+                    //
+                    // let clear_all = matches!(&event, AgentEvent::AgentStart);
+                    // let ended = matches!(&event, AgentEvent::AgentEnd);
+                    // let reask = !self.deferred_settings.is_empty()
+                    //     && (clear_all || ended || matches!(&event, AgentEvent::Error { .. }));
+                    // ==== /SKETCH ====
                     // Route to the surface that owns this session; an unknown id
                     // is ignored (a stray/duplicate event must not panic).
                     if let Some(idx) = self.surface_index(&id) {
@@ -3952,6 +4199,60 @@ impl App {
                         // its `Block::Error`), so the turn keeps the lower ordinal.
                         self.touch_open_turn(idx, open);
                         self.stamp_new(idx, before);
+                        // ==== SKETCH (review-only, not real code) ====
+                        // The settles the peek above scheduled, acted on AFTER
+                        // `apply` — but against the STORED INTENT, never against
+                        // `Status` (first-layer A5; see the peek's comment).
+                        //
+                        // `event` was MOVED into `apply`, so the reply's values must
+                        // be captured beside the peek: three clones, no borrow of a
+                        // moved value.
+                        //
+                        // if clear_all {
+                        //     self.clear_deferred_settings();   // AgentStart: the
+                        //     // previous boundary passed, so every deferral applied.
+                        // }
+                        // if let Some(reply) = &reply_values {
+                        //     // `settle_deferred_setting` now takes the row's INTENT and
+                        //     // compares: model == reply.model, effort == reply.effort
+                        //     // (None = "(none)"), plan == reply.plan.
+                        //     self.settle_deferred_setting(settings::ids::MODEL, &reply.model);
+                        //     self.settle_deferred_setting(settings::ids::EFFORT, &effort_word);
+                        //     self.settle_deferred_setting(settings::ids::PLAN, &plan_word);
+                        // }
+                        // if reask {
+                        //     self.actions.push(Action::AskTo(idx, Request::Settings));
+                        // }
+                        //
+                        // FIRST-LAYER BLOCKER 1 — the FAILURE path, which no line
+                        // above covers. A deferred mutation that fails at the
+                        // boundary emits NOTHING: the re-queued `Tell`'s `Err` is
+                        // RETURNED, never broadcast (`actor.rs:521` `if let Some(reply)
+                        // = reply { let _ = reply.send(event); }`, and a `Tell` caller
+                        // drops the return, `:308`). So intent `gpt-x` stays stored,
+                        // the re-ask's reply names the OLD model, the intent
+                        // comparison keeps the mark, and the row claims a change is
+                        // in flight that was refused — permanently, until the next
+                        // `AgentStart`. The same lie-class this item exists to remove.
+                        //
+                        // The reply is authoritative once the harness is IDLE: an idle
+                        // harness has drained every deferral, so a mark it does not
+                        // confirm is dead. (`Error` still does NOT clear on its own —
+                        // a `/btw` failure reaches here with truthful marks.)
+                        //
+                        // if !self.running() {
+                        //     self.clear_deferred_settings();
+                        // }
+                        //
+                        // `running()` is `focused().running`, cleared by `AgentEnd`, so
+                        // the three cases fall out: a MID-RUN reply keeps an
+                        // unconfirmed mark (the deferral is still queued — right);
+                        // the `AgentEnd`/open reply retires it (right); a new run's
+                        // `AgentStart` clears it (right). Test:
+                        // `a_settled_reply_clears_only_matching_marks` gains the
+                        // failed-mutation case (intent `x`, reply `y`, not running →
+                        // no mark, `Status` shows `y`).
+                        // ==== /SKETCH ====
                         if ended {
                             self.dequeue_next(idx);
                         }
@@ -3970,6 +4271,24 @@ impl App {
         // A modal owns the keyboard: no key reaches the input while it is up.
         if self.overlay.is_some() {
             self.on_overlay_key(key);
+            return;
+        }
+        // The settings panel is the FOURTH tier (W032 §4.1): `overlay` →
+        // `settings` → `completion` → `Mode::Browse` → composer. It sits ABOVE
+        // `completion` because the panel is a modal over the whole frame, and
+        // ABOVE `Mode::Browse` because it must work in both view modes (§4.3:
+        // "the settings panel brackets neither — it is a modal over whatever is
+        // behind it").
+        //
+        // It BYPASSES `on_overlay_key` entirely — that handler is keyed on
+        // `Overlay`, and the panel is not an `Overlay`; a `match` arm added there
+        // would be the silent `_ => {}` swallow instead of an exhaustive match,
+        // so the panel gets its own handler whose grammar is the pure function
+        // `crate::settings::on_key`.
+        if self.settings.is_some() {
+            self.on_settings_key(key);
+            // Load-bearing `return`: without it the key falls through to the
+            // composer and `recompute_completion()`.
             return;
         }
         // While the inline completion is open it owns Up/Down/Tab/Esc (and an
@@ -4033,6 +4352,8 @@ impl App {
             Key::Alt(']') => self.bump_measure(MEASURE_STEP as isize),
             Key::Alt(c) => self.focus_digit(c),
             Key::F(1) => self.open_help(),
+            // `F2` pairs with `F1` (W032 §4.7, site 1 of 3): the settings panel.
+            Key::F(2) => self.open_settings(),
             Key::Ctrl('g') => self.enter_browse(),
             // Ctrl-B docks/undocks the left sidebar. Reached only in INPUT
             // mode: `on_key`'s head already returned for an open overlay, an
@@ -5198,6 +5519,68 @@ impl App {
         }
     }
 
+    /// One keypress while the settings panel is open — the whole of §4.2, which
+    /// lives in [`crate::settings::on_key`] (pure, unit-tested with no terminal).
+    ///
+    /// This function is the seam that turns a [`crate::settings::KeyOutcome`]
+    /// into App state, and nothing else: it must not re-derive any part of the
+    /// grammar. A key the panel does not own reaches `KeyOutcome::None` inside
+    /// `settings::on_key` and is swallowed here — the panel owns the keyboard
+    /// exactly as a modal does, so `Char` never reaches the composer and `Enter`
+    /// never submits.
+    ///
+    /// # Contracts
+    /// - `Close` → `close_settings()`; the pending marks survive.
+    /// - `None`/`Moved` → mark the frame dirty (a cursor move repaints; a
+    ///   swallowed key costs one no-op frame, exactly as `on_overlay_key`'s
+    ///   `self.dirty = true` already does).
+    /// - Builds the rows ONCE, from `&self`, before taking `&mut` on `settings` —
+    ///   that is why `settings::on_key` takes `&[Section]` and not the snapshot
+    ///   (`settings.rs`, `on_key`'s first contract).
+    /// - `KeyOutcome::Act` (step 2+) joins this match as `self.apply_setting(a)`.
+    fn on_settings_key(&mut self, key: Key) {
+        let sections = self.settings_sections();
+        let Some(state) = self.settings.as_mut() else {
+            return;
+        };
+        let outcome = crate::settings::on_key(state, key, &sections);
+        // `KeyOutcome` owns its data, so the `&mut` borrow of `state` ends here
+        // and the handlers below may take `&mut self` again.
+        match outcome {
+            crate::settings::KeyOutcome::Close => self.close_settings(),
+            _ => self.dirty = true,
+        }
+    }
+
+    // ==== SKETCH (review-only, not real code) — the effect executor (steps 2–4) ====
+    // /// Execute one [`crate::settings::SettingAction`] — a FLAT match, one arm
+    // /// per variant, each arm one existing setter. This is the whole of the
+    // /// panel's write surface: `settings.rs` names no setter and no `Request`, so
+    // /// a new effect is a new enum variant and the compiler asks for its arm.
+    // ///
+    // /// # Contracts
+    // /// - Four arms settle instantly and never mark pending (§4.8): `SetWidth` →
+    // ///   `set_measure` (`:2704`), `SetView` → `set_view_mode` (`:5460`),
+    // ///   `ToggleSidebar` → `toggle_sidebar` (`:5442`), `OpenPicker` →
+    // ///   `open_model_picker` (`:5114`) / `open_theme_picker` (`:5107`).
+    // /// - `SetEffort` and `SetPlan` are the DEFERRABLE pair (§4.5): write the
+    // ///   intended value to `Status` optimistically — `SetPlan` exactly as `/plan`
+    // ///   does at `:4303` (`plan_pending` + `status.plan`), `SetEffort` as the
+    // ///   `/effort` arm at `:4252`-`:4261` does NOT (that omission is one of the
+    // ///   two defects this panel fixes) — push the `Action::Ask(Request::…)`, and
+    // ///   if `self.running()` (`:5502`) push the row id onto `deferred_settings`,
+    // ///   which the row build renders as `· pending`.
+    // /// - `SetPlan`'s revert path is already wired: `AgentEvent::Error` restores
+    // ///   `plan_pending` (`:1961`), `AgentStart` drops it (`:1932`).
+    // /// - The `model` row's pending mark is NOT set here: `OpenPicker(Model)`
+    // ///   raises no request. It is set by `accept_picker`'s `PickerKind::Model`
+    // ///   arm (`:5217`-`:5221`), which is where `Request::SetModel` is actually
+    // ///   pushed — one line there, guarded by the same `self.running()`.
+    // fn apply_setting(&mut self, action: crate::settings::SettingAction) {
+        // todo!()
+    // }
+    // ==== /SKETCH ====
+
     /// Apply the highlighted row and dismiss the modal.
     fn accept_picker(&mut self) {
         let Some(Overlay::Pick(picker)) = self.overlay.take() else {
@@ -5485,6 +5868,17 @@ impl App {
         self.dirty = true;
     }
 
+    // ==== SKETCH (review-only, not real code) ====
+    // /// Inject the finished `--dump-config` text (see [`Options::config`]); marks
+    // /// the app dirty. Called once from `lib::run` beside `app.set_git(git)`
+    // /// (`lib.rs:409` `app.set_git(git);`). The panel is a modal, so no repaint is owed while it is
+    // /// closed — `dirty` costs one frame at startup, which is already dirty.
+    // pub fn set_config(&mut self, config: String) {
+        // self.config = config;
+        // self.dirty = true;
+    // }
+    // ==== /SKETCH ====
+
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
         self.models = models;
@@ -5502,6 +5896,92 @@ impl App {
     pub fn running(&self) -> bool {
         self.focused().running
     }
+
+    /// The open panel's state, if any — the renderer's `None` check and the key
+    /// tier's gate. Read-only: nothing outside this module writes it
+    /// (`settings::on_key` owns the cursor, `set_settings_page` owns the page).
+    ///
+    /// `pub(crate)`, not `pub` (first-layer A14): `mod settings;` stays PRIVATE —
+    /// the CLI never touches the panel — so a `pub` method returning a private
+    /// module's type is a `private_interfaces` warning, and clippy must stay
+    /// clean with no `#[allow]`.
+    pub(crate) fn settings(&self) -> Option<&crate::settings::SettingsState> {
+        self.settings.as_ref()
+    }
+
+    /// The panel's live values, gathered from the sources the panel must NOT
+    /// own: `Status` for model/effort/plan/context, the view bits for
+    /// width/view/sidebar, `theme::active_name()` for the palette, the injected
+    /// dump, and `deferred_settings` for the marks — those field adds are steps
+    /// 2–7, so today only the heading is resolved.
+    ///
+    /// # Contracts
+    /// - Borrows `&self` only, so it can run BEFORE the `&mut` on `settings`
+    ///   (the `on_settings_key` borrow order).
+    /// - `config_heading` is `settings::CONFIG_HEADING_CLIENT` when `self.remote`
+    ///   (`set_remote`), else `…_LOCAL` (§4.6/§4.8: a socket client shows its own
+    ///   config and says so).
+    fn settings_snapshot(&self) -> crate::settings::SettingsSnapshot {
+        crate::settings::SettingsSnapshot {
+            config_heading: if self.remote {
+                crate::settings::CONFIG_HEADING_CLIENT
+            } else {
+                crate::settings::CONFIG_HEADING_LOCAL
+            },
+        }
+    }
+
+    /// The built rows — the ONE caller of `settings::rows`, shared by the key
+    /// handler and the renderer so the two cannot disagree (§4.3: "the panel is
+    /// data"). Allocates per call; one call per keypress and one per frame.
+    pub(crate) fn settings_sections(&self) -> Vec<crate::settings::Section> {
+        crate::settings::rows(&self.settings_snapshot())
+    }
+
+    /// Publish the drawn body height so `PgUp`/`PgDn` move one screen — the
+    /// renderer's call, the mirror of `set_terminal_width`/`set_terminal_height`
+    /// (`ui.rs` `app.set_terminal_width(full.width);`). A no-op with the panel
+    /// closed.
+    pub(crate) fn set_settings_page(&mut self, page: usize) {
+        if let Some(state) = self.settings.as_mut() {
+            state.set_page(page);
+        }
+    }
+
+    // ==== SKETCH (review-only, not real code) — the pending marks (step 6) ====
+    // /// Record that `id`'s change is accepted-but-not-yet-applied (§4.5) — the
+    // /// pending trigger, called from `apply_setting` and the model picker's
+    // /// accept arm, both guarded by `self.running()`.
+    // ///
+    // /// # Contracts
+    // /// - Takes the INTENDED VALUE, not just the id (first-layer A5): settling
+    // ///   compares the reply against it, so an id alone cannot tell a stale reply
+    // ///   from a fresh one.
+    // /// - Dedupes per id (a second `→` REPLACES the intent — the last key wins,
+    // ///   which is what the user last asked for); never holds an id outside
+    // ///   `settings::ids::{MODEL, EFFORT, PLAN}`.
+    // fn note_deferred_setting(&mut self, id: &'static str, intent: String) {
+        // todo!()
+    // }
+
+    // /// Settle ONE mark IFF the reply's value equals the stored intent (§4.5,
+    // /// first-layer A5) — called from the `AppEvent::Agent` arm, never from
+    // /// `Surface::apply` (which cannot see App, and which has already written the
+    // /// reply into `Status`, so `Status` cannot be the comparison).
+    // ///
+    // /// # Contracts: a mismatch KEEPS the mark (a later deferral is still queued);
+    // /// an id with no mark is a no-op.
+    // fn settle_deferred_setting(&mut self, id: &'static str, applied: &str) {
+        // todo!()
+    // }
+
+    // /// Clear EVERY mark: a new run means the previous boundary passed, and any
+    // /// error means the mutation failed (§4.5). Called from the `AppEvent::Agent`
+    // /// arm on `AgentStart` and `Error`.
+    // fn clear_deferred_settings(&mut self) {
+        // todo!()
+    // }
+    // ==== /SKETCH ====
 
     /// The focused surface's queued-prompt count — the composer foot's
     /// `⇥ N queued` segment (W029). Focused, not chrome: the enqueue is a
@@ -5587,6 +6067,46 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    // ==== SKETCH (review-only, not real code) ====
+    // W032 first-layer A12: the App-layer tests §7.1 requires. §7.1's prose named
+    // one of these and its own list omitted it — so the list is here, once.
+    //
+    // MUST assert BEHAVIOUR, never `settings.is_some()`:
+    //
+    // - slash_settings_opens_the_panel
+    //     `run_command` (`:4444` `match cmd.name`) FALLS THROUGH to
+    //     `None => self.transient(format!("unknown command: {name}"))` (`:4437`),
+    //     so a `COMMANDS` entry with no arm is invisible to `/help`, completion and
+    //     the count assertion. §7.1 had no `/settings` test at all.
+    // - the_settings_panel_answers_keys_rather_than_swallowing_them
+    //     the ONLY App-layer guard for the `_ => {}` swallow class: `↑` puts the
+    //     cursor on `effort`; `→` on `width` CHANGES the value (68 → 76).
+    // - opening_the_panel_asks_for_the_settings_once
+    //     exactly one `Action::Ask(Request::Settings)` per open (pins B5).
+    // - a_settled_reply_clears_only_matching_marks
+    //     pins A5's intent comparison, INCLUDING the second-deferral case
+    //     (`xhigh` queued, a `high` reply must NOT clear it).
+    // - a_mid_run_setting_shows_pending_until_the_reply
+    //     the brief's §7.1 version, extended with the `AgentEnd` ask.
+    // - the_header_effort_follows_the_settings_reply
+    //     must drive `app.handle(AppEvent::Agent(..))`, NOT `Surface::apply`
+    //     directly — otherwise it cannot catch the `_ => false,` arm at `:2099`
+    //     silently dropping the new event.
+    // - a_model_switch_refreshes_the_context_limit
+    //     the same route; `context_limit` is the gauge's denominator.
+    // - the_panel_reports_the_focused_surface_in_all_mode
+    //     `settings_snapshot` reads `self.status()` (focused), NOT
+    //     `chrome_status()` (the root in All) — every setter is
+    //     `focused_mut()`/`Action::Ask`, so a "what the header shows" reflex would
+    //     make the panel describe a surface it does not edit. State that contract
+    //     in `settings.rs`'s module doc too: model/effort/plan/context are the
+    //     FOCUSED session; width/view/sidebar are App-global.
+    // - enter_on_the_model_row_opens_the_picker_and_returns_to_the_panel
+    // - f2_opens_the_panel_from_the_composer_browse_and_search  (three sites)
+    // - esc_closes_the_settings_panel_and_nothing_else_does
+    //     (and `Enter` on a Toggle DOES act — the deliberate divergence from
+    //     `Info`, `:9532`'s invariant; that test stays green untouched)
+    // ==== /SKETCH ====
     use super::*;
     use crate::ui::ITEM_LABEL_COLS;
     use wcode_harness::message::StopReason;
@@ -8674,6 +9194,68 @@ mod tests {
         app.handle(AppEvent::Key(Key::F(1)));
         app.handle(AppEvent::Key(Key::F(1)));
         assert!(app.overlay().is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_settings_panel_and_nothing_else_does() {
+        let mut app = App::new();
+        typed(&mut app, "keep me");
+        let draft = app.input();
+        app.handle(AppEvent::Key(Key::F(2)));
+        assert!(app.settings().is_some(), "F2 opens the panel");
+        // The panel owns the keyboard: a `Char` never reaches the composer buffer,
+        // and no other key closes it (`Esc` is the only close key, W032 §4.2).
+        for key in [Key::Char('x'), Key::Backspace, Key::Enter, Key::Char('q')] {
+            app.handle(AppEvent::Key(key));
+            assert!(app.settings().is_some(), "{key:?} closed the panel");
+        }
+        assert_eq!(app.input(), draft, "the panel gates the composer");
+        assert_eq!(app.cursor(), draft.chars().count(), "and its cursor");
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.settings().is_none(), "Esc closes it");
+        // The draft survived the round trip untouched.
+        assert_eq!(app.input(), draft);
+    }
+
+    #[test]
+    fn the_settings_panel_precedes_the_composer() {
+        let mut app = App::new();
+        typed(&mut app, "abc");
+        app.handle(AppEvent::Key(Key::Home));
+        app.handle(AppEvent::Key(Key::Right));
+        assert_eq!(app.cursor(), 1, "the composer cursor sits mid-draft");
+        app.handle(AppEvent::Key(Key::F(2)));
+        // The movement keys are the panel's: the composer's cursor must not budge.
+        for key in [Key::Down, Key::Up, Key::PageDown, Key::PageUp, Key::ScrollDown] {
+            app.handle(AppEvent::Key(key));
+            assert_eq!(app.cursor(), 1, "{key:?} reached the composer");
+        }
+        // NOT asserted here: a picker opened OVER the panel (step 3). Until the
+        // `model`/`theme` rows exist no picker can be raised from inside it, so
+        // the `overlay`-wins half of this test arrives with `OpenModelPicker`.
+    }
+
+    #[test]
+    fn f2_opens_the_panel_from_the_composer_browse_and_search() {
+        // Site 1 of 3: the composer.
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(2)));
+        assert!(app.settings().is_some(), "the composer");
+        // Site 2 of 3: browse — F2 is global and does NOT leave the mode.
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        assert_eq!(app.mode(), Mode::Browse);
+        app.handle(AppEvent::Key(Key::F(2)));
+        assert!(app.settings().is_some(), "browse");
+        assert_eq!(app.mode(), Mode::Browse, "F2 does not leave browse");
+        // Site 3 of 3: the browse search prompt — the prompt stays open under it.
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::Ctrl('g')));
+        app.handle(AppEvent::Key(Key::Char('/')));
+        assert!(app.search_query().is_some(), "the search prompt is open");
+        app.handle(AppEvent::Key(Key::F(2)));
+        assert!(app.settings().is_some(), "the search prompt");
+        assert!(app.search_query().is_some(), "F2 does not close the prompt");
     }
 
     #[test]

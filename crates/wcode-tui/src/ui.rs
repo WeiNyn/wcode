@@ -170,6 +170,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     draw_completion(frame, area, above, app);
     draw_search_prompt(frame, area, above, app);
+    // The settings panel (W032) is drawn HERE — before `draw_overlay`, so a
+    // picker opened from its `model`/`theme` row lands ON TOP of it, and after
+    // the bands, which it covers without reflowing them.
+    //
+    // NOTE: the panel is NOT an `Overlay` variant, so `draw_overlay`'s exhaustive
+    // match cannot catch a missing draw — the guard is the pixel test
+    // `the_settings_panel_draws_its_title_and_hides_when_closed`.
+    if app.settings().is_some() {
+        draw_settings(frame, full, app);
+    }
     // The modal, if any, is drawn last — over the WHOLE terminal (`full`), so
     // it covers the docked sidebar too; the popups above float over the bands.
     draw_overlay(frame, full, app);
@@ -282,6 +292,76 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
+/// The hint line's fallback: the footer slot's key legend while no `ReadOnly`
+/// act has set a hint (`SettingsState::hint`). The panel's own grammar rows in
+/// `F1` carry the full keymap; `esc close` never drops (W032 §4.2), and the
+/// remaining clauses — `←→ change · enter edit · tab section` — join it with the
+/// rows that make them act (step 2).
+const HINT_LEGEND: &str = " ↑↓ move · esc close";
+
+/// Draw the settings panel over the whole terminal — an overlay of the
+/// `F1`/`Info` family, built on the same [`draw_info_panel`] so the frame, the
+/// `Clear`, the rounded border, the bare-lowercase ` settings ` title and the
+/// clip-not-wrap body are the family's, never a re-implementation
+/// (`tui-design.md` §4 "settings panel").
+///
+/// **Step 1 draws the two section headings and the hint line**; the row body
+/// (cursor glyph, affordance column, `· pending` mark) is `tui-design.md` §4 and
+/// arrives with the rows (step 2).
+///
+/// # Contracts
+/// - One `Line` per DRAWN line: a section heading, a blank separator, and one row
+///   per `Setting` — so the panel is scrolled by `draw_info_panel`'s existing
+///   arithmetic and no second scroll rule exists.
+/// - The cursor row is `settings::line_of(&sections, state.cursor())` — the ONE
+///   mapping from a row index to a drawn line, shared with the key handler, so a
+///   heading cannot desynchronise the two.
+/// - `scroll` is DERIVED, never stored: `cursor_line.saturating_sub(visible-1)`,
+///   clamped by `draw_info_panel` against its own geometry. `more: false` — a
+///   cursor that walks the window is its own tell (the designer's amendment 1).
+/// - Publishes the body height through `app.set_settings_page(visible)` so
+///   `PgUp`/`PgDn` move one screen (the `set_terminal_width` precedent).
+/// - Footer = `state.hint()` when a `ReadOnly` act set one, else [`HINT_LEGEND`].
+/// - FIRST-LAYER A15 — the borrow order decides whether this compiles:
+///   `app.settings()` holds `&App`, so `app.set_settings_page(..)` (which needs
+///   `&mut`) cannot be called while that borrow lives. The scalars are copied
+///   out first.
+/// - # Panics: never.
+fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(state) = app.settings() else {
+        return;
+    };
+    // A15: scalars out, then the `&App` borrow ends.
+    let (cursor, hint) = (state.cursor(), state.hint());
+    let sections = app.settings_sections();
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, section) in sections.iter().enumerate() {
+        if i > 0 {
+            // One blank row sets the second section off, as `/help` separates
+            // its two tables.
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(section.heading.to_string()));
+        // STEP 2: one `item_line`-plus-cursor row per `section.rows` entry —
+        // `❯ ` in `accent()`, the unchanged `item_line` body, then the
+        // right-flush affordance column.
+    }
+    let (cursor_line, total) = crate::settings::line_of(&sections, cursor);
+    let visible = info_visible_rows(total, area.height);
+    app.set_settings_page(visible);
+    let start = cursor_line.saturating_sub(visible.saturating_sub(1));
+    draw_info_panel(
+        frame,
+        area,
+        InfoPanel {
+            title: "settings",
+            lines,
+            scroll: start as u16,
+            footer: hint.unwrap_or(HINT_LEGEND),
+            more: false,
+        },
+    );
+}
 /// Draw the info modal body `rows` at `scroll`, under a rounded ` title ` panel.
 ///
 /// The door used by the `Overlay::Info` dispatch arm: it maps each [`InfoRow`] to
@@ -5946,6 +6026,39 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             }
         }
         panic!("{needle:?} not found in the frame");
+    }
+
+    /// W032 first-layer A8 — the draw tripwire for a panel that is NOT an
+    /// `Overlay` variant: `draw_overlay`'s exhaustive match cannot catch a
+    /// missing draw, so the assertion is on PIXELS, never on
+    /// `settings().is_some()`.
+    #[test]
+    fn the_settings_panel_draws_its_title_and_hides_when_closed() {
+        let mut app = App::new();
+        let closed = buffer_text(&render(&mut app, 80, 24));
+        assert!(
+            !closed.contains(" settings "),
+            "a closed panel draws nothing:\n{closed}"
+        );
+        app.handle(AppEvent::Key(Key::F(2)));
+        let open = buffer_text(&render(&mut app, 80, 24));
+        assert!(open.contains(" settings "), "the padded title:\n{open}");
+        // The empty body still carries BOTH section headings (the first one is
+        // labelled too, `tui-design.md` §4 amendment 5) and the hint line.
+        assert!(open.contains("session"), "the session heading:\n{open}");
+        assert!(open.contains("config"), "the config heading:\n{open}");
+        assert!(open.contains("↑↓ move"), "the hint line:\n{open}");
+        // Drawn OVER the bands without reflowing them: the frame's top row (the
+        // pinned head band, outside the centered panel) is byte-identical.
+        assert_eq!(
+            open.lines().next(),
+            closed.lines().next(),
+            "the panel reflowed the base layout"
+        );
+        // `Esc` closes it and the frame returns byte-for-byte.
+        app.handle(AppEvent::Key(Key::Esc));
+        let shut = buffer_text(&render(&mut app, 80, 24));
+        assert_eq!(shut, closed, "closing left a residue");
     }
 
     /// The heart of D027: a `/help` ITEM row and an `F1` row render identically —
