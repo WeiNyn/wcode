@@ -2418,22 +2418,40 @@ fn live_roster(
 /// with a `id · age · first user line` label and the path to hand back for
 /// `--resume`. Failures degrade to a bare file name rather than break the picker.
 fn session_items() -> Vec<wcode_tui::SessionItem> {
-    session_groups::list_groups(&session_dir())
+    session_items_in(&session_dir())
+}
+
+fn session_items_in(dir: &Path) -> Vec<wcode_tui::SessionItem> {
+    session_groups::list_groups(dir)
         .unwrap_or_default()
         .into_iter()
-        .map(|entry| {
+        .filter_map(|entry| {
             let path = entry.path().to_path_buf();
-            let mut label = session_label(&path);
-            // Mark a group that actually carries a team, so the picker
-            // distinguishes it from a bare legacy file.
-            if let session_groups::GroupEntry::Group(group) = &entry
-                && !session_groups::scan_members(group)
+            // ONE open for both halves: the blank check and the label share it.
+            let session = row_session(&path);
+            // Drop only OPENED transcripts with no real user message (A4): an
+            // unopenable file stays listed, degraded, rather than being hidden.
+            if let Some(s) = session.as_ref()
+                && !s.messages().iter().any(is_real_user_message)
+            {
+                return None;
+            }
+            let mut label = session_label_of(&path, session.as_ref());
+            // Mark a group that actually carries a team / workflow run, so the
+            // picker distinguishes it from a bare legacy file. Team first, then
+            // workflow.
+            if let session_groups::GroupEntry::Group(group) = &entry {
+                if !session_groups::scan_members(group)
                     .unwrap_or_default()
                     .is_empty()
-            {
-                label.push_str(" · team");
+                {
+                    label.push_str(" · team");
+                }
+                if session_groups::load_run(group).is_some() {
+                    label.push_str(" · workflow");
+                }
             }
-            wcode_tui::SessionItem { label, path }
+            Some(wcode_tui::SessionItem { label, path })
         })
         .collect()
 }
@@ -2452,19 +2470,21 @@ fn session_items() -> Vec<wcode_tui::SessionItem> {
 ///
 /// Private on purpose — `repl` is a descendant of the crate root, so it reaches
 /// `crate::session_label` with no visibility change.
+#[cfg(test)]
 fn session_label(path: &Path) -> String {
+    session_label_of(path, row_session(path).as_ref())
+}
+
+fn session_label_of(path: &Path, session: Option<&Session>) -> String {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let id = name.strip_suffix(".jsonl").unwrap_or(&name);
 
-    // ONE open for both halves: this runs for every row the picker lists, and a
-    // second open per row would double the reads.
-    let session = row_session(path);
     let age = age_millis(id).map(humanize_age);
 
-    if let Some(title) = session.as_ref().and_then(|s| s.title()) {
+    if let Some(title) = session.and_then(|s| s.title()) {
         let mut parts = vec![title];
         parts.extend(age);
         return parts.join(" · ");
@@ -2472,7 +2492,7 @@ fn session_label(path: &Path) -> String {
 
     let mut parts = vec![id.to_string()];
     parts.extend(age);
-    if let Some(first) = session.as_ref().and_then(first_user_line_of) {
+    if let Some(first) = session.and_then(first_user_line_of) {
         parts.push(first);
     }
     parts.join(" · ")
@@ -2512,26 +2532,31 @@ fn humanize_age(ms: u64) -> String {
     }
 }
 
+/// Shared predicate: is this a REAL user message (not a compaction summary)?
+/// Used both by `first_user_line_of` and the blank-row filter in `session_items_in`,
+/// so the two readers agree on what counts as "a user touched this session".
+fn is_real_user_message(message: &AgentMessage) -> bool {
+    match message {
+        AgentMessage::User { .. } => {
+            !message
+                .as_text()
+                .starts_with(wcode_harness::message::COMPACTION_SUMMARY_PREFIX)
+        }
+        _ => false,
+    }
+}
+
 /// The first line of the session's first REAL user message, truncated — the
 /// quickest way to recognize a session in the picker (W031 §2: a compaction
 /// summary is not a user message, however it is typed).
 fn first_user_line_of(session: &Session) -> Option<String> {
-    session.messages().into_iter().find_map(|message| match message {
-        AgentMessage::User { .. } => {
-            let text = message.as_text();
-            // `Session::messages()` PREPENDS `AgentMessage::summary(..)` whenever a
-            // compaction boundary exists, and a summary is an ordinary `User`
-            // message — so without this skip EVERY compacted session's row shows
-            // the constant prefix, i.e. exactly the long sessions a user most
-            // wants to find. The prefix comes from the kernel (one literal, one
-            // source: `message.rs` builds the summary with it).
-            if text.starts_with(wcode_harness::message::COMPACTION_SUMMARY_PREFIX) {
-                return None;
-            }
-            let line = text.lines().next().unwrap_or_default().trim();
-            (!line.is_empty()).then(|| truncate_chars(line, 48))
+    session.messages().into_iter().find_map(|message| {
+        if !is_real_user_message(&message) {
+            return None;
         }
-        _ => None,
+        let text = message.as_text();
+        let line = text.lines().next().unwrap_or_default().trim();
+        (!line.is_empty()).then(|| truncate_chars(line, 48))
     })
 }
 
@@ -4776,6 +4801,152 @@ mod tests {
         assert_eq!(resolve_overlay(None, Some("   ")), None);
         assert_eq!(resolve_overlay(None, None), None);
     }
+    fn w035_temp_session_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        (dir, sessions)
+    }
+
+    #[test]
+    fn session_items_drops_blank_group() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let _root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        let items = session_items_in(&sessions);
+        assert!(items.is_empty(), "blank group must be dropped: {:?}", items);
+    }
+
+    #[test]
+    fn session_items_keeps_user_without_reply() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Message {
+            id: "m1".into(),
+            parent_id: None,
+            message: AgentMessage::user_text("hi"),
+        })
+        .unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+    }
+
+    #[test]
+    fn session_items_keeps_unopenable_file() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        std::fs::write(sessions.join("1234_abcd.jsonl"), "{not json\n{also bad").unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+    }
+
+    #[test]
+    fn session_items_keeps_whitespace_user() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Message {
+            id: "m1".into(),
+            parent_id: None,
+            message: AgentMessage::user_text("   "),
+        })
+        .unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+    }
+
+    #[test]
+    fn session_items_workflow_suffix_present() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Message {
+            id: "m1".into(),
+            parent_id: None,
+            message: AgentMessage::user_text("hi"),
+        })
+        .unwrap();
+        let run = session_groups::RunRecord {
+            task: "t".into(),
+            ..Default::default()
+        };
+        session_groups::write_run(&group, &run).unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+        assert!(
+            items[0].label.contains(" · workflow"),
+            "{}",
+            items[0].label
+        );
+    }
+
+    #[test]
+    fn session_items_workflow_suffix_absent() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Message {
+            id: "m1".into(),
+            parent_id: None,
+            message: AgentMessage::user_text("hi"),
+        })
+        .unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+        assert!(!items[0].label.contains(" · workflow"), "{}", items[0].label);
+    }
+
+    #[test]
+    fn session_items_team_and_workflow() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Message {
+            id: "m1".into(),
+            parent_id: None,
+            message: AgentMessage::user_text("hi"),
+        })
+        .unwrap();
+        session_groups::create_member_session(group.members(), "w1").unwrap();
+        let run = session_groups::RunRecord {
+            task: "t".into(),
+            ..Default::default()
+        };
+        session_groups::write_run(&group, &run).unwrap();
+        let items = session_items_in(&sessions);
+        assert_eq!(items.len(), 1, "{:?}", items);
+        assert!(
+            items[0].label.ends_with(" · team · workflow"),
+            "{}",
+            items[0].label
+        );
+    }
+
+    #[test]
+    fn session_items_compaction_summary_alone_not_user() {
+        let (_dir, sessions) = w035_temp_session_dir();
+        let group = session_groups::create_group(&sessions).unwrap();
+        let mut root = session_groups::create_root_session(&group.dir, &sessions).unwrap();
+        root.append(wcode_harness::session::SessionEntry::Compaction {
+            id: "c1".into(),
+            summary: "did the first thing".into(),
+            first_kept_message: 0,
+            tokens_before: None,
+            usage: None,
+        })
+        .unwrap();
+        let items = session_items_in(&sessions);
+        assert!(items.is_empty(), "compaction-only group must be dropped: {:?}", items);
+        // and the shared predicate agrees
+        let summary_msg = AgentMessage::user_text(format!(
+            "{} \n\n x",
+            wcode_harness::message::COMPACTION_SUMMARY_PREFIX
+        ));
+        assert!(!is_real_user_message(&summary_msg));
+    }
+
+
+
 }
 
 #[cfg(test)]
@@ -4794,4 +4965,5 @@ mod instructions_flag_tests {
         assert!(a.no_instructions);
         assert!(!Args::default().no_instructions);
     }
+
 }

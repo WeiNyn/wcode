@@ -483,11 +483,8 @@ pub struct RunRecord {
 /// Read `<dir>/run.json`; `None` when absent or unparseable. Best-effort: a
 /// resume line is a convenience, never a hard failure. Mirrors [`load_manifest`].
 ///
-/// Only the launch-record gate reads it today (the printed `resume:` line is
-/// built from the live args); kept public as the reader a resumed run / a future
-/// `--status` extension needs — hence the same `allow` as the default-cap
-/// `TaskList::load` convenience ctors.
-#[allow(dead_code)]
+/// Read `<dir>/run.json`; `None` when absent or unparseable. Used by the
+/// `/resume` picker to mark workflow runs (W035).
 pub fn load_run(group: &SessionGroup) -> Option<RunRecord> {
     let raw = fs::read_to_string(group.run_path()).ok()?;
     serde_json::from_str(&raw).ok()
