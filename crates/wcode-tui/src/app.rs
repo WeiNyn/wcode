@@ -7229,6 +7229,16 @@ mod tests {
         push_tool_round(&mut app, "c1", "read");
         push_tool_round(&mut app, "c2", "read");
         let block = app.transcript().last().expect("the turn");
+        // The premise: the block really does render as one railed run, so the
+        // assertion below is about the clipboard and not about a missing rail.
+        let rows: Vec<String> = crate::ui::block_lines(block, 70)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            rows.len() >= 2 && rows.iter().all(|r| r.chars().nth(1) == Some('│')),
+            "the premise — every row of the run carries the rail:\n{rows:#?}"
+        );
         let text = copy_text(block).expect("a copyable block");
         assert!(
             !text.contains('│'),

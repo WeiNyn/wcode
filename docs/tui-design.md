@@ -271,8 +271,10 @@ blank pane.
   click geometry (D023). The collapsed row is one row **always**: an over-long
   head is **elided with `…`** (clip-not-wrap, the D027 rule) and a multi-line
   value shows its first line plus ` … +N lines`. An elision is **always marked** —
-  never a silent cut. **Expanded**, the head sits over its body (`key  value`
-  params + output/diff + a `… +N more` hint), all at the same column: expansion is
+  never a silent cut, and **exactly one `…` per row**: a clip replaces the fold
+  tail rather than stacking on it. **Expanded**, the head sits over its body (`key
+  value` params + output/diff + a `… +N more` hint), all at the same column:
+  expansion is
   the **complete record**, so a multi-line param keeps its real line breaks. The
   name prints **once** — no ordinal, no separate `✓ name · note` row. A tool's
   **params are never LOST: elided in the collapsed head, complete on expansion**
@@ -284,7 +286,7 @@ blank pane.
   never shed. So a `bash` command's head is one row, its command clipped with `…`,
   and the command in full one expansion away. **Expanded**, the params re-draw as
   `key  value` rows. `Ctrl-T` governs the tool's **output body** only
-  (params are the call's identity and never hide). A tool error is
+  (params are the call's identity and are never lost). A tool error is
   forced expanded. `Ctrl-T` toggles every tool's output; browse
   `Enter`/`Space`/`y` act per tool. The `── notes ──` **foot ledger is removed**.
 

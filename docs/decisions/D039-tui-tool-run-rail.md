@@ -32,6 +32,9 @@ rows stay flat and non-nested.
 2. **A `Thinking` block inside a run is TRANSPARENT.** It neither breaks the span
    nor stands outside it: the call before it and the call after it are the same
    run, and the thinking block's own row (+ its expanded body) carries the rail.
+   That holds at a run's **edge** too: `[Thinking, call, call]` is one run and the
+   leading thinking row is railed — a thinking row is never the thing that decides
+   the span, only the calls are.
 
 3. **The run's rows carry ` │ ` at the gutter** — the `│` at **col 1**, in place
    of the three-space indent's blanks. The bar is **col 1 only**: content stays at
@@ -43,9 +46,9 @@ rows stay flat and non-nested.
    appear where there is nothing to signal.
 
 5. **Membership is computed from the BLOCKS, never from `turn.tools`.** A
-   `ToolCall` whose result has not landed yet emits no panel
-   (`ui.rs:1094-1096`); keying the rail off the landed tools would make the rail
-   appear and shift on arrival.
+   `ToolCall` whose result has not landed yet emits no panel (`ui.rs:1109-1111`,
+   *"no panel is emitted for it"*); keying the rail off the landed tools would
+   make the rail appear and shift on arrival.
 
 ## What this is not
 
@@ -59,13 +62,16 @@ the vocabulary.
 
 ## Mechanism
 
-- `turn_inline` precomputes `run_membership(&turn.content) -> Vec<bool>` in one
-  pass over the blocks (a running list of the current span's indices plus a call
-  count; a `Text` block or the end flushes it, marking the span iff it carried ≥2
-  calls).
-- The gutter is threaded as a `&str` prefix (` │ ` or `   `) down every row
-  builder of a tool: the collapsed head, its live tail, the expanded head, the
-  params block, the body rows, the `… +N more` hint, and the thinking row + body.
+- `turn_inline` (`ui.rs:1090`) precomputes `run_membership(&turn.content) ->
+  Vec<bool>` (`ui.rs:1129`) in one pass over the blocks (a running list of the
+  current span's indices plus a call count; a `Text` block or the end flushes it,
+  marking the span iff it carried ≥2 calls), then picks the gutter per block:
+  `ui.rs:1098` `let gutter = if rail[i] { TOOL_RAIL } else { TOOL_INDENT };`.
+- The gutter (`TOOL_RAIL` = ` │ `, `ui.rs:43`) is threaded as a `&str` prefix
+  (` │ ` or `   `) down every row builder of a tool: the collapsed head, its live
+  tail, the expanded head, the params block (including a wrapped param's
+  continuation rows), the body rows, the `… +N more` hint, and the thinking row +
+  body.
 - `Block::Tool` (a standalone/replayed tool, no turn) passes the plain indent: it
   cannot be in a run.
 - `copy_text` is untouched — it reads `Tool`/`Turn` fields, never rendered lines,
