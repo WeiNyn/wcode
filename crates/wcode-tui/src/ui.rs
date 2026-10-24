@@ -36,6 +36,11 @@ pub(crate) const ITEM_LABEL_COLS: usize = 22;
 /// thinking row's word sits in — so a tool's head, its params, its body, and the
 /// thinking body all line up at col 3. Replaces the retired `├`/`│`/`└` tree.
 const TOOL_INDENT: &str = "   ";
+/// The **run rail** (D039): a contiguous batch of tool calls marks its rows with
+/// `│` at col **1** — cols 0 and 2 stay blank — in place of [`TOOL_INDENT`]'s
+/// three blanks. Every content column is unchanged (col 3), so nothing shifts and
+/// browse's `▌` at col 0 coexists; a run costs no width.
+const TOOL_RAIL: &str = " │ ";
 /// The floor for a clipped collapsed-head value (D038): a value that would elide
 /// to fewer than eight columns keeps eight, so the `…` never stands over a
 /// two-character stub that reads as noise. At a pathologically narrow width the
@@ -925,7 +930,7 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         Block::Turn(turn) => turn_lines(turn, width),
         // A standalone tool (a live/running tool before its answer commits, or an
         // orphan with no turn): a single inline tool panel (no `── notes ──` rule).
-        Block::Tool(tool) => tool_inline_lines(1, tool, width),
+        Block::Tool(tool) => tool_inline_lines(1, tool, width, TOOL_INDENT),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
         // The transient twin: byte-identical to the `Notice` arm above (same call,
         // same gutter, same `dim()` role, same `width`, so the block's HEIGHT
@@ -1080,19 +1085,23 @@ fn turn_inline_lines(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 /// The turn's body: the prose/thinking interleaved with each tool's panel, in
 /// call order. # Contracts: exactly one panel per tool (a `ToolCall` whose result
 /// is not yet in `turn.tools` emits nothing); the tool itself, inline at the call
-/// site, is the locator (D021 — there is no reference mark).
+/// site, is the locator (D021 — there is no reference mark). A **run** of ≥2
+/// contiguous calls carries the [`TOOL_RAIL`] gutter on its rows (D039).
 fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
+    // Run membership comes from the BLOCKS, never from `turn.tools` (D039).
+    let rail = run_membership(&turn.content);
     // The `ToolCall` ordinal: the count seen (one per-turn series). It selects the
     // tool (`turn.tools.get(refn - 1)`); it is NEVER printed (D021).
     let mut refn = 0usize;
-    for block in &turn.content {
+    for (i, block) in turn.content.iter().enumerate() {
+        let gutter = if rail[i] { TOOL_RAIL } else { TOOL_INDENT };
         match block {
             ContentBlock::Text { text } => {
                 out.extend(markdown::render(text, width));
             }
             ContentBlock::Thinking { text } => {
-                out.extend(thinking_block_lines(text, width, turn.thinking_open));
+                out.extend(thinking_block_lines(text, width, turn.thinking_open, gutter));
             }
             ContentBlock::ToolCall { .. } => {
                 refn += 1;
@@ -1100,12 +1109,51 @@ fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
                 // `ToolExecutionStart`, so the result may not be in `tools` yet —
                 // no panel is emitted for it.
                 if let Some(tool) = turn.tools.get(refn - 1) {
-                    out.extend(tool_inline_lines(refn, tool, width));
+                    out.extend(tool_inline_lines(refn, tool, width, gutter));
                 }
             }
         }
     }
     out
+}
+
+/// Which blocks sit inside a **run** (D039): a maximal span of ≥2 consecutive
+/// `ToolCall` blocks. A `Text` block — and the turn's end — breaks the span; a
+/// `Thinking` block is **transparent**, so it neither breaks the span nor stands
+/// outside it: a call before it and a call after it are the same run, and the
+/// thinking block's own rows carry the rail.
+///
+/// Membership is a function of the BLOCKS, never of `turn.tools`: a mid-run
+/// `ToolCall` whose result has not landed emits no panel yet, and keying the rail
+/// off the landed tools would make it appear and shift on arrival.
+fn run_membership(blocks: &[ContentBlock]) -> Vec<bool> {
+    let mut railed = vec![false; blocks.len()];
+    // The open span: its block indices, and how many of them are calls.
+    let mut span: Vec<usize> = Vec::new();
+    let mut calls = 0usize;
+    let close = |span: &mut Vec<usize>, calls: usize, railed: &mut Vec<bool>| {
+        if calls >= 2 {
+            for &i in span.iter() {
+                railed[i] = true;
+            }
+        }
+        span.clear();
+    };
+    for (i, block) in blocks.iter().enumerate() {
+        match block {
+            ContentBlock::ToolCall { .. } => {
+                calls += 1;
+                span.push(i);
+            }
+            ContentBlock::Thinking { .. } => span.push(i),
+            ContentBlock::Text { .. } => {
+                close(&mut span, calls, &mut railed);
+                calls = 0;
+            }
+        }
+    }
+    close(&mut span, calls, &mut railed);
+    railed
 }
 
 /// One tool's inline flat rows (D010/T1). The state map (W016 §5.1 / A1):
@@ -1126,24 +1174,24 @@ fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 /// A tool's **params are never LOST** (D019/W016, D038): collapsed, the first
 /// value rides the head — elided with `…` when the head is crowded — expanded,
 /// they re-draw as the `key  value` rows, the complete record.
-fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
+fn tool_inline_lines(_n: usize, tool: &Tool, width: usize, gutter: &str) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     if expanded {
-        let mut out = vec![tool_head_row(tool, width)];
-        let mut body = panel_param_lines(tool, width);
-        body.extend(tool_panel_body(tool, width, true));
+        let mut out = vec![tool_head_row(tool, width, gutter)];
+        let mut body = panel_param_lines(tool, width, gutter);
+        body.extend(tool_panel_body(tool, width, true, gutter));
         if !body.is_empty() {
             out.extend(body);
         }
         return out;
     }
     // Collapsed (done OR running): the one head row, params inlined.
-    let mut out = vec![collapsed_head_row(tool, width)];
+    let mut out = vec![collapsed_head_row(tool, width, gutter)];
     // A running tool keeps exactly ONE live-tail row under the gutter (O1); no note.
     if !tool.done
         && let Some(tail) = last_line(&tool.output)
     {
-        out.push(prefixed(TOOL_INDENT, &tail, dim()));
+        out.push(prefixed(gutter, &tail, dim()));
     }
     out
 }
@@ -1171,8 +1219,8 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
 ///   order and only this one: the note → the ms → the extra `key=value` params
 ///   (from the tail) → the ` … +N lines` tail → a CLIPPED first value with a
 ///   [`MIN_TOOL_VALUE_COLS`] floor. The **name never sheds**.
-fn collapsed_head_row(tool: &Tool, width: usize) -> Line<'static> {
-    let prefix = TOOL_INDENT.to_string();
+fn collapsed_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
+    let prefix = gutter.to_string();
     let name_style = if tool.is_error { error_style() } else { tool_name() };
     // The fixed part: the gutter and the name (the name is never shed).
     let head_len = prefix.chars().count() + tool.name.chars().count();
@@ -1388,7 +1436,7 @@ fn content_lines(
                     // until commit lands it in the row below.
                     lines.push(live_thinking_line(elapsed));
                 } else {
-                    lines.extend(thinking_block_lines(text, width, thinking_open));
+                    lines.extend(thinking_block_lines(text, width, thinking_open, TOOL_INDENT));
                 }
             }
             // A tool call in a committed message renders as its own inline rows
@@ -1412,7 +1460,7 @@ fn content_lines(
 /// right-aligned to the row's edge — the name prints ONCE. On success the name
 /// sits at col 3; an error prepends the red `✗ ` mark. The target is inlined on the
 /// head only when the params block is empty (otherwise it rides the params rows).
-fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
+fn tool_head_row(tool: &Tool, width: usize, gutter: &str) -> Line<'static> {
     let stats = tool_stats(tool);
     // An errored tool's head carries the `✗` mark (red) in place of the retired
     // tree branch, so a failure reads at a glance; a success stays quiet (col 3).
@@ -1421,7 +1469,7 @@ fn tool_head_row(tool: &Tool, width: usize) -> Line<'static> {
     } else {
         ("", dim(), tool_name())
     };
-    let prefix = format!("{TOOL_INDENT}{mark}");
+    let prefix = format!("{gutter}{mark}");
     // The target inlines on the head ONLY as a fallback for a call whose args
     // miss its per-tool key list, so `params` is empty (W015) — otherwise the
     // value rides the always-visible params rows.
@@ -1603,7 +1651,7 @@ fn count_find_paths(output: &str) -> Option<usize> {
 /// `elapsed == None` prints NO timer (before the first tick); the caller injects
 /// it.
 fn live_thinking_line(elapsed: Option<std::time::Duration>) -> Line<'static> {
-    let mut line = thinking_header_line();
+    let mut line = thinking_header_line(TOOL_INDENT);
     if let Some(d) = elapsed {
         line.spans.push(Span::styled(
             format!(" {}", format_ms(d.as_millis() as u64)),
@@ -1616,18 +1664,19 @@ fn live_thinking_line(elapsed: Option<std::time::Duration>) -> Line<'static> {
 /// A committed thinking block (D33): a plain dim `thinking` row, plus the
 /// `thinking`-styled body when expanded. No panel frame — thinking is lighter
 /// than a tool, so a bare row keeps it cheap.
-fn thinking_block_lines(text: &str, width: usize, open: bool) -> Vec<Line<'static>> {
-    let mut out = vec![thinking_header_line()];
+fn thinking_block_lines(text: &str, width: usize, open: bool, gutter: &str) -> Vec<Line<'static>> {
+    let mut out = vec![thinking_header_line(gutter)];
     if open {
-        out.extend(wrap(text, width, TOOL_INDENT, TOOL_INDENT, thinking()));
+        out.extend(wrap(text, width, gutter, gutter, thinking()));
     }
     out
 }
 
-/// The thinking block's header row: a plain dim `   thinking` (indent col 3).
-fn thinking_header_line() -> Line<'static> {
+/// The thinking block's header row: a plain dim `   thinking` (indent col 3), or
+/// ` │ thinking` when the block sits inside a tool run (D039).
+fn thinking_header_line(gutter: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(TOOL_INDENT.to_string(), dim()),
+        Span::styled(gutter.to_string(), dim()),
         Span::styled("thinking", dim()),
     ])
 }
@@ -1659,8 +1708,9 @@ fn param_row(
     key_col: usize,
     width: usize,
     info: Option<&str>,
+    gutter: &str,
 ) -> Vec<Line<'static>> {
-    let prefix = TOOL_INDENT.to_string();
+    let prefix = gutter.to_string();
     let indent = prefix.chars().count();
     let value_col = indent + key_col + 2;
     let avail = width.saturating_sub(value_col).max(1);
@@ -1698,7 +1748,7 @@ fn param_row(
 /// The params block: one [`param_row`] per `(key, value)`, keys aligned to the
 /// longest; the value is syntax-highlighted when its key names code. Empty
 /// `params` → no rows.
-fn panel_param_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+fn panel_param_lines(tool: &Tool, width: usize, gutter: &str) -> Vec<Line<'static>> {
     if tool.params.is_empty() {
         return Vec::new();
     }
@@ -1712,7 +1762,7 @@ fn panel_param_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         .iter()
         .flat_map(|(key, value)| {
             let info = param_syntax(tool, key);
-            param_row(key, value, key_col, width, info.as_deref())
+            param_row(key, value, key_col, width, info.as_deref(), gutter)
         })
         .collect()
 }
@@ -1720,7 +1770,7 @@ fn panel_param_lines(tool: &Tool, width: usize) -> Vec<Line<'static>> {
 /// The tool's body rows under the flat gutter: the params block precedes it, and
 /// the `note · ms` (or `+a −r · ms`) stats ride the head row ([`tool_stats`]). No
 /// `── notes ──` rule, no `✓` summary row.
-fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'static>> {
+fn tool_panel_body(tool: &Tool, width: usize, expanded: bool, gutter: &str) -> Vec<Line<'static>> {
     let info_owned = tool_body_syntax(tool);
     let info = info_owned.as_deref();
     let mut out = Vec::new();
@@ -1729,12 +1779,16 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
     if !tool.done {
         if expanded {
             let all: Vec<&str> = tool.output.lines().collect();
-            out.extend(tool_body(&all, width, TOOL_EXPANDED_LINES, info, true));
-            if let Some(hint) = more_hint(all.len().saturating_sub(TOOL_EXPANDED_LINES), false) {
+            out.extend(tool_body(&all, width, TOOL_EXPANDED_LINES, info, true, gutter));
+            if let Some(hint) = more_hint(
+                all.len().saturating_sub(TOOL_EXPANDED_LINES),
+                false,
+                gutter,
+            ) {
                 out.push(hint);
             }
         } else if let Some(tail) = last_line(&tool.output) {
-            out.push(prefixed(TOOL_INDENT, &tail, dim()));
+            out.push(prefixed(gutter, &tail, dim()));
         }
         return out;
     }
@@ -1754,9 +1808,9 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
                 Some('-') => removed_style(),
                 _ => dim(),
             };
-            out.push(prefixed(TOOL_INDENT, raw, style));
+            out.push(prefixed(gutter, raw, style));
         }
-        if let Some(hint) = more_hint(all.len().saturating_sub(take), false) {
+        if let Some(hint) = more_hint(all.len().saturating_sub(take), false, gutter) {
             out.push(hint);
         }
         return out;
@@ -1766,12 +1820,12 @@ fn tool_panel_body(tool: &Tool, width: usize, expanded: bool) -> Vec<Line<'stati
     let (_, wide) = summary_line(&tool.output);
     if expanded {
         let all: Vec<&str> = tool.output.lines().collect();
-        out.extend(tool_body(&all, width, all.len(), info, false));
+        out.extend(tool_body(&all, width, all.len(), info, false, gutter));
     } else {
         let body = body_after_summary(&tool.output);
-        out.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, info, false));
+        out.extend(tool_body(&body, width, TOOL_PREVIEW_LINES, info, false, gutter));
         let more = body.len().saturating_sub(TOOL_PREVIEW_LINES);
-        if let Some(hint) = more_hint(more, wide) {
+        if let Some(hint) = more_hint(more, wide, gutter) {
             out.push(hint);
         }
     }
@@ -1877,6 +1931,7 @@ fn tool_body(
     limit: usize,
     info: Option<&str>,
     tail: bool,
+    gutter: &str,
 ) -> Vec<Line<'static>> {
     let total = lines.len();
     if total == 0 {
@@ -1891,17 +1946,17 @@ fn tool_body(
     } else {
         (0, total)
     };
-    body_rows(&lines[start..end], width, info)
+    body_rows(&lines[start..end], width, info, gutter)
 }
 
 /// Wrap a tool body to `width`, one physical row per wrapped segment, char-exact
 /// (`wrap_input`: spaces kept, an over-long token hard-broken) so a long line is
 /// reachable rather than clipped at the pane edge.
-fn body_rows(lines: &[&str], width: usize, info: Option<&str>) -> Vec<Line<'static>> {
+fn body_rows(lines: &[&str], width: usize, info: Option<&str>, gutter: &str) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return Vec::new();
     }
-    let prefix = TOOL_INDENT.to_string();
+    let prefix = gutter.to_string();
     let avail = width.saturating_sub(prefix.chars().count()).max(1);
     let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
     let mut out = Vec::new();
@@ -1924,8 +1979,8 @@ fn body_rows(lines: &[&str], width: usize, info: Option<&str>) -> Vec<Line<'stat
 /// the summary is truncated (a single long line, empty body). `None` when
 /// expansion would reveal nothing more. Informational only — the per-block
 /// toggle is browse mode's `Enter`.
-fn more_hint(more_lines: usize, wide: bool) -> Option<Line<'static>> {
-    let prefix = TOOL_INDENT.to_string();
+fn more_hint(more_lines: usize, wide: bool, gutter: &str) -> Option<Line<'static>> {
+    let prefix = gutter.to_string();
     let text = if more_lines > 0 {
         let line = if more_lines == 1 { "line" } else { "lines" };
         format!("{prefix}… +{more_lines} more {line}")
@@ -3706,13 +3761,13 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     #[test]
     fn the_more_hint_pluralizes_one_hidden_line() {
         // The hint is a unit of the (expanded) body: 1 is singular, 2+ plural.
-        let one = more_hint(1, false).expect("a hint");
+        let one = more_hint(1, false, TOOL_INDENT).expect("a hint");
         assert_eq!(one.spans[0].content.as_ref(), "   … +1 more line");
-        let two = more_hint(2, false).expect("a hint");
+        let two = more_hint(2, false, TOOL_INDENT).expect("a hint");
         assert_eq!(two.spans[0].content.as_ref(), "   … +2 more lines");
         // `wide` adds the single-line-elision hint; 0 with no `wide` → none.
-        assert!(more_hint(0, false).is_none());
-        assert!(more_hint(0, true).is_some());
+        assert!(more_hint(0, false, TOOL_INDENT).is_none());
+        assert!(more_hint(0, true, TOOL_INDENT).is_some());
     }
 
     #[test]
@@ -5037,8 +5092,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let text = buffer_text(&render(&mut app, 70, 30));
         assert!(!text.contains('¹'), "no reference mark:\n{text}");
         assert!(
-            text.matches("   bash").count() == 2,
-            "both tools still render (once each):\n{text}"
+            text.matches("│ bash").count() == 2,
+            "both tools still render (once each), railed as one run (D039):\n{text}"
         );
     }
 
@@ -5672,6 +5727,271 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(
             rows[0].contains("5ms"),
             "the ms survives the note:\n{rows:?}"
+        );
+    }
+
+    /// The CHAR column of `needle` in a rendered row — `│` is three BYTES, so a
+    /// byte `find` would report col 5 for a glyph that occupies col 1.
+    fn col_of(row: &str, needle: &str) -> Option<usize> {
+        let chars: Vec<char> = row.chars().collect();
+        let needle: Vec<char> = needle.chars().collect();
+        if needle.is_empty() || needle.len() > chars.len() {
+            return None;
+        }
+        chars.windows(needle.len()).position(|w| w == needle.as_slice())
+    }
+
+    /// The rendered rows of one block as plain strings, at an explicit `width`.
+    fn rows_of(block: &Block, width: usize) -> Vec<String> {
+        block_lines(block, width)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// A landed `bash` tool for the run-rail fixtures (D039).
+    fn a_tool(command: &str, output: &str) -> Tool {
+        Tool {
+            name: "bash".into(),
+            target: Some(command.into()),
+            output: output.into(),
+            done: true,
+            is_error: false,
+            expanded: false,
+            diff: None,
+            path: None,
+            duration_ms: None,
+            params: vec![("command".into(), command.into())],
+        }
+    }
+
+    fn a_call(id: &str, name: &str) -> ContentBlock {
+        ContentBlock::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    /// A committed turn with `content` and its landed `tools`, rendered as one
+    /// block — the exact shape `turn_inline` walks (D039 fixtures).
+    fn turn_with(content: Vec<ContentBlock>, tools: Vec<Tool>) -> Block {
+        Block::Turn(Turn {
+            n: 1,
+            content,
+            tools,
+            thinking_open: false,
+            open: false,
+        })
+    }
+
+    #[test]
+    fn two_contiguous_calls_both_carry_the_rail() {
+        // ONE run: `│` at col 1 on both rows, every head still at col 3 (D039).
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![
+                a_tool("echo one", "exit code: 0"),
+                a_tool("echo two", "exit code: 0"),
+            ],
+        );
+        let rows = rows_of(&block, 70);
+        assert_eq!(rows.len(), 2, "one row per call:\n{rows:#?}");
+        for row in &rows {
+            assert_eq!(row.chars().next(), Some(' '), "col 0 stays blank: {row:?}");
+            assert_eq!(row.chars().nth(1), Some('│'), "the rail at col 1: {row:?}");
+            assert_eq!(row.chars().nth(2), Some(' '), "col 2 stays blank: {row:?}");
+            assert_eq!(
+                col_of(row, "bash"),
+                Some(3),
+                "the head still starts at col 3: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_call_carries_no_rail() {
+        let block = turn_with(
+            vec![a_call("c1", "bash")],
+            vec![a_tool("echo one", "exit code: 0")],
+        );
+        let rows = rows_of(&block, 70);
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert!(
+            !rows[0].contains('│'),
+            "a lone tool is byte-identical to D038:\n{rows:?}"
+        );
+        assert!(rows[0].starts_with("   bash"), "{rows:?}");
+    }
+
+    #[test]
+    fn prose_between_two_calls_breaks_the_run() {
+        // A `Text` block is the batch boundary: two lone runs, no rail.
+        let block = turn_with(
+            vec![
+                a_call("c1", "bash"),
+                ContentBlock::Text {
+                    text: "between them".into(),
+                },
+                a_call("c2", "bash"),
+            ],
+            vec![a_tool("echo one", "ok"), a_tool("echo two", "ok")],
+        );
+        let rows = rows_of(&block, 70);
+        assert!(
+            !rows.iter().any(|r| r.contains('│')),
+            "no rail across prose:\n{rows:#?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.starts_with("   bash")).count(),
+            2,
+            "two lone heads:\n{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_thinking_block_between_two_calls_keeps_one_run() {
+        // `Thinking` is TRANSPARENT: the two calls stay one run and the thinking
+        // row carries the rail itself (D039).
+        let block = turn_with(
+            vec![
+                a_call("c1", "bash"),
+                ContentBlock::Thinking {
+                    text: "why I am doing this".into(),
+                },
+                a_call("c2", "bash"),
+            ],
+            vec![a_tool("echo one", "ok"), a_tool("echo two", "ok")],
+        );
+        let rows = rows_of(&block, 70);
+        let thinking = rows
+            .iter()
+            .find(|r| r.contains("thinking"))
+            .expect("the thinking row");
+        assert_eq!(
+            thinking.chars().nth(1),
+            Some('│'),
+            "the thinking row carries the rail: {thinking:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|r| r.chars().nth(1) == Some('│')).count(),
+            3,
+            "both heads + the thinking row:\n{rows:#?}"
+        );
+        for row in rows.iter().filter(|r| r.contains("bash")) {
+            assert_eq!(col_of(row, "bash"), Some(3), "content stays at col 3: {row:?}");
+        }
+    }
+
+    #[test]
+    fn an_expanded_panel_body_carries_the_rail() {
+        let mut expanded = a_tool("echo one", "line-a\nline-b");
+        expanded.expanded = true;
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![expanded, a_tool("echo two", "ok")],
+        );
+        let rows = rows_of(&block, 70);
+        for needle in ["line-a", "command"] {
+            let row = rows
+                .iter()
+                .find(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("a {needle} row:\n{rows:#?}"));
+            assert_eq!(
+                row.chars().nth(1),
+                Some('│'),
+                "the {needle} row carries the rail: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_head_keeps_the_rail() {
+        let mut bad = a_tool("echo one", "boom");
+        bad.is_error = true;
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![a_tool("echo two", "ok"), bad],
+        );
+        let rows = rows_of(&block, 70);
+        let err = rows
+            .iter()
+            .find(|r| r.contains('✗'))
+            .expect("the error head");
+        assert_eq!(err.chars().nth(1), Some('│'), "the rail: {err:?}");
+        assert_eq!(col_of(err, "✗"), Some(3), "the mark sits at col 3: {err:?}");
+    }
+
+    #[test]
+    fn the_rail_holds_while_a_mid_run_call_has_not_landed() {
+        // Membership comes from the BLOCKS, not `turn.tools`: the second call has
+        // no panel yet, and the landed one is already railed (no shift on arrival).
+        let block = turn_with(
+            vec![a_call("c1", "bash"), a_call("c2", "bash")],
+            vec![a_tool("echo one", "ok")],
+        );
+        let rows = rows_of(&block, 70);
+        assert_eq!(rows.len(), 1, "one landed panel:\n{rows:#?}");
+        assert_eq!(rows[0].chars().nth(1), Some('│'), "still a run: {rows:?}");
+    }
+
+    #[test]
+    fn eight_continuous_calls_cost_eight_rows() {
+        // D038's guarantee, pinned as a ROW COST: one row per call, whatever its
+        // arguments. Re-introducing the wrap-to-continuation head turns this into
+        // 24–32 rows (measured on the pre-D038 tree: 24 at 100/80 cols, 32 at 60)
+        // and fails here.
+        let cmd = "sh -c 'set -euo pipefail\n\
+            for f in $(git ls-files \"crates/**/*.rs\"); do\n\
+            \tawk -F: \"{print $1 \\\" \\\" $2}\" \"$f\";\n\
+            done | sort -u | uniq -c | sort -rn | head -40' && cargo test --workspace --all-targets";
+        let content: Vec<ContentBlock> = (0..8)
+            .map(|i| a_call(&format!("c{i}"), "bash"))
+            .collect();
+        let tools: Vec<Tool> = (0..8).map(|_| a_tool(cmd, "exit code: 0")).collect();
+        let block = turn_with(content, tools);
+        for width in [60usize, 80, 100] {
+            let rows = rows_of(&block, width);
+            assert_eq!(
+                rows.len(),
+                8,
+                "one row per call at {width} cols:\n{rows:#?}"
+            );
+            assert_eq!(
+                rows.iter().filter(|r| r.chars().nth(1) == Some('│')).count(),
+                8,
+                "and all 8 rows are one railed run at col 1:\n{rows:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_crowding_ladder_sheds_the_stats_before_the_extra_params() {
+        // Rung order (D038): note → ms → the extra `key=value` params. At 48 cols
+        // the stats are gone and `offset=40` survives; a ladder that shed the
+        // extras first would show `5ms` and no `offset`.
+        let mut app = App::new();
+        push_panel_full(
+            &mut app,
+            "read",
+            serde_json::json!({ "path": "crates/wcode-tui/src/ui.rs", "offset": 40 }),
+            "1\tone\n2\ttwo\n3\tthree\n",
+            None,
+            Some(5),
+        );
+        let rows = last_block_rows(&app, 48);
+        assert_eq!(rows.len(), 1, "still ONE row:\n{rows:#?}");
+        assert!(
+            rows[0].contains("offset=40"),
+            "the extra param outlives the stats:\n{rows:?}"
+        );
+        assert!(
+            !rows[0].contains("3 lines") && !rows[0].contains("5ms"),
+            "both stats shed before a param does:\n{rows:?}"
+        );
+        assert!(
+            rows[0].contains("crates/wcode-tui/src/ui.rs"),
+            "the value is intact:\n{rows:?}"
         );
     }
 

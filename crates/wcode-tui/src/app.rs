@@ -7222,6 +7222,21 @@ mod tests {
     }
 
     #[test]
+    fn copy_text_never_gains_the_run_rail() {
+        // Two contiguous calls render as ONE railed run on screen (D039), but the
+        // clipboard reads fields — never rendered lines — so it gains no `│`.
+        let mut app = App::new();
+        push_tool_round(&mut app, "c1", "read");
+        push_tool_round(&mut app, "c2", "read");
+        let block = app.transcript().last().expect("the turn");
+        let text = copy_text(block).expect("a copyable block");
+        assert!(
+            !text.contains('│'),
+            "the rail is presentation-only, never copied: {text:?}"
+        );
+    }
+
+    #[test]
     fn a_prose_only_reply_is_one_turn_with_no_ledger() {
         let mut app = App::new();
         app.handle(AppEvent::Agent(root(), AgentEvent::MessageEnd {
