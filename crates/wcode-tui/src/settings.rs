@@ -15,13 +15,14 @@
 //! [`Section`]), [`rows`] with every `session` row and the `config` section's
 //! line-per-dump split, [`SettingsState`], [`SettingsSnapshot`], [`line_of`],
 //! [`KeyOutcome`], [`on_key`]'s movement + `Tab`/`BackTab` + `←`/`→`/`Enter`
-//! grammar, and [`SettingAction`]'s effects — the four client-local ones plus the
-//! two `Pick` rows' existing pickers.
+//! grammar, and [`SettingAction`]'s effects — the four client-local ones, the two
+//! `Pick` rows' existing pickers, and the effort cycle with its off-list rule.
 //!
-//! Still a sketch, kept verbatim and COMMENTED at the foot of this file: the
-//! effort cycle (step 4: `SetEffort`, `EFFORT_LEVELS`' wrap and the off-list
-//! rule, `effort_position` / `effort_at` / `effort_next`), and the tests it
-//! needs.
+//! Nothing of the panel's model is left as a sketch: the taxonomy, all nine
+//! rows, the `config` section, the pickers and the effort cycle are real. Only
+//! step 6's pending-mark test is still commented at the foot of this file — the
+//! `· pending` mark itself already renders, and `App` feeds it an empty set until
+//! `deferred_settings` lands.
 //! They cannot be *declared* before they are constructed: `dead_code` fires on
 //! an unconstructed enum variant inside a private module, and this crate may not
 //! answer that with `#[allow]` (W032 §6). The step that constructs them brings
@@ -652,6 +653,15 @@ pub enum SettingAction {
     /// `theme`: open the existing theme picker (`app.rs:5107`), whose accept arm
     /// (`:5241`-`:5245`) applies the preset.
     OpenThemePicker,
+    /// `effort`: the `/effort <level>` payload, byte-identical (the `/effort`
+    /// arm, `app.rs:4569`-`:4578`) — `None` for the `(none)` stop, which the wire
+    /// spells as `effort: None`.
+    ///
+    /// STEP 5: `/effort` today writes NO `Status.effort`, so neither does the
+    /// panel — writing it here would show a value the harness never confirmed,
+    /// which is the defect §4.5 exists to fix. The row therefore keeps drawing
+    /// `Status` until the `Settings` reply lands.
+    SetEffort(Option<String>),
     /// `plan`: the `/plan` arm's body — `plan_pending`, `Status.plan`, and
     /// `Request::SetPlanMode` (`app.rs:4289`–`:4304`).
     SetPlan(bool),
@@ -722,6 +732,45 @@ fn step(state: &mut SettingsState, by: isize, total: usize) -> KeyOutcome {
     KeyOutcome::Moved
 }
 
+/// The cycle position of `effort`, or `None` when the value is OFF the list.
+/// Position `0` is `(none)` (`None` on the wire, and also the synonyms
+/// `"none"`/`"off"` that `/effort` already treats as "clear", `app.rs:4255`);
+/// positions `1..` are `EFFORT_LEVELS[1..]`. One function, so the off-list rule
+/// (§4.4) is written once for both [`rows`] and [`on_key`].
+fn effort_position(effort: Option<&str>) -> Option<usize> {
+    match effort {
+        None => Some(0),
+        // `/effort`'s three spellings of "clear" are the `(none)` stop, not an
+        // off-list value: they mean what `None` means.
+        Some("-" | "none" | "off") => Some(0),
+        Some(level) => EFFORT_LEVELS.iter().position(|known| *known == level),
+    }
+}
+
+/// The wire value at a cycle position: `None` at 0, `Some(EFFORT_LEVELS[i])`
+/// above it — byte-identical to what `/effort <level>` sends.
+fn effort_at(position: usize) -> Option<String> {
+    match position {
+        0 => None,
+        i => EFFORT_LEVELS.get(i).map(|level| (*level).to_string()),
+    }
+}
+
+/// `Enter`/`→` = forward, `←` = back. From OFF the list BOTH directions land on
+/// `(none)` — "any arrow press moves to the first list entry" (§4.4) — a
+/// deliberate, visible action rather than a silent clamp. Otherwise wraps over
+/// `EFFORT_LEVELS.len()`.
+fn effort_next(effort: Option<&str>, forward: bool) -> Option<String> {
+    let len = EFFORT_LEVELS.len();
+    let next = match effort_position(effort) {
+        // Off the list: both directions land on the `(none)` stop.
+        None => 0,
+        Some(position) if forward => (position + 1) % len,
+        Some(position) => (position + len - 1) % len,
+    };
+    effort_at(next)
+}
+
 /// `Tab`/`BackTab`: the FIRST row of the next/previous section, wrapping. A
 /// section is never empty (an un-injected config yields a placeholder), so the
 /// walk is a guard rather than a need — with every section empty it is a no-op.
@@ -789,9 +838,12 @@ fn act(state: &mut SettingsState, sections: &[Section], key: Key) -> KeyOutcome 
                 },
                 None => KeyOutcome::None,
             },
-            // STEP 4: the effort cycle is the off-list rule plus the wire
-            // mapping (`effort_next`), so the row renders but does not turn yet.
-            Cycle::Effort => KeyOutcome::None,
+            // The off-list rule lives in `effort_next`: an off-list value is
+            // preserved until a press, and then one press lands on `(none)`.
+            Cycle::Effort => KeyOutcome::Act(SettingAction::SetEffort(effort_next(
+                current.as_deref(),
+                forward,
+            ))),
         },
         // `←`/`→` step the measure, clamped; `Enter` is a no-op (§4.2). The step
         // starts from the KIND's number, never from `value`'s drawn text.
@@ -1283,10 +1335,101 @@ mod tests {
             press(&mut state, &snap(), Key::Enter),
             KeyOutcome::Act(SettingAction::OpenThemePicker)
         );
-        // The effort row does not cycle yet (step 4): `Enter` is swallowed, not a
-        // silent no-op action.
+        // The effort row is a `Cycle`, not a `Pick`: `Enter` advances it.
         focus(&mut state, &snap(), ids::EFFORT);
-        assert_eq!(press(&mut state, &snap(), Key::Enter), KeyOutcome::None);
+        assert_eq!(
+            press(&mut state, &snap(), Key::Enter),
+            KeyOutcome::Act(SettingAction::SetEffort(Some("minimal".into())))
+        );
+    }
+
+    #[test]
+    fn cycle_wraps_and_preserves_an_off_list_value() {
+        // `(none)` → minimal → … → max → `(none)`, and back the other way.
+        let mut state = SettingsState::new();
+        focus(&mut state, &snap(), ids::EFFORT);
+        assert_eq!(
+            press(&mut state, &snap(), Key::Enter),
+            KeyOutcome::Act(SettingAction::SetEffort(Some("minimal".into()))),
+            "Enter advances past the `(none)` stop"
+        );
+        assert_eq!(
+            press(&mut state, &snap(), Key::Left),
+            KeyOutcome::Act(SettingAction::SetEffort(Some("max".into()))),
+            "and `←` wraps the other way"
+        );
+        let at_max = SettingsSnapshot {
+            effort: Some("max"),
+            ..snap()
+        };
+        assert_eq!(
+            press(&mut state, &at_max, Key::Right),
+            KeyOutcome::Act(SettingAction::SetEffort(None)),
+            "`max` + `→` is the `(none)` stop, `None` on the wire"
+        );
+        assert_eq!(
+            press(&mut state, &at_max, Key::Left),
+            KeyOutcome::Act(SettingAction::SetEffort(Some("xhigh".into()))),
+        );
+        // The whole ladder, one turn at a time, wraps at both ends.
+        let mut walked: Vec<Option<String>> = vec![None];
+        let mut current: Option<String> = None;
+        for _ in 0..EFFORT_LEVELS.len() {
+            current = effort_next(current.as_deref(), true);
+            walked.push(current.clone());
+        }
+        assert_eq!(
+            walked,
+            vec![
+                None,
+                Some("minimal".to_string()),
+                Some("low".to_string()),
+                Some("medium".to_string()),
+                Some("high".to_string()),
+                Some("xhigh".to_string()),
+                Some("max".to_string()),
+                None,
+            ],
+            "the cycle closes on itself after seven presses"
+        );
+        // An OFF-LIST value is preserved verbatim and ONE press — either
+        // direction — lands on `(none)` (§4.4), never silently reused.
+        let off = SettingsSnapshot {
+            effort: Some("medium-high"),
+            ..snap()
+        };
+        assert_eq!(
+            row(&rows(&off), ids::EFFORT).value, "medium-high",
+            "rendered verbatim, not clamped"
+        );
+        focus(&mut state, &off, ids::EFFORT);
+        assert_eq!(
+            press(&mut state, &off, Key::Right),
+            KeyOutcome::Act(SettingAction::SetEffort(None)),
+            "→ from off-list lands on `(none)`"
+        );
+        assert_eq!(
+            press(&mut state, &off, Key::Left),
+            KeyOutcome::Act(SettingAction::SetEffort(None)),
+            "and so does ←"
+        );
+        // `/effort`'s three clear spellings are the `(none)` stop, not off-list.
+        for clear in ["-", "none", "off"] {
+            assert_eq!(effort_position(Some(clear)), Some(0), "{clear}");
+            assert_eq!(
+                effort_next(Some(clear), true),
+                Some("minimal".to_string()),
+                "{clear} + →"
+            );
+            assert_eq!(
+                effort_next(Some(clear), false),
+                Some("max".to_string()),
+                "{clear} + ←"
+            );
+        }
+        assert_eq!(effort_position(None), Some(0), "`None` is the `(none)` stop");
+        assert_eq!(effort_at(0), None);
+        assert_eq!(effort_at(1), Some("minimal".to_string()));
     }
 
     #[test]
@@ -1409,53 +1552,8 @@ mod tests {
     }
 }
 
-// ==== SKETCH (review-only, not real code) — W032 step 4: the effort cycle.
-// Kept VERBATIM from the reviewed sketch: the step that constructs it uncomments
-// these and deletes this block (see the module doc's "Real so far").
-//
-// Step 4 registers `SetEffort`, `effort_position` / `effort_at` / `effort_next`
-// below, and replaces `Cycle::Effort => KeyOutcome::None` in `act` with the
-// off-list rule.
-//
-// /// `effort`: `Status.effort` optimistically + `Request::SetEffort` (the
-// /// `/effort` arm, `app.rs:4252`–`:4261`, which today writes no `Status`).
-// SetEffort(Option<String>),
-//
-// ---- the effort helpers, verbatim ----
-//
-// /// The cycle position of `effort`, or `None` when the value is OFF the list.
-// /// Position `0` is `(none)` (`None` on the wire, and also the synonyms
-// /// `"none"`/`"off"` that `/effort` already treats as "clear", `app.rs:4255`);
-// /// positions `1..` are `EFFORT_LEVELS[1..]`. One function, so the off-list rule
-// /// (§4.4) is written once for both `rows` and `on_key`.
-// fn effort_position(effort: Option<&str>) -> Option<usize> {
-//     todo!()
-// }
-//
-// /// The wire value at a cycle position: `None` at 0, `Some(EFFORT_LEVELS[i])`
-// /// above it — byte-identical to what `/effort <level>` sends.
-// fn effort_at(position: usize) -> Option<String> {
-//     todo!()
-// }
-//
-// /// `Enter`/`→` = forward, `←` = back. From OFF the list BOTH directions land on
-// /// `(none)` — "any arrow press moves to the first list entry" (§4.4) — a
-// /// deliberate, visible action rather than a silent clamp. Otherwise wraps over
-// /// `EFFORT_LEVELS.len()`.
-// fn effort_next(effort: Option<&str>, forward: bool) -> Option<String> {
-//     todo!()
-// }
-// ==== /SKETCH ====
 
-// ==== SKETCH (review-only, not real code) — the tests of steps 3–6 ====
-// Helpers + one test per row-level rule that needs the steps above.
-//
-// #[test]
-// fn cycle_wraps_and_preserves_an_off_list_value() {
-//     todo!()
-//     // `None` → minimal → … → max → `None`; `Some("medium-high")` renders
-//     // verbatim and ONE arrow press lands on `(none)` — either direction.
-// }
+// ==== SKETCH (review-only, not real code) — the pending-mark test (step 6) ====
 //
 // #[test]
 // fn only_the_three_request_rows_can_be_pending() {
@@ -1465,7 +1563,7 @@ mod tests {
 //     // including all `config` rows and `tool output`/`context` (§4.8).
 //     //
 //     // The CLOSE-survival half of §4.5 (`Esc` clears no mark) is App-level —
-//     // `App::deferred_settings` is not inside the `Option` that close drops —
+//     // `App.deferred_settings` is not inside the `Option` that close drops —
 //     // and is pinned by `a_mid_run_setting_shows_pending_until_the_reply` in
 //     // `app.rs`'s tests, where `App::handle` is reachable.
 // }

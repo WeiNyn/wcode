@@ -5543,13 +5543,25 @@ impl App {
         let outcome = crate::settings::on_key(state, key, &sections);
         // `KeyOutcome` owns its data, so the `&mut` borrow of `state` ends here
         // and the handlers below may take `&mut self` again.
-        match outcome {
-            crate::settings::KeyOutcome::Close => self.close_settings(),
-            crate::settings::KeyOutcome::Act(action) => self.apply_setting(action),
+        let act = match outcome {
+            crate::settings::KeyOutcome::Close => {
+                self.close_settings();
+                return;
+            }
+            crate::settings::KeyOutcome::Act(action) => Some(action),
             // `None`/`Moved`: a swallowed key costs one no-op frame, exactly as
             // `on_overlay_key`'s `self.dirty = true` does.
-            _ => self.dirty = true,
+            _ => None,
+        };
+        if let Some(action) = act {
+            self.apply_setting(action);
         }
+        // EVERY key repaints, an act included. Most setters mark the frame
+        // themselves, but `SetEffort` changes nothing the client owns (the value
+        // is confirmed by the harness, §4.5), so relying on the setter would
+        // leave the press with no frame at all — a key that silently does nothing
+        // visible is exactly the swallow this tier exists to avoid.
+        self.dirty = true;
     }
 
     /// Execute one [`crate::settings::SettingAction`] — a FLAT match, one arm
@@ -5563,6 +5575,9 @@ impl App {
     /// - `OpenModelPicker`/`OpenThemePicker` raise the ordinary `Overlay::Pick`
     ///   and nothing else: the accept arm that already exists applies the value,
     ///   and the panel survives because it is not the `overlay` slot (§4.1).
+    /// - `SetEffort` pushes the `/effort` payload only. It deliberately does NOT
+    ///   write `Status.effort` (step 5's defect fix): an optimistic value the
+    ///   harness never confirmed is the lie §4.5 exists to remove.
     /// - `SetPlan` is the DEFERRABLE one (§4.5) and runs the `/plan` arm's body:
     ///   write `Status.plan` optimistically, remember the previous value in
     ///   `plan_pending` (the `AgentEvent::Error` revert), and ask the harness.
@@ -5580,6 +5595,13 @@ impl App {
             // the PICKER, so the panel is still open underneath (§4.1's payoff).
             crate::settings::SettingAction::OpenModelPicker => self.open_model_picker(),
             crate::settings::SettingAction::OpenThemePicker => self.open_theme_picker(),
+            // The `/effort` payload, and nothing else: `Status.effort` is NOT
+            // written here. `/effort` does not write it either, because a value
+            // the harness has not confirmed is exactly the stale-status defect
+            // §4.5 fixes — that write arrives with the `Settings` reply (step 5).
+            crate::settings::SettingAction::SetEffort(effort) => {
+                self.actions.push(Action::Ask(Request::SetEffort { effort }));
+            }
             crate::settings::SettingAction::SetPlan(on) => {
                 let prev = self.focused().status.plan;
                 let surface = self.focused_mut();
@@ -9348,6 +9370,43 @@ mod tests {
             .find(|r| r.id == crate::settings::ids::MODEL)
             .expect("the model row");
         assert_eq!(row.value, "b-model", "the panel re-reads `Status`");
+    }
+
+    #[test]
+    fn the_effort_row_cycles_and_asks_without_writing_status() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.handle(AppEvent::Key(Key::Down)); // `effort`
+        assert_eq!(app.status().effort, None, "the session has no effort set");
+        app.handle(AppEvent::Key(Key::Right));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetEffort {
+                effort: Some("minimal".into())
+            })],
+            "one SetEffort ask, the `/effort minimal` payload"
+        );
+        // Deliberately NOT written optimistically: `/effort` writes no `Status`
+        // either, and an unconfirmed value is the defect step 5 fixes. So the row
+        // still reads `Status`, and a second press asks the same thing — honest,
+        // and the panel never shows a value the harness has not confirmed.
+        assert_eq!(app.status().effort, None, "no optimistic write");
+        app.handle(AppEvent::Key(Key::Right));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetEffort {
+                effort: Some("minimal".into())
+            })],
+            "the row still reads `Status`"
+        );
+        assert!(app.settings().is_some(), "the panel survives the ask");
+        // The frame still repaints: the client changes nothing it owns here, so
+        // the `dirty` flag cannot be left to a setter (a key with no frame is the
+        // swallow this tier exists to avoid).
+        app.take_actions();
+        app.clear_dirty();
+        app.handle(AppEvent::Key(Key::Right));
+        assert!(app.dirty(), "an act repaints the panel");
     }
 
     #[test]
