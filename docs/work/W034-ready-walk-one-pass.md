@@ -1,7 +1,8 @@
 # W034 — The readiness walk is one pass (`ready_ids_in` + `ready_ids_where`)
 
-**Status:** **shipped** — first-layer APPROVE with 8 mandatory amendments (A1–A8),
-all landed; implemented in code commit `f28b053` plus this bookkeeping commit.
+**Status:** **shipped** — second-layer **APPROVED at `f28b053`**; first-layer
+APPROVE with 8 mandatory amendments (A1–A8), all landed; implemented in code
+commit `f28b053` plus this bookkeeping commit.
 Gates at hand-off: `cargo test --workspace` **1489 passed / 4 ignored**, `cargo
 clippy --workspace --all-targets` **clean**, plus a live headless workflow run (§4).
 **Decision record:** [`decisions/D040-ready-walk-one-pass.md`](../decisions/D040-ready-walk-one-pass.md).

@@ -1,6 +1,8 @@
 # D040 — The readiness walk is one pass, and the frontier takes one lock
 
-- **Status:** accepted (first-layer APPROVE with amendments A1–A8; implemented)
+- **Status:** accepted — second-layer **APPROVED at `f28b053`** (rework: one
+  blocker, five stale book anchors + a stray blank line + a forward-dependency
+  test, all fixed); first-layer APPROVE with amendments A1–A8, all landed
 - **Date:** this session
 - **Relates to:** [`tasks.rs`](../../crates/wcode-cli/src/tasks.rs) (`ready_ids_in`,
   `ready_ids`, `ready_ids_where`), [`scheduler.rs`](../../crates/wcode-cli/src/scheduler.rs)
