@@ -1,6 +1,6 @@
 # W033 — Team membership is declared, not discovered (`[[team]]` only)
 
-**Status:** accepted — human sign-off recorded (§0). Implementation not started.
+**Status:** **shipped** — signed off (§0), sketched, implemented, **second-layer APPROVED** at `6e2d660` after one BLOCK (two prose items). Commits `25a2967` → `3031ba8` → `7d6e4d2` → `6e2d660`.
 **Supersedes:** D-C2's discovery half, D-B1's "or ≥ 1 discovered agent `.md` member" clause, D005's global-scan carve-out, and D017's fold-suppression amendment (which becomes structurally moot).
 **Decision record:** [`decisions/D037-toml-only-team-membership.md`](../decisions/D037-toml-only-team-membership.md).
 **Read-only author note:** the brief was authored by a read-only worker — `cargo test`, `cargo clippy`, `--dump-config` and `--dump-system-prompt` could not be run. Every live check in §8/§10 is *proposed*, not run. Line numbers are from reading the tree; §12 lists what that leaves unverified.
@@ -409,3 +409,40 @@ as "a discovered `.wcode/agents/<name>.md` role", which the plan named three tim
    2 failed`; both pass in isolation and the next two full runs were green
    (1457 passed). Unrelated to W033 — it makes "the gates are clean" a
    timing-dependent statement, which is why it is filed rather than shrugged at.
+
+---
+
+## 14. Outcome
+
+**Shipped.** `25a2967` → `3031ba8` → `7d6e4d2` → `6e2d660`. Second-layer review
+APPROVED at `6e2d660`, after one BLOCK consisting of two prose items (A6's
+`main.rs:1683` "folded", and D024's Context) — no behavioural finding.
+
+The end state, as measured rather than asserted:
+
+- `--dump-config | grep -c '^team\.'` → **6**; `--dump-system-prompt | grep -c '^# Your team'`
+  → **1**; `--team recon --dump-config | grep -c '^team\.'` → **2** (recon's declared
+  pair only — the old D017 fold-symptom is unreachable, because no fold symbol
+  exists in the binary).
+- `agent_files::{discover, discover_project, discover_global, load_members,
+  collect_agent_files(_at)}`, `MAX_SCAN_DEPTH`, the `HashSet` import and the three
+  precedence tests are gone; `parse_agent_md`, `resolve_role`, `resolve_member_files`
+  survive with live callers; **no new `#[allow(dead_code)]`**; `PathBuf` moved into
+  `mod tests`.
+- The two non-scope bodies are byte-identical across the diff — `resolve_team_files`
+  `sha1 360891d2…`, `resolve_role` `698e7d45…` — so the W020 A9 resolver
+  unification did not happen here (A11).
+- Tests **1462 → 1457** (7 deleted, 2 added, 4 renamed). Every replacement test
+  fails if the fold is restored; the one exception is A2's disclaimed limit,
+  which its doc states outright.
+- Gates: `cargo build --workspace` clean · `cargo test --workspace` 1457 passed,
+  4 ignored · `cargo clippy --workspace --all-targets` No issues found ·
+  `check-book.py docs/book` ok (19 pages) · `grep -rn SKETCH crates/` → 0.
+
+**Deliberate capability loss, owned:** `spawn { agent }` names declared roles only.
+An ad-hoc worker is still expressible through `spawn`'s own `role`/`model`/`tools`
+arguments (D037).
+
+**Filed, not fixed:** tracker row 99 (the pre-existing `wcode-tui` theme race that
+flaked one of three gate runs) and the `docs/book/appendix-decisions.html` back-fill
+(D035–D037, all missing before W033).

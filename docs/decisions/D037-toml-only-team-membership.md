@@ -1,7 +1,8 @@
 # D037 — Team membership is declared, not discovered
 
-- **Status:** accepted (human sign-off on the W033 brief — answers #1 `A`, #2
-  yes, #3 ok)
+- **Status:** **implemented (W033 shipped)** — human sign-off on the W033 brief
+  (answers #1 `A`, #2 yes, #3 ok); second-layer review APPROVED at `6e2d660`, after
+  one BLOCK (two prose items) and a first-layer APPROVE with amendments A1–A12
 - **Date:** this session
 - **Relates to:** [`main.rs`](../../crates/wcode-cli/src/main.rs)
   (`load_config_raw`, `resolve_team_files`, the removed `fold_discovered_members`),
