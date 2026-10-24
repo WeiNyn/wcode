@@ -15,12 +15,13 @@
 //! [`Section`]), [`rows`] with every `session` row and the `config` section's
 //! line-per-dump split, [`SettingsState`], [`SettingsSnapshot`], [`line_of`],
 //! [`KeyOutcome`], [`on_key`]'s movement + `Tab`/`BackTab` + `←`/`→`/`Enter`
-//! grammar, and [`SettingAction`]'s four client-local effects.
+//! grammar, and [`SettingAction`]'s effects — the four client-local ones plus the
+//! two `Pick` rows' existing pickers.
 //!
 //! Still a sketch, kept verbatim and COMMENTED at the foot of this file: the
-//! `Pick` effects (step 3: `OpenModelPicker` / `OpenThemePicker`), the effort
-//! cycle (step 4: `SetEffort`, `EFFORT_LEVELS`' wrap and the off-list rule,
-//! `effort_position` / `effort_at` / `effort_next`), and the tests they need.
+//! effort cycle (step 4: `SetEffort`, `EFFORT_LEVELS`' wrap and the off-list
+//! rule, `effort_position` / `effort_at` / `effort_next`), and the tests it
+//! needs.
 //! They cannot be *declared* before they are constructed: `dead_code` fires on
 //! an unconstructed enum variant inside a private module, and this crate may not
 //! answer that with `#[allow]` (W032 §6). The step that constructs them brings
@@ -185,12 +186,23 @@ pub enum SettingKind {
     Toggle { on: bool, what: Toggle },
     /// `←`/`→`/`Enter` advance (back/forward/forward); wraps; preserves an
     /// off-list value until the first press (§4.4).
+    ///
+    /// `current` is the WIRE value the cycle turns from — `None` is the effort
+    /// cycle's `(none)` stop, which `Setting::value` draws as the word
+    /// `(none)`. The kind carries it so the key handler never parses the drawn
+    /// column; a change to `value`'s formatting cannot change what a press does.
     Cycle {
+        current: Option<String>,
         options: &'static [&'static str],
         what: Cycle,
     },
     /// `←`/`→` step by `step`, clamped to `min..=max`; `Enter` is a no-op.
+    ///
+    /// `current` is the machine number (`Setting::value` draws it with its unit:
+    /// `"68 cols"`). Carried here for the same reason as [`Self::Cycle`]'s
+    /// `current`: input never parses display text.
     Nudge {
+        current: usize,
         min: usize,
         max: usize,
         step: usize,
@@ -375,6 +387,8 @@ pub fn rows(snapshot: &SettingsSnapshot<'_>) -> Vec<Section> {
             id: ids::EFFORT,
             label: Cow::Borrowed("effort"),
             kind: SettingKind::Cycle {
+                // `None` = the `(none)` stop; the drawn word below says so.
+                current: snapshot.effort.map(str::to_string),
                 options: EFFORT_LEVELS,
                 what: Cycle::Effort,
             },
@@ -409,6 +423,7 @@ pub fn rows(snapshot: &SettingsSnapshot<'_>) -> Vec<Section> {
             id: ids::WIDTH,
             label: Cow::Borrowed("width"),
             kind: SettingKind::Nudge {
+                current: snapshot.width,
                 min: MEASURE_MIN,
                 max: MEASURE_LIMIT,
                 step: MEASURE_STEP,
@@ -420,6 +435,7 @@ pub fn rows(snapshot: &SettingsSnapshot<'_>) -> Vec<Section> {
             id: ids::VIEW,
             label: Cow::Borrowed("view"),
             kind: SettingKind::Cycle {
+                current: Some(view_word(snapshot.view).to_string()),
                 options: VIEW_MODES,
                 what: Cycle::View,
             },
@@ -613,8 +629,8 @@ pub enum KeyOutcome {
 ///   instantly and never mark pending (§4.8).
 /// - `SetWidth`'s value is already clamped to the row's `min..=max`; the caller's
 ///   `set_measure` clamps again (harmless, `app.rs:2705`).
-/// - `OpenModelPicker` / `OpenThemePicker` (step 3) and `SetEffort` (step 4) are
-///   their own steps' arms; their sketches are at the foot of this file.
+/// - `SetEffort` (step 4) is its own step's arm; its sketch is at the foot of
+///   this file.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingAction {
     /// `width`: `App::set_measure(cols)` (`app.rs:2704`).
@@ -623,6 +639,19 @@ pub enum SettingAction {
     SetView(ViewMode),
     /// `sidebar`: `App::toggle_sidebar()` (`app.rs:5442`).
     ToggleSidebar,
+    /// `model`: open the EXISTING picker (`app.rs:5114`) — its accept arm
+    /// (`:5217`-`:5221`) writes `Status.model` and asks `SetModel`, and the panel
+    /// is still open underneath (the host decision's payoff, §4.1).
+    ///
+    /// ONE VARIANT PER PICKER (first-layer A3), not `OpenPicker(PickerKind)`: the
+    /// other four `PickerKind`s (`Change`/`Resume`/`Team`/`Surface`) are not
+    /// settings rows, so a payload would force `apply_setting` to grow a
+    /// wildcard arm for impossible states — the silent-match class this item
+    /// exists to avoid. Two variants keep the caller's match flat AND total.
+    OpenModelPicker,
+    /// `theme`: open the existing theme picker (`app.rs:5107`), whose accept arm
+    /// (`:5241`-`:5245`) applies the preset.
+    OpenThemePicker,
     /// `plan`: the `/plan` arm's body — `plan_pending`, `Status.plan`, and
     /// `Request::SetPlanMode` (`app.rs:4289`–`:4304`).
     SetPlan(bool),
@@ -752,8 +781,8 @@ fn act(state: &mut SettingsState, sections: &[Section], key: Key) -> KeyOutcome 
                 Toggle::Sidebar => SettingAction::ToggleSidebar,
             })
         }
-        SettingKind::Cycle { options, what } => match what {
-            Cycle::View => match cycle_value(&row.value, options, forward) {
+        SettingKind::Cycle { current, options, what } => match what {
+            Cycle::View => match cycle_value(current.as_deref(), options, forward) {
                 Some(next) => match ViewMode::parse(next) {
                     Ok(view) => KeyOutcome::Act(SettingAction::SetView(view)),
                     Err(_) => KeyOutcome::None,
@@ -764,21 +793,17 @@ fn act(state: &mut SettingsState, sections: &[Section], key: Key) -> KeyOutcome 
             // mapping (`effort_next`), so the row renders but does not turn yet.
             Cycle::Effort => KeyOutcome::None,
         },
-        // `←`/`→` step the measure, clamped; `Enter` is a no-op (§4.2).
-        SettingKind::Nudge { min, max, step } => {
+        // `←`/`→` step the measure, clamped; `Enter` is a no-op (§4.2). The step
+        // starts from the KIND's number, never from `value`'s drawn text.
+        SettingKind::Nudge {
+            current,
+            min,
+            max,
+            step,
+        } => {
             if key == Key::Enter {
                 return KeyOutcome::None;
             }
-            // The row's value is the drawn `"{n} cols"`; the leading integer is
-            // the number it steps from.
-            let Some(current) = row
-                .value
-                .split(' ')
-                .next()
-                .and_then(|n| n.parse::<usize>().ok())
-            else {
-                return KeyOutcome::None;
-            };
             let next = if forward {
                 current.saturating_add(*step).min(*max)
             } else {
@@ -786,9 +811,16 @@ fn act(state: &mut SettingsState, sections: &[Section], key: Key) -> KeyOutcome 
             };
             KeyOutcome::Act(SettingAction::SetWidth(next))
         }
-        // STEP 3: `Enter` opens the existing picker (`Overlay::Pick`), whose
-        // accept arm applies the value while the panel stays open underneath.
-        SettingKind::Pick { .. } => KeyOutcome::None,
+        // `Enter` opens the existing picker (`Overlay::Pick`), whose accept arm
+        // applies the value while the panel stays open underneath. `←`/`→` are
+        // no-ops (§4.2): a picker is a choice, not a cycle.
+        SettingKind::Pick { kind } => match (key, kind) {
+            (Key::Enter, PickerKind::Model) => KeyOutcome::Act(SettingAction::OpenModelPicker),
+            (Key::Enter, PickerKind::Theme) => KeyOutcome::Act(SettingAction::OpenThemePicker),
+            // `rows` builds `Pick` only for the two settings rows; the other four
+            // kinds are a guard, never a case.
+            _ => KeyOutcome::None,
+        },
         // `Enter` sets the one-line hint; `←`/`→` are no-ops and leave it alone
         // (first-layer B7 — `↑`/`↓` never reach here, so they still move).
         SettingKind::ReadOnly { note } => match key {
@@ -801,15 +833,20 @@ fn act(state: &mut SettingsState, sections: &[Section], key: Key) -> KeyOutcome 
     }
 }
 
-/// The token after (forward) or before (back) `value` in `options`, wrapping. A
-/// value that is OFF the list lands on the FIRST entry either way — the visible,
-/// deliberate move §4.4 asks for, never a silent clamp.
-fn cycle_value(value: &str, options: &[&'static str], forward: bool) -> Option<&'static str> {
+/// The token after (forward) or before (back) `current` in `options`, wrapping.
+/// A value that is OFF the list lands on the FIRST entry either way — the
+/// visible, deliberate move §4.4 asks for, never a silent clamp.
+fn cycle_value(
+    current: Option<&str>,
+    options: &[&'static str],
+    forward: bool,
+) -> Option<&'static str> {
     let len = options.len();
     if len == 0 {
         return None;
     }
-    let next = match options.iter().position(|option| *option == value) {
+    let position = current.and_then(|value| options.iter().position(|option| *option == value));
+    let next = match position {
         Some(i) if forward => (i + 1) % len,
         Some(i) => (i + len - 1) % len,
         None => 0,
@@ -879,6 +916,9 @@ mod tests {
             .expect("row id present");
         while state.cursor() < index {
             press(state, snapshot, Key::Down);
+        }
+        while state.cursor() > index {
+            press(state, snapshot, Key::Up);
         }
         assert_eq!(state.cursor(), index, "the cursor reached {id}");
     }
@@ -1088,6 +1128,7 @@ mod tests {
         assert_eq!(
             nudges[0].kind,
             SettingKind::Nudge {
+                current: 68,
                 min: MEASURE_MIN,
                 max: MEASURE_LIMIT,
                 step: MEASURE_STEP,
@@ -1138,6 +1179,46 @@ mod tests {
     }
 
     #[test]
+    fn the_nudge_steps_from_the_kind_not_from_the_drawn_value() {
+        // The `width` row draws `"68 cols"`; the press must not depend on that
+        // formatting. Rewriting the drawn column to something unparsable leaves
+        // the step identical — the machine value lives in `SettingKind::Nudge`.
+        let snapshot = snap();
+        let mut sections = rows(&snapshot);
+        for row in sections.iter_mut().flat_map(|s| &mut s.rows) {
+            if row.id == ids::WIDTH {
+                row.value = "not a number".to_string();
+            }
+        }
+        let mut state = SettingsState::new();
+        for _ in 0..4 {
+            on_key(&mut state, Key::Down, &sections);
+        }
+        assert_eq!(
+            on_key(&mut state, Key::Right, &sections),
+            KeyOutcome::Act(SettingAction::SetWidth(68 + MEASURE_STEP)),
+            "the step comes from the kind, not the drawn text"
+        );
+        // The same for the cycle: its `current` is the wire value, so a rewritten
+        // `value` cannot change which token comes next.
+        let mut sections = rows(&snapshot);
+        for row in sections.iter_mut().flat_map(|s| &mut s.rows) {
+            if row.id == ids::VIEW {
+                row.value = "??".to_string();
+            }
+        }
+        let mut state = SettingsState::new();
+        while state.cursor() < 5 {
+            on_key(&mut state, Key::Down, &sections);
+        }
+        assert_eq!(
+            on_key(&mut state, Key::Right, &sections),
+            KeyOutcome::Act(SettingAction::SetView(ViewMode::All)),
+            "the cycle turns from the kind too"
+        );
+    }
+
+    #[test]
     fn enter_acts_per_kind_and_arrows_are_no_ops_on_a_toggle() {
         let mut state = SettingsState::new();
         focus(&mut state, &snap(), ids::PLAN);
@@ -1182,6 +1263,30 @@ mod tests {
             KeyOutcome::Act(SettingAction::SetView(ViewMode::Focus)),
             "and `←` is the other direction, also wrapping"
         );
+    }
+
+    #[test]
+    fn enter_on_a_pick_row_opens_its_picker_and_arrows_do_not() {
+        let mut state = SettingsState::new();
+        // The cursor opens on `model`.
+        assert_eq!(
+            press(&mut state, &snap(), Key::Enter),
+            KeyOutcome::Act(SettingAction::OpenModelPicker)
+        );
+        // `←`/`→` are no-ops on a Pick — a picker is a choice, not a cycle.
+        for key in [Key::Left, Key::Right] {
+            assert_eq!(press(&mut state, &snap(), key), KeyOutcome::None, "{key:?}");
+        }
+        // `theme` is the other `Pick` row.
+        focus(&mut state, &snap(), ids::THEME);
+        assert_eq!(
+            press(&mut state, &snap(), Key::Enter),
+            KeyOutcome::Act(SettingAction::OpenThemePicker)
+        );
+        // The effort row does not cycle yet (step 4): `Enter` is swallowed, not a
+        // silent no-op action.
+        focus(&mut state, &snap(), ids::EFFORT);
+        assert_eq!(press(&mut state, &snap(), Key::Enter), KeyOutcome::None);
     }
 
     #[test]
@@ -1304,38 +1409,14 @@ mod tests {
     }
 }
 
-// ==== SKETCH (review-only, not real code) — W032 step 4: the effort cycle,
-// and step 3's picker effects. Kept VERBATIM from the reviewed sketch: the step
-// that constructs them uncomments these and deletes this block (see the module
-// doc's "Real so far").
+// ==== SKETCH (review-only, not real code) — W032 step 4: the effort cycle.
+// Kept VERBATIM from the reviewed sketch: the step that constructs it uncomments
+// these and deletes this block (see the module doc's "Real so far").
 //
-// Step 3 registers, in `SettingAction` above:
-//     OpenModelPicker,
-//     OpenThemePicker,
-// and turns `SettingKind::Pick`'s arm in `act` into
-//     KeyOutcome::Act(match kind { PickerKind::Model => SettingAction::OpenModelPicker,
-//                                  PickerKind::Theme => SettingAction::OpenThemePicker,
-//                                  _ => return KeyOutcome::None }),
-// — one variant per picker (first-layer A3), so `apply_setting` needs no
-// wildcard for impossible kinds.
-//
-// Step 4 registers `SetEffort`, `effort_position` / `effort_at` /
-// `effort_next` below, and replaces `Cycle::Effort => KeyOutcome::None` with the
+// Step 4 registers `SetEffort`, `effort_position` / `effort_at` / `effort_next`
+// below, and replaces `Cycle::Effort => KeyOutcome::None` in `act` with the
 // off-list rule.
 //
-// The two variants' contracts, verbatim from the sketch:
-//
-// /// `model` / `theme`: open the EXISTING picker (`app.rs:5114`, `:5107`); the
-// /// accept arm that already exists applies it (`:5217`–`:5221`, `:5241`–`:5245`),
-// /// and the panel is still open underneath — the host decision's payoff (§4.1).
-// ///
-// /// ONE VARIANT PER PICKER (first-layer A3), not `OpenPicker(PickerKind)`: the
-// /// four other `PickerKind`s (`Change`/`Resume`/`Team`/`Surface`) are not
-// /// settings rows, so a payload would force `apply_setting` to grow a
-// /// wildcard arm for impossible states — the silent-match class this item
-// /// exists to avoid. Two variants keep the caller's match flat AND total.
-// OpenModelPicker,
-// OpenThemePicker,
 // /// `effort`: `Status.effort` optimistically + `Request::SetEffort` (the
 // /// `/effort` arm, `app.rs:4252`–`:4261`, which today writes no `Status`).
 // SetEffort(Option<String>),
@@ -1387,12 +1468,5 @@ mod tests {
 //     // `App::deferred_settings` is not inside the `Option` that close drops —
 //     // and is pinned by `a_mid_run_setting_shows_pending_until_the_reply` in
 //     // `app.rs`'s tests, where `App::handle` is reachable.
-// }
-//
-// #[test]
-// fn enter_on_the_model_row_opens_the_picker_and_returns_to_the_panel() {
-//     todo!()
-//     // Step 3: `Act(OpenModelPicker)`, and `accept_picker`'s existing arm
-//     // applies the model while `App.settings` stays `Some`.
 // }
 // ==== /SKETCH ====

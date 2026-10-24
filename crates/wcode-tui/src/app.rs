@@ -5560,6 +5560,9 @@ impl App {
     /// # Contracts
     /// - `SetWidth`/`SetView`/`ToggleSidebar` settle instantly and never mark
     ///   pending (§4.8): each is one client-local setter.
+    /// - `OpenModelPicker`/`OpenThemePicker` raise the ordinary `Overlay::Pick`
+    ///   and nothing else: the accept arm that already exists applies the value,
+    ///   and the panel survives because it is not the `overlay` slot (§4.1).
     /// - `SetPlan` is the DEFERRABLE one (§4.5) and runs the `/plan` arm's body:
     ///   write `Status.plan` optimistically, remember the previous value in
     ///   `plan_pending` (the `AgentEvent::Error` revert), and ask the harness.
@@ -5572,6 +5575,11 @@ impl App {
             crate::settings::SettingAction::SetWidth(cols) => self.set_measure(cols),
             crate::settings::SettingAction::SetView(view) => self.set_view_mode(view),
             crate::settings::SettingAction::ToggleSidebar => self.toggle_sidebar(),
+            // The EXISTING pickers: no new `PickerKind` and no new accept path —
+            // `accept_picker` applies the value, and its `overlay.take()` removes
+            // the PICKER, so the panel is still open underneath (§4.1's payoff).
+            crate::settings::SettingAction::OpenModelPicker => self.open_model_picker(),
+            crate::settings::SettingAction::OpenThemePicker => self.open_theme_picker(),
             crate::settings::SettingAction::SetPlan(on) => {
                 let prev = self.focused().status.plan;
                 let surface = self.focused_mut();
@@ -9251,9 +9259,29 @@ mod tests {
             app.handle(AppEvent::Key(key));
             assert_eq!(app.cursor(), 1, "{key:?} reached the composer");
         }
-        // NOT asserted here: a picker opened OVER the panel (step 3). Until the
-        // `model`/`theme` rows exist no picker can be raised from inside it, so
-        // the `overlay`-wins half of this test arrives with `OpenModelPicker`.
+    }
+
+    #[test]
+    fn a_picker_opens_over_the_panel_and_owns_the_keys() {
+        let mut app = App::new();
+        app.set_models(vec!["a-model".into(), "b-model".into()]);
+        app.handle(AppEvent::Key(Key::F(2)));
+        let panel_cursor = app.settings().expect("open").cursor();
+        app.handle(AppEvent::Key(Key::Enter)); // the picker, over the panel
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(_))));
+        for key in [Key::Down, Key::Down, Key::Up] {
+            app.handle(AppEvent::Key(key));
+        }
+        // The picker owns the arrows: the panel's cursor never moved.
+        assert_eq!(
+            app.settings().expect("open").cursor(),
+            panel_cursor,
+            "the picker, not the panel, answered the arrows"
+        );
+        // Accepting returns to the panel, cursor intact.
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none());
+        assert_eq!(app.settings().expect("open").cursor(), panel_cursor);
     }
 
     #[test]
@@ -9282,6 +9310,44 @@ mod tests {
         app.handle(AppEvent::Key(Key::Tab));
         assert_eq!(app.settings().expect("open").cursor(), 9, "the first config row");
         assert_eq!(app.focus(), 0, "Tab did not move the surface focus");
+    }
+
+    #[test]
+    fn enter_on_the_model_row_opens_the_picker_and_returns_to_the_panel() {
+        let mut app = App::new();
+        app.set_models(vec!["a-model".into(), "b-model".into()]);
+        app.handle(AppEvent::Key(Key::F(2)));
+        app.handle(AppEvent::Key(Key::Enter));
+        // The ordinary picker, over the panel.
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Pick(picker)) if picker.kind == PickerKind::Model),
+            "Enter on `model` opens the model picker"
+        );
+        assert!(app.settings().is_some(), "the panel is still open under it");
+        // Move the picker's selection and accept it.
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none(), "accepting closes the PICKER");
+        assert!(
+            app.settings().is_some(),
+            "and leaves the panel open — the host decision's whole point"
+        );
+        assert_eq!(app.status().model, "b-model", "the pick landed");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Ask(Request::SetModel {
+                model: "b-model".into()
+            })],
+            "exactly one SetModel ask — no new accept path"
+        );
+        // And the row under the cursor now draws the new value.
+        let sections = app.settings_sections();
+        let row = sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .find(|r| r.id == crate::settings::ids::MODEL)
+            .expect("the model row");
+        assert_eq!(row.value, "b-model", "the panel re-reads `Status`");
     }
 
     #[test]
