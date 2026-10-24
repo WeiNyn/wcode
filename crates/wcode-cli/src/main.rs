@@ -538,6 +538,20 @@ fn config_dump(cfg: &Config) -> String {
         cfg.provenance.api_key
     );
     let _ = writeln!(out, "{}", context_window_line(effective_base, &cfg.model, &cfg.compaction));
+    // The `[compaction] budget` line — the tracked gap (`docs/next-steps.md:121`
+    // "`--dump-config` prints no `[compaction] budget`") closed for BOTH surfaces
+    // at once, since the panel shows this text verbatim. `budget` is
+    // `Option<u64>` (`config.rs:164`): `None` means "the model window", which is
+    // what a reader needs to know, so it says that rather than `(none)` — the
+    // `session.title_after_turns` `0 (off)` precedent.
+    let _ = writeln!(
+        out,
+        "compaction budget: {}",
+        match cfg.compaction.budget {
+            Some(budget) => format!("{budget} tokens"),
+            None => "(the model window)".to_string(),
+        }
+    );
     let _ = writeln!(out, "effort: {}", cfg.effort.as_deref().unwrap_or("(none)"));
     let _ = writeln!(
         out,
@@ -1131,6 +1145,8 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         remote: true,
                         cwd,
                         git,
+                        // One builder, two surfaces: the flag and the panel show the same bytes.
+                        config: config_dump(cfg),
                     };
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
@@ -2045,6 +2061,8 @@ async fn dispatch(
                 remote: false,
                 cwd,
                 git,
+                // One builder, two surfaces: the flag and the panel show the same bytes.
+                config: config_dump(cfg),
             };
             let session_path = agent.session_path().map(Path::to_path_buf);
             let handle = SessionActor::spawn(agent);
@@ -3777,6 +3795,28 @@ mod tests {
             "the default is resolved, not deferred: {dump}"
         );
         assert!(!dump.contains("(off)"), "{dump}");
+    }
+
+    /// W032 §4.6: the one line `--dump-config` gained. Both renderings are
+    /// pinned — `budget` is `Option<u64>`, and the `None` case prints what it
+    /// MEANS ("the model window"), not `(none)`.
+    #[test]
+    fn dump_config_renders_both_compaction_budgets() {
+        let set: FileConfig =
+            toml::from_str("model = \"m\"\n[compaction]\nbudget = 60000\n").unwrap();
+        let dump = config_dump(&merge(EnvLike::default(), set).unwrap());
+        assert!(
+            dump.contains("compaction budget: 60000 tokens\n"),
+            "the set budget, with its unit: {dump}"
+        );
+
+        let unset: FileConfig = toml::from_str("model = \"m\"\n").unwrap();
+        let dump = config_dump(&merge(EnvLike::default(), unset).unwrap());
+        assert!(
+            dump.contains("compaction budget: (the model window)\n"),
+            "unset means the model window, not \"(none)\": {dump}"
+        );
+        assert!(!dump.contains("compaction budget: (none)"), "{dump}");
     }
 
     #[test]

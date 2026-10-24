@@ -2696,19 +2696,12 @@ pub struct App {
     /// `branch`, with a trailing `*` when the worktree is dirty. Display-only;
     /// never refreshed after startup.
     git: Option<String>,
-    // ==== SKETCH (review-only, not real code) ====
-    // The finished `--dump-config` text, injected by the CLI (`Options.config`)
-    // and split into the settings panel's read-only `config` section one line per
-    // row (W032 §4.6). A blob, not a table: the section is never edited, so it
-    // needs no columns — and a `Vec<ConfigRow>` refactor would rewrite a 90-line
-    // builder whose exact bytes are the `--dump-config` contract.
-    //
-    // /// The `--dump-config` text this CLIENT resolved (see [`Options::config`]),
-    // /// shown read-only in the settings panel. Empty = not injected (the panel
-    // /// renders one placeholder row). Over `--socket` this is the CLIENT's config,
-    // /// which is why the section heading says so.
-    // config: String,
-    // ==== /SKETCH ====
+    /// The `--dump-config` text this CLIENT resolved, injected by the CLI
+    /// (`Options.config`) and shown read-only in the panel's `config` section, one
+    /// row per line (W032 §4.6). A blob, not a table: the section is never edited,
+    /// so it needs no columns. Empty = not injected (the panel renders one
+    /// placeholder row).
+    config: String,
     /// The docked left sidebar is open. OFF by default, so the base layout
     /// (transcript · rule · [team strip] · input · status) is byte-identical
     /// while it is closed. Toggled only by `Ctrl-B` (see `on_key` / `KEYS`).
@@ -2816,6 +2809,9 @@ impl App {
             settings: None,
             // No change is in flight at startup.
             deferred_settings: Vec::new(),
+            // Seeded from `Options.config` in `lib::run` (`App::new` takes no
+            // `Options`), like `cwd`/`git`.
+            config: String::new(),
             mode: Mode::Input,
             search: None,
             last_search: None,
@@ -5913,16 +5909,12 @@ impl App {
         self.dirty = true;
     }
 
-    // ==== SKETCH (review-only, not real code) ====
-    // /// Inject the finished `--dump-config` text (see [`Options::config`]); marks
-    // /// the app dirty. Called once from `lib::run` beside `app.set_git(git)`
-    // /// (`lib.rs:409` `app.set_git(git);`). The panel is a modal, so no repaint is owed while it is
-    // /// closed — `dirty` costs one frame at startup, which is already dirty.
-    // pub fn set_config(&mut self, config: String) {
-        // self.config = config;
-        // self.dirty = true;
-    // }
-    // ==== /SKETCH ====
+    /// Inject the finished `--dump-config` text (see [`Options::config`]); marks
+    /// the app dirty. Called once from `lib::run` beside `app.set_git(git)`.
+    pub fn set_config(&mut self, config: String) {
+        self.config = config;
+        self.dirty = true;
+    }
 
     /// Seed the model list the picker offers (e.g. from `list_models`).
     pub fn set_models(&mut self, models: Vec<String>) {
@@ -5980,10 +5972,9 @@ impl App {
             view: self.view,
             sidebar: self.sidebar,
             context: status.context_limit,
-            // STEP 7: `&self.config` — the finished `--dump-config` body, injected
-            // by the CLI (`Options.config`). Empty today, so the panel shows its
-            // one placeholder row.
-            config: "",
+            // The finished `--dump-config` body, injected by the CLI
+            // (`Options.config`); empty renders the panel's one placeholder row.
+            config: &self.config,
             // The marks ride only while a run is in flight (§4.5): at IDLE the
             // harness applies a mutation at once, so an intent that survives the
             // ack would be a mark claiming a deferral that never happened. The

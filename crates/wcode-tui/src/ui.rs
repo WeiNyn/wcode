@@ -6149,6 +6149,34 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         }
     }
 
+    /// W032 §4.6: the panel's `config` section is the `--dump-config` text
+    /// verbatim — one row per line, the label the dump's own `key:`. And with
+    /// nothing injected the placeholder keeps the section non-empty, so `Tab`
+    /// still has a target.
+    #[test]
+    fn the_settings_panel_shows_the_injected_config_text() {
+        let mut app = App::new();
+        app.set_config("provider: openai-compatible\nmodel: m1 (source: config)\n".into());
+        app.handle(AppEvent::Key(Key::F(2)));
+        let text = buffer_text(&render(&mut app, 80, 32));
+        assert!(text.contains("provider:"), "the dump's key, colon kept:\n{text}");
+        assert!(text.contains("openai-compatible"), "its value verbatim:\n{text}");
+        assert!(text.contains("model:") && text.contains("m1 (source: config)"), "\n{text}");
+        assert!(
+            !text.contains("(no config injected)"),
+            "an injected dump replaces the placeholder:\n{text}"
+        );
+        // Not injected: one placeholder row, so the section is never empty.
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(2)));
+        let text = buffer_text(&render(&mut app, 80, 32));
+        assert!(text.contains("(no config injected)"), "\n{text}");
+        // `Tab` lands on the first config row in both cases (the section always
+        // has a row, so the cursor has somewhere to go).
+        app.handle(AppEvent::Key(Key::Tab));
+        assert_eq!(app.settings().expect("open").cursor(), 9, "the first config row");
+    }
+
     /// W032 first-layer A8 — the draw tripwire for a panel that is NOT an
     /// `Overlay` variant: `draw_overlay`'s exhaustive match cannot catch a
     /// missing draw, so the assertion is on PIXELS, never on
