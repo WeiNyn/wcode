@@ -45,7 +45,7 @@
 <section>
   <h2><span class="num">12.2</span>The node</h2>
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:172</span><span class="tag">Task (field comments condensed)</span></figcaption>
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:173</span><span class="tag">Task (field comments condensed)</span></figcaption>
 <pre><span class="k">pub struct</span> Task {
     <span class="k">pub</span> id: u32,                    <span class="c">// monotonic, 1-based</span>
     <span class="k">pub</span> title: String,
@@ -63,7 +63,7 @@
 
   <div class="grid2">
     <div class="card">
-      <h4>Five states · <code>tasks.rs:45</code></h4>
+      <h4>Five states · <code>tasks.rs:46</code></h4>
       <p>
         <code>Todo</code> → <code>Doing</code> → <code>Done</code>. Two terminals:
         <strong><code>Failed</code></strong> (the rework cap was hit; dependents stay blocked
@@ -83,22 +83,30 @@
 
   <h3>Readiness is derived, never stored</h3>
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:1068</span><span class="tag">ready_ids</span></figcaption>
-<pre>    <span class="k">pub fn</span> <span class="f2">ready_ids</span>(<span class="f2">&amp;</span>self) -&gt; Vec&lt;u32&gt; {
-        <span class="k">let</span> tasks = self.inner.tasks.<span class="f2">lock</span>().<span class="f2">unwrap</span>();
-        tasks
-            .<span class="f2">iter</span>()
-            .<span class="f2">filter</span>(|t| {
-                t.state == TaskState::Todo
-                    <span class="f2">&amp;&amp;</span> t.deps.<span class="f2">iter</span>().<span class="f2">all</span>(|d| {
-                        tasks.<span class="f2">iter</span>().<span class="f2">find</span>(|x| x.id == d.<span class="f2">id</span>()).<span class="f2">is_some_and</span>(|x| {
-                            <span class="f2">matches!</span>(x.state, TaskState::Done | TaskState::Skipped)
-                        })
-                    })
-            })
-            .<span class="f2">map</span>(|t| t.id)
-            .<span class="f2">collect</span>()
-    }</pre>
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:445</span><span class="tag">ready_ids_in (the readiness walk)</span></figcaption>
+<pre><span class="k">fn</span> <span class="f2">ready_ids_in</span>(tasks: <span class="f2">&amp;</span>[Task], <span class="k">mut</span> keep: <span class="k">impl</span> FnMut(<span class="f2">&amp;</span>Task) -&gt; <span class="k">bool</span>) -&gt; Vec&lt;u32&gt; {
+    <span class="c">// pass 1: one id -&gt; state index (`or_insert` = first wins, like `find` did)</span>
+    <span class="k">let</span> <span class="k">mut</span> states: HashMap&lt;u32, TaskState&gt; = HashMap::<span class="f2">with_capacity</span>(tasks.<span class="f2">len</span>());
+    <span class="k">for</span> t <span class="k">in</span> tasks {
+        states.<span class="f2">entry</span>(t.id).<span class="f2">or_insert</span>(t.state);
+    }
+    <span class="c">// pass 2: the walk — every dep is a map hit, never a rescan of `tasks`</span>
+    <span class="k">let</span> <span class="k">mut</span> out = Vec::new();
+    <span class="k">for</span> t <span class="k">in</span> tasks {
+        <span class="k">if</span> t.state != TaskState::Todo {
+            <span class="k">continue</span>;
+        }
+        <span class="k">let</span> ready = t.deps.<span class="f2">iter</span>().<span class="f2">all</span>(|d| {
+            states
+                .<span class="f2">get</span>(<span class="f2">&amp;</span>d.<span class="f2">id</span>())
+                .<span class="f2">is_some_and</span>(|s| <span class="f2">matches!</span>(s, TaskState::Done | TaskState::Skipped))
+        });
+        <span class="k">if</span> ready <span class="f2">&amp;&amp;</span> <span class="f2">keep</span>(t) {
+            out.<span class="f2">push</span>(t.id);
+        }
+    }
+    out
+}</pre>
   </figure>
   <p>
     No <code>ready</code> flag, no <code>blocked</code> counter to keep in sync. Every mutation
@@ -144,7 +152,7 @@
   </div>
 
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:856</span><span class="tag">complete will not corrupt the graph</span></figcaption>
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:913</span><span class="tag">complete will not corrupt the graph</span></figcaption>
 <pre>            <span class="k">for</span> d <span class="k">in</span> <span class="f2">&amp;</span>deps {
                 <span class="k">let</span> done = tasks.<span class="f2">iter</span>().<span class="f2">find</span>(|t| t.id == d.<span class="f2">id</span>()).<span class="f2">is_some_and</span>(|t| {
                     <span class="f2">matches!</span>(t.state, TaskState::Done | TaskState::Skipped)
@@ -169,7 +177,7 @@
   </p>
 
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:894</span><span class="tag">reopen_inner — the cap</span></figcaption>
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:951</span><span class="tag">reopen_inner — the cap</span></figcaption>
 <pre>            tasks[idx].attempts += <span class="n">1</span>;
             <span class="k">if</span> tasks[idx].attempts &gt; self.<span class="f2">max_attempts</span>() {
                 tasks[idx].state = TaskState::Failed;
@@ -263,7 +271,7 @@ with no gate depending on it — create a gate (`task create` with \
   </p>
 
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:234</span><span class="tag">the journal ops</span></figcaption>
+    <figcaption><span class="f">crates/wcode-cli/src/tasks.rs:235</span><span class="tag">the journal ops</span></figcaption>
 <pre><span class="k">pub</span>(crate) <span class="k">enum</span> PlanOp {
     Create { id: u32, title: String, deps: Vec&lt;Dep&gt;, gate: <span class="k">bool</span> },
     Depends { id: u32, on: u32 },

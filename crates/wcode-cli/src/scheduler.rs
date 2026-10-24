@@ -306,21 +306,20 @@ impl Scheduler {
     /// acceptable for P1, since the scheduler drives the root's own `[team]`,
     /// each member `register`ed and `set_owner`ed at spawn.
     // A `Script` node is worker-less, so the owner filter must not drop it.
+    //
+    // One `TaskList` lock, no snapshot: [`TaskList::ready_ids_where`] runs the
+    // predicate INSIDE the readiness walk, so readiness, the judge bookkeeping and
+    // the owner/`Script` filter all read one consistent state. The predicate must
+    // not touch `self.tasks` — that mutex is already held (see
+    // `ready_ids_where`'s deadlock contract).
     fn frontier(&self) -> Vec<u32> {
-        let snapshot = self.tasks.snapshot();
-        self.tasks
-            .ready_ids()
-            .into_iter()
+        self.tasks.ready_ids_where(|t| {
             // A node awaiting an async verdict (`judging`) or blocked-and-
             // escalated (`unjudgeable`) must NOT be re-dispatched.
-            .filter(|id| !self.judging.contains(id) && !self.unjudgeable.contains_key(id))
-            .filter(|id| {
-                snapshot.iter().any(|t| {
-                    t.id == *id
-                        && (t.owner.is_some() || matches!(t.run, RunSpec::Script { .. }))
-                })
-            })
-            .collect()
+            !self.judging.contains(&t.id)
+                && !self.unjudgeable.contains_key(&t.id)
+                && (t.owner.is_some() || matches!(t.run, RunSpec::Script { .. }))
+        })
     }
 
     /// The timer arm's effect for node `id` (W028): `fail` it if it is STILL
@@ -2326,5 +2325,123 @@ mod tests {
             !has_pending(&mut root_rx),
             "an owner-less Todo plan does not escalate"
         );
+    }
+
+    /// A scheduler over `tasks` with no registry wiring — enough to exercise
+    /// `frontier`, which reads only the plan and the two judge maps (W034/D040).
+    fn frontier_scheduler(tasks: &TaskList) -> Scheduler {
+        Scheduler::new(
+            Registry::new(),
+            SessionId::agent("orchestrator"),
+            tasks.clone(),
+            SessionId::agent("scheduler"),
+            std::env::temp_dir(),
+            HooksSet::default(),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(crate::judge::FakeJudge::new(vec![])),
+        )
+    }
+
+    /// `frontier()` equals the OLD two-lock shape — `snapshot()`, `ready_ids()`,
+    /// then the judging/unjudgeable and owner/`Script` filters by hand — on a plan
+    /// with a ready owned `Session` node, a ready owner-less `Session` node, a
+    /// ready `Script` node and a node still blocked by an unfinished dep. This is
+    /// the behaviour-equality gate: it fails if the single-pass predicate drops,
+    /// adds or reorders one id. Both sides stay unsorted.
+    #[test]
+    fn frontier_equals_the_two_lock_reference() {
+        let tasks = TaskList::new();
+        let w1 = SessionId::agent("w1");
+        let done = tasks.create("done", vec![], false).unwrap().id;
+        tasks.assign(done, w1.clone()).unwrap();
+        let owned = tasks.create("owned", vec![Dep::Id(done)], false).unwrap().id;
+        tasks.assign(owned, w1.clone()).unwrap();
+        let _orphan = tasks.create("orphan", vec![], false).unwrap().id;
+        let script = tasks.create("build", vec![], false).unwrap().id;
+        tasks
+            .configure(
+                script,
+                RunSpec::Script {
+                    command: "true".into(),
+                    timeout_secs: None,
+                },
+                false,
+            )
+            .unwrap();
+        let blocked = tasks.create("blocked", vec![Dep::Id(owned)], false).unwrap().id;
+        tasks.assign(blocked, w1).unwrap();
+        tasks.complete(done, None).unwrap();
+
+        // The reference: the body this change replaces, in shape — readiness from
+        // `ready_ids()` (the storage-order walk is unchanged), the two filters
+        // applied outside any lock against ONE snapshot.
+        let scheduler = frontier_scheduler(&tasks);
+        let snapshot = tasks.snapshot();
+        let mut reference = tasks.ready_ids();
+        reference.retain(|id| {
+            !scheduler.judging.contains(id) && !scheduler.unjudgeable.contains_key(id)
+        });
+        reference.retain(|id| {
+            snapshot.iter().any(|t| {
+                t.id == *id && (t.owner.is_some() || matches!(t.run, RunSpec::Script { .. }))
+            })
+        });
+
+        assert_eq!(scheduler.frontier(), reference);
+        assert_eq!(
+            reference,
+            vec![owned, script],
+            "the ready owned Session and the worker-less Script; the owner-less \
+             Session and the blocked node drop"
+        );
+    }
+
+    /// A node with an in-flight judge verdict is NOT in the frontier, and it is
+    /// back once the verdict lands and `judging` is cleared — the clause the walk
+    /// now enforces from inside the lock.
+    #[test]
+    fn frontier_excludes_a_judging_node() {
+        let tasks = TaskList::new();
+        let a = tasks.create("a", vec![], false).unwrap().id;
+        tasks.assign(a, SessionId::agent("w1")).unwrap();
+        let mut scheduler = frontier_scheduler(&tasks);
+        assert_eq!(scheduler.frontier(), vec![a]);
+        scheduler.judging.insert(a);
+        assert!(
+            scheduler.frontier().is_empty(),
+            "a judging node is not re-dispatched"
+        );
+        scheduler.judging.remove(&a);
+        assert_eq!(
+            scheduler.frontier(),
+            vec![a],
+            "and it returns once the verdict lands"
+        );
+    }
+
+    /// A node recorded `unjudgeable` (keyed by `reset_epoch`) is NOT in the
+    /// frontier, and a `reset` — which bumps the epoch, so `prune_unjudgeable`
+    /// drops the now-stale entry — returns it. The direct unit for what the live
+    /// `unjudgeable_is_cleared_by_a_reset` proves end to end.
+    #[test]
+    fn frontier_excludes_an_unjudgeable_node() {
+        let tasks = TaskList::new();
+        let a = tasks.create("a", vec![], false).unwrap().id;
+        tasks.assign(a, SessionId::agent("w1")).unwrap();
+        let epoch = tasks
+            .snapshot()
+            .into_iter()
+            .find(|t| t.id == a)
+            .unwrap()
+            .reset_epoch;
+        let mut scheduler = frontier_scheduler(&tasks);
+        scheduler.unjudgeable.insert(a, epoch);
+        assert!(
+            scheduler.frontier().is_empty(),
+            "an unjudgeable node is not re-dispatched"
+        );
+        tasks.reset(a).unwrap();
+        scheduler.prune_unjudgeable();
+        assert_eq!(scheduler.frontier(), vec![a], "a reset re-arms it");
     }
 }

@@ -22,6 +22,7 @@
 //! — a "go back" is the runtime control action `reopen`, which resets a node and
 //! its whole downstream cone, bounded by the attempt cap (§6).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -407,6 +408,62 @@ fn cone(tasks: &[Task], id: u32) -> Vec<u32> {
         }
     }
     out.sort_unstable();
+    out
+}
+
+/// The ready ids of `tasks`, in `tasks`' OWN ORDER (never sorted): a task is
+/// ready when `state == TaskState::Todo` and EVERY `deps` entry names a task that
+/// is `Done` or `Skipped`. `keep` then filters the ready set.
+///
+/// One pass builds an id→state index, one pass walks the tasks: O(len + Σ deps).
+/// The body this replaces did a `tasks.iter().find(..)` PER DEP — O(len × Σ deps)
+/// per wake.
+///
+/// # Equivalence with the walk it replaces
+///
+/// * ORDER — the output follows `tasks`' storage order, exactly as before. DO
+///   NOT sort. The vec is creation order in practice (ids are monotonic,
+///   `next_id.fetch_add`), but `PlanOp::Snapshot` reassigns the whole vec from
+///   journal lines (`apply`), so ANY order is legal.
+/// * FIRST WINS on a duplicate id — `find` returned the FIRST match, so the index
+///   is filled with `entry(id).or_insert(state)`, NOT
+///   `collect::<HashMap<_,_>>()` (which keeps the LAST). Duplicate ids can only
+///   arrive through a hand-written `Snapshot`, and that is exactly the case
+///   `a_duplicate_id_reads_first_wins_like_find_did` pins.
+/// * A dangling dep keeps its dependent NOT ready — `find` returned `None` and
+///   `is_some_and` is false; a missing index entry reads the same way.
+///   `TaskList::create` refuses an unknown dep, but a replayed `Snapshot`
+///   bypasses that check.
+/// * A SELF-dep needs no special case: the node is `Todo` (the first clause), so
+///   its own dep reads `Todo`, not `Done | Skipped`.
+/// * `Skipped` satisfies readiness, `Failed` does not — the match is on
+///   `Done | Skipped` only.
+///
+/// `keep` is called at most once per READY task, in `tasks` order, and never for
+/// an unready one. It runs while the caller holds the `tasks` mutex, so it MUST
+/// NOT call back into `TaskList` (see [`TaskList::ready_ids_where`]).
+fn ready_ids_in(tasks: &[Task], mut keep: impl FnMut(&Task) -> bool) -> Vec<u32> {
+    // Pass 1 — the id → state index. `or_insert` keeps the FIRST row with an id,
+    // matching the `iter().find(..)` this replaces.
+    let mut states: HashMap<u32, TaskState> = HashMap::with_capacity(tasks.len());
+    for t in tasks {
+        states.entry(t.id).or_insert(t.state);
+    }
+    // Pass 2 — the walk: every dep is a map hit now, not a rescan of `tasks`.
+    let mut out = Vec::new();
+    for t in tasks {
+        if t.state != TaskState::Todo {
+            continue;
+        }
+        let ready = t.deps.iter().all(|d| {
+            states
+                .get(&d.id())
+                .is_some_and(|s| matches!(s, TaskState::Done | TaskState::Skipped))
+        });
+        if ready && keep(t) {
+            out.push(t.id);
+        }
+    }
     out
 }
 
@@ -1060,28 +1117,34 @@ impl TaskList {
         Ok(reopened)
     }
 
-
-    /// The ready frontier, in creation order: every `Todo` node all of whose
-    /// deps are `Done` or `Skipped` (derived, never stored, §3). Read-only — no
-    /// publish.
-    // Called by the scheduler's `frontier` (P1).
+    /// The ready frontier, in storage order (creation order in practice): every
+    /// `Todo` node all of whose deps are `Done` or `Skipped` (derived, never
+    /// stored, §3). Read-only — no publish. One pass, O(len + Σ deps).
+    // The scheduler's `frontier` now calls `ready_ids_where`, so the binary has no
+    // caller left — but the method stays part of the plan's public read surface
+    // (D040, F4: narrowing it to `pub(crate)` is tidier, not behaviour-preserving
+    // scope), and the readiness tests read it directly.
+    #[allow(dead_code)]
     pub fn ready_ids(&self) -> Vec<u32> {
-        let tasks = self.inner.tasks.lock().unwrap();
-        tasks
-            .iter()
-            .filter(|t| {
-                t.state == TaskState::Todo
-                    && t.deps.iter().all(|d| {
-                        tasks
-                            .iter()
-                            .find(|x| x.id == d.id())
-                            .is_some_and(|x| {
-                                matches!(x.state, TaskState::Done | TaskState::Skipped)
-                            })
-                    })
-            })
-            .map(|t| t.id)
-            .collect()
+        ready_ids_in(&self.inner.tasks.lock().unwrap(), |_| true)
+    }
+
+    /// [`TaskList::ready_ids`] with a caller filter, computed under the SAME
+    /// `tasks` lock — the readiness walk and the filter cannot see different
+    /// states, and no `Vec<Task>` clone is taken (the scheduler's `frontier`).
+    ///
+    /// Order and membership are exactly `ready_ids()`'s, with `keep` applied to
+    /// each ready task in storage order. Read-only; no publish.
+    ///
+    /// # Deadlock contract
+    /// `keep` runs while the `tasks` mutex is HELD (a `std::sync::Mutex`, not
+    /// reentrant). It may read fields of the `&Task` and immutable state captured
+    /// from the caller — nothing else. Any call back into `TaskList` (`snapshot`,
+    /// `ready_ids`, `assign`, `start`, `fail`, `terminal_code`, `descendants`, …)
+    /// deadlocks the process. Callers that need more than a `&Task` must filter
+    /// OUTSIDE, as before.
+    pub(crate) fn ready_ids_where(&self, keep: impl FnMut(&Task) -> bool) -> Vec<u32> {
+        ready_ids_in(&self.inner.tasks.lock().unwrap(), keep)
     }
 
     /// The transitive downstream cone of `id` (every node reaching `id` through
@@ -1889,6 +1952,306 @@ fn plan_op_and_task_serde_round_trip() {
         );
         let r = TaskList::load(&path).unwrap();
         assert_eq!(r.snapshot().len(), n as usize);
+    }
+    /// The PRE-CHANGE `ready_ids` body, verbatim in behaviour: per dep, a linear
+    /// `find` over the whole vec. First match wins on a duplicate id; a dangling
+    /// dep means not ready. Test-only — nothing in production calls it.
+    fn ready_ids_naive(tasks: &[Task]) -> Vec<u32> {
+        tasks
+            .iter()
+            .filter(|t| {
+                t.state == TaskState::Todo
+                    && t.deps.iter().all(|d| {
+                        tasks.iter().find(|x| x.id == d.id()).is_some_and(|x| {
+                            matches!(x.state, TaskState::Done | TaskState::Skipped)
+                        })
+                    })
+            })
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// One fixture row: `task(id, …)` at a chosen state with `deps` as bare ids.
+    fn row(id: u32, state: TaskState, deps: &[u32]) -> Task {
+        let mut t = task(id, "t");
+        t.state = state;
+        t.deps = deps.iter().copied().map(Dep::Id).collect();
+        t
+    }
+
+    /// A plan with every branch the readiness walk has, its ids named by role —
+    /// a struct, NOT a tuple of seven `u32`s (`clippy::type_complexity` runs on
+    /// `--all-targets`).
+    struct BranchingPlan {
+        list: TaskList,
+        /// An unconditional chain `[done, ready, blocked]`.
+        chain: [u32; 3],
+        /// The join of a diamond whose root and both arms are `Done` — ready on
+        /// TWO satisfied deps.
+        diamond_root: u32,
+        /// A `Todo` node whose only dep is `Skipped` — ready.
+        skipped_dep: u32,
+        /// A `Todo` node whose only dep is `Failed` — blocked.
+        failed_dep: u32,
+        /// A `Todo` node whose only dep is `Doing` — blocked.
+        doing_dep: u32,
+        /// A `Todo` node with a dep id no row carries — blocked.
+        dangling: u32,
+        /// A ready `Session` node with no owner (never dispatched).
+        ownerless: u32,
+        /// A ready `Script` node with no owner (worker-less, still dispatched).
+        script: u32,
+        /// A `Todo` node that depends on itself — never ready.
+        self_dep: u32,
+    }
+
+    /// Build [`BranchingPlan`] from ONE `PlanOp::Snapshot` — the only way to place
+    /// a `Doing`/`Skipped`/`Failed` row and a dangling dep at chosen ids without a
+    /// long mutation script (and the path a resumed plan really takes).
+    fn w034_branching_plan() -> BranchingPlan {
+        let mut script = row(16, TaskState::Todo, &[]);
+        script.run = RunSpec::Script {
+            command: "true".into(),
+            timeout_secs: None,
+        };
+        let mut rows = vec![
+            row(1, TaskState::Done, &[]),     // chain[0]
+            row(2, TaskState::Todo, &[1]),    // chain[1] — ready
+            row(3, TaskState::Todo, &[2]),    // chain[2] — blocked by chain[1]
+            row(4, TaskState::Done, &[]),     // diamond root
+            row(5, TaskState::Done, &[4]),    // left arm
+            row(6, TaskState::Done, &[4]),    // right arm
+            row(7, TaskState::Todo, &[5, 6]), // diamond_root — ready on two deps
+            row(8, TaskState::Skipped, &[]),  // the skipped dep itself
+            row(9, TaskState::Todo, &[8]),    // skipped_dep — ready
+            row(10, TaskState::Failed, &[]),  // the failed dep itself
+            row(11, TaskState::Todo, &[10]),  // failed_dep — blocked
+            row(12, TaskState::Doing, &[]),   // the in-flight dep itself
+            row(13, TaskState::Todo, &[12]),  // doing_dep — blocked
+            row(14, TaskState::Todo, &[999]), // dangling — blocked, no such row
+            row(15, TaskState::Todo, &[]),    // ownerless — ready, no owner
+            script,                           // script — ready, worker-less
+            row(17, TaskState::Todo, &[17]),  // self_dep — never ready
+        ];
+        for id in [1, 2, 7] {
+            rows.iter_mut().find(|t| t.id == id).unwrap().owner = Some(SessionId::agent("w1"));
+        }
+        let list = TaskList::with_sink(None, false, 3);
+        list.apply(PlanOp::Snapshot { tasks: rows });
+        BranchingPlan {
+            list,
+            chain: [1, 2, 3],
+            diamond_root: 7,
+            skipped_dep: 9,
+            failed_dep: 11,
+            doing_dep: 13,
+            dangling: 14,
+            ownerless: 15,
+            script: 16,
+            self_dep: 17,
+        }
+    }
+
+    /// A hand-written `Snapshot` stores its rows verbatim, so the vec order is the
+    /// only order (creation order in practice, NOT a guarantee) — and
+    /// `ready_ids` must follow it. A stray `sort_unstable()` fails here.
+    #[test]
+    fn ready_ids_keeps_storage_order_for_ids_out_of_ascending_order() {
+        let list = TaskList::with_sink(None, false, 3);
+        list.apply(PlanOp::Snapshot {
+            tasks: vec![
+                row(7, TaskState::Todo, &[]),
+                row(3, TaskState::Todo, &[]),
+                row(5, TaskState::Todo, &[]),
+            ],
+        });
+        assert_eq!(
+            list.ready_ids(),
+            vec![7, 3, 5],
+            "storage order, never sorted"
+        );
+        assert_eq!(list.ready_ids(), ready_ids_naive(&list.snapshot()));
+    }
+
+    /// A dep may name a row that sits LATER in storage order — a hand-written
+    /// `Snapshot` can put the dependent first. The index must cover the WHOLE vec,
+    /// never the rows walked so far: a positional (streaming) index would call this
+    /// blocked even though its dep is `Done`.
+    #[test]
+    fn ready_ids_reads_a_dep_that_sits_later_in_storage_order() {
+        let list = TaskList::with_sink(None, false, 3);
+        list.apply(PlanOp::Snapshot {
+            tasks: vec![row(3, TaskState::Todo, &[5]), row(5, TaskState::Done, &[])],
+        });
+        assert_eq!(
+            list.ready_ids(),
+            vec![3],
+            "3's dep is Done even though its row comes later"
+        );
+        assert_eq!(list.ready_ids(), ready_ids_naive(&list.snapshot()));
+    }
+
+    /// Two rows share an id: `(Todo, Done)` leaves the dependent BLOCKED and
+    /// `(Done, Todo)` unblocks it — first wins, exactly like the `find` the walk
+    /// replaced. A last-wins index (`HashMap::collect`) passes the second half and
+    /// fails the first.
+    #[test]
+    fn a_duplicate_id_reads_first_wins_like_find_did() {
+        let list = TaskList::with_sink(None, false, 3);
+        list.apply(PlanOp::Snapshot {
+            tasks: vec![
+                row(7, TaskState::Todo, &[]),
+                row(8, TaskState::Todo, &[7]),
+                row(7, TaskState::Done, &[]),
+            ],
+        });
+        assert_eq!(
+            list.ready_ids(),
+            vec![7],
+            "the FIRST row with id 7 is Todo, so 8 stays blocked"
+        );
+        assert_eq!(list.ready_ids(), ready_ids_naive(&list.snapshot()));
+
+        let flipped = TaskList::with_sink(None, false, 3);
+        flipped.apply(PlanOp::Snapshot {
+            tasks: vec![
+                row(7, TaskState::Done, &[]),
+                row(8, TaskState::Todo, &[7]),
+                row(7, TaskState::Todo, &[]),
+            ],
+        });
+        assert_eq!(
+            flipped.ready_ids(),
+            vec![8, 7],
+            "first wins again: 7's first row is Done, so 8 unblocks; the later 7 is ready"
+        );
+        assert_eq!(flipped.ready_ids(), ready_ids_naive(&flipped.snapshot()));
+    }
+
+    /// The accelerated walk and [`ready_ids_naive`] agree, ids AND order, on the
+    /// branching plan — and the reference's own answer is pinned, so it cannot
+    /// drift into agreeing with a broken body.
+    #[test]
+    fn ready_ids_matches_the_naive_reference_on_a_branching_plan() {
+        let p = w034_branching_plan();
+        let snapshot = p.list.snapshot();
+        assert_eq!(
+            ready_ids_naive(&snapshot),
+            vec![
+                p.chain[1],
+                p.diamond_root,
+                p.skipped_dep,
+                p.ownerless,
+                p.script
+            ],
+            "ready chain link, diamond join, skipped-dep dependent, owner-less \
+             Session, Script"
+        );
+        assert_eq!(p.list.ready_ids(), ready_ids_naive(&snapshot));
+    }
+
+    /// A dep id naming no row keeps its dependent blocked — reachable only through
+    /// a replayed `Snapshot`, since `create` refuses an unknown dep.
+    #[test]
+    fn a_dangling_dep_keeps_its_dependent_blocked() {
+        let p = w034_branching_plan();
+        let snapshot = p.list.snapshot();
+        assert!(
+            snapshot.iter().all(|t| t.id != 999),
+            "no row carries the dangling id"
+        );
+        assert!(!p.list.ready_ids().contains(&p.dangling));
+        assert!(!ready_ids_naive(&snapshot).contains(&p.dangling));
+        let fresh = TaskList::new();
+        assert!(
+            fresh.create("x", vec![Dep::Id(999)], false).is_err(),
+            "the public API refuses a dangling dep"
+        );
+    }
+
+    /// `Skipped` satisfies readiness (`Done | Skipped` is the match); `Failed`, a
+    /// `Doing` dep and a self-dep do not.
+    #[test]
+    fn skipped_satisfies_but_failed_and_self_deps_do_not() {
+        let p = w034_branching_plan();
+        let ready = p.list.ready_ids();
+        assert!(ready.contains(&p.skipped_dep), "Skipped satisfies readiness");
+        assert!(!ready.contains(&p.failed_dep), "Failed does not");
+        assert!(!ready.contains(&p.doing_dep), "neither does a Doing dep");
+        assert!(!ready.contains(&p.self_dep), "a self-dep never satisfies itself");
+        assert!(!ready.contains(&p.chain[2]), "the tail waits for its middle");
+        assert_eq!(ready, ready_ids_naive(&p.list.snapshot()));
+    }
+
+    /// `ready_ids_where` returns exactly `ready_ids()` filtered by hand — same
+    /// ids, same order — and runs `keep` ONLY for ready tasks.
+    #[test]
+    fn ready_ids_where_equals_ready_ids_filtered_by_hand() {
+        let p = w034_branching_plan();
+        let mut seen = Vec::new();
+        let kept = p.list.ready_ids_where(|t| {
+            seen.push(t.id);
+            t.owner.is_some() || matches!(t.run, RunSpec::Script { .. })
+        });
+        let snapshot = p.list.snapshot();
+        let by_hand: Vec<u32> = p
+            .list
+            .ready_ids()
+            .into_iter()
+            .filter(|id| {
+                snapshot.iter().any(|t| {
+                    t.id == *id && (t.owner.is_some() || matches!(t.run, RunSpec::Script { .. }))
+                })
+            })
+            .collect();
+        assert_eq!(kept, by_hand);
+        assert_eq!(
+            kept,
+            vec![p.chain[1], p.diamond_root, p.script],
+            "the owned ready nodes plus the worker-less Script; the owner-less Session drops"
+        );
+        assert_eq!(
+            seen,
+            vec![
+                p.chain[1],
+                p.diamond_root,
+                p.skipped_dep,
+                p.ownerless,
+                p.script
+            ],
+            "`keep` saw the ready set only, in storage order"
+        );
+    }
+
+    /// 2000 nodes in one chain, seeded with ONE `Snapshot` (`create` publishes a
+    /// whole-vec clone per call, so a 2000-`create` setup is itself quadratic):
+    /// completing a node readies exactly its successor, one id per level, and the
+    /// tail only at the end. A CORRECTNESS test at a size the old per-dep rescan
+    /// crossed ~4M times — a human-noticeable tripwire, NOT a complexity
+    /// assertion: no timing is measured.
+    #[test]
+    fn a_long_chain_stays_correct_at_scale() {
+        const N: u32 = 2000;
+        let list = TaskList::with_sink(None, false, 3);
+        let rows: Vec<Task> = (1..=N)
+            .map(|id| match id {
+                1 => row(1, TaskState::Todo, &[]),
+                _ => row(id, TaskState::Todo, &[id - 1]),
+            })
+            .collect();
+        list.apply(PlanOp::Snapshot { tasks: rows });
+
+        assert_eq!(list.ready_ids(), vec![1], "only the head is ready");
+        for id in 1..N {
+            list.complete(id, None).unwrap();
+            assert_eq!(
+                list.ready_ids(),
+                vec![id + 1],
+                "completing {id} readies exactly its successor"
+            );
+        }
+        list.complete(N, None).unwrap();
+        assert!(list.ready_ids().is_empty(), "the chain is finished");
     }
 }
 
