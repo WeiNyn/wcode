@@ -36,6 +36,11 @@ pub(crate) const ITEM_LABEL_COLS: usize = 22;
 /// thinking row's word sits in — so a tool's head, its params, its body, and the
 /// thinking body all line up at col 3. Replaces the retired `├`/`│`/`└` tree.
 const TOOL_INDENT: &str = "   ";
+/// The floor for a clipped collapsed-head value (D038): a value that would elide
+/// to fewer than eight columns keeps eight, so the `…` never stands over a
+/// two-character stub that reads as noise. At a pathologically narrow width the
+/// row simply overruns and the band clips it — the head stays ONE row either way.
+const MIN_TOOL_VALUE_COLS: usize = 8;
 /// Output lines a collapsed tool shows before a `… +N more` hint.
 const TOOL_PREVIEW_LINES: usize = 4;
 /// Output lines a fully expanded tool shows before the hint returns.
@@ -1105,8 +1110,9 @@ fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 
 /// One tool's inline flat rows (D010/T1). The state map (W016 §5.1 / A1):
 ///
-/// - **Collapsed, done** (`done && !expanded`) → [`collapsed_head_row`]: ONE
-///   logical row (the head, with the params inlined and the outcome note). No body.
+/// - **Collapsed, done** (`done && !expanded`) → [`collapsed_head_row`]: exactly
+///   ONE row, always (D038) — the head, with the params inlined (elided with `…`
+///   when crowded) and the outcome note. No body.
 /// - **Collapsed, running** (`!done && !expanded`) → [`collapsed_head_row`] plus
 ///   exactly ONE live-tail row (`last_line`); no note (O2).
 /// - **Expanded** (`expanded`, incl. `is_error`) → the head ([`tool_head_row`]) +
@@ -1117,8 +1123,9 @@ fn turn_inline(turn: &Turn, width: usize) -> Vec<Line<'static>> {
 /// row. `n` is the tool's 1-based call order (kept for the render walk); row 0 is
 /// the tool's head row, and `Block::Tool` also uses it with `n = 1`.
 ///
-/// A tool's **params are never hidden** (D019/W016): collapsed, the first value
-/// rides the head; expanded, they re-draw as the `key  value` rows.
+/// A tool's **params are never LOST** (D019/W016, D038): collapsed, the first
+/// value rides the head — elided with `…` when the head is crowded — expanded,
+/// they re-draw as the `key  value` rows, the complete record.
 fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>> {
     let expanded = tool.expanded || tool.is_error;
     if expanded {
@@ -1131,7 +1138,7 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
         return out;
     }
     // Collapsed (done OR running): the one head row, params inlined.
-    let mut out = collapsed_head_row(tool, width);
+    let mut out = vec![collapsed_head_row(tool, width)];
     // A running tool keeps exactly ONE live-tail row under the gutter (O1); no note.
     if !tool.done
         && let Some(tail) = last_line(&tool.output)
@@ -1141,10 +1148,11 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
     out
 }
 
-/// The collapsed tool's ONE logical row (W016 §5.1):
+/// The collapsed tool's ONE row — exactly one, whatever its arguments (D038;
+/// W016 §5.1):
 ///
 /// ```text
-///    <name>  <first-param value (bare)>  <key=value …>  …fill…  <note · ms>
+///    <name>  <first-param value, elided …>  <key=value …>  …fill…  <note · ms>
 /// ```
 ///
 /// The FIRST param's value prints BARE (its key dropped) in the
@@ -1153,49 +1161,57 @@ fn tool_inline_lines(_n: usize, tool: &Tool, width: usize) -> Vec<Line<'static>>
 /// inlines `tool.target.or(tool.path)` — the same fallback as [`tool_head_row`]
 /// (B2), so the target never drops off a collapsed tool.
 ///
-/// The note ([`completion_note`], else the `summary_line` fallback) is capped at 40
-/// chars and dropped when crowded — the note, then the ms, then both (A4; the ONLY
-/// place the cap is applied). A too-long head WRAPS char-exact onto a gutter-aligned
-/// continuation (never a `…` clip), so a long `bash` command shows in FULL
-/// (D31/D019). Returns ≥1 row; row 0 is the head row.
-fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
+/// # Contracts (D038)
+/// - **ONE row.** An over-long value **elides with `…`** (clip-not-wrap, the D027
+///   rule), never silently: expansion is what shows it in full.
+/// - A multi-line value shows its FIRST logical line plus ` … +N lines`, and that
+///   tail is priced into the budget. No `\n` char may reach a span.
+/// - The note ([`completion_note`], else the `summary_line` fallback) is capped at
+///   40 chars (A4; the ONLY place the cap is applied). Crowding sheds in this
+///   order and only this one: the note → the ms → the extra `key=value` params
+///   (from the tail) → the ` … +N lines` tail → a CLIPPED first value with a
+///   [`MIN_TOOL_VALUE_COLS`] floor. The **name never sheds**.
+fn collapsed_head_row(tool: &Tool, width: usize) -> Line<'static> {
     let prefix = TOOL_INDENT.to_string();
     let name_style = if tool.is_error { error_style() } else { tool_name() };
-    // The head run: the prefix, the name, then the inlined params.
-    let mut content: Vec<Span<'static>> = vec![
-        Span::styled(prefix.clone(), dim()),
-        Span::styled(tool.name.clone(), name_style),
-    ];
-    let mut len = prefix.chars().count() + tool.name.chars().count();
-    if tool.params.is_empty() {
-        // B2: a reseeded tool whose target came from `ToolExecutionEnd`.
-        if let Some(target) = tool.target.as_ref().or(tool.path.as_ref()) {
-            content.push(Span::styled("  ".to_string(), dim()));
-            content.push(Span::styled(target.clone(), theme::theme().body));
-            len += 2 + target.chars().count();
+    // The fixed part: the gutter and the name (the name is never shed).
+    let head_len = prefix.chars().count() + tool.name.chars().count();
+
+    // The FIRST param's value — or, for a reseeded tool with no params, its
+    // `target`/`path` (the [`tool_head_row`] fallback, B2).
+    let (value_key, value) = match tool.params.first() {
+        Some((key, value)) => (Some(key.as_str()), value.as_str()),
+        None => (
+            None,
+            tool.target.as_deref().or(tool.path.as_deref()).unwrap_or(""),
+        ),
+    };
+    // Flatten to ONE logical line: a heredoc `command` must never put a `\n` in a
+    // span (a zero-width cell that mis-sizes the row).
+    let first_line = value.split('\n').next().unwrap_or("");
+    let hidden_lines = value.split('\n').count().saturating_sub(1);
+    let highlight = |text: &str| match value_key {
+        Some(key) => inline_param_value(tool, key, text),
+        None => vec![Span::styled(text.to_string(), theme::theme().body)],
+    };
+    let value_run = |text: &str, tail: bool| -> Vec<Span<'static>> {
+        let mut spans = highlight(text);
+        if tail && hidden_lines > 0 {
+            spans.push(Span::styled(lines_tail(hidden_lines), dim()));
         }
-    } else {
-        // The FIRST param's value prints bare (its key dropped), highlighted.
-        let (first_key, first_value) = &tool.params[0];
-        let value = inline_param_value(tool, first_key, first_value);
-        content.push(Span::styled("  ".to_string(), dim()));
-        len += 2 + span_width(&value);
-        content.extend(value);
-        // The rest print `key=value`, the value quoted iff it contains a space.
-        for (key, value) in &tool.params[1..] {
-            let shown = if value.contains(' ') {
-                format!("\"{value}\"")
-            } else {
-                value.clone()
-            };
-            content.push(Span::styled("  ".to_string(), dim()));
-            content.push(Span::styled(format!("{key}="), dim()));
-            content.push(Span::styled(shown.clone(), theme::theme().body));
-            len += 2 + key.chars().count() + 1 + shown.chars().count();
-        }
-    }
-    // The right run: the `note · ms` stats, selected by the 40-cap
-    // drop-when-crowded rule (A4).
+        spans
+    };
+
+    // The rest of the params, `key=value`, droppable from the tail when crowded.
+    let extra: Vec<Vec<Span<'static>>> = tool
+        .params
+        .iter()
+        .skip(1)
+        .map(|(key, raw)| extra_param_run(key, raw))
+        .collect();
+
+    // The stats run: `note · ms`, drop-when-crowded (A4, extended by D038). The
+    // three rungs are full stats, ms only, none.
     let note = if tool.done {
         let raw = completion_note(tool).unwrap_or_else(|| summary_line(&tool.output).0);
         (!raw.is_empty()).then(|| truncate(&raw, 40))
@@ -1203,48 +1219,93 @@ fn collapsed_head_row(tool: &Tool, width: usize) -> Vec<Line<'static>> {
         None
     };
     let ms = tool.done.then(|| tool.duration_ms.map(format_ms)).flatten();
-    let tail_len = |stats: &str| stats.chars().count();
-    let note_ms = join_stats(note.as_deref(), ms.as_deref());
-    let ms_only = join_stats(None, ms.as_deref());
-    // Keep ≥1 fill column, else drop the note (keep ms), else drop both.
-    let stats = if len + tail_len(&note_ms) < width {
-        note_ms
-    } else if len + tail_len(&ms_only) < width {
-        ms_only
-    } else {
-        String::new()
+    let stat_runs = [
+        join_stats(note.as_deref(), ms.as_deref()),
+        join_stats(None, ms.as_deref()),
+        String::new(),
+    ];
+    let gap = if value.is_empty() { 0 } else { 2 };
+    let full = value_run(first_line, true);
+    let extras_w = |keep: usize| extra[..keep].iter().map(|run| span_width(run)).sum::<usize>();
+    // Keep ≥1 fill column while a stat string is present (A4); a stat-less head
+    // may flush to the edge.
+    let fits = |keep: usize, stats: &str| -> bool {
+        let need = head_len + gap + span_width(&full) + extras_w(keep) + stats.chars().count();
+        need + usize::from(!stats.is_empty()) <= width
     };
-    let mut tail: Vec<Span<'static>> = Vec::new();
-    if !stats.is_empty() {
-        tail.push(Span::styled(stats, dim()));
-    }
-    let tail_w = span_width(&tail);
-
-    // Row 0 keeps the stats; an over-long head wraps onto gutter-aligned rows.
-    let first_avail = width.saturating_sub(tail_w);
-    if len <= first_avail {
-        let fill = width.saturating_sub(len + tail_w);
-        let mut spans = content;
-        spans.push(Span::styled(" ".repeat(fill), dim()));
-        spans.extend(tail);
-        return vec![Line::from(spans)];
-    }
-    let chars: Vec<(char, Style)> = content
+    let chosen = stat_runs
         .iter()
-        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
-        .collect();
-    let take = first_avail.min(chars.len());
-    let mut head = spans_from_chars(&chars[..take]);
-    head.extend(tail);
-    let mut rows = vec![Line::from(head)];
-    let cont = TOOL_INDENT.to_string();
-    let cont_avail = width.saturating_sub(cont.chars().count()).max(1);
-    for chunk in chars[take..].chunks(cont_avail) {
-        let mut spans = vec![Span::styled(cont.clone(), dim())];
-        spans.extend(spans_from_chars(chunk));
-        rows.push(Line::from(spans));
+        .find_map(|stats| fits(extra.len(), stats).then_some((extra.len(), stats.as_str())))
+        .or_else(|| {
+            (0..extra.len())
+                .rev()
+                .find(|keep| fits(*keep, ""))
+                .map(|keep| (keep, ""))
+        });
+    let (keep, stats, value_row) = match chosen {
+        Some((keep, stats)) => (keep, stats, full),
+        None => {
+            // The last two rungs: shed the ` … +N lines` tail, then clip.
+            let bare = value_run(first_line, false);
+            if head_len + gap + span_width(&bare) <= width {
+                (0, "", bare)
+            } else {
+                let budget = width
+                    .saturating_sub(head_len + gap)
+                    .max(MIN_TOOL_VALUE_COLS);
+                (0, "", highlight(&truncate(first_line, budget)))
+            }
+        }
+    };
+
+    let mut spans = vec![
+        Span::styled(prefix, dim()),
+        Span::styled(tool.name.clone(), name_style),
+    ];
+    if !value.is_empty() {
+        spans.push(Span::styled("  ".to_string(), dim()));
+        spans.extend(value_row);
     }
-    rows
+    for run in extra.iter().take(keep) {
+        spans.extend(run.iter().cloned());
+    }
+    let used = span_width(&spans);
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used + stats.chars().count())),
+        dim(),
+    ));
+    if !stats.is_empty() {
+        spans.push(Span::styled(stats.to_string(), dim()));
+    }
+    Line::from(spans)
+}
+
+/// The ` … +N lines` tail of a multi-line param value in a collapsed head (D038):
+/// the fold is always marked, and singular/plural reads right.
+fn lines_tail(lines: usize) -> String {
+    let noun = if lines == 1 { "line" } else { "lines" };
+    format!(" … +{lines} {noun}")
+}
+
+/// One trailing `key=value` run of a collapsed head: the value quoted iff it
+/// contains a space, flattened to its first logical line plus a [`lines_tail`]
+/// (D038 — no `\n` reaches a span, and the tail is priced, never unpriced).
+fn extra_param_run(key: &str, raw: &str) -> Vec<Span<'static>> {
+    let first = raw.split('\n').next().unwrap_or("");
+    let hidden = raw.split('\n').count().saturating_sub(1);
+    let shown = if first.contains(' ') {
+        format!("\"{first}\"")
+    } else {
+        first.to_string()
+    };
+    let mut spans = vec![
+        Span::styled(format!("  {key}="), dim()),
+        Span::styled(shown, theme::theme().body),
+    ];
+    if hidden > 0 {
+        spans.push(Span::styled(lines_tail(hidden), dim()));
+    }
+    spans
 }
 
 /// The styled spans of a collapsed head's first-param VALUE — syntax-highlighted
@@ -1283,17 +1344,6 @@ fn join_stats(note: Option<&str>, ms: Option<&str>) -> String {
     parts.join(" · ")
 }
 
-/// Coalesce a `(char, style)` run into spans — the wrap's continuation builder.
-fn spans_from_chars(chars: &[(char, Style)]) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
-    for (c, style) in chars {
-        match out.last_mut() {
-            Some(last) if last.style == *style => last.content.to_mut().push(*c),
-            _ => out.push(Span::styled(c.to_string(), *style)),
-        }
-    }
-    out
-}
 /// Render the live (streaming) assistant message for `width` — the same body
 /// `draw_transcript` used inline, with the streaming cursor (`live = true`).
 /// Empty for a non-assistant message.
@@ -1596,7 +1646,13 @@ fn param_syntax(tool: &Tool, key: &str) -> Option<String> {
 
 /// One `key  value` row: the key in `dim()` padded to `key_col`, the value in
 /// body strength (or syntax-highlighted when `info` resolves), continuations
-/// aligned under the value column. Returns ≥1 line.
+/// aligned under the value column.
+///
+/// # Contracts (D038)
+/// - Expansion is the **complete record**: the value splits on `\n` and each
+///   LOGICAL line wraps on its own, so a heredoc `command` keeps its shape.
+/// - No `\n` char reaches a span (a zero-width cell that mis-sizes the row).
+/// - Returns ≥1 line (an empty value still emits its `key` row).
 fn param_row(
     key: &str,
     value: &str,
@@ -1614,10 +1670,20 @@ fn param_row(
     };
     let cont = " ".repeat(value_col);
     let mut hl = info.map(|i| markdown::CodeHighlight::new(i, theme::color_mode()));
-    let rows = match hl.as_mut() {
-        Some(h) if h.is_active() => wrap_styled(&h.spans(value), avail),
-        _ => wrap_styled(&[Span::styled(value.to_string(), theme::theme().body)], avail),
-    };
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    // `lines()` drops a trailing `\n` and a `\r`; the fallback keeps the empty
+    // value's one row.
+    let mut logical: Vec<&str> = value.lines().collect();
+    if logical.is_empty() {
+        logical.push("");
+    }
+    for line in logical {
+        let spans = match hl.as_mut() {
+            Some(h) if h.is_active() => h.spans(line),
+            _ => vec![Span::styled(line.to_string(), theme::theme().body)],
+        };
+        rows.extend(wrap_styled(&spans, avail));
+    }
     rows.iter()
         .enumerate()
         .map(|(i, row)| {
@@ -5487,30 +5553,151 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(text.contains("+1 −1 · 4ms"), "edit note:\n{text}");
     }
 
+    /// The rendered rows of the LAST committed block as plain strings, at an
+    /// explicit `width` (so the assertion holds no layout arithmetic).
+    fn last_block_rows(app: &App, width: usize) -> Vec<String> {
+        let block = app.transcript().last().expect("a committed block");
+        block_lines(block, width)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    /// No span of the last block's render may carry a `\n` — it would be a
+    /// zero-width cell that mis-sizes the row (D038).
+    fn assert_no_newline_spans(app: &App, width: usize) {
+        let block = app.transcript().last().expect("a committed block");
+        for line in block_lines(block, width) {
+            for span in &line.spans {
+                assert!(
+                    !span.content.contains('\n'),
+                    "a `\\n` reached a span: {span:?}"
+                );
+            }
+        }
+    }
+
     #[test]
-    fn a_long_bash_command_wraps_on_the_collapsed_head() {
+    fn a_three_line_command_is_one_row_with_a_line_count() {
+        // D038: a heredoc-shaped value folds to its FIRST line + ` … +N lines`.
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "set -e\necho one\necho two" }),
+            "ok",
+        );
+        let rows = last_block_rows(&app, 80);
+        assert_eq!(rows.len(), 1, "the head is ONE row, always:\n{rows:#?}");
+        assert!(rows[0].contains("set -e"), "the first line:\n{rows:?}");
+        assert!(
+            rows[0].contains(" … +2 lines"),
+            "the fold is marked with the remaining line count:\n{rows:?}"
+        );
+        assert!(
+            !rows[0].contains("echo one"),
+            "no second line reaches the head:\n{rows:?}"
+        );
+        assert_no_newline_spans(&app, 80);
+    }
+
+    #[test]
+    fn an_eighty_col_command_clips_to_one_row() {
+        // An 84-col command at 60 cols: ONE row, the value clipped with `…`.
         let mut app = App::new();
         let cmd = "cargo test -p wcode-cli --all-targets -- --nocapture --color=always --test-threads=1";
+        assert!(
+            cmd.chars().count() >= 80,
+            "the fixture must be at least 80 cols"
+        );
         push_panel(&mut app, "bash", serde_json::json!({ "command": cmd }), "ok");
-        let text = buffer_text(&render(&mut app, 60, 20));
-        // The command wraps onto a col-3 continuation; the tail is reachable.
-        let head_row = text
-            .lines()
-            .find(|l| l.contains("cargo test"))
-            .expect("the head row");
+        let rows = last_block_rows(&app, 60);
+        assert_eq!(rows.len(), 1, "the head is ONE row, always:\n{rows:#?}");
         assert!(
-            !head_row.contains("--test-threads=1"),
-            "the command wraps onto a continuation:\n{text}"
+            rows[0].trim_end().ends_with('…'),
+            "the elision is marked with `…` (never silent):\n{rows:?}"
         );
-        let joined: String = text.split_whitespace().collect();
+        assert_eq!(
+            rows[0].chars().count(),
+            60,
+            "the clipped row flushes to the edge:\n{rows:?}"
+        );
+        assert_no_newline_spans(&app, 60);
+    }
+
+    #[test]
+    fn a_short_command_is_not_elided() {
+        // Width, not a threshold: a value that fits is untouched.
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "cargo test" }),
+            "ok",
+        );
+        let rows = last_block_rows(&app, 80);
+        assert_eq!(rows.len(), 1, "the head is ONE row:\n{rows:#?}");
+        assert!(rows[0].contains("cargo test"), "the command:\n{rows:?}");
+        assert!(!rows[0].contains('…'), "a short head is unchanged:\n{rows:?}");
+    }
+
+    #[test]
+    fn a_crowded_head_drops_the_note_before_it_elides_the_value() {
+        // The ladder's first rung (A4 extended, D038): the note goes, the ms
+        // stays, the value is intact — the name and value are the last to shed.
+        let mut app = App::new();
+        let cmd = "cargo test -p wcode-cli --all-targets"; // 37 cols
+        push_panel_full(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": cmd }),
+            "exit code: 0",
+            None,
+            Some(5),
+        );
+        let rows = last_block_rows(&app, 50);
+        assert_eq!(rows.len(), 1, "still ONE row:\n{rows:#?}");
         assert!(
-            joined.contains("--test-threads=1"),
-            "the tail must render in full:\n{text}"
+            !rows[0].contains("exit 0"),
+            "the note is the first thing that drops:\n{rows:?}"
         );
         assert!(
-            !text.contains("--color=always…"),
-            "the wrapped command must not clip:\n{text}"
+            rows[0].contains("--all-targets"),
+            "the value survives the note:\n{rows:?}"
         );
+        assert!(
+            !rows[0].contains('…'),
+            "nothing is elided yet:\n{rows:?}"
+        );
+        assert!(
+            rows[0].contains("5ms"),
+            "the ms survives the note:\n{rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_expanded_multi_line_command_renders_every_line() {
+        // Expansion is the complete record: real line breaks, one wrapped run each.
+        let mut app = App::new();
+        push_panel(
+            &mut app,
+            "bash",
+            serde_json::json!({ "command": "set -e\necho one\necho two" }),
+            "ok",
+        );
+        app.handle(AppEvent::Key(Key::Ctrl('t'))); // expand
+        let rows = last_block_rows(&app, 80);
+        for line in ["set -e", "echo one", "echo two"] {
+            assert!(
+                rows.iter().any(|r| r.contains(line)),
+                "the expanded params must render {line:?}:\n{rows:#?}"
+            );
+        }
+        assert!(
+            !rows.iter().any(|r| r.contains(" … +2 lines")),
+            "expansion elides nothing:\n{rows:#?}"
+        );
+        assert_no_newline_spans(&app, 80);
     }
 
     #[test]
@@ -6489,5 +6676,58 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert!(after.contains("root prose"));
         assert!(!after.contains("compacted 22"), "Focus never merges a member");
     }
-}
 
+    #[test]
+    fn tmp_tool_region_row_cost() {
+        // ONE turn, 8 contiguous `bash` calls (a parallel batch), each carrying a
+        // multi-line 200+ col command: the tool region's ROW COUNT.
+        let mut app = App::new();
+        let cmd = "sh -c 'set -euo pipefail\n\
+            for f in $(git ls-files \"crates/**/*.rs\"); do\n\
+            \tawk -F: \"{print $1 \\\" \\\" $2}\" \"$f\";\n\
+            done | sort -u | uniq -c | sort -rn | head -40' && cargo test --workspace --all-targets";
+        let calls: Vec<ContentBlock> = (0..8)
+            .map(|i| ContentBlock::ToolCall {
+                id: format!("t{i}"),
+                name: "bash".into(),
+                arguments: serde_json::json!({ "command": cmd }),
+            })
+            .collect();
+        app.handle(AppEvent::Agent(
+            root(),
+            wcode_harness::event::AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant {
+                    content: calls,
+                    stop_reason: wcode_harness::message::StopReason::ToolUse,
+                    usage: None,
+                    model: None,
+                },
+            },
+        ));
+        for i in 0..8 {
+            app.handle(AppEvent::Agent(
+                root(),
+                wcode_harness::event::AgentEvent::ToolExecutionStart {
+                    call_id: format!("t{i}"),
+                    name: "bash".into(),
+                },
+            ));
+            app.handle(AppEvent::Agent(
+                root(),
+                wcode_harness::event::AgentEvent::ToolExecutionEnd {
+                    call_id: format!("t{i}"),
+                    name: "bash".into(),
+                    output: "building…\nbuilt\nexit code: 0".into(),
+                    is_error: false,
+                    diff: None,
+                    path: None,
+                    duration_ms: Some(1200),
+                },
+            ));
+        }
+        let block = app.transcript().last().expect("a block");
+        for w in [100usize, 80, 60] {
+            println!("ROWCOST width={w} rows={}", block_lines(block, w).len());
+        }
+    }
+}
