@@ -919,12 +919,22 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
+/// One candidate in the inline `/`-command completion popup. Commands come
+/// first (in [`COMMANDS`] order), then skills (in discovery order). A skill
+/// whose name collides with a command or one of its aliases is dropped, so a
+/// command always wins the completion (and dispatch) — see W036 D?.
+#[derive(Clone, Copy, Debug)]
+enum CompletionCandidate {
+    Command(usize),
+    Skill(usize),
+}
+
 /// The inline `/`-command completion popup. Non-modal: it never owns the
-/// keyboard, so the user keeps typing arguments beneath it. `matches` indexes
-/// [`COMMANDS`]; `selected` indexes `matches`.
+/// keyboard, so the user keeps typing arguments beneath it. `matches` holds
+/// [`CompletionCandidate`]s; `selected` indexes `matches`.
 #[derive(Clone, Debug, Default)]
 struct Completion {
-    pub matches: Vec<usize>,
+    pub matches: Vec<CompletionCandidate>,
     pub selected: usize,
 }
 
@@ -935,7 +945,7 @@ pub(crate) struct CompletionRow {
     /// The alias that matched when the canonical name has no prefix (a hint).
     pub(crate) alias: Option<&'static str>,
     pub(crate) args: Option<&'static str>,
-    pub(crate) summary: &'static str,
+    pub(crate) summary: String,
 }
 
 /// Look up a command by its typed name (canonical or alias). The leading slash
@@ -1186,10 +1196,11 @@ pub(crate) fn help_rows() -> Vec<InfoRow> {
 
 /// `true` when `query` is already a complete command name *or alias* — nothing
 /// left to complete, so Enter submits rather than completes.
-fn is_exact_command(query: &str) -> bool {
+fn is_exact_command(query: &str, skills: &[SkillItem]) -> bool {
     COMMANDS
         .iter()
         .any(|c| c.name == query || c.aliases.contains(&query))
+        || skills.iter().any(|s| s.name == query)
 }
 
 /// Indices of the entries matching `query` (case-insensitive substring), in
@@ -4730,7 +4741,28 @@ impl App {
             self.completion = None;
             return;
         };
-        let matches = prefix_indices(COMMANDS, &query);
+        // Commands first, in table order; then skills, excluding any whose
+        // name collides with a command or one of its aliases (command wins).
+        let mut matches: Vec<CompletionCandidate> = prefix_indices(COMMANDS, &query)
+            .into_iter()
+            .map(CompletionCandidate::Command)
+            .collect();
+        let q = query.to_lowercase();
+        for (i, skill) in self.skills.iter().enumerate() {
+            if !skill.name.to_lowercase().starts_with(&q) {
+                continue;
+            }
+            let collides = COMMANDS.iter().any(|c| {
+                c.name.eq_ignore_ascii_case(&skill.name)
+                    || c.aliases
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&skill.name))
+            });
+            if collides {
+                continue;
+            }
+            matches.push(CompletionCandidate::Skill(i));
+        }
         if matches.is_empty() {
             self.completion = None;
             return;
@@ -4776,7 +4808,7 @@ impl App {
                 // a command at all (it falls through to "unknown command: /").
                 let pending = self
                     .command_query()
-                    .is_some_and(|q| !q.is_empty() && !is_exact_command(&q));
+                    .is_some_and(|q| !q.is_empty() && !is_exact_command(&q, &self.skills));
                 if pending {
                     self.accept_completion();
                     true
@@ -4800,11 +4832,15 @@ impl App {
     /// Insert the highlighted command as `/<name> ` (trailing space) and close
     /// the popup, so the user can type arguments.
     fn accept_completion(&mut self) {
-        let Some(&idx) = self.completion.as_ref().and_then(|c| c.matches.get(c.selected)) else {
+        let Some(cand) = self.completion.as_ref().and_then(|c| c.matches.get(c.selected).copied()) else {
             self.completion = None;
             return;
         };
-        let text = format!("/{} ", COMMANDS[idx].name);
+        let name = match cand {
+            CompletionCandidate::Command(i) => COMMANDS[i].name,
+            CompletionCandidate::Skill(i) => self.skills[i].name.as_str(),
+        };
+        let text = format!("/{} ", name);
         self.input = Self::atoms(&text);
         self.cursor = self.input.len();
         self.focused_mut().history_index = None;
@@ -4821,19 +4857,33 @@ impl App {
         completion
             .matches
             .iter()
-            .map(|&idx| {
-                let cmd = &COMMANDS[idx];
-                let label = format!("/{}", cmd.name);
-                let range = prefix_range(&label, cmd.name, &query);
-                let alias = (range.is_none() && !query.is_empty())
-                    .then(|| matched_alias(cmd, &query))
-                    .flatten();
-                CompletionRow {
-                    range,
-                    label,
-                    alias,
-                    args: cmd.args,
-                    summary: cmd.summary,
+            .map(|cand| match cand {
+                CompletionCandidate::Command(idx) => {
+                    let cmd = &COMMANDS[*idx];
+                    let label = format!("/{}", cmd.name);
+                    let range = prefix_range(&label, cmd.name, &query);
+                    let alias = (range.is_none() && !query.is_empty())
+                        .then(|| matched_alias(cmd, &query))
+                        .flatten();
+                    CompletionRow {
+                        range,
+                        label,
+                        alias,
+                        args: cmd.args,
+                        summary: cmd.summary.to_string(),
+                    }
+                }
+                CompletionCandidate::Skill(idx) => {
+                    let skill = &self.skills[*idx];
+                    let label = format!("/{}", skill.name);
+                    let range = prefix_range(&label, &skill.name, &query);
+                    CompletionRow {
+                        range,
+                        label,
+                        alias: None,
+                        args: Some("[args]"),
+                        summary: skill.description.clone(),
+                    }
                 }
             })
             .collect()
@@ -9058,7 +9108,7 @@ mod tests {
                 panic!("row {} is not an Item: {:?}", 1 + i, rows[1 + i]);
             };
             assert_eq!(label, &command_label(cmd));
-            assert_eq!(detail, cmd.summary);
+            assert_eq!(detail.as_str(), cmd.summary);
         }
         // The blank row + the `keys` header, then one Item per KEYS entry exactly
         // as F1 styles them.

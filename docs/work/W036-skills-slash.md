@@ -280,7 +280,30 @@ skill names). A local TUI lists the discovered skills; a `--socket` client shows
 none and refuses a load with a notice. `cargo test --workspace` and
 `cargo clippy --workspace --all-targets` are clean.
 
-## 10. Live check (performed — supersedes the initial "not driven")
+## 11. Follow-up: slash completion now suggests skill names (same item, later)
+
+The user noticed that typing `/om` did not surface `omarchy` in the inline
+completion popup — skill names were not in the candidate set at all (the
+`COMMANDS` table is `&'static`, skills are runtime-injected). Fixed by
+generalising the completion candidate from `usize` (index into `COMMANDS`)
+to a `CompletionCandidate` enum (`Command(usize)` | `Skill(usize)`):
+
+- `recompute_completion` appends skills after commands, in discovery order,
+  skipping any whose name collides with a command or alias (command wins —
+  the same rule as dispatch).
+- `accept_completion` and `completion_rows` handle both variants; skill rows
+  show `args: Some("[args]")` and `summary` = the (collapsed) description.
+- `CompletionRow.summary` changed from `&'static str` to `String` so a skill
+  description (runtime-owned) fits; the one `/help` site already called
+  `.to_string()`.
+- `is_exact_command` gained a `skills` parameter so typing a full skill name
+  + Enter submits instead of being rewritten.
+
+Verified live: `/om` now lists `/omarchy [args]`, and `/omarchy` + Enter arms
+the run with the compact `# Skill: omarchy` block. 561 tui tests still pass;
+clippy clean. No new tests added — the existing completion tests run with an
+empty skill list, so they are unchanged; a skill-aware completion assertion
+would be the natural next test but is not required for the gate.
 
 Driven in a real pty (`tmux new-session -x 110 -y 60`) with a throwaway project
 holding `.wcode/skills/live-check/SKILL.md`, against a scripted
