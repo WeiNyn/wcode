@@ -326,3 +326,12 @@ second live sighting of it, not a regression from this item.
 
 Cleanup: the tmux server, the listener and the temp project were removed; the
 run used `--no-session`, so nothing was written into the repository.
+
+## 12. Released
+
+Shipped in **v0.13.2** (tag on `e60f028`). CI, Publish and Release all green
+first try; four crates published, 4 tarballs + 4 sha256, formula auto-committed
+(`331a7ee`). Verified against the released `x86_64-unknown-linux-gnu` artifact,
+not just the working tree: `sha256sum -c` passes, `wcode --version` prints
+`0.13.2`, `/om` completes to `/omarchy` in a real pty, and `/skill` put the
+framed body on the wire and streamed the model's reply.
