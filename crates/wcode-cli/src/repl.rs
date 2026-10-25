@@ -2342,9 +2342,9 @@ assert_eq!(parse_command("/effort"), Some(Command::Effort(None)));
         assert_eq!(plain, "# Skill: pdf-tools\n\n# PDF Tools\n\nRun extract.sh.");
 
         let with_args = skill_turn("pdf-tools", "body\n", Some("merge a.pdf b.pdf"));
-        assert!(
-            with_args.ends_with("\n\n## Task\nmerge a.pdf b.pdf"),
-            "{with_args}"
+        assert_eq!(
+            with_args,
+            "# Skill: pdf-tools\n\nbody\n\n## Task\nmerge a.pdf b.pdf"
         );
     }
 

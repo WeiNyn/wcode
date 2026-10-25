@@ -1094,6 +1094,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         sessions: Vec::new(),
                         tasks: Vec::new(),
                         teams: Vec::new(),
+                        skills: Vec::new(),
                         theme: cfg.theme.clone(),
                         tui: cfg.tui,
                         history: Some(repl::history_path()),
@@ -2010,6 +2011,7 @@ async fn dispatch(
                     .into_iter()
                     .map(|team| team.name)
                     .collect(),
+                skills: skill_items(&rt.skills),
                 theme: cfg.theme.clone(),
                 tui: cfg.tui,
                 history: Some(repl::history_path()),
@@ -2412,6 +2414,22 @@ fn live_roster(
         }
     });
     rx
+}
+
+/// Map the CLI's discovered `SkillSet` into the TUI's startup constant.
+/// Sibling of `session_items()` / `task_items()`; lives beside them.
+/// `rt.skills` is live at the local `Options` literal (main.rs:2008
+/// `tasks: task_items(&rt.orchestrator)` proves `rt` is in scope).
+fn skill_items(skills: &crate::skills::SkillSet) -> Vec<wcode_tui::SkillItem> {
+    skills
+        .skills
+        .iter()
+        .map(|s| wcode_tui::SkillItem {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            path: s.path.clone(),
+        })
+        .collect()
 }
 
 /// The `/resume` picker's list: one entry per session file, newest first, each

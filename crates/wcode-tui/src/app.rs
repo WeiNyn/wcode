@@ -145,6 +145,10 @@ pub enum Action {
     SubmitTo(SessionId, String),
     /// Copy this text to the terminal clipboard (OSC-52).
     Copy(String),
+    /// Load a skill's body and submit it as a turn. The reducer stays pure (D5):
+    /// it only emits this; the event loop in `lib.rs` reads `path` and sends
+    /// `skill_turn(name, body, args)` as `Request::Submit`.
+    LoadSkill { name: String, path: PathBuf, args: Option<String> },
 }
 
 /// One **exchange**: a user prompt → the assistant's answer, as ONE block.
@@ -454,6 +458,22 @@ fn copy_text(block: &Block) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// TUI-local copy of `crates/wcode-cli/src/repl.rs:1551` `skill_turn`.
+/// D4: duplicated (six lines) rather than hoisted into wcode-protocol or the
+/// harness, so prompt shape stays out of transport/kernel. Pinned by a test
+/// in BOTH crates on the same literal (`skill_turn_frames_body_and_appends_args`).
+/// Contract: identical output to the CLI copy —
+///   `format!("# Skill: {name}\n\n{}", body.trim_end())` plus, when args present,
+///   `out.push_str("\n\n## Task\n"); out.push_str(args);`
+pub(crate) fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
+    let mut out = format!("# Skill: {name}\n\n{}", body.trim_end());
+    if let Some(args) = args {
+        out.push_str("\n\n## Task\n");
+        out.push_str(args);
+    }
+    out
+}
+
 /// The fresh-transcript hint (D5): a dim notice telling the user how to begin.
 /// Seeded when an empty transcript is first drawn; retired by the first real
 /// block, so a resumed session never shows it.
@@ -643,6 +663,9 @@ pub enum PickerKind {
     Surface,
     /// A catalog theme (`/theme`); selecting applies it LIVE (client-local).
     Theme,
+    /// A discovered skill (`/skills`); selecting reads its body and submits it
+    /// as a turn (`Action::LoadSkill`).
+    Skill,
 }
 
 impl Picker {
@@ -875,6 +898,18 @@ const COMMANDS: &[Command] = &[
         aliases: &[],
         args: None,
         summary: "list the tasks",
+    },
+    Command {
+        name: "skills",
+        aliases: &[],
+        args: None,
+        summary: "list the discovered skills",
+    },
+    Command {
+        name: "skill",
+        aliases: &[],
+        args: Some("<name> [args]"),
+        summary: "load a skill's body as a turn",
     },
     Command {
         name: "help",
@@ -1228,6 +1263,16 @@ fn match_range(item: &str, query: &str) -> Option<Range<usize>> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionItem {
     pub label: String,
+    pub path: PathBuf,
+}
+
+/// A discovered skill offered by `/skills` and bare-slash resolution: a `name`,
+/// a `description`, and the path to its `SKILL.md`. Injected by the composition
+/// root — the TUI holds no fs/discovery. Mirrors `crates/wcode-cli/src/skills.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkillItem {
+    pub name: String,
+    pub description: String,
     pub path: PathBuf,
 }
 
@@ -2558,6 +2603,9 @@ pub struct App {
     /// Project-team names for the `/team` picker — injected by the composition
     /// root, which discovers `./.wcode/teams/*.toml`; the TUI holds no fs.
     teams: Vec<String>,
+    /// Discovered skills — injected by the composition root; the TUI holds no
+    /// fs/discovery. Empty over `--socket`.
+    skills: Vec<SkillItem>,
     /// The orchestrator's plan — injected by the composition root and refreshed
     /// live by the `new_tasks` feed to `run`.
     tasks: Vec<TaskItem>,
@@ -2763,6 +2811,7 @@ impl App {
             models: Vec::new(),
             sessions: Vec::new(),
             teams: Vec::new(),
+            skills: Vec::new(),
             tasks: Vec::new(),
             pending_resume: None,
             pending_team: None,
@@ -4484,6 +4533,9 @@ impl App {
         self.transient(line);
         match command_named(name) {
             Some(cmd) => self.run_command(cmd, arg),
+            None if self.skills.iter().any(|s| {
+                s.name == name.strip_prefix('/').unwrap_or(name)
+            }) => self.load_skill(name.strip_prefix('/').unwrap_or(name), arg),
             None => self.transient(format!("unknown command: {name}")),
         }
         self.dirty = true;
@@ -4633,6 +4685,17 @@ impl App {
                 Some(name) => self.request_team(name),
             },
             "tasks" => self.open_info("tasks", tasks_text(&self.tasks)),
+            "skills" => self.open_skills_picker(),
+            "skill" => match arg {
+                None => self.transient("usage: /skill <name> [args]   (/skills lists them)"),
+                Some(a) => {
+                    let (n, extra) = match a.split_once(char::is_whitespace) {
+                        Some((n, rest)) => (n, Some(rest.trim())),
+                        None => (a, None),
+                    };
+                    self.load_skill(n, extra);
+                }
+            },
             "surface" => self.open_surface_picker(),
             // `/help` is the one command with a TABULAR body — it opens explicit
             // rows. The other prose producers (`/verify`, `/team roster`, `/tasks`,
@@ -4853,7 +4916,7 @@ impl App {
     /// Push a transient block on the FOCUSED surface — the twin of
     /// [`App::notice`], one word different. Used for `/`-command chatter, which
     /// [`Surface::retire_transient`] clears at the next submit.
-    fn transient(&mut self, text: impl Into<String>) {
+    pub(crate) fn transient(&mut self, text: impl Into<String>) {
         let idx = self.focus;
         self.push_on(idx, Block::Transient(text.into()));
         self.dirty = true;
@@ -5376,6 +5439,43 @@ impl App {
         self.dirty = true;
     }
 
+    /// Pure-reducer helper: resolve a skill name to an `Action::LoadSkill`.
+    /// Guards: remote → `skills unavailable over a socket`; unknown name →
+    /// `no such skill: {name}`. `remote` is the private `self.remote` field
+    /// already set by `App::set_remote` — no new plumbing.
+    fn load_skill(&mut self, name: &str, args: Option<&str>) {
+        if self.remote {
+            self.transient("skills unavailable over a socket");
+            return;
+        }
+        if self.focused().running {
+            self.transient("cannot load a skill while a run is in flight");
+            return;
+        }
+        let found = self.skills.iter().find(|s| s.name == name).map(|s| s.path.clone());
+        match found {
+            None => self.transient(format!("no such skill: {name}")),
+            Some(path) => {
+                // Arm the run (D5-pure: `begin_run` is state only) so the
+                // transcript shows a `Block::User` and `running` is true; the
+                // body is read later by the loop, so the user block carries the
+                // compact invocation, not the whole `SKILL.md`.
+                let mut text = format!("# Skill: {name}");
+                if let Some(args) = args {
+                    text.push_str("\n\n");
+                    text.push_str(args);
+                }
+                let idx = self.focus;
+                self.begin_run(idx, text);
+                self.actions.push(Action::LoadSkill {
+                    name: name.to_string(),
+                    path,
+                    args: args.map(str::to_string),
+                });
+            }
+        }
+    }
+
     /// `/team <name>`: hand the choice back and quit; the composition root
     /// re-execs with `--team <name>` — a NEW session with that project team.
     fn request_team(&mut self, name: &str) {
@@ -5404,6 +5504,37 @@ impl App {
             PickerKind::Model,
             "model",
             self.models.clone(),
+        )));
+        self.dirty = true;
+    }
+    /// Open the `/skills` picker over the injected skill list. Over a socket
+    /// (`self.remote`) it refuses with `skills unavailable over a socket` first;
+    /// an empty list (local or otherwise) reports `no skills discovered`.
+    fn open_skills_picker(&mut self) {
+        if self.remote {
+            self.transient("skills unavailable over a socket");
+            return;
+        }
+        if self.skills.is_empty() {
+            self.transient("no skills discovered");
+            return;
+        }
+        // `Picker.items: Vec<String>` + `values: Vec<String>` (`app.rs:620`):
+        // item = "{name} — {description}" (description newlines collapsed to
+        // spaces so one skill never wraps to a second row), values = bare name,
+        // so `selected_value()` yields the name.
+        let mut items = Vec::with_capacity(self.skills.len());
+        let mut values = Vec::with_capacity(self.skills.len());
+        for s in &self.skills {
+            let desc = s.description.replace('\n', " ");
+            items.push(format!("{} — {}", s.name, desc));
+            values.push(s.name.clone());
+        }
+        self.overlay = Some(Overlay::Pick(Picker::with_values(
+            PickerKind::Skill,
+            "skills",
+            items,
+            values,
         )));
         self.dirty = true;
     }
@@ -5657,6 +5788,12 @@ impl App {
                 }
                 self.dirty = true;
             }
+            PickerKind::Skill => {
+                // Amendment (i): Enter submits the turn — no second overlay.
+                // `selected` is the bare skill name (from `values`); args None
+                // because the picker carries no free text.
+                self.load_skill(&selected, None);
+            }
         }
     }
 
@@ -5715,6 +5852,11 @@ impl App {
     /// Seed the project-team names the `/team` picker offers.
     pub fn set_teams(&mut self, teams: Vec<String>) {
         self.teams = teams;
+    }
+    /// Seed the discovered skills the `/skills` picker and bare-slash resolution
+    /// offer (injected by the composition root).
+    pub fn set_skills(&mut self, skills: Vec<SkillItem>) {
+        self.skills = skills;
     }
 
     /// The session the user chose to resume, if any — read by the event loop
@@ -8940,7 +9082,7 @@ mod tests {
         for name in [
             "new", "exit", "model", "theme", "effort", "compact", "changes", "resume", "rename",
             "reload", "btw", "plan", "verify", "usage", "copy", "surface", "width", "view",
-            "settings", "team", "tasks", "help",
+            "settings", "team", "tasks", "skills", "skill", "help",
         ] {
             let prefixed = format!("/{name}");
             assert!(
@@ -9101,7 +9243,7 @@ mod tests {
         typed(&mut app, "/s");
         assert_eq!(
             completion_labels(&app),
-            vec!["/resume", "/surface", "/settings"]
+            vec!["/resume", "/surface", "/settings", "/skills", "/skill"]
         );
 
         let mut app = App::new();
@@ -11656,6 +11798,180 @@ mod tests {
             app.merged_order()
         );
     }
+    // ---- W036 skills slash tests ----
+
+    fn skill_item(name: &str, desc: &str) -> SkillItem {
+        SkillItem {
+            name: name.to_string(),
+            description: desc.to_string(),
+            path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+        }
+    }
+
+    #[test]
+    fn skills_picker_opens_on_slash_skills() {
+        let mut app = App::new();
+        app.set_skills(vec![
+            skill_item("pdf-tools", "manipulate pdfs"),
+            skill_item("xlsx", "spreadsheets"),
+        ]);
+        submit(&mut app, "/skills");
+        assert!(matches!(app.overlay(), Some(Overlay::Pick(p)) if p.kind == PickerKind::Skill));
+        let Some(Overlay::Pick(p)) = app.overlay() else { panic!() };
+        assert!(p.items.iter().any(|i| i.starts_with("pdf-tools")));
+        assert!(p.items.iter().any(|i| i.starts_with("xlsx")));
+        let _ = app.take_actions();
+    }
+
+    #[test]
+    fn skills_picker_empty_reports_no_skills() {
+        let mut app = App::new();
+        submit(&mut app, "/skills");
+        assert!(app.overlay().is_none());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "no skills discovered"
+        ));
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn skill_command_loads_and_submits() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        app.set_remote(false);
+        submit(&mut app, "/skill pdf-tools extract page 2");
+        let actions = app.take_actions();
+        assert_eq!(
+            actions,
+            vec![Action::LoadSkill {
+                name: "pdf-tools".into(),
+                path: std::path::PathBuf::from("/tmp/pdf-tools/SKILL.md"),
+                args: Some("extract page 2".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn skill_command_unknown_name_is_transient() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "/skill nope");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "no such skill: nope"
+        ));
+    }
+
+    #[test]
+    fn bare_slash_resolves_to_skill() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "/pdf-tools");
+        let actions = app.take_actions();
+        assert_eq!(
+            actions,
+            vec![Action::LoadSkill {
+                name: "pdf-tools".into(),
+                path: std::path::PathBuf::from("/tmp/pdf-tools/SKILL.md"),
+                args: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn bare_slash_unknown_stays_unknown() {
+        let mut app = App::new();
+        submit(&mut app, "/nope");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "unknown command: /nope"
+        ));
+    }
+
+    #[test]
+    fn skill_named_like_a_command_does_not_shadow_it() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("help", "h")]);
+        submit(&mut app, "/help");
+        assert_eq!(app.overlay_title(), "help");
+        assert!(matches!(app.overlay(), Some(Overlay::Info { .. })));
+        let _ = app.take_actions();
+    }
+
+    #[test]
+    fn remote_skill_load_refused() {
+        let mut app = App::new();
+        app.set_remote(true);
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "/skill pdf-tools");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "skills unavailable over a socket"
+        ));
+    }
+
+    #[test]
+    fn skill_turn_frames_body_and_appends_args() {
+        let out = skill_turn("pdf-tools", "body text  \n", Some("extract page 2"));
+        assert_eq!(out, "# Skill: pdf-tools\n\nbody text\n\n## Task\nextract page 2");
+        let out2 = skill_turn("x", "b", None);
+        assert_eq!(out2, "# Skill: x\n\nb");
+    }
+
+    #[test]
+    fn skills_picker_one_row_for_newline_description() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("n", "line1\nline2")]);
+        submit(&mut app, "/skills");
+        let Some(Overlay::Pick(p)) = app.overlay() else { panic!() };
+        assert_eq!(p.items.len(), 1);
+        assert!(!p.items[0].contains('\n'));
+        let _ = app.take_actions();
+    }
+
+    #[test]
+    fn skill_command_arms_a_run() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "/skill pdf-tools");
+        assert!(app.running());
+        assert!(app.transcript().iter().any(|b| matches!(b, Block::User(t) if t == "# Skill: pdf-tools")));
+        let _ = app.take_actions();
+    }
+
+    #[test]
+    fn skill_command_refused_while_running() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "first");
+        let _ = app.take_actions();
+        assert!(app.running());
+        submit(&mut app, "/skill pdf-tools");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t == "cannot load a skill while a run is in flight"
+        ));
+    }
+
+    #[test]
+    fn skills_picker_enter_refused_while_running() {
+        let mut app = App::new();
+        app.set_skills(vec![skill_item("pdf-tools", "d")]);
+        submit(&mut app, "first");
+        let _ = app.take_actions();
+        assert!(app.running());
+        submit(&mut app, "/skills");
+        let _ = app.take_actions();
+        assert!(app.overlay().is_some(), "picker opens");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.overlay().is_none(), "overlay closes");
+        assert!(app.take_actions().is_empty(), "nothing loads");
+    }
 }
 
 #[cfg(test)]
@@ -12142,4 +12458,5 @@ mod live_cache_tests {
             "exactly the toggled block re-renders"
         );
     }
+
 }

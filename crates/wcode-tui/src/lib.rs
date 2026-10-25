@@ -35,8 +35,8 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::{AskError, Backend};
 
 pub use crate::app::{
-    Action, App, AppEvent, Block, Key, SessionItem, Signal, Status, TaskItem, Tool, ViewMode,
-    DEFAULT_MEASURE, MEASURE_LIMIT, MEASURE_MIN,
+    Action, App, AppEvent, Block, Key, SessionItem, Signal, SkillItem, Status, TaskItem, Tool,
+    ViewMode, DEFAULT_MEASURE, MEASURE_LIMIT, MEASURE_MIN,
 };
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 
@@ -295,6 +295,11 @@ pub struct Options {
     /// Project teams for the `/team` picker (names from `./.wcode/teams/*.toml`;
     /// empty for a socket client, which cannot discover the working dir).
     pub teams: Vec<String>,
+    /// Discovered skills (`SKILL.md`) for the `/skills` picker and bare-slash
+    /// resolution — injected by the composition root, which owns discovery
+    /// (`wcode-cli/src/skills.rs`). Empty for a `--socket` client, which cannot
+    /// discover the working dir (mirrors `teams`).
+    pub skills: Vec<SkillItem>,
     /// A `[theme]` overlay on palette B (empty = palette B); installed before
     /// the first draw.
     pub theme: ThemeSpec,
@@ -384,6 +389,7 @@ pub async fn run(
         sessions,
         tasks,
         teams,
+        skills,
         history,
         theme,
         tui,
@@ -409,6 +415,7 @@ pub async fn run(
     app.set_models(models);
     app.set_sessions(sessions);
     app.set_teams(teams);
+    app.set_skills(skills);
     app.set_tasks(tasks);
     app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
     // The root's full status line (members derive a reduced one).
@@ -640,6 +647,28 @@ async fn event_loop(
                 }
                 Action::Copy(text) => {
                     let _ = clipboard::copy(&text);
+                }
+                Action::LoadSkill { name, path, args } => {
+                    // IO happens here (D5): the reducer never touches the fs.
+                    // `remote` was already consumed at startup (`app.set_remote`),
+                    // and `App::load_skill` refuses over a socket before this
+                    // action is ever emitted, so no re-check is needed here.
+                    match std::fs::read_to_string(&path) {
+                        Ok(body) => {
+                            let text = crate::app::skill_turn(&name, &body, args.as_deref());
+                            let _ = backend.send(wcode_harness::protocol::Request::Submit { text });
+                        }
+                        Err(e) => {
+                            // Clear the run that `load_skill` armed (item 2): a
+                            // read failure is a run failure, so drive the same
+                            // reducer path a real `AgentEvent::Error` + `AgentEnd`
+                            // would, leaving no permanent spinner.
+                            let msg = format!("read {}: {e}", path.display());
+                            let sid = id.clone();
+                            app.handle(AppEvent::Agent(sid.clone(), AgentEvent::Error { message: msg }));
+                            app.handle(AppEvent::Agent(sid, AgentEvent::AgentEnd));
+                        }
+                    }
                 }
             }
         }
@@ -1063,6 +1092,7 @@ mod tests {
             sessions: Vec::new(),
             tasks: Vec::new(),
             teams: Vec::new(),
+            skills: Vec::new(),
             history: None,
             theme: ThemeSpec::default(),
             tui: TuiSpec::default(),

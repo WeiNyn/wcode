@@ -148,6 +148,7 @@ async fn main() -> std::io::Result<()> {
         sessions: Vec::new(),
         tasks: Vec::new(),
         teams: Vec::new(),
+        skills: Vec::new(),
         theme: Default::default(),
         tui: Default::default(),
         history: None,
