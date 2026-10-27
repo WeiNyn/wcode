@@ -507,9 +507,10 @@ impl SessionFactory {
             parallel_tools: true,
             compaction: t.compaction,
             plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
-            // W031: a worker carries the kernel default — there is no per-worker
-            // title knob (one title request per worker is the accepted cost).
-            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
+            // W031: a member session never auto-titles — auto-titling is a root-only
+            // convenience (naming the user's session in `/resume`); titling a worker
+            // is redundant noise and costs an extra model call per worker.
+            title_after_turns: 0,
         }
     }
 }
