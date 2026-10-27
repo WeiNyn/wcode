@@ -16,6 +16,11 @@
 //! running), a near-full context gauge, plan mode on, and — W029 — one prompt
 //! queued behind the running turn, so the composer foot renders its
 //! `⇥ 1 queued` segment.
+//!
+//! `-- empty` swaps the populated fixture for an EMPTY root surface (no flag =
+//! the populated ladder, byte-identical): the D5/D042 banner is only on screen
+//! when nothing has been committed, so the populated dump can never show it.
+//! The files are then written as `empty-<W>x<H>.{txt,ansi}` alongside the rest.
 
 use std::fs;
 use std::path::PathBuf;
@@ -63,21 +68,28 @@ fn main() -> std::io::Result<()> {
     let out = target_dir().join("tui-render");
     fs::create_dir_all(&out)?;
 
+    // `cargo run -p wcode-tui --example dump -- empty` selects the empty state.
+    let empty = std::env::args().nth(1).as_deref() == Some("empty");
+    let prefix = if empty { "empty-" } else { "" };
+
     for (w, h) in SIZES {
         // A fresh fixture per size: the ladder should start from one state.
-        let mut app = fixture();
+        let mut app = if empty { empty_app() } else { fixture() };
         // Warm the layout so the viewport/scroll bounds are known, then pin the
         // transcript to its TOP with a burst of `PageUp`. A live TUI pins the
         // tail; a design review wants the conversation from its first block.
+        // The empty state has nothing above the tail, so it skips the burst.
         let _ = wcode_tui::render_text(&mut app, w, h);
-        for _ in 0..128 {
-            app.handle(AppEvent::Key(Key::PageUp));
+        if !empty {
+            for _ in 0..128 {
+                app.handle(AppEvent::Key(Key::PageUp));
+            }
         }
 
-        let ansi_path = out.join(format!("{w}x{h}.ansi"));
+        let ansi_path = out.join(format!("{prefix}{w}x{h}.ansi"));
         fs::write(&ansi_path, wcode_tui::render_text(&mut app, w, h))?;
 
-        let plain_path = out.join(format!("{w}x{h}.txt"));
+        let plain_path = out.join(format!("{prefix}{w}x{h}.txt"));
         fs::write(&plain_path, wcode_tui::render_plain(&mut app, w, h))?;
 
         println!("{} · {}", ansi_path.display(), plain_path.display());
@@ -94,6 +106,24 @@ fn target_dir() -> PathBuf {
             .join("..")
             .join("target"),
     }
+}
+
+/// The other end of the ladder's range: a root surface with NO transcript, so
+/// `ui::draw` seeds the empty state (the mark over the hint, D042).
+fn empty_app() -> App {
+    let mut app = App::new();
+    app.set_surfaces(vec![SurfaceInfo {
+        id: SessionId::agent("root"),
+        label: "wcode".into(),
+        model: "zephyr-9".into(),
+        is_root: true,
+    }]);
+    // A root surface seeds `Status::default()` from its `SurfaceInfo` (the model
+    // field is a member's), which would print `wcode   wcode` in the head — a
+    // fixture artefact, not a frame. Set the status the way the composition root
+    // does, so the empty-mode header reads like a real session's.
+    app.set_status(Status::new("zephyr-9"));
+    app
 }
 
 /// A realistic session snapshot, built through the public reducer only.

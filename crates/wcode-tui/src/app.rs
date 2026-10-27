@@ -474,10 +474,33 @@ pub(crate) fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
     out
 }
 
-/// The fresh-transcript hint (D5): a dim notice telling the user how to begin.
-/// Seeded when an empty transcript is first drawn; retired by the first real
-/// block, so a resumed session never shows it.
-const EMPTY_HINT: &str = "❯ type a message · /help for commands · F1 for keys";
+/// The member-surface fresh-transcript hint (D5): a dim notice telling the user
+/// how to begin. Seeded when an empty transcript is first drawn; retired by the
+/// first real block, so a resumed session never shows it.
+///
+/// Root sees the same sentence under the mark ([`ROOT_EMPTY_HINT`]); a member
+/// sees it alone (the mark is root-surface-only, D042). The copy is short by
+/// design: the shipped `… /help for commands … F1 for keys` form measured 52
+/// cells with the 3-cell notice gutter and wrapped at 48 columns, so it is
+/// trimmed to 37 here (the `the_empty_state_fits_48_cols` test pins that).
+pub(crate) const EMPTY_HINT: &str = "❯ type a message · /help · F1 keys";
+
+/// The wcode mark (D042): `❯▌` + the name, root-surface only, one dim row above
+/// the hint. It adds no glyph to the design: `❯` is `docs/tui-design.md` §2's
+/// `user prompt` row (the composer's prompt cell) and `▌` its live-cursor /
+/// selection row, so the banner reuses two cells the palette already names.
+// Read by `ROOT_EMPTY_HINT`'s composition test in `ui.rs` only (a `const` cannot
+// be `concat!`ed from other consts), so it is test-only in a release build.
+#[allow(dead_code)]
+pub(crate) const EMPTY_MARK: &str = "❯▌ wcode";
+
+/// The root surface's whole empty state (D042): the mark over the member hint,
+/// as ONE [`Block::Notice`] — the two rows ride one block, so `wrap`'s `'\n'`
+/// split (`ui.rs:2054`) does the stacking and no new `Block` variant or
+/// renderer function is needed. Kept as a literal because a `const` cannot be
+/// built with `format!`; `the_root_empty_state_is_the_mark_over_the_member_hint`
+/// asserts it still equals `EMPTY_MARK` + `'\n'` + `EMPTY_HINT`.
+pub(crate) const ROOT_EMPTY_HINT: &str = "❯▌ wcode\n❯ type a message · /help · F1 keys";
 
 /// Render the `todo` checklist as one line per item, for a transcript notice.
 /// Local to the TUI — `wcode-tui` does not depend on `wcode-cli`, so it cannot
@@ -1771,7 +1794,14 @@ impl Surface {
     fn seed_hint_if_empty(&mut self) {
         let empty = self.transcript.is_empty();
         if empty && self.live.is_none() {
-            self.transcript.push(Block::Notice(EMPTY_HINT.into()));
+            // The root's banner is the mark OVER the member hint (one block, two
+            // rows); a member gets the bare hint — the mark is root-only (D042).
+            let hint = if self.is_root {
+                ROOT_EMPTY_HINT
+            } else {
+                EMPTY_HINT
+            };
+            self.transcript.push(Block::Notice(hint.into()));
             self.block_revs.push(0);
             self.cache.push(CacheEntry::never());
             // A direct push (not via `push_block`) — keep `seqs` in lockstep.
@@ -1781,10 +1811,14 @@ impl Surface {
 
     /// Drop the D5 empty-state hint, if present. It is the first block of an
     /// otherwise-empty transcript; scan the leading slots to find it either way.
+    /// BOTH empty-state shapes retire here — the root's two-row banner and a
+    /// member's single hint — because one `Notice(_)` variant match would need a
+    /// new `Block` variant, which this design deliberately does not add (D042).
     fn clear_hint(&mut self) {
-        let idx = self.transcript.iter().take(2).position(
-            |b| matches!(b, Block::Notice(t) if t.as_str() == EMPTY_HINT),
-        );
+        let idx = self.transcript.iter().take(2).position(|b| {
+            matches!(b, Block::Notice(t)
+                if t.as_str() == EMPTY_HINT || t.as_str() == ROOT_EMPTY_HINT)
+        });
         if let Some(i) = idx {
             self.transcript.remove(i);
             self.block_revs.remove(i);

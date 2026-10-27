@@ -2837,7 +2837,10 @@ pub(crate) fn code_style() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Action, App, AppEvent, Key, MouseEvent, MouseKind, help_rows};
+    use crate::app::{
+        Action, App, AppEvent, EMPTY_HINT, EMPTY_MARK, Key, MouseEvent, MouseKind,
+        ROOT_EMPTY_HINT, help_rows,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wcode_harness::protocol::SessionId;
@@ -5202,14 +5205,92 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let mut app = App::new();
         let text = buffer_text(&render(&mut app, 80, 12));
         assert!(text.contains("type a message"), "the fresh hint:\n{text}");
-        assert!(text.contains("/help for commands"), "the fresh hint:\n{text}");
+        assert!(text.contains("/help"), "the fresh hint:\n{text}");
+        // D042: the mark is its OWN row, ABOVE the hint (queued by order, not
+        // merely present) — the root surface's two-row banner.
+        let mark = text
+            .lines()
+            .position(|r| r.contains(EMPTY_MARK))
+            .unwrap_or_else(|| panic!("the mark row:\n{text}"));
+        let hint = text
+            .lines()
+            .position(|r| r.contains("type a message"))
+            .expect("the hint row");
+        assert!(mark < hint, "the mark sits above the hint:\n{text}");
 
-        // A resumed session seeds real turns, which retire the hint (D5).
+        // A resumed session seeds real turns, which retire BOTH rows (D5).
         app.seed_history(&root(), &[AgentMessage::user_text("old question")]);
         let text = buffer_text(&render(&mut app, 80, 12));
         assert!(
             !text.contains("type a message"),
             "the hint must not linger after history:\n{text}"
+        );
+        assert!(
+            !text.contains("❯▌"),
+            "the mark must retire with the hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_mark_is_seeded_only_on_the_root_surface() {
+        let mut app = App::new();
+        with_member(&mut app, "w1", "m");
+        // Ctrl-N cycles root → first member; the hint is seeded on the FOCUSED
+        // surface, so this pins the member's arm of `seed_hint_if_empty`.
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 1, "focus is on the member");
+        let text = buffer_text(&render(&mut app, 80, 12));
+        assert!(
+            text.contains("type a message"),
+            "the member also gets the hint:\n{text}"
+        );
+        assert!(
+            !text.contains("❯▌"),
+            "the mark is root-surface-only (D042):\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_root_empty_state_is_the_mark_over_the_member_hint() {
+        // The three literals cannot be composed at const time, so this is the
+        // guard that keeps the root banner from drifting away from its parts.
+        assert_eq!(ROOT_EMPTY_HINT, format!("{EMPTY_MARK}\n{EMPTY_HINT}"));
+    }
+
+    #[test]
+    fn the_empty_state_fits_48_cols() {
+        // The shipped hint (with `for commands` / `for keys`) measured 52 cells
+        // with the 3-cell notice gutter and wrapped in a 48-column terminal. The
+        // assertion: the copy lands on ONE row, tail included.
+        let mut app = App::new();
+        let terminal = render(&mut app, 48, 20);
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let frame = rows.join("\n");
+        let hint_rows: Vec<&String> = rows
+            .iter()
+            .filter(|r| r.contains("type a message"))
+            .collect();
+        assert_eq!(
+            hint_rows.len(),
+            1,
+            "the hint wrapped onto a continuation row:\n{frame}"
+        );
+        assert!(
+            hint_rows[0].contains("F1 keys"),
+            "the hint's tail wrapped off its row:\n{frame}"
+        );
+        // The mark row fits too (it is 9 cells + the gutter).
+        assert_eq!(
+            rows.iter().filter(|r| r.contains("❯▌")).count(),
+            1,
+            "the mark row is intact:\n{frame}"
         );
     }
 
@@ -6491,9 +6572,14 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         assert_eq!((hit.rect.x, hit.rect.width), (26, 68), "a centered measure");
         // The transcript content is indented by the pad; the margin to its left is
         // blank. (The pinned header above is full-bleed, so read a transcript row.)
+        // D042: the banner's TOP row is the mark, the hint sits one row below it.
         let body = text
             .lines()
             .nth(hit.rect.y as usize)
+            .unwrap_or_default();
+        let below = text
+            .lines()
+            .nth(hit.rect.y as usize + 1)
             .unwrap_or_default();
         assert_eq!(
             body.chars().take(26).collect::<String>().trim(),
@@ -6501,7 +6587,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             "the margin is blank:\n{text}"
         );
         assert!(
-            body.contains("type a message"),
+            below.contains("type a message"),
             "the transcript body rides the measure:\n{text}"
         );
         // The pinned header itself is full-bleed: `WCODE` starts at column 0.
