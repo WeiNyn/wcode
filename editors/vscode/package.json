@@ -18,6 +18,7 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "icon": "media/icon.png",
   "activationEvents": [
     "onView:wcode.surface",
     "onCommand:wcode.start",
