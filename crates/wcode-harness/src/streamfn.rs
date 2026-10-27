@@ -990,7 +990,6 @@ where
     F: Fn() -> Pin<Box<dyn std::future::Future<Output = Result<S, CompletionError>> + Send>>,
     S: futures::Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin + Send,
 {
-    state.attempts += 1;
     state.budget -= 1;
     if !retry_wait(tx, policy, state.attempts, error).await {
         return PreContent::Cancelled;
