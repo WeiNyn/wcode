@@ -1049,3 +1049,45 @@ async fn after_run_fires_with_error_when_the_run_returns_err() {
         "the hook fires exactly once, with the error stop reason"
     );
 }
+
+/// R2: an early session-append failure must mint a fresh cancel token so a
+/// cancelled token from a previous run does not poison the next one.
+#[tokio::test]
+async fn early_append_failure_mints_a_fresh_cancel_token() {
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session::create_named(dir.path(), "s").unwrap();
+
+    // Make the session file read-only so the next append fails.
+    for entry in fs::read_dir(dir.path()).unwrap() {
+        let p = entry.unwrap().path();
+        let mut perms = fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&p, perms).unwrap();
+    }
+
+    let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+        Box::pin(futures::stream::iter(vec![
+            LlmStreamEvent::TextDelta("x".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ])) as LlmStream
+    });
+    let mut agent = Agent::new(agent_config(stream_fn, vec![], Some(session)));
+
+    agent.cancel();
+    assert!(agent.cancel_token().is_cancelled());
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let res = agent.run("hi", tx).await;
+    assert!(res.is_err(), "append should fail on a read-only session file");
+
+    // The token must be fresh (not pre-cancelled) after the failed run.
+    assert!(
+        !agent.cancel_token().is_cancelled(),
+        "early append failure must mint a fresh cancel token"
+    );
+}

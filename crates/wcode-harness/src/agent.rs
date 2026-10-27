@@ -321,6 +321,8 @@ impl Agent {
                 // sees. Wake the owner here too, so a worker's report can never
                 // silently vanish; `StopReason::Error` makes `ReportBack`
                 // synthesize a status line rather than forward a stale prior reply.
+                self.cancel = CancellationToken::new();
+
                 self.hooks.after_run(&self.ctx, StopReason::Error).await;
                 return Err(e);
             }
@@ -378,15 +380,7 @@ impl Agent {
                 Ok(result.stop_reason)
             }
             Err(e) => {
-                // Error exit: the channels were dropped with the error. Reboot
-                // both sides so a later steer()/follow_up() still work
-                // (pre-run sender clones are stale after an error).
-                let (steer_tx, steer_rx) = mpsc::unbounded_channel();
-                self.steer_tx = steer_tx;
-                self.steer_rx = Some(steer_rx);
-                let (follow_tx, follow_rx) = mpsc::unbounded_channel();
-                self.follow_tx = follow_tx;
-                self.follow_rx = Some(follow_rx);
+                self.reset_channels();
                 // A `LoopError` never reaches the `Ok` arm above, so the owner of a
                 // worker would block forever on a report that never fires. Wake it
                 // here too; `StopReason::Error` makes `ReportBack` synthesize a
@@ -397,6 +391,18 @@ impl Agent {
         }
     }
 
+    fn reset_channels(&mut self) {
+        // Error exit: the channels were dropped with the error. Reboot
+        // both sides so a later steer()/follow_up() still work
+        // (pre-run sender clones are stale after an error).
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        self.steer_tx = steer_tx;
+        self.steer_rx = Some(steer_rx);
+        let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+        self.follow_tx = follow_tx;
+        self.follow_rx = Some(follow_rx);
+    }
+    
     pub fn messages(&self) -> &[AgentMessage] {
         &self.ctx
     }
