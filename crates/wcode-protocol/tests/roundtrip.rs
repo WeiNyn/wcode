@@ -1066,3 +1066,65 @@ async fn a_flush_waits_behind_an_unwritten_frame() {
         "flush completed once the reader drained"
     );
 }
+
+/// R1: a frame that fails to write (socket dropped mid-send) is replayed and
+/// delivered once the client reconnects.
+#[tokio::test]
+async fn a_frame_failing_to_write_is_replayed_after_reconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("wcode.sock");
+
+    // A server that accepts the connection and immediately drops it, so the
+    // client's first write fails and the frame lands in the replay queue.
+    let bad = wcode_protocol::bind(&sock).await.unwrap();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = bad.accept().await {
+            drop(stream);
+        }
+        drop(bad);
+    });
+
+    let client = Client::connect(&sock).await.unwrap();
+    let mut events = client.subscribe();
+
+    // Queue a frame while the (doomed) connection is technically up. The write
+    // fails and the frame is retained for replay.
+    client.send(Request::Submit { text: "hi".into() }).unwrap();
+
+    // Bring the real server up on the same path.
+    let handle = SessionActor::spawn(agent(vec![vec![
+        LlmStreamEvent::TextDelta("back".into()),
+        done(),
+    ]]));
+    let listener = wcode_protocol::bind(&sock).await.unwrap();
+    serve_static(
+        vec![(SessionId::new("test"), handle)],
+        listener,
+    );
+
+    // Wait until the supervisor has reconnected to the real server.
+    let mut reconnected = false;
+    for _ in 0..200 {
+        if client.ask(Request::GetHistory).await.is_ok() {
+            reconnected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(reconnected, "the client reconnected");
+
+    // The replayed Submit should have run.
+    let mut saw_text = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the run streamed after reconnect")
+            .expect("open");
+        match event {
+            AgentEvent::MessageUpdate { message } if message.as_text() == "back" => saw_text = true,
+            AgentEvent::AgentEnd => break,
+            _ => {}
+        }
+    }
+    assert!(saw_text, "the failed frame was replayed and executed");
+}

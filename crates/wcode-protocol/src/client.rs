@@ -17,7 +17,7 @@
 //!
 //! [`SessionHandle`]: wcode_harness::actor::SessionHandle
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -353,6 +353,7 @@ async fn supervise(
     mut next: Option<UnixStream>,
 ) {
     let mut backoff = RECONNECT_BASE;
+    let mut backoff_queue = VecDeque::new();
     loop {
         // Never hold a strong reference across an await: a dropped `Client` must
         // be able to end this task.
@@ -375,11 +376,25 @@ async fn supervise(
 
         let (read, mut write) = stream.into_split();
         let mut read = BufReader::new(read);
+        
+        while !backoff_queue.is_empty() {
+            if let Some(Out::Frame(frame)) = backoff_queue.pop_front()
+                && write_frame(&mut write, &frame).await.is_err() {
+                    backoff_queue.push_front(Out::Frame(frame));
+                    break;
+                }
+        }
+
+        if !backoff_queue.is_empty() {
+            break;
+        }
+        
         loop {
             tokio::select! {
                 item = out.recv() => match item {
                     Some(Out::Frame(frame)) => {
                         if write_frame(&mut write, &frame).await.is_err() {
+                            backoff_queue.push_front(Out::Frame(frame));
                             break;
                         }
                     }
