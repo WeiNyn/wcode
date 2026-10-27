@@ -74,8 +74,8 @@ no source is a rule not to make.
   fourth (`docs/tui-design.md:W4SAR`). An overlay never reflows the base.
 - **Gutter**: a 1-col margin, a marker column, content at a fixed column; wrapped
   continuation lines align under the content (`:zwmWX`).
-- **Glyphs come from the locked table only** (`docs/tui-design.md:34-50`,
-  `:pMZOm`): ``❯ ··· ⚙ ✓ ✗ ⋯ ▌ ⠋ ▤ · ` │ ─ ┼ █░``. Inventing a glyph is a fail.
+- **Glyphs come from the locked table only** (`docs/tui-design.md:67-103`,
+  `:pMZOm`): ``❯ ··· ⚙ ✓ ✗ ⋯ ▌ ⠋ ▤ · ` │ ─``. Inventing a glyph is a fail.
 - **Palette = the 17 named roles in `theme.rs`** (`crates/wcode-tui/src/theme.rs:3dRHq`);
   a new role needs a real call site. Named ANSI only (the palette-B default);
   **≤1 accent** (`accent`, cyan).
@@ -221,7 +221,7 @@ ladder) · `style.css`, `index.html` (the site's only spec) · `AGENTS.md`
   `name`+`description` folded in `:7ib2K`. The body loads on demand via the
   existing `read` tool.
 - TUI (locked): bands `docs/tui-design.md:W4SAR`; gutter `:zwmWX`; palette
-  `:yQCWu`; role gap `:vHHsu`; glyphs `:pMZOm` (lines 34–50); decisions `:npxul`;
+  `:yQCWu`; role gap `:vHHsu`; glyphs `:pMZOm` (lines 67–103); decisions `:npxul`;
   no title bar `:rbQjh`; sidebar off by default, base untouched <80 cols
   `:7TMJb`/`:D1aSS`. The color ladder has shipped, so the older NO_COLOR line
   `:4AL6e` and its "detection still open" neighbour `:Y3ofN` predate it — cite the

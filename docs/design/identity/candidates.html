@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wcode identity · round 1</title>
+<style>
+  :root {
+    --bg: #0b0e13;
+    --line: #232b37;
+    --text: #dce3ed;
+    --muted: #93a0b4;
+    --dim: #6b7788;
+    --dark: #0b0e13;
+    --light: #f4f4f0;
+    --chrome-dark: #2c313a;
+    --on-dark: #c5c5c5;
+    --on-light: #424242;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.5rem 5rem;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 var(--mono); color-scheme: dark;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  h1 { font-size: 1rem; font-weight: 600; letter-spacing: .04em; margin: 0 0 .4rem; }
+  .sub { color: var(--muted); margin: 0 0 2rem; max-width: 44rem; }
+  h2 { font-size: .8rem; font-weight: 600; text-transform: uppercase;
+        letter-spacing: .08em; color: var(--dim); margin: 2.75rem 0 .9rem; }
+  .key { color: var(--muted); margin-right: .45rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid var(--line); }
+  thead th {
+    color: var(--muted); font-weight: 400; font-size: .74rem;
+    padding: .4rem .6rem; text-align: left; white-space: nowrap;
+  }
+  thead tr:first-child th { color: var(--text); font-size: .78rem; }
+  tbody th {
+    color: var(--muted); font-weight: 400; font-size: .75rem;
+    padding: .4rem .6rem; text-align: left; vertical-align: top; white-space: nowrap;
+    width: 4.5rem;
+  }
+  tbody th span { color: var(--dim); }
+  td.on-dark, td.on-light { padding: .5rem; vertical-align: top; width: 8.5rem; }
+  td.on-dark { background: var(--dark); }
+  td.on-light { background: var(--light); }
+  td.on-dark .mark { color: var(--on-dark); }
+  td.on-light .mark { color: var(--on-light); }
+  .mark { display: block; }
+  .bars { display: flex; gap: .5rem; align-items: stretch; }
+  .bar {
+    display: flex; align-items: center; justify-content: center;
+    width: 3rem; height: 5.5rem; border-radius: 4px;
+  }
+  /* the host's chrome, not ours: a simulated activity bar, so a dark bar is
+     visible against a dark page */
+  .bar.dark { background: var(--chrome-dark); color: var(--on-dark); }
+  .bar.light { background: var(--light); color: var(--on-light); }
+  .bar .mark { color: currentColor; }
+  .tiles { display: flex; gap: 1.5rem; margin-top: .5rem; }
+  .tiles figure {
+    margin: 0; background: var(--chrome-dark); border: 1px solid var(--line);
+    border-radius: 10px; padding: .75rem .75rem .5rem;
+  }
+  .tiles figcaption { color: var(--dim); font-size: .72rem; margin-top: .5rem; }
+  .notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.75rem; }
+  .note { border-top: 1px solid var(--line); padding-top: .9rem; }
+  .note h3 { font-size: .82rem; font-weight: 400; margin: 0 0 .5rem; }
+  .note .what { color: var(--muted); font-size: .8rem; margin: 0 0 .6rem; }
+  .verdict { color: var(--dim); font-size: .78rem; margin: 0 0 .35rem; }
+  .verdict b { color: var(--muted); font-weight: 600; margin-right: .3rem; }
+  code { color: var(--text); }
+  footer { border-top: 1px solid var(--line); margin-top: 3rem; padding-top: 1rem;
+            color: var(--dim); font-size: .76rem; max-width: 44rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>wcode identity · round 1</h1>
+  <p class="sub">Three candidate marks, each at every size the product actually
+  draws. 16 px is the VS Code activity bar at DPR 1; 24 px is the icon file's own
+  grid and the bar at DPR 1.5; 32 px a tab strip; 128 px the marketplace tile and
+  the favicon. Each mark is one ink (<code>fill="currentColor"</code>, no hex) and
+  is shown inheriting its colour from the surface, not from a fill in the file.
+  Rows are sizes, so the row height is the size's own height; marks share a left
+  edge down each column.</p>
+
+  <table>
+    <thead>
+      <tr><th></th><th colspan="2" scope="colgroup"><span class="key">A</span>Prompt + cursor</th><th colspan="2" scope="colgroup"><span class="key">B</span>The wordmark's <code>w</code></th><th colspan="2" scope="colgroup"><span class="key">C</span>The cursor cell</th></tr>
+      <tr><th></th><th scope="col">dark</th><th scope="col">light</th><th scope="col">dark</th><th scope="col">light</th><th scope="col">dark</th><th scope="col">light</th></tr>
+    </thead>
+    <tbody><tr><th scope="row">16<span>px</span></th><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate A at 16 px"><use href="#mark-a"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate A at 16 px"><use href="#mark-a"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate B at 16 px"><use href="#mark-b"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate B at 16 px"><use href="#mark-b"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate C at 16 px"><use href="#mark-c"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="16" height="16" role="img" aria-label="candidate C at 16 px"><use href="#mark-c"/></svg></td></tr><tr><th scope="row">24<span>px</span></th><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate A at 24 px"><use href="#mark-a"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate A at 24 px"><use href="#mark-a"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate B at 24 px"><use href="#mark-b"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate B at 24 px"><use href="#mark-b"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate C at 24 px"><use href="#mark-c"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate C at 24 px"><use href="#mark-c"/></svg></td></tr><tr><th scope="row">32<span>px</span></th><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate A at 32 px"><use href="#mark-a"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate A at 32 px"><use href="#mark-a"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate B at 32 px"><use href="#mark-b"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate B at 32 px"><use href="#mark-b"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate C at 32 px"><use href="#mark-c"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="32" height="32" role="img" aria-label="candidate C at 32 px"><use href="#mark-c"/></svg></td></tr><tr><th scope="row">64<span>px</span></th><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate A at 64 px"><use href="#mark-a"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate A at 64 px"><use href="#mark-a"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate B at 64 px"><use href="#mark-b"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate B at 64 px"><use href="#mark-b"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate C at 64 px"><use href="#mark-c"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="64" height="64" role="img" aria-label="candidate C at 64 px"><use href="#mark-c"/></svg></td></tr><tr><th scope="row">128<span>px</span></th><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate A at 128 px"><use href="#mark-a"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate A at 128 px"><use href="#mark-a"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate B at 128 px"><use href="#mark-b"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate B at 128 px"><use href="#mark-b"/></svg></td><td class="on-dark"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate C at 128 px"><use href="#mark-c"/></svg></td><td class="on-light"><svg class="mark" viewBox="0 0 24 24" width="128" height="128" role="img" aria-label="candidate C at 128 px"><use href="#mark-c"/></svg></td></tr></tbody>
+  </table>
+
+  <h2>Mono-inherited at 24 px, on a simulated bar</h2>
+  <div class="bars"><div class="bar dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate A at 24 px"><use href="#mark-a"/></svg></div><div class="bar dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate B at 24 px"><use href="#mark-b"/></svg></div><div class="bar dark"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate C at 24 px"><use href="#mark-c"/></svg></div><div class="bar light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate A at 24 px"><use href="#mark-a"/></svg></div><div class="bar light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate B at 24 px"><use href="#mark-b"/></svg></div><div class="bar light"><svg class="mark" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="candidate C at 24 px"><use href="#mark-c"/></svg></div></div>
+
+  <h2>Tiles, 128 px</h2>
+  <div class="tiles"><figure><img src="candidate-a-tile.svg" width="128" height="128" alt=""><figcaption>A · 128 px</figcaption></figure><figure><img src="candidate-b-tile.svg" width="128" height="128" alt=""><figcaption>B · 128 px</figcaption></figure><figure><img src="candidate-c-tile.svg" width="128" height="128" alt=""><figcaption>C · 128 px</figcaption></figure></div>
+
+  <h2>The three ideas</h2>
+  <div class="notes"><section class="note"><h3><span class="key">A</span>Prompt + cursor</h3><p class="what">The two glyphs the TUI is made of: the <code>❯</code> prompt and the <code>▌</code> live cursor. Today's <code>&gt;_</code> with the underscore promoted to a cursor block.</p><p class="verdict"><b>Buys</b> Nothing to relearn: it still reads <code>&gt;_</code> at a glance.</p><p class="verdict"><b>Costs</b> Category-typical — every CLI has a chevron.</p></section><section class="note"><h3><span class="key">B</span>The wordmark's <code>w</code></h3><p class="what">The initial, drawn as four strokes on the same chevron family as <code>❯</code>, with every acute vertex cut flat where a miter would draw a needle.</p><p class="verdict"><b>Buys</b> The identity is the name, not a borrowed terminal trope.</p><p class="verdict"><b>Costs</b> A letter says nothing about what the product does; dense at 16 px.</p></section><section class="note"><h3><span class="key">C</span>The cursor cell</h3><p class="what">The live cursor made solid, with the prompt knocked out of it: one mass, one ink, and the only candidate whose mark and app tile are one shape.</p><p class="verdict"><b>Buys</b> Reads as an app icon rather than a toolbar glyph.</p><p class="verdict"><b>Costs</b> A filled square is a blob among the activity bar's line icons.</p></section></div>
+
+  <footer>Generated by <code>gen.py</code> in this directory; the eight SVGs are
+  its output. The live marks are untouched: this is a candidate sheet, not a
+  wiring round. Zero external requests; system font stacks only.</footer>
+</main>
+<svg style="display:none" aria-hidden="true"><symbol id="mark-a" viewBox="0 0 24 24" fill="currentColor"><path d="M2.72,5.88 L8.83,12 L2.72,18.12 L4.48,19.88 L12.37,12 L4.48,4.12Z"/>
+  <rect x="13.5" y="16.5" width="7.5" height="3"/></symbol><symbol id="mark-b" viewBox="0 0 24 24" fill="currentColor"><path d="M2.66,6.46 L6.81,18.46 L8.89,18.46 L12,9.47 L15.11,18.46 L17.19,18.46 L21.34,6.46 L19.26,5.74 L16.15,14.73 L13.04,5.74 L10.96,5.74 L7.85,14.73 L4.74,5.74Z"/></symbol><symbol id="mark-c" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M7,2.5 H17 A4.5,4.5 0 0 1 21.5,7 V17 A4.5,4.5 0 0 1 17,21.5 H7 A4.5,4.5 0 0 1 2.5,17 V7 A4.5,4.5 0 0 1 7,2.5 Z M7.97,8.53 L11.44,12 L7.97,15.47 L10.23,17.73 L15.96,12 L10.23,6.27Z"/></symbol></svg>
+</body>
+</html>

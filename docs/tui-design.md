@@ -5,7 +5,8 @@ modals: `/help`, `/verify`, `/usage`, `/tasks`, `/team roster` open a scrollable
 popup) **and by D027** (the ` help ` body is `F1`'s two-column table — an item
 row per command and per key, prose for the rest) **and by W032/D036** (a settings
 panel: an `F2` modal with a row cursor, one row grammar for both sections, and
-`›` admitted to §2). Companion to [`tui-plan.md`](tui-plan.md) (the
+`›` admitted to §2) **and by W037/D042** (the mark: `❯▌`, one ink, two tiers,
+root-surface-only; §2 unchanged). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -60,7 +61,8 @@ TUI reads as the same product, given a full screen.
    are full-strength. A **tool** is a flat row (name + right-aligned stats, its
    params inlined and body at the same column) and **thinking** is a plain dim
    `thinking` row — richer than a blank-line-only block (§4), not a reflow of the
-   base.
+   base. **The mark** is the product's only logo — `❯▌` (D042) — shown once, on
+   the root surface's empty state, and retired by the first block.
 
 ## 2. Vocabulary
 
@@ -212,8 +214,13 @@ At startup the loop asks `GetHistory` and `App::seed_history` rebuilds the
 transcript from it, so a resumed session (or a reconnecting socket client) opens
 on its earlier turns instead of an empty pane — a dim `⋯ N earlier message(s)`
 divider marks the replayed prefix. With **no** history the transcript opens on a
-dim seeded hint (`❯ type a message · /help for commands · F1 for keys`), not a
-blank pane.
+dim seeded **empty state** (a `Notice`), not a blank pane: on the **root**
+surface it is the mark over the hint, one block, the mark first —
+`❯▌ wcode` then `❯ type a message · /help · F1 keys` on the next line — and on
+a **member** surface the hint line alone, because the team surfaces are already
+the brand (D042). The mark adds **no glyph** and leaves §2 byte-unchanged: `❯`
+is already the `user prompt` row and `▌` is already the live cursor and the
+selection bar.
 
 - **Notices** (D018) — a dim row in the content column, no glyph of its own (the
   `⏹` of `⏹ aborted` and the `⋯` prefixes are table glyphs). The **lifetime
