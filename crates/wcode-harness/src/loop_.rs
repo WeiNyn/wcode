@@ -1,4 +1,4 @@
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::{self, CompactOutcome, CompactionPolicy};
@@ -661,7 +661,15 @@ pub async fn run_loop(
                         let started = std::time::Instant::now();
                         let mut out = tokio::select! {
                             biased;
-                            out = tool.execute(arguments, tctx) => out,
+                            out = std::panic::AssertUnwindSafe(tool.execute(arguments, tctx)).catch_unwind() => match out {
+                                Ok(out) => out,
+                                Err(_) => ToolOutput {
+                                    output: "aborted: tool panicked".to_string(),
+                                    is_error: true,
+                                    diff: None,
+                                    path: None,
+                                },
+                            },
                             _ = cancel.cancelled() => ToolOutput {
                                 output: "aborted: cancelled before the tool returned"
                                     .to_string(),

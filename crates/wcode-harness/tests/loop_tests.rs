@@ -2599,3 +2599,58 @@ async fn auto_title_failure_is_not_retried_at_the_next_boundary() {
     );
     assert_eq!(title_entry_count(&session), 0);
 }
+
+// ---------------------------------------------------------------------------
+// R3: a panicking tool becomes an error result instead of unwinding run_loop.
+// ---------------------------------------------------------------------------
+
+struct PanickingTool;
+
+#[async_trait::async_trait]
+impl TypedTool for PanickingTool {
+    type Args = NoArgs;
+    fn name(&self) -> &str {
+        "panic"
+    }
+    fn description(&self) -> &str {
+        "panics on execute"
+    }
+    async fn execute(&self, _args: NoArgs, _ctx: &ToolContext) -> ToolOutput {
+        panic!("boom");
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_tool_becomes_an_error_result() {
+    let rec = Recorder::default();
+    rec.push(vec![
+        LlmStreamEvent::ToolCall {
+            id: "c1".into(),
+            name: "panic".into(),
+            arguments: serde_json::json!({}),
+        },
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+    ]);
+    rec.push(vec![
+        LlmStreamEvent::TextDelta("ok".into()),
+        LlmStreamEvent::Done {
+            stop_reason: StopReason::Stop,
+            usage: None,
+        },
+    ]);
+
+    let tool = erased(PanickingTool);
+    let ts = setup(fake_stream_fn(&rec), vec![tool], HooksSet::default());
+
+    let mut ctx = vec![AgentMessage::user_text("hi")];
+    let (res, events) = run(ts.cfg, &mut ctx).await;
+    assert_eq!(res.unwrap(), StopReason::Stop);
+    let end = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd { is_error, .. } => Some(*is_error),
+        _ => None,
+    });
+    assert_eq!(end, Some(true), "a panic must surface as an error result");
+}
