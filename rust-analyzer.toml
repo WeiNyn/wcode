@@ -1,0 +1,5 @@
+[inlayHints]
+typeHints.enable = true
+chainingHints.enable = true
+closureReturnTypeHints.enable = "always"
+parameterHints.enable = true
