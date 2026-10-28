@@ -73,7 +73,7 @@ Replace wcode's **hardcoded** model context-window table (`limits.rs`, 45 ids) a
 - **Replace the bodies** of `limits::model_limit`, `limits::model_protocol`, and `pricing::model_price` so they read from a cached catalog instead of the two `static` slices, preserving their signatures and `Option`-typed honesty. (Widened: `model_limit`/`model_price` apply to any resolved provider; `model_protocol` stays opencode-go-gated.)
 - A **cache** at `~/.local/share/wcode/models.dev.json` (data dir, matching the session store convention) with a staleness policy and atomic write.
 - A **background refresh** (never on the boot path) that fetches models.dev, rewrites the cache, and swaps the in-memory catalog.
-- A **compiled-in seed** (the current 45/32-row snapshot) so a first run with no cache and no network still has today's data.
+- A **compiled-in seed** so a first run with no cache and no network still has today's data. It is a SUPERset of the two retired tables (54 limit / 37 price rows, incl. the 17 ids models.dev no longer serves) so offline behaviour matches pre-W038 exactly — see D043 and `scripts/refresh-seed.sh`, which merges by default.
 - **`DEFAULT_CONTEXT_WINDOW` raised to 256_000** (from 128_000) at the user's explicit request during W038. It is the window used when the catalog knows nothing about the model, so an unknown model now compacts later while a model the catalog knows keeps its real window. Recorded as a decision bullet in [D043](decisions/D043-model-catalog-seam.md).
 - `--refresh-models` (and `WCODE_REFRESH_MODELS=1`) to force a synchronous refresh; `--dump-catalog` to print the resolved provider + counts.
 - Tests for: provider resolution, cache round-trip, staleness, float→micro conversion, unknown→`None`, tier deferral, concurrency of the global swap.
@@ -157,9 +157,13 @@ pub struct Catalog {
     pub source: CatalogSource,   // Seed | Cache | Network
 }
 pub fn current() -> Arc<Catalog>;
+pub fn load();                                     // cache read, NEVER the network
+pub fn init();                                     // load() + background refresh when stale
 pub fn refresh() -> Result<(), CatalogError>;       // blocking, for --refresh-models
+pub fn refresh_at(path: &Path, url: &str, fetcher: &dyn Fetcher) -> Result<(), CatalogError>;
 pub fn refresh_background();                       // spawns a task, no-op if in flight
 pub fn provider_for(base_url: Option<&str>) -> Option<String>;
+pub fn provider_for_in(cat: &Catalog, base_url: Option<&str>) -> Option<String>;  // pure
 ```
 
 `limits::model_limit` reads `catalog::current()` filtered by `provider_for` for any resolved provider (no opencode-go gate).
@@ -205,7 +209,7 @@ Atomic write via temp-file + rename. A torn or schema-mismatched cache is treate
 
 ### 4.5 Global state (Q2)
 
-Back the unchanged signatures with a process-global `Arc<Catalog>` behind a `RwLock` (or `arc_swap`). Reads never allocate beyond an `Arc` clone; a refresh swaps the `Arc`. Tests seed the global with a temp catalog via a `#[cfg(test)]` setter.
+Back the unchanged signatures with a process-global `Arc<Catalog>` behind a `RwLock` (or `arc_swap`). Reads never allocate beyond an `Arc` clone; a refresh swaps the `Arc`. No TEST writes it: the pure `*_in` seams take an explicit `&Catalog`, so a test edits a catalog it owns (the first cut's `set_current` raced the parallel readers).
 
 ---
 
@@ -218,7 +222,8 @@ Back the unchanged signatures with a process-global `Arc<Catalog>` behind a `RwL
 - **Q5 — Tier support:** Defer (D028). Store `tiers` but `cost_of` uses base rate.
 - **Q6 — Protocol snapshot separate:** Yes. Moved into manifest's `protocol` section for co-location, but source of truth remains the live probe.
 - **Q7 — Refresh vs W014 "no network at boot":** Reconciled by construction: boot reads cache/seed only; `refresh_background()` spawned after load; `--refresh-models` is the only synchronous network path.
-- **Q9 — Generic fetch (new):** The fetch is extensible: `catalog_url()` honors `WCODE_MODELS_URL`; `refresh_from(url, fetcher)` / `refresh_with_url(url, fetcher)` allow a new provider/source; `Fetcher` trait is the HTTP seam; `set_current` lets a caller install a hand-built catalog for a provider not on models.dev. Default source remains models.dev.
+- **Q9 — Generic fetch (new):** The fetch is extensible: `catalog_url()` honors `WCODE_MODELS_URL`; `refresh_at(path, url, fetcher)` / `refresh_with_url(url, fetcher)` allow a new provider/source; the `Fetcher` trait is the HTTP seam. Default source remains models.dev.
+- **Q10 — `--dump-config` and the cache (resolved):** the context line must describe the REAL catalog, so the cache read is split from the refresh: `load()` reads the cache with no network and no staleness check, `init()` = `load()` + `refresh_background()` when stale. A pure one-shot (`--dump-config`, `--dump-catalog`) calls `load()`, a session boot (`dispatch`, `serve`) calls `init()`, and `--refresh-models` calls neither. "No network" was never the same requirement as "don't read the cache".
 
 Decisions still needed from the human:
 
@@ -265,7 +270,7 @@ cargo run -p wcode-cli -- -p "say hi"
 - `limits::model_limit` returns `None` for a base URL that resolves to no provider (e.g. unknown host) even if the id is in the catalog.
 - `pricing::model_price` returns `Some(ModelPrice::default())` for `step-5-preview-free`.
 - Float→micro conversion exact for `deepseek-v4.1-flash` (150000/600000/3000/0) and `mimo-v2.6-pro` (435000/870000/3625/0).
-- Global swap visibility.
+- A refresh through `refresh_at` + a tempdir: the catalogue is replaced, the file is written, and a failing fetch/parse leaves the previous `Arc` and writes nothing (no test writes the global path).
 - `cost_of` still matches the W024 golden when pointed at the refreshed catalog.
 
 **Human (live).**

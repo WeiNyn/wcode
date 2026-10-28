@@ -36,8 +36,8 @@ models.dev's advertised `https://opencode.ai/inference/go/openai/v1`.
   swaps the `Arc`. No TEST writes it: `provider_for_in` / `model_limit_in` /
   `model_price_in` take an explicit `&Catalog` (the pure seams), so a test edits
   a catalog it owns and the parallel readers (`limits`, `pricing`, `actor`)
-  cannot be perturbed. `init_with_path` is the only other writer, and it is
-  production boot wiring.
+  cannot be perturbed. `load_into_global` (reachable as `load()`/`init()`, both
+  production boot wiring) is the only writer.
 - **Tiers stored, ignored (D028).** `PriceTier` is persisted but `cost_of` uses
   the base rate.
 - **`DEFAULT_CONTEXT_WINDOW` is 256_000** (raised from 128_000 at the user's
@@ -57,7 +57,14 @@ models.dev's advertised `https://opencode.ai/inference/go/openai/v1`.
 
 - Adding a model no longer needs a release once the cache is refreshed.
 - `DEFAULT_CONTEXT_WINDOW` is the fallback for any unresolved provider/model.
-- The compiled-in `seed()` keeps offline/first-run behaviour identical to the
-  old static tables.
-SCRIPT
-echo "written D043"
+- The compiled-in `seed()` is a SUPERset of the old static tables, not a copy of
+  the live payload: 54 limit rows and 37 price rows, 17 of which models.dev no
+  longer serves (`glm-5`, `grok-4.6`, …). So offline/first-run behaviour matches
+  the pre-W038 tables exactly (`scripts/refresh-seed.sh` merges by default and
+  needs `--prune` to delete), and a model the catalog cannot resolve falls back
+  to `DEFAULT_CONTEXT_WINDOW` — never to a zero window (`model_limit` returns
+  `None` when an entry's `context` is `0`).
+- `--dump-config` describes the on-disk catalog, not the seed: `catalog::load()`
+  reads the cache with no network, and `catalog::init()` adds the background
+  refresh on top. A pure one-shot therefore never opens a socket, and a session
+  boot still refreshes a stale cache.

@@ -7580,6 +7580,7 @@ version = "0.14.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "futures",
  "reqwest 0.13.4",
  "rig",

@@ -241,7 +241,11 @@ pub fn catalog_url() -> String {
 /// with the built-in [`DefaultFetcher`]. Used by `--refresh-models`.
 /// Single-flight with [`refresh_background`] via `REFRESH_LOCK`.
 pub fn refresh() -> Result<(), CatalogError> {
-    refresh_at(&cache_path_from_env_or_default(), &catalog_url(), &DefaultFetcher)
+    refresh_at(
+        &cache_path_from_env_or_default(),
+        &catalog_url(),
+        &DefaultFetcher,
+    )
 }
 
 /// Refresh from an explicit URL into an explicit cache path with a
@@ -449,7 +453,10 @@ pub fn seed() -> Catalog {
     let mut protocol = BTreeMap::new();
     protocol.insert(
         "opencode-go".to_string(),
-        SEED_RESPONSES_ONLY.iter().map(|s| (*s).to_string()).collect(),
+        SEED_RESPONSES_ONLY
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
     );
     Catalog {
         providers,
@@ -459,13 +466,15 @@ pub fn seed() -> Catalog {
     }
 }
 
-/// Default cache path, honoring `$HOME` (and `$WCODE_MODELS_CACHE` at call
-/// sites via [`cache_path_from_env_or_default`]).
+/// Default cache path: `~/.local/share/wcode/models.dev.json` — the data-dir
+/// convention `session_dir()` uses (`dirs::home_dir()`, so it is right on
+/// Windows too). `$WCODE_MODELS_CACHE` overrides it at the call sites, see
+/// [`cache_path_from_env_or_default`].
 pub fn default_cache_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local/share/wcode").join(DEFAULT_CACHE_FILE_NAME)
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/share/wcode")
+        .join(DEFAULT_CACHE_FILE_NAME)
 }
 
 fn cache_path_from_env_or_default() -> PathBuf {
@@ -794,15 +803,27 @@ mod tests {
             Some("opencode-go".to_string())
         );
         // non-go
-        assert_eq!(provider_for_in(&cat, Some("https://api.openai.com/v1")), None);
+        assert_eq!(
+            provider_for_in(&cat, Some("https://api.openai.com/v1")),
+            None
+        );
         assert_eq!(provider_for_in(&cat, None), None);
     }
 
     #[test]
     fn normalize_url_alias() {
-        assert_eq!(normalize_url("https://opencode.ai/zen/go/v1"), "https://opencode.ai/inference/go/openai");
-        assert_eq!(normalize_url("https://opencode.ai/zen/go/v1/"), "https://opencode.ai/inference/go/openai");
-        assert_eq!(normalize_url("https://opencode.ai/inference/go/openai/v1"), "https://opencode.ai/inference/go/openai");
+        assert_eq!(
+            normalize_url("https://opencode.ai/zen/go/v1"),
+            "https://opencode.ai/inference/go/openai"
+        );
+        assert_eq!(
+            normalize_url("https://opencode.ai/zen/go/v1/"),
+            "https://opencode.ai/inference/go/openai"
+        );
+        assert_eq!(
+            normalize_url("https://opencode.ai/inference/go/openai/v1"),
+            "https://opencode.ai/inference/go/openai"
+        );
     }
 
     #[test]
@@ -813,7 +834,10 @@ mod tests {
         write_cache(&path, &cat).unwrap();
         let loaded = load_cache(&path).unwrap();
         assert_eq!(loaded.providers.len(), cat.providers.len());
-        assert_eq!(loaded.providers.get("opencode-go").unwrap().models.len(), cat.providers.get("opencode-go").unwrap().models.len());
+        assert_eq!(
+            loaded.providers.get("opencode-go").unwrap().models.len(),
+            cat.providers.get("opencode-go").unwrap().models.len()
+        );
     }
 
     #[test]
@@ -852,12 +876,18 @@ mod tests {
             "qwen3.7-max",
             "space-bunny-free",
         ] {
-            let entry = models.get(id).unwrap_or_else(|| panic!("`{id}` missing from the seed"));
+            let entry = models
+                .get(id)
+                .unwrap_or_else(|| panic!("`{id}` missing from the seed"));
             assert!(entry.context > 0, "`{id}` must keep a real window");
         }
         // The responses-only snapshot names `grok-4.6`, so the limit table must
         // know it too — that inconsistency is what the drop created.
-        assert!(cat.protocol["opencode-go"].iter().any(|id| id == "grok-4.6"));
+        assert!(
+            cat.protocol["opencode-go"]
+                .iter()
+                .any(|id| id == "grok-4.6")
+        );
         assert!(models.contains_key("grok-4.6"));
     }
 
@@ -866,7 +896,9 @@ mod tests {
     #[test]
     fn a_live_value_beats_the_retired_table() {
         let cat = seed();
-        let price = cat.providers["opencode-go"].models["kimi-k3"].price.unwrap();
+        let price = cat.providers["opencode-go"].models["kimi-k3"]
+            .price
+            .unwrap();
         assert_eq!(price.cache_write, 3_000_000);
     }
 
@@ -945,7 +977,11 @@ mod tests {
         // ... and the cache file round-trips, with schema, timestamp and the
         // source URL recorded.
         let cached = load_cache(&path).expect("the refresh wrote the cache");
-        assert!(cached.providers["opencode-go"].models.contains_key("w038-probe"));
+        assert!(
+            cached.providers["opencode-go"]
+                .models
+                .contains_key("w038-probe")
+        );
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["schema"], SCHEMA_VERSION);
@@ -975,8 +1011,12 @@ mod tests {
         assert!(!path.exists(), "a failed refresh writes nothing");
 
         // (b) the fetch succeeds, the payload is unparseable.
-        let err = refresh_at(&path, "https://example.invalid/api.json", &Stub("{not json".into()))
-            .expect_err("an unparseable payload is an error");
+        let err = refresh_at(
+            &path,
+            "https://example.invalid/api.json",
+            &Stub("{not json".into()),
+        )
+        .expect_err("an unparseable payload is an error");
         assert!(matches!(err, CatalogError::Json(_)), "got {err:?}");
         assert!(Arc::ptr_eq(&before, &current()));
         assert!(
@@ -1144,18 +1184,31 @@ mod tests {
             .models
             .remove("deepseek-v4.1-flash");
         // The local value lost the row ...
-        assert!(!mine.providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"));
+        assert!(
+            !mine.providers["opencode-go"]
+                .models
+                .contains_key("deepseek-v4.1-flash")
+        );
         assert_eq!(
-            crate::limits::model_limit_in(&mine, Some("https://opencode.ai/zen/go/v1"), "deepseek-v4.1-flash"),
+            crate::limits::model_limit_in(
+                &mine,
+                Some("https://opencode.ai/zen/go/v1"),
+                "deepseek-v4.1-flash"
+            ),
             None
         );
         // ... the process-global one is untouched ...
         assert!(
-            current().providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"),
+            current().providers["opencode-go"]
+                .models
+                .contains_key("deepseek-v4.1-flash"),
             "no test writes the global catalog"
         );
         // ... and so is a fresh seed.
-        assert!(seed().providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"));
+        assert!(
+            seed().providers["opencode-go"]
+                .models
+                .contains_key("deepseek-v4.1-flash")
+        );
     }
-
 }

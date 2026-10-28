@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+dirs = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]

@@ -46,7 +46,7 @@ use crate::tools::background::Background;
 const USAGE: &str = "\
 wcode — minimal coding agent
 
-usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--title <text>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>] [--quiet] [--status [group|latest]]
+usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--base-url <url>] [--config <path>] [--endpoint <chat|responses|auto>] [--effort <level>] [--list-models] [--list-themes] [--refresh-models] [--dump-catalog] [--no-instructions] [--no-skills] [--dump-system-prompt] [--agents] [--no-project-config] [--peer <name>=<socket>] [--name <id>] [--title <text>] [--owner <addr>] [serve] [--socket <path>] [--tui|--no-tui] [--task <text>] [--timeout <secs>] [--quiet] [--status [group|latest]]
 
   -p <prompt>        run once with <prompt>, print the reply, exit
   --resume [path]    resume a session (default: latest in the session dir)
@@ -62,6 +62,11 @@ usage: wcode [-p <prompt>] [--resume [path]] [--no-session] [--model <id>] [--ba
    --title <text>     name this session (also /rename; distinct from --name,
                       which is the A2A address)
    --list-models      list models from GET {base_url}/models and exit
+   --list-themes      print the theme catalog names (one per line) and exit
+   --refresh-models   fetch the model catalog (models.dev), rewrite the cache, print
+                      counts + fetched_at, exit
+   --dump-catalog     print the resolved provider + model limit for the launch
+                      base_url/model (and WHERE the catalog came from: seed|cache|network), exit
    --sequential       run tool calls one at a time (default: independent calls in a
                       batch run in parallel)
    --no-instructions  don't load instruction files (AGENTS.md/CLAUDE.md)
@@ -231,6 +236,8 @@ struct Args {
     /// base_url/model, then exit. Touches no session.
     dump_catalog: bool,
 }
+
+// `Args` is much larger than `Help`; boxing it would only churn the call sites.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 enum Parsed {

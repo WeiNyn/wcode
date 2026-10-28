@@ -1935,7 +1935,7 @@ mod tests {
         assert_eq!(
             context_limit, None,
             "an unknown window is `None`, never 0 and never a guess \
-             (`limits::model_limit` knows one endpoint family)"
+             (`limits::model_limit` answers for any provider the catalog resolves)"
         );
 
         handle

@@ -243,7 +243,11 @@ mod tests {
         assert_eq!(model_price_in(&cat, ZEN, "no-such-model"), None);
         // A known id behind a non-zen base is NOT assumed.
         assert_eq!(
-            model_price_in(&cat, Some("https://api.openai.com/v1"), "deepseek-v4.1-flash"),
+            model_price_in(
+                &cat,
+                Some("https://api.openai.com/v1"),
+                "deepseek-v4.1-flash"
+            ),
             None
         );
         // No base at all.
@@ -286,7 +290,10 @@ mod tests {
         // Two priced turns (deepseek-v4.1-flash) + one unpriced model id.
         let messages = vec![
             // 1_000_000 * 150_000 / 1e6 = 150_000 µUSD.
-            assistant(Some(usage(1_000_000, 0, None, None)), Some("deepseek-v4.1-flash")),
+            assistant(
+                Some(usage(1_000_000, 0, None, None)),
+                Some("deepseek-v4.1-flash"),
+            ),
             // No per-message model ⇒ the fallback id is used → 150_000 µUSD.
             assistant(Some(usage(1_000_000, 0, None, None)), None),
             // An unknown id: reported usage, no price ⇒ one unpriced turn.
@@ -297,7 +304,10 @@ mod tests {
         assert_eq!(cost.unpriced_turns, 1);
 
         // Not one priced turn ⇒ None, never $0.
-        let unpriced = vec![assistant(Some(usage(10, 10, None, None)), Some("no-such-model"))];
+        let unpriced = vec![assistant(
+            Some(usage(10, 10, None, None)),
+            Some("no-such-model"),
+        )];
         assert_eq!(cost_of(&unpriced, ZEN, "no-such-model"), None);
         // A session that reported no usage is None too.
         assert_eq!(cost_of(&[], ZEN, "deepseek-v4.1-flash"), None);

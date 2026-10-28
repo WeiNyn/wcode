@@ -320,7 +320,8 @@ impl SettingsState {
 /// - `None` in `theme` = the active palette has no catalog name (palette B, or a
 ///   `[theme]` inline palette) — see `theme::active_name()`.
 /// - `None` in `context` = unknown, rendered as the honest absence the brief's
-///   §11.8 accepts (`limits::model_limit` knows one endpoint family only).
+///   §11.8 accepts (`limits::model_limit` answers for any provider the catalog
+///   resolves, and `None` for an unknown or windowless model).
 /// - No `running`: the pending set already answers "is this change still in
 ///   flight?", which is what the row draws; `App::running()` is read once, at
 ///   the mutation site (`apply_setting`), to decide whether to mark one. See the
@@ -377,8 +378,9 @@ pub struct SettingsSnapshot<'a> {
 ///   renders **`unknown`**. They are different words because they are different
 ///   facts: `palette b` is the name of the palette actually applied (A9 — the
 ///   row names a SOURCE, so it may not borrow the catalogue's `default`), while
-///   `unknown` is the honest absence of a context window (`limits::model_limit`
-///   knows one endpoint family, `limits.rs:63`).
+///   `unknown` is the honest absence of a context window
+///   (`limits::model_limit` answers for any provider the catalog resolves, and
+///   `None` when the model — or its window — is unknown).
 /// - Never matches on a row id.
 pub fn rows(snapshot: &SettingsSnapshot<'_>) -> Vec<Section> {
     let session = vec![

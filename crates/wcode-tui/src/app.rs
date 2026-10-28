@@ -2152,9 +2152,10 @@ impl Surface {
             // error — the same silent trap class as `on_overlay_key`.
             //
             // `context_limit` is `Option<u64>`: `None` = the harness does not
-            // know the window (today `limits::model_limit` recognizes one
-            // endpoint family, `limits.rs:63`) and the panel renders the honest
-            // absence rather than a stale number.
+            // know the window (`limits::model_limit` answers for any provider
+            // the catalog resolves, but returns `None` for an unknown or
+            // windowless model) and the panel renders the honest absence rather
+            // than a stale number.
             //
             // NOTE the deliberate split of duties: this arm writes ONLY
             // `Status`. The pending marks are App-level and are settled by

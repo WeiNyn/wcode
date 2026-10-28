@@ -155,7 +155,10 @@ mod tests {
         let cat = crate::catalog::seed();
         assert_eq!(model_limit_in(&cat, ZEN, "no-such-model"), None);
         // A known OpenCode id behind a non-opencode endpoint is not assumed.
-        assert_eq!(model_limit_in(&cat, Some("https://api.openai.com/v1"), "kimi-k3"), None);
+        assert_eq!(
+            model_limit_in(&cat, Some("https://api.openai.com/v1"), "kimi-k3"),
+            None
+        );
         assert_eq!(model_limit_in(&cat, None, "kimi-k3"), None);
     }
 
@@ -278,14 +281,20 @@ mod tests {
     #[test]
     fn reserve_is_capped_and_trigger_and_is_full_agree() {
         // Huge advertised output (384k) is capped to the reserve cap.
-        let big = ModelLimit { context: 1_000_000, output: 384_000 };
+        let big = ModelLimit {
+            context: 1_000_000,
+            output: 384_000,
+        };
         assert_eq!(big.reserve(), DEFAULT_RESERVE_CAP);
         assert_eq!(big.trigger(), 1_000_000 - DEFAULT_RESERVE_CAP);
         assert!(!big.is_full(big.trigger() - 1));
         assert!(big.is_full(big.trigger()));
 
         // Small advertised output is used verbatim, not the cap.
-        let small = ModelLimit { context: 8_192, output: 4_096 };
+        let small = ModelLimit {
+            context: 8_192,
+            output: 4_096,
+        };
         assert_eq!(small.reserve(), 4_096);
         assert_eq!(small.trigger(), 4_096);
         assert!(small.is_full(4_096));
@@ -302,7 +311,11 @@ mod tests {
             "muse-spark-1.2-contributor",
             "muse-spark-1.3-contributor",
         ] {
-            assert_eq!(model_protocol(ZEN, id), Some(LlmEndpoint::Responses), "{id}");
+            assert_eq!(
+                model_protocol(ZEN, id),
+                Some(LlmEndpoint::Responses),
+                "{id}"
+            );
         }
     }
 

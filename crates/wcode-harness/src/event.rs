@@ -178,9 +178,11 @@ pub enum AgentEvent {
     /// cannot invalidate it.
     ///
     /// `context_limit: None` means the window is UNKNOWN — never `0`, and
-    /// never a guess. Today `limits::model_limit` recognises one endpoint
-    /// family (`limits.rs:63`), so `None` is the common case and the panel
-    /// renders the honest absence (`docs/work/W032-tui-settings.md` §11.8).
+    /// never a guess. `limits::model_limit` answers for ANY provider the model
+    /// catalog resolves, and returns `None` for a known-but-windowless entry
+    /// (models.dev omits `limit` for e.g. `openai/gpt-image-2`), so `None`
+    /// stays the honest absence the panel renders
+    /// (`docs/work/W032-tui-settings.md` §11.8).
     ///
     /// Purely additive on the wire (`{"type":"settings","model":…}`) — an
     /// older peer drops the frame — so `PROTOCOL_VERSION` stays 1, the same
