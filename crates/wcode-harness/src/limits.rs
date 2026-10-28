@@ -5,10 +5,9 @@
 //! (zen) `/models` endpoint returns only `id/object/created/owned_by`, and rig
 //! leaves `Model::context_length` empty for every OpenAI-compatible listing
 //! (it is only populated for providers whose listing reports a window, e.g.
-//! Groq/Moonshot/OpenRouter). The authoritative catalog is models.dev, whose
-//! `opencode-go` entry (`api = https://opencode.ai/zen/go/v1`) carries
-//! `limit.context` / `limit.output` per model. [`OPENCODE_GO`] is a snapshot of
-//! that table.
+//! Groq/Moonshot/OpenRouter). The authoritative catalog is models.dev; wcode
+//! syncs it at runtime into `crate::catalog` (W038) and keeps a compiled-in
+//! seed (`catalog::seed`) for offline use.
 //!
 //! The *live* measure of how full the context is comes from the provider's own
 //! response usage (`prompt_tokens` → `crate::message::Usage::input_tokens`),
@@ -18,7 +17,7 @@ use crate::streamfn::LlmEndpoint;
 
 /// Context window assumed when neither the model catalog nor config supplies
 /// one: a conservative baseline so an unknown model still compacts in time.
-pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 256_000;
 
 /// Context window and output ceiling advertised for a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,108 +60,44 @@ pub fn is_opencode_go(base_url: Option<&str>) -> bool {
 /// Limits for `model` served from `base_url`, when we recognize the provider.
 /// `None` = unknown provider/model (the caller falls back to a default budget).
 pub fn model_limit(base_url: Option<&str>, model: &str) -> Option<ModelLimit> {
-    if is_opencode_go(base_url) {
-        return opencode_go(model);
-    }
-    None
+    let provider = crate::catalog::provider_for(base_url)?;
+    let cat = crate::catalog::current();
+    let entry = cat.providers.get(&provider)?.models.get(model)?;
+    Some(ModelLimit {
+        context: entry.context,
+        output: entry.output,
+    })
 }
 
 /// The wire protocol `model` speaks on OpenCode Go, when we recognize it.
 /// `None` = unknown / both-work / not served by `chat`-or-`responses`, or a
 /// non-zen provider — the caller (`EndpointPref::resolve`) falls back to `Chat`.
 ///
-/// Gated by `is_opencode_go` EXACTLY like `model_limit`: a known id behind a
-/// non-OpenCode base is NOT assumed (mirrors `unknown_model_or_provider_is_none`).
+/// Gated by `is_opencode_go` (note: `model_limit` is NOT gated since W038 —
+/// it resolves any provider via the catalog). A known id behind a non-OpenCode
+/// base is NOT assumed (mirrors `unknown_model_or_provider_is_none`).
 /// Only the responses-only ids are enumerated; every other id is `None`
 /// (both-works, or speaks a protocol wcode does not implement).
 ///
 /// # Returns
-/// `Some(LlmEndpoint::Responses)` for an id in `OPENCODE_GO_RESPONSES_ONLY` under a
+/// `Some(LlmEndpoint::Responses)` for an id in the seed's responses-only list under a
 /// zen base; `None` otherwise (never `Some(Chat)` — absence means "let the caller
 /// default to chat").
 ///
 /// Does NOT promise: it does not verify the id exists in the live catalog, and it is
-/// a snapshot of the OpenCode Go listing (`OPENCODE_GO_RESPONSES_ONLY`).
+/// a snapshot of the OpenCode Go listing (seeded from `SEED_RESPONSES_ONLY`).
 pub fn model_protocol(base_url: Option<&str>, model: &str) -> Option<LlmEndpoint> {
-    if is_opencode_go(base_url) && OPENCODE_GO_RESPONSES_ONLY.contains(&model) {
-        return Some(LlmEndpoint::Responses);
+    if !is_opencode_go(base_url) {
+        return None;
     }
-    None
+    let cat = crate::catalog::current();
+    let ids = cat.protocol.get("opencode-go")?;
+    if ids.iter().any(|id| id == model) {
+        Some(LlmEndpoint::Responses)
+    } else {
+        None
+    }
 }
-
-fn opencode_go(model: &str) -> Option<ModelLimit> {
-    OPENCODE_GO
-        .iter()
-        .find(|(id, ..)| *id == model)
-        .map(|(_, context, output)| ModelLimit {
-            context: *context,
-            output: *output,
-        })
-}
-
-/// The snapshot ids served by OpenCode Go ONLY on the Responses wire
-/// (`/responses`); every other id in `OPENCODE_GO` answers on `chat`. Snapshot from
-/// the orchestrator's live probe. Served by NEITHER wcode wire: `claude-haiku-5-5`,
-/// `minimax-m2.7`, `gemini-4-argon-contributor` — deliberately absent, so they fall
-/// through to chat = today's behavior.
-static OPENCODE_GO_RESPONSES_ONLY: &[&str] = &[
-    "grok-4.6",
-    "grok-4.7",
-    "gpt-5.6-luna",
-    "gpt-6-luna",
-    "muse-spark-1.2-contributor",
-    "muse-spark-1.3-contributor",
-];
-
-/// OpenCode Go (zen) model table, snapshotted from the models.dev `opencode-go`
-/// catalog: `(model id, context window, max output tokens)`.
-static OPENCODE_GO: &[(&str, u64, u64)] = &[
-    ("claude-haiku-5-5", 1_000_000, 128_000),
-    ("deepseek-v4-flash", 1_000_000, 384_000),
-    ("deepseek-v4-flash-vision-exp", 1_000_000, 384_000),
-    ("deepseek-v4-pro", 1_000_000, 384_000),
-    ("deepseek-v4.1-flash", 1_000_000, 384_000),
-    ("glm-5", 202_752, 32_768),
-    ("glm-5.1", 202_752, 32_768),
-    ("glm-5.2", 1_000_000, 131_072),
-    ("glm-5.3", 1_000_000, 131_072),
-    ("glm-5.3-flash", 1_000_000, 131_072),
-    ("gpt-5.6-luna", 1_050_000, 128_000),
-    ("gpt-6-luna", 1_050_000, 128_000),
-    ("grok-4.5", 500_000, 500_000),
-    ("grok-4.6", 500_000, 500_000),
-    ("grok-4.7", 500_000, 500_000),
-    ("hy3", 256_000, 128_000),
-    ("hy4-preview", 1_024_000, 64_000),
-    ("kimi-k2.5", 262_144, 65_536),
-    ("kimi-k2.6", 262_144, 65_536),
-    ("kimi-k2.7-code", 262_144, 262_144),
-    ("kimi-k3", 1_048_576, 131_072),
-    ("longcat-2.0", 1_000_000, 131_072),
-    ("longcat-2.5-preview-free", 1_000_000, 131_072),
-    ("mimo-v2-omni", 262_144, 128_000),
-    ("mimo-v2-pro", 1_048_576, 128_000),
-    ("mimo-v2.5", 1_000_000, 128_000),
-    ("mimo-v2.5-pro", 1_048_576, 128_000),
-    ("mimo-v2.6-flash", 1_048_576, 131_072),
-    ("mimo-v2.6-pro", 1_048_576, 131_072),
-    ("minimax-m2.5", 204_800, 65_536),
-    ("minimax-m2.7", 204_800, 131_072),
-    ("minimax-m3", 1_000_000, 131_072),
-    ("muse-spark-1.2-contributor", 1_048_576, 131_072),
-    ("muse-spark-1.3-contributor", 1_048_576, 131_072),
-    ("omen-alpha", 500_000, 128_000),
-    ("ox-alpha-free", 1_000_000, 131_072),
-    ("qwen3.5-plus", 262_144, 65_536),
-    ("qwen3.6-plus", 1_000_000, 65_536),
-    ("qwen3.7-max", 1_000_000, 65_536),
-    ("qwen3.7-plus", 1_000_000, 65_536),
-    ("qwen3.8-flash", 1_000_000, 131_072),
-    ("qwen3.8-max", 1_000_000, 131_072),
-    ("space-bunny", 1_048_576, 524_288),
-    ("space-bunny-free", 1_048_576, 524_288),
-    ("step-5-preview-free", 1_000_000, 65_536),
-];
 
 #[cfg(test)]
 mod tests {

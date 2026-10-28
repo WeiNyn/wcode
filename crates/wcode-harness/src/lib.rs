@@ -1,5 +1,6 @@
 pub mod actor;
 pub mod agent;
+pub mod catalog;
 pub mod compaction;
 pub mod event;
 pub mod hooks;

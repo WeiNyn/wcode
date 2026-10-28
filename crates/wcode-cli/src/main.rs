@@ -224,9 +224,13 @@ struct Args {
     view: Option<String>,
     /// `--no-tui`: force the line REPL (pipes/CI).
     no_tui: bool,
+    /// `--refresh-models`: force a synchronous fetch of models.dev, rewrite the
+    /// cache, swap the in-memory catalog, print counts + fetched_at, then exit.
+    refresh_models: bool,
+    /// `--dump-catalog`: print the resolved provider + counts for the launch
+    /// base_url/model, then exit. Touches no session.
+    dump_catalog: bool,
 }
-
-// `Args` is much larger than `Help`; boxing it would only churn the call sites.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 enum Parsed {
@@ -324,6 +328,8 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--dump-system-prompt" => a.dump_system_prompt = true,
             "--detect-endpoint" => a.detect_endpoint = true,
             "--dump-config" => a.dump_config = true,
+            "--refresh-models" => a.refresh_models = true,
+            "--dump-catalog" => a.dump_catalog = true,
             "--no-skills" => a.no_skills = true,
             "--no-project-config" => a.no_project_config = true,
             "--sequential" => a.sequential = true,
@@ -2246,6 +2252,7 @@ async fn dispatch(
 async fn main() {
     // Phase 1: parse argv, resolving the `--help`/`--version` early exits.
     let mut args = parse_cli();
+    wcode_harness::catalog::init();
     // A whitespace-only `WCODE_TASK` counts as unset; the `--task` flag wins
     // (a direct read, like `WCODE_CONFIG` — an invocation input, not provider
     // config, so it is not part of `EnvVars`).
@@ -2291,6 +2298,36 @@ async fn main() {
     }
     if args.list_models {
         list_models_and_exit(&llm).await;
+    }
+    if args.refresh_models {
+        match wcode_harness::catalog::refresh() {
+            Ok(()) => {
+                let cat = wcode_harness::catalog::current();
+                println!(
+                    "refreshed: {} providers, {} models; fetched_at={:?}",
+                    cat.providers.len(),
+                    cat.providers.values().map(|p| p.models.len()).sum::<usize>(),
+                    cat.fetched_at
+                );
+            }
+            Err(e) => {
+                eprintln!("refresh failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
+    if args.dump_catalog {
+        let cat = wcode_harness::catalog::current();
+        let provider = wcode_harness::catalog::provider_for(llm.base_url.as_deref());
+        println!("provider: {:?}", provider);
+        if let Some(p) = provider.as_ref().and_then(|id| cat.providers.get(id)) {
+            println!("models: {}", p.models.len());
+            if let Some(m) = p.models.get(&llm.model) {
+                println!("model: {} context={} output={}", llm.model, m.context, m.output);
+            }
+        }
+        std::process::exit(0);
     }
     if args.list_themes {
         for name in wcode_tui::theme_names() {
@@ -3599,15 +3636,15 @@ mod tests {
         let id = SessionId::new("root");
         // A KNOWN provider/model settles a real window; `effort` is copied through.
         let known = LlmOpts {
-            model: "glm-5".into(),
+            model: "deepseek-v4.1-flash".into(),
             base_url: Some("https://opencode.ai/zen/go/v1".into()),
             effort: Some("high".into()),
             ..LlmOpts::default()
         };
         record_root_meta(&registry, &id, &known);
-        assert_eq!(registry.model_of(&id).as_deref(), Some("glm-5"));
+        assert_eq!(registry.model_of(&id).as_deref(), Some("deepseek-v4.1-flash"));
         assert_eq!(registry.effort_of(&id).as_deref(), Some("high"));
-        assert_eq!(registry.window_of(&id), Some(202_752), "glm-5's window");
+        assert_eq!(registry.window_of(&id), Some(1_000_000), "deepseek-v4.1-flash's window");
 
         // An unknown provider/model falls back to DEFAULT_CONTEXT_WINDOW.
         let unknown = LlmOpts {

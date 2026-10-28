@@ -1,13 +1,10 @@
 //! Per-model prices for recognized providers, so `/usage` can report a `$` cost
 //! instead of a bare token count.
 //!
-//! Twin of [`crate::limits`], from the same source and the same gate: the
-//! authoritative catalog is models.dev, whose `opencode-go` entry
-//! (`api = https://opencode.ai/zen/go/v1`) carries
-//! `cost { input, output, cache_read, cache_write }` in **USD per million
-//! tokens**. [`OPENCODE_GO`] is a snapshot of that table, and [`model_price`] is
-//! gated by the existing [`crate::limits::is_opencode_go`] — so the two tables
-//! can never disagree about which provider they describe.
+//! Twin of [`crate::limits`], from the same source: the authoritative catalog
+//! is models.dev. [`model_price`] resolves any provider via `catalog::provider_for`
+//! (W038) and reads `catalog::current()`; the two tables can never disagree about
+//! which provider they describe.
 //!
 //! Units are **micro-USD per Mtok**, integers, never floats: a price stays
 //! `Eq`/serde-stable, a cost is byte-identical across a round-trip, and the
@@ -21,7 +18,7 @@
 //! NOT in v1 (named, deliberate — brief Q5):
 //! - `tiers` / `context_over_200k` — a request past the tier size bills up to
 //!   ~5× the base rate, so a tiered model's number is an **undercount**;
-//!   [`OPENCODE_GO`] stores the base rate only.
+//!   the compiled seed stores the base rate only.
 //! - a per-model `base_url` from [`crate::streamfn::LlmOpts::model_profiles`] —
 //!   pricing uses the session's launch base_url for every turn.
 //! - a config file. A const table mirrors `limits.rs`; behaviour is not
@@ -40,7 +37,7 @@ const MICRO_PER_MTOK: u128 = 1_000_000;
 /// so `summary()`'s `$` is reproducible to the last digit. `Default` is the
 /// all-zero price — a *known free* model, which is `Some(ModelPrice::default())`
 /// and never `None`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelPrice {
     /// Price of one million **uncached** prompt tokens.
     pub input: u64,
@@ -104,19 +101,13 @@ impl ModelPrice {
 /// `None` = unknown provider/model — the caller OMITS the `$` (an unknown price
 /// is not `$0`; a known-free model is `Some(ModelPrice::default())`).
 ///
-/// Gated by [`crate::limits::is_opencode_go`] EXACTLY like
-/// [`crate::limits::model_limit`] (`limits.rs:63` `pub fn model_limit(base_url:
-/// Option<&str>, model: &str) -> Option<ModelLimit> {`): a known id behind a
-/// non-zen base is NOT assumed — mirrors `limits::unknown_model_or_provider_is_none`.
-///
-/// Does NOT promise: id coverage. [`OPENCODE_GO`] holds the 32 ids models.dev
-/// prices; `limits::OPENCODE_GO` holds 45, so a model can have a context window
-/// and NO price (see the table doc).
+/// Generic over any provider `provider_for` resolves (W038): a known id behind a
+/// non-matching base is NOT assumed. Tier rates remain deferred (D028).
+/// Providers without cost data (e.g. ollama) return `None` → `$` omitted, never `$0`.
 pub fn model_price(base_url: Option<&str>, model: &str) -> Option<ModelPrice> {
-    if crate::limits::is_opencode_go(base_url) {
-        return opencode_go(model);
-    }
-    None
+    let provider = crate::catalog::provider_for(base_url)?;
+    let cat = crate::catalog::current();
+    cat.providers.get(&provider)?.models.get(model)?.price
 }
 
 /// The session's `$` cost: fold every `Assistant { usage: Some(u), model }` at
@@ -174,82 +165,6 @@ pub fn cost_of(
         unpriced_turns,
     })
 }
-
-/// Table lookup, mirroring `limits::opencode_go` (`limits.rs:93`
-/// `fn opencode_go(model: &str) -> Option<ModelLimit> {`): first row whose id
-/// matches exactly. No prefix/normalization — an id is an id.
-fn opencode_go(model: &str) -> Option<ModelPrice> {
-    OPENCODE_GO
-        .iter()
-        .find(|(id, ..)| *id == model)
-        .map(|(_, input, output, cache_read, cache_write)| ModelPrice {
-            input: *input,
-            output: *output,
-            cache_read: *cache_read,
-            cache_write: *cache_write,
-        })
-}
-
-/// OpenCode Go (zen) price table, snapshotted from the models.dev `opencode-go`
-/// catalog (`https://models.dev/api.json` → `opencode-go` → `models.<id>.cost`,
-/// 32 models): `(model id, input, output, cache_read, cache_write)` in
-/// **micro-USD per Mtok** (USD/Mtok × 1_000_000 — `0.15` ⇒ `150_000`,
-/// `0.003` ⇒ `3_000`).
-///
-/// Source notes, per the `limits.rs` discipline of citing where the numbers come
-/// from:
-/// - every value converts EXACTLY to micro-USD for this snapshot (checked: no
-///   entry carries more than 6 decimals), so no rounding happens on the way in;
-/// - `cache_write` is `0` where models.dev omits it (the provider does not
-///   report a separate write price);
-/// - four ids are priced at all-zero = genuinely free: `beam-free`,
-///   `cat-jam-free`, `longcat-2.5-preview-free`, `step-5-preview-free`;
-/// - `tiers` / `context_over_200k` are DROPPED: the base rate is stored, so a
-///   tiered model (`grok-4.7`, `gpt-5.6-luna`, `gpt-6-luna`, `minimax-m3`,
-///   `claude-haiku-5-5`, `qwen3.7-plus`) is an undercount above its threshold.
-///
-/// Coverage gap (named, not a bug to hide): 17 ids in `limits::OPENCODE_GO` have
-/// no row here — `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `glm-5`,
-/// `glm-5.1`, `grok-4.5`, `grok-4.6`, `kimi-k2.5`, `kimi-k2.6`, `mimo-v2-omni`,
-/// `mimo-v2-pro`, `minimax-m2.5`, `omen-alpha`, `ox-alpha-free`,
-/// `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-max`, `space-bunny-free`. They get
-/// a context window but NO `$`. Conversely `beam-free`, `cat-jam-free`,
-/// `gemini-4-argon-contributor`, `step-5-preview` are priced here and absent
-/// from the limits table — harmless: the two tables answer different questions.
-static OPENCODE_GO: &[(&str, u64, u64, u64, u64)] = &[
-    ("beam-free", 0, 0, 0, 0),
-    ("cat-jam-free", 0, 0, 0, 0),
-    ("claude-haiku-5-5", 100_000, 500_000, 10_000, 125_000),
-    ("deepseek-v4-pro", 660_000, 1_980_000, 22_000, 0),
-    ("deepseek-v4.1-flash", 150_000, 600_000, 3_000, 0),
-    ("gemini-4-argon-contributor", 4_000_000, 20_000_000, 200_000, 0),
-    ("glm-5.2", 1_400_000, 4_400_000, 260_000, 0),
-    ("glm-5.3", 1_400_000, 4_400_000, 260_000, 0),
-    ("glm-5.3-flash", 150_000, 500_000, 30_000, 0),
-    ("gpt-5.6-luna", 200_000, 1_200_000, 20_000, 250_000),
-    ("gpt-6-luna", 100_000, 500_000, 10_000, 125_000),
-    ("grok-4.7", 2_000_000, 6_000_000, 500_000, 0),
-    ("hy3", 140_000, 580_000, 35_000, 0),
-    ("hy4-preview", 834_000, 2_501_000, 42_000, 0),
-    ("kimi-k2.7-code", 950_000, 4_000_000, 190_000, 0),
-    ("kimi-k3", 3_000_000, 15_000_000, 300_000, 0),
-    ("longcat-2.0", 300_000, 1_200_000, 6_000, 0),
-    ("longcat-2.5-preview-free", 0, 0, 0, 0),
-    ("mimo-v2.5", 140_000, 280_000, 2_800, 0),
-    ("mimo-v2.5-pro", 435_000, 870_000, 3_625, 0),
-    ("mimo-v2.6-flash", 140_000, 280_000, 2_800, 0),
-    ("mimo-v2.6-pro", 435_000, 870_000, 3_625, 0),
-    ("minimax-m2.7", 300_000, 1_200_000, 60_000, 375_000),
-    ("minimax-m3", 300_000, 1_200_000, 60_000, 0),
-    ("muse-spark-1.2-contributor", 100_000, 200_000, 2_000, 0),
-    ("muse-spark-1.3-contributor", 100_000, 200_000, 2_000, 0),
-    ("qwen3.7-plus", 400_000, 1_600_000, 40_000, 500_000),
-    ("qwen3.8-flash", 150_000, 470_000, 16_000, 200_000),
-    ("qwen3.8-max", 2_000_000, 6_000_000, 250_000, 2_500_000),
-    ("space-bunny", 150_000, 600_000, 30_000, 0),
-    ("step-5-preview", 1_000_000, 2_700_000, 100_000, 0),
-    ("step-5-preview-free", 0, 0, 0, 0),
-];
 
 #[cfg(test)]
 mod tests {

@@ -386,6 +386,8 @@ wcode --detect-endpoint      # when base_url is unset, probe common local endpoi
 wcode --title "retry fix"    # name this session up front (distinct from --name, the A2A address)
 wcode --dump-config          # print the resolved endpoint/base_url/model and key SOURCES
                              # (plus the effective `compaction budget`), exit
+wcode --refresh-models       # fetch models.dev, rewrite the on-disk catalog cache, print counts, exit
+wcode --dump-catalog         # print the resolved provider + model count for the launch base_url/model, exit
 wcode --no-skills            # run without discovering skills
 wcode --sequential           # run each tool call one at a time
 wcode --tui                  # force the full-screen TUI (default on a TTY)

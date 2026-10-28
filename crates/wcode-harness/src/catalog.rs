@@ -1,0 +1,837 @@
+//! Runtime-synced model catalog: context windows, output ceilings, prices, and
+//! (co-located but hand-maintained) protocol facts, sourced from models.dev.
+//!
+//! W038: replaces the two hand-maintained static tables in `limits.rs` and
+//! `pricing.rs` with a single on-disk cached manifest. The boot path never
+//! touches the network (W014): [`init`] reads the cache (or the compiled-in
+//! [`seed`]) synchronously and kicks a background refresh when stale. A
+//! synchronous refresh is available via [`refresh`] (`--refresh-models`).
+//!
+//! Shape mirrors `session_groups::Manifest`: serde, tolerant read, atomic write.
+//! A torn or schema-mismatched cache degrades to the seed and never panics.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::pricing::ModelPrice;
+
+/// Schema version of the on-disk cache file. A mismatched cache is treated as
+/// absent (returns the seed), never panics (D-D).
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// models.dev endpoint that produces the catalog payload.
+pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+
+/// Default staleness TTL in seconds. Overridable via `WCODE_MODELS_TTL_SECS`.
+pub const DEFAULT_TTL_SECS: u64 = 86_400;
+
+/// Human-readable default cache location (the real path is computed from
+/// `$HOME`, see [`default_cache_path`]).
+pub const DEFAULT_CACHE_PATH: &str = "~/.local/share/wcode/models.dev.json";
+
+/// Default cache file name.
+pub const DEFAULT_CACHE_FILE_NAME: &str = "models.dev.json";
+
+/// Where a catalog came from — for diagnostics / `--dump-catalog`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CatalogSource {
+    Seed,
+    Cache,
+    Network,
+}
+
+/// One model's context/output/price entry. `price` is `None` when models.dev
+/// carries no `cost` block for the id (rare); `tiers` are stored but ignored
+/// in v1 (D028 base-rate-only).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ModelEntry {
+    pub context: u64,
+    pub output: u64,
+    pub price: Option<ModelPrice>,
+    pub tiers: Vec<PriceTier>,
+}
+
+/// A tiered rate. Stored, ignored in v1 (D028). `size` is the tier threshold
+/// in input tokens (Q8 of the brief leaves the exact unit unverified).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PriceTier {
+    pub size: u64,
+    pub price: ModelPrice,
+}
+
+/// One provider's catalog slice.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProviderEntry {
+    pub id: String,
+    pub api: String,
+    pub aliases: Vec<String>,
+    pub models: BTreeMap<String, ModelEntry>,
+}
+
+/// The in-memory catalog. Reads clone an `Arc<Catalog>`; a refresh swaps the
+/// `Arc` (Q2). `protocol` is the hand-maintained responses-only snapshot,
+/// co-located but not sourced from models.dev (Q6).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Catalog {
+    pub providers: BTreeMap<String, ProviderEntry>,
+    pub protocol: BTreeMap<String, Vec<String>>,
+    pub fetched_at: Option<i64>,
+    pub source: CatalogSource,
+}
+
+/// Errors surfaced by refresh / cache I/O.
+#[derive(Debug, Error)]
+pub enum CatalogError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("http: {0}")]
+    Http(String),
+    #[error("invalid schema (expected {expected}, got {got})")]
+    Schema { expected: u32, got: u32 },
+    #[error("parse: {0}")]
+    Parse(String),
+}
+
+// ---------------------------------------------------------------------------
+// Global state (Q2)
+// ---------------------------------------------------------------------------
+
+static CATALOG: OnceLock<RwLock<Arc<Catalog>>> = OnceLock::new();
+
+fn global() -> &'static RwLock<Arc<Catalog>> {
+    CATALOG.get_or_init(|| RwLock::new(Arc::new(seed())))
+}
+
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+// Fetcher injection (test-only surface for stubbing HTTP in refresh tests).
+pub trait Fetcher: Send + Sync {
+    fn fetch(&self, url: &str) -> Result<String, CatalogError>;
+}
+
+struct DefaultFetcher;
+
+impl Fetcher for DefaultFetcher {
+    fn fetch(&self, url: &str) -> Result<String, CatalogError> {
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            let resp = reqwest::blocking::get(&url).map_err(|e| CatalogError::Http(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(CatalogError::Http(format!("status {}", resp.status())));
+            }
+            resp.text().map_err(|e| CatalogError::Http(e.to_string()))
+        })
+        .join()
+        .map_err(|_| CatalogError::Http("fetch thread panicked".into()))?
+    }
+}
+
+static FETCHER: Mutex<Option<Arc<dyn Fetcher>>> = Mutex::new(None);
+
+fn current_fetcher() -> Arc<dyn Fetcher> {
+    FETCHER
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| Arc::new(DefaultFetcher))
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// The live catalog. Never allocates beyond an `Arc` clone.
+pub fn current() -> Arc<Catalog> {
+    global().read().unwrap().clone()
+}
+
+/// Resolve a runtime `base_url` to a provider id using the live catalog.
+/// Returns `None` when no provider matches (unknown endpoint).
+pub fn provider_for(base_url: Option<&str>) -> Option<String> {
+    let key = normalize_url(base_url?);
+    let cat = current();
+    for (id, provider) in &cat.providers {
+        if normalize_url(&provider.api) == key {
+            return Some(id.clone());
+        }
+        for alias in &provider.aliases {
+            if normalize_url(alias) == key {
+                return Some(id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Normalize a URL to a comparison key (§4.3):
+/// lowercase, trim trailing slash, strip a trailing `/v1`, then rewrite the
+/// legacy `zen/go` spelling to models.dev's `inference/go/openai`.
+pub fn normalize_url(url: &str) -> String {
+    let mut s = url.trim().to_ascii_lowercase();
+    while s.ends_with('/') {
+        s.pop();
+    }
+    if let Some(stripped) = s.strip_suffix("/v1") {
+        s = stripped.to_string();
+    }
+    s.replace("zen/go", "inference/go/openai")
+}
+
+/// Source URL for the catalog fetch. Honors `WCODE_MODELS_URL` so a new
+/// provider/source can be pointed at without recompiling; defaults to
+/// [`MODELS_DEV_URL`] (models.dev). This is the extension point for fetching
+/// from a provider that is not on models.dev: implement [`Fetcher`] for that
+/// source and call [`refresh_from`] (or [`refresh_with_url`]).
+pub fn catalog_url() -> String {
+    std::env::var("WCODE_MODELS_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| MODELS_DEV_URL.to_string())
+}
+
+/// Blocking refresh from the configured catalog source (see [`catalog_url`]).
+/// Used by `--refresh-models`. Single-flight with [`refresh_background`] via
+/// `REFRESH_LOCK`.
+pub fn refresh() -> Result<(), CatalogError> {
+    refresh_with_url(catalog_url(), current_fetcher().as_ref())
+}
+
+/// Refresh from an explicit URL using a caller-supplied fetcher (the seam for
+/// adding a new provider/source that is not models.dev).
+pub fn refresh_from(url: &str, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
+    refresh_with_url(url.to_string(), fetcher)
+}
+
+/// Refresh from an explicit URL using a caller-supplied fetcher.
+pub fn refresh_with_url(url: String, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
+    // Fetch + parse OUTSIDE the lock (reviewer A7).
+    let body = fetcher.fetch(&url)?;
+    let mut cat = from_models_dev_json(&body)?;
+    if cat.protocol.is_empty() {
+        cat.protocol = current().protocol.clone();
+    }
+    cat.fetched_at = Some(now_unix());
+    cat.source = CatalogSource::Network;
+    let path = cache_path_from_env_or_default();
+    let _guard = REFRESH_LOCK.lock().unwrap();
+    // Record the source URL in the cache file for diagnostics.
+    write_cache_with_url(&path, &cat, &url)?;
+    *global().write().unwrap() = Arc::new(cat);
+    Ok(())
+}
+
+/// Refresh using a caller-supplied fetcher against the default URL (test seam).
+pub fn refresh_with(fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
+    refresh_with_url(MODELS_DEV_URL.to_string(), fetcher)
+}
+pub fn refresh_background() {
+    if REFRESHING.swap(true, Ordering::SeqCst) {
+        return; // already in flight
+    }
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            REFRESHING.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    // Reviewer A7: run the blocking HTTP + file I/O on a blocking thread so we
+    // never stall the async runtime; take REFRESH_LOCK only around cache write
+    // + the Arc swap (see refresh_with).
+    handle.spawn_blocking(|| {
+        let _ = refresh();
+        REFRESHING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Boot wiring: read the cache (or fall back to the seed) into the global,
+/// then kick a background refresh if the cache is missing or stale. Synchronous;
+/// never touches the network.
+pub fn init() {
+    let path = cache_path_from_env_or_default();
+    init_with_path(&path);
+}
+
+/// Boot wiring with an explicit cache path (tests).
+pub fn init_with_path(path: &Path) {
+    let cached = load_cache(path);
+    if let Some(cat) = cached.clone() {
+        *global().write().unwrap() = Arc::new(cat);
+    }
+    // Staleness check (stale-while-revalidate): refresh in the background when
+    // the cache is absent or older than the TTL. The seed/global stays usable
+    // in the meantime.
+    let stale = match cached {
+        Some(cat) => cat
+            .fetched_at
+            .map(|t| now_unix().saturating_sub(t) > ttl_secs() as i64)
+            .unwrap_or(true),
+        None => true,
+    };
+    if stale {
+        refresh_background();
+    }
+}
+
+/// Load a cache file. `None` on absence, IO error, parse error, or schema
+/// mismatch — never panics.
+pub fn load_cache(path: &Path) -> Option<Catalog> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cache: CacheFile = serde_json::from_str(&raw).ok()?;
+    if cache.schema != SCHEMA_VERSION {
+        return None;
+    }
+    Some(Catalog {
+        providers: cache.providers,
+        protocol: cache.protocol,
+        fetched_at: Some(cache.fetched_at),
+        source: CatalogSource::Cache,
+    })
+}
+
+/// Atomic write via temp file + rename. A concurrent reader sees either the
+/// old file or the new one, never a torn write.
+pub fn write_cache(path: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
+    write_cache_with_url(path, catalog, MODELS_DEV_URL)
+}
+
+/// Atomic write with an explicit source URL recorded in the cache file.
+pub fn write_cache_with_url(
+    path: &Path,
+    catalog: &Catalog,
+    source_url: &str,
+) -> Result<(), CatalogError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let cache = CacheFile {
+        schema: SCHEMA_VERSION,
+        fetched_at: catalog.fetched_at.unwrap_or_else(now_unix),
+        source_url: source_url.to_string(),
+        providers: catalog.providers.clone(),
+        protocol: catalog.protocol.clone(),
+    };
+    let tmp = path.with_extension("tmp");
+    {
+        let file = std::fs::File::create(&tmp)?;
+        serde_json::to_writer_pretty(file, &cache)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Compiled-in snapshot (the old 45/32 rows). Offline fallback and seed for a
+/// first run. Moved here from `limits.rs` / `pricing.rs` (W038).
+pub fn seed() -> Catalog {
+    use std::collections::BTreeMap;
+    let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
+    for (id, context, output) in SEED_LIMITS {
+        models.insert(
+            (*id).to_string(),
+            ModelEntry {
+                context: *context,
+                output: *output,
+                price: None,
+                tiers: Vec::new(),
+            },
+        );
+    }
+    for (id, input, output, cache_read, cache_write) in SEED_PRICES {
+        let price = ModelPrice {
+            input: *input,
+            output: *output,
+            cache_read: *cache_read,
+            cache_write: *cache_write,
+        };
+        models
+            .entry((*id).to_string())
+            .and_modify(|e| {
+                e.price = Some(price);
+            })
+            .or_insert(ModelEntry {
+                context: 0,
+                output: 0,
+                price: Some(price),
+                tiers: Vec::new(),
+            });
+    }
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "opencode-go".to_string(),
+        ProviderEntry {
+            id: "opencode-go".to_string(),
+            api: "https://opencode.ai/inference/go/openai/v1".to_string(),
+            aliases: vec![
+                "https://opencode.ai/zen/go".to_string(),
+                "https://opencode.ai/inference/go/openai".to_string(),
+            ],
+            models,
+        },
+    );
+    let mut protocol = BTreeMap::new();
+    protocol.insert(
+        "opencode-go".to_string(),
+        SEED_RESPONSES_ONLY.iter().map(|s| (*s).to_string()).collect(),
+    );
+    Catalog {
+        providers,
+        protocol,
+        fetched_at: None,
+        source: CatalogSource::Seed,
+    }
+}
+
+/// Default cache path, honoring `$HOME` (and `$WCODE_MODELS_CACHE` at call
+/// sites via [`cache_path_from_env_or_default`]).
+pub fn default_cache_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local/share/wcode").join(DEFAULT_CACHE_FILE_NAME)
+}
+
+fn cache_path_from_env_or_default() -> PathBuf {
+    std::env::var_os("WCODE_MODELS_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_cache_path)
+}
+
+fn ttl_secs() -> u64 {
+    std::env::var("WCODE_MODELS_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TTL_SECS)
+}
+
+/// Parse a models.dev `/api.json` payload into a [`Catalog`]. Provider-generic:
+/// stores every provider models.dev carries. Limits/prices are applied for ANY
+/// provider that `provider_for` resolves (no opencode-go gate); `model_protocol`
+/// keeps its own opencode-go gate for the responses-only snapshot.
+pub fn from_models_dev_json(input: &str) -> Result<Catalog, CatalogError> {
+    let raw: BTreeMap<String, RawProvider> =
+        serde_json::from_str(input).map_err(CatalogError::Json)?;
+    let mut providers = BTreeMap::new();
+    for (id, rp) in raw {
+        // Alias seeding for the URL mismatch (Q1): opencode-go is advertised
+        // under inference/go/openai but wcode talks to zen/go.
+        let aliases = match id.as_str() {
+            "opencode-go" => vec![
+                "https://opencode.ai/zen/go".to_string(),
+                "https://opencode.ai/inference/go/openai".to_string(),
+            ],
+            "openai" => vec!["https://api.openai.com/v1".to_string()],
+            "openrouter" => vec!["https://openrouter.ai/api/v1".to_string()],
+            "groq" => vec!["https://api.groq.com/openai/v1".to_string()],
+            "moonshot" => vec!["https://api.moonshot.cn/v1".to_string()],
+            "mistral" => vec!["https://api.mistral.ai/v1".to_string()],
+            _ => Vec::new(),
+        };
+        let mut models = BTreeMap::new();
+        for (mid, rm) in rp.models {
+            models.insert(
+                mid,
+                ModelEntry {
+                    context: rm.limit.context,
+                    output: rm.limit.output,
+                    price: rm.cost.as_ref().map(RawCost::to_model_price),
+                    tiers: rm
+                        .cost
+                        .as_ref()
+                        .and_then(|c| c.tiers.as_ref())
+                        .map(|ts| ts.iter().map(|t| t.clone().into_price_tier()).collect())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        providers.insert(
+            id.clone(),
+            ProviderEntry {
+                id: id.clone(),
+                api: rp.api,
+                aliases,
+                models,
+            },
+        );
+    }
+    Ok(Catalog {
+        providers,
+        protocol: BTreeMap::new(),
+        fetched_at: None,
+        source: CatalogSource::Network,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Raw models.dev shapes (private)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawProvider {
+    #[serde(default)]
+    api: String,
+    #[serde(default)]
+    models: BTreeMap<String, RawModel>,
+}
+
+#[derive(Deserialize)]
+struct RawModel {
+    #[serde(default)]
+    limit: RawLimit,
+    #[serde(default)]
+    cost: Option<RawCost>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawLimit {
+    #[serde(default)]
+    context: u64,
+    #[serde(default)]
+    output: u64,
+}
+
+#[derive(Deserialize)]
+struct RawCost {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    output: f64,
+    #[serde(default)]
+    cache_read: f64,
+    #[serde(default)]
+    cache_write: f64,
+    #[serde(default)]
+    tiers: Option<Vec<RawTier>>,
+    // context_over_200k is intentionally ignored (D028 base-rate only).
+    #[serde(default)]
+    #[allow(dead_code)]
+    context_over_200k: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Deserialize)]
+struct RawTier {
+    #[serde(default)]
+    input: f64,
+    #[serde(default)]
+    output: f64,
+    #[serde(default)]
+    cache_read: f64,
+    #[serde(default)]
+    cache_write: f64,
+    #[serde(default)]
+    tier: RawTierSpec,
+}
+
+impl RawTier {
+    fn into_price_tier(self) -> PriceTier {
+        PriceTier {
+            size: self.tier.size,
+            price: ModelPrice {
+                input: (self.input * 1_000_000.0).round() as u64,
+                output: (self.output * 1_000_000.0).round() as u64,
+                cache_read: (self.cache_read * 1_000_000.0).round() as u64,
+                cache_write: (self.cache_write * 1_000_000.0).round() as u64,
+            },
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct RawTierSpec {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    #[allow(dead_code)]
+    kind: String,
+    #[serde(default)]
+    size: u64,
+}
+
+impl RawCost {
+    fn to_model_price(&self) -> ModelPrice {
+        // Float -> micro-USD: USD/Mtok * 1_000_000, rounded to nearest int.
+        // Max 6 decimals in the current catalog, so no precision loss (Q8).
+        ModelPrice {
+            input: (self.input * 1_000_000.0).round() as u64,
+            output: (self.output * 1_000_000.0).round() as u64,
+            cache_read: (self.cache_read * 1_000_000.0).round() as u64,
+            cache_write: (self.cache_write * 1_000_000.0).round() as u64,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cache file shape (mirrors session_groups::Manifest)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CacheFile {
+    schema: u32,
+    fetched_at: i64,
+    source_url: String,
+    providers: BTreeMap<String, ProviderEntry>,
+    protocol: BTreeMap<String, Vec<String>>,
+}
+
+// ---------------------------------------------------------------------------
+// Test-only injection
+// ---------------------------------------------------------------------------
+
+// Public injection (composition + tests). `set_current` lets a caller install
+// a catalog built for a provider that is not on models.dev; `set_fetcher`
+// swaps the HTTP implementation.
+pub fn set_current(cat: Arc<Catalog>) {
+    *global().write().unwrap() = cat;
+}
+
+pub fn set_fetcher(f: Arc<dyn Fetcher>) {
+    *FETCHER.lock().unwrap() = Some(f);
+}
+
+// Fetcher is nameable outside tests so callers can build stubs (reviewer A5).
+pub use self::Fetcher as FetcherTrait;
+
+// Fetcher is nameable outside tests so callers can build stubs (reviewer A5).
+
+fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+// ---------------------------------------------------------------------------
+// Seed data (compiled-in snapshot of the legacy static tables)
+// ---------------------------------------------------------------------------
+
+const SEED_LIMITS: &[(&str, u64, u64)] = &[
+    ("beam-free", 1048576, 131072),
+    ("cat-jam-free", 1048576, 131072),
+    ("claude-haiku-5-5", 1000000, 128000),
+    ("deepseek-v4-pro", 1000000, 384000),
+    ("deepseek-v4.1-flash", 1000000, 384000),
+    ("gemini-4-argon", 1048576, 65536),
+    ("gemini-4-argon-contributor", 1048576, 65536),
+    ("glm-5.2", 1000000, 131072),
+    ("glm-5.3", 1000000, 131072),
+    ("glm-5.3-flash", 1000000, 131072),
+    ("gpt-5.6-luna", 1050000, 128000),
+    ("gpt-6-luna", 1050000, 128000),
+    ("grok-4.7", 500000, 500000),
+    ("hy3", 256000, 128000),
+    ("hy4-preview", 1024000, 64000),
+    ("iceman-contributor-free", 262144, 131072),
+    ("kimi-k2.7-code", 262144, 262144),
+    ("kimi-k3", 1048576, 131072),
+    ("kimi-k3.1-pro", 1048576, 131072),
+    ("longcat-2.0", 1000000, 131072),
+    ("longcat-2.5-preview-free", 1000000, 131072),
+    ("mimo-v2.5", 1000000, 128000),
+    ("mimo-v2.5-pro", 1048576, 128000),
+    ("mimo-v2.6-flash", 1048576, 131072),
+    ("mimo-v2.6-pro", 1048576, 131072),
+    ("minimax-m2.7", 204800, 131072),
+    ("minimax-m3", 1000000, 131072),
+    ("minimax-m3.1-flash", 1000000, 512000),
+    ("minimax-m3.1-flash-free", 1000000, 512000),
+    ("muse-spark-1.2-contributor", 1048576, 131072),
+    ("muse-spark-1.3-contributor", 1048576, 131072),
+    ("qwen3.7-plus", 1000000, 65536),
+    ("qwen3.8-flash", 1000000, 131072),
+    ("qwen3.8-max", 1000000, 131072),
+    ("space-bunny", 1048576, 524288),
+    ("step-5-preview", 1000000, 65536),
+    ("step-5-preview-free", 1000000, 65536),
+];
+
+const SEED_PRICES: &[(&str, u64, u64, u64, u64)] = &[
+    ("beam-free", 0, 0, 0, 0),
+    ("cat-jam-free", 0, 0, 0, 0),
+    ("claude-haiku-5-5", 100000, 500000, 10000, 125000),
+    ("deepseek-v4-pro", 660000, 1980000, 22000, 0),
+    ("deepseek-v4.1-flash", 150000, 600000, 3000, 0),
+    ("gemini-4-argon", 2000000, 10000000, 100000, 0),
+    ("gemini-4-argon-contributor", 4000000, 20000000, 200000, 0),
+    ("glm-5.2", 1400000, 4400000, 260000, 0),
+    ("glm-5.3", 1400000, 4400000, 260000, 0),
+    ("glm-5.3-flash", 150000, 500000, 30000, 0),
+    ("gpt-5.6-luna", 200000, 1200000, 20000, 250000),
+    ("gpt-6-luna", 100000, 500000, 10000, 125000),
+    ("grok-4.7", 2000000, 6000000, 500000, 0),
+    ("hy3", 140000, 580000, 35000, 0),
+    ("hy4-preview", 834000, 2501000, 42000, 0),
+    ("iceman-contributor-free", 0, 0, 0, 0),
+    ("kimi-k2.7-code", 950000, 4000000, 190000, 0),
+    ("kimi-k3", 3000000, 15000000, 300000, 3000000),
+    ("kimi-k3.1-pro", 2000000, 10000000, 200000, 2000000),
+    ("longcat-2.0", 300000, 1200000, 6000, 0),
+    ("longcat-2.5-preview-free", 0, 0, 0, 0),
+    ("mimo-v2.5", 140000, 280000, 2800, 0),
+    ("mimo-v2.5-pro", 435000, 870000, 3625, 0),
+    ("mimo-v2.6-flash", 140000, 280000, 2800, 0),
+    ("mimo-v2.6-pro", 435000, 870000, 3625, 0),
+    ("minimax-m2.7", 300000, 1200000, 60000, 375000),
+    ("minimax-m3", 300000, 1200000, 60000, 0),
+    ("minimax-m3.1-flash", 150000, 600000, 15000, 0),
+    ("minimax-m3.1-flash-free", 0, 0, 0, 0),
+    ("muse-spark-1.2-contributor", 100000, 200000, 2000, 0),
+    ("muse-spark-1.3-contributor", 100000, 200000, 2000, 0),
+    ("qwen3.7-plus", 400000, 1600000, 40000, 500000),
+    ("qwen3.8-flash", 150000, 470000, 16000, 200000),
+    ("qwen3.8-max", 2000000, 6000000, 250000, 2500000),
+    ("space-bunny", 150000, 600000, 30000, 0),
+    ("step-5-preview", 1000000, 2700000, 100000, 0),
+    ("step-5-preview-free", 0, 0, 0, 0),
+];
+
+const SEED_RESPONSES_ONLY: &[&str] = &[
+    "grok-4.6",
+    "grok-4.7",
+    "gpt-5.6-luna",
+    "gpt-6-luna",
+    "muse-spark-1.2-contributor",
+    "muse-spark-1.3-contributor",
+];
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn provider_for_matrix() {
+        // seed path: catalog::current() defaults to seed() only after init;
+        // ensure global is seeded.
+        set_current(Arc::new(seed()));
+        let zen = Some("https://opencode.ai/zen/go/v1");
+        assert_eq!(provider_for(zen), Some("opencode-go".to_string()));
+        let inf = Some("https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(provider_for(inf), Some("opencode-go".to_string()));
+        // mixed case + trailing slash
+        assert_eq!(
+            provider_for(Some("HTTPS://OPENCODE.AI/ZEN/GO/V1/")),
+            Some("opencode-go".to_string())
+        );
+        // non-go
+        assert_eq!(provider_for(Some("https://api.openai.com/v1")), None);
+        assert_eq!(provider_for(None), None);
+    }
+
+    #[test]
+    fn normalize_url_alias() {
+        assert_eq!(normalize_url("https://opencode.ai/zen/go/v1"), "https://opencode.ai/inference/go/openai");
+        assert_eq!(normalize_url("https://opencode.ai/zen/go/v1/"), "https://opencode.ai/inference/go/openai");
+        assert_eq!(normalize_url("https://opencode.ai/inference/go/openai/v1"), "https://opencode.ai/inference/go/openai");
+    }
+
+    #[test]
+    fn load_cache_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let cat = seed();
+        write_cache(&path, &cat).unwrap();
+        let loaded = load_cache(&path).unwrap();
+        assert_eq!(loaded.providers.len(), cat.providers.len());
+        assert_eq!(loaded.providers.get("opencode-go").unwrap().models.len(), cat.providers.get("opencode-go").unwrap().models.len());
+    }
+
+    #[test]
+    fn load_cache_torn_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_cache(&path).is_none());
+    }
+
+    #[test]
+    fn load_cache_schema_mismatch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, r#"{"schema":999,"providers":{},"protocol":{}}"#).unwrap();
+        assert!(load_cache(&path).is_none());
+    }
+
+    #[test]
+    fn float_to_micro_conversion_exact() {
+        // Build a minimal models.dev JSON and check conversion.
+        let json = r#"{
+            "opencode-go": {
+                "id": "opencode-go",
+                "api": "https://opencode.ai/zen/go/v1",
+                "models": {
+                    "deepseek-v4.1-flash": {
+                        "limit": {"context": 1000000, "output": 384000},
+                        "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.003}
+                    },
+                    "mimo-v2.6-pro": {
+                        "limit": {"context": 1048576, "output": 131072},
+                        "cost": {"input": 0.435, "output": 0.87, "cache_read": 0.003625}
+                    }
+                }
+            }
+        }"#;
+        let cat = from_models_dev_json(json).unwrap();
+        let p = cat.providers.get("opencode-go").unwrap();
+        let d = p.models.get("deepseek-v4.1-flash").unwrap();
+        assert_eq!(d.context, 1_000_000);
+        let price = d.price.unwrap();
+        assert_eq!(price.input, 150_000);
+        assert_eq!(price.output, 600_000);
+        assert_eq!(price.cache_read, 3_000);
+        let m = p.models.get("mimo-v2.6-pro").unwrap();
+        let price2 = m.price.unwrap();
+        assert_eq!(price2.input, 435_000);
+        assert_eq!(price2.output, 870_000);
+        assert_eq!(price2.cache_read, 3_625);
+    }
+
+    #[test]
+    fn unknown_provider_returns_none() {
+        set_current(Arc::new(seed()));
+        assert_eq!(provider_for(Some("https://unknown.example.com/v1")), None);
+    }
+
+    #[test]
+    fn global_swap_visible() {
+        let a = Arc::new(seed());
+        set_current(a.clone());
+        assert_eq!(current().providers.len(), a.providers.len());
+        // swap to a modified catalog
+        let mut c = seed();
+        // remove a model to make it distinguishable
+        if let Some(p) = c.providers.get_mut("opencode-go") {
+            p.models.remove("deepseek-v4.1-flash");
+        }
+        set_current(Arc::new(c));
+        let binding = current();
+        let p = binding.providers.get("opencode-go").unwrap();
+        assert!(!p.models.contains_key("deepseek-v4.1-flash"));
+        // restore baseline
+        set_current(Arc::new(seed()));
+    }
+
+    #[test]
+    fn refresh_failure_leaves_previous() {
+        set_current(Arc::new(seed()));
+        let before = current().providers.get("opencode-go").unwrap().models.len();
+        // a fetcher that fails
+        struct FailFetcher;
+        impl Fetcher for FailFetcher {
+            fn fetch(&self, _url: &str) -> Result<String, CatalogError> {
+                Err(CatalogError::Http("boom".into()))
+            }
+        }
+        let res = refresh_with_url("http://example.com".to_string(), &FailFetcher);
+        assert!(res.is_err());
+        // previous catalog intact
+        let after = current().providers.get("opencode-go").unwrap().models.len();
+        assert_eq!(before, after);
+    }
+}
