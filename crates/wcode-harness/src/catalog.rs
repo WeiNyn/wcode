@@ -30,19 +30,37 @@ pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 /// Default staleness TTL in seconds. Overridable via `WCODE_MODELS_TTL_SECS`.
 pub const DEFAULT_TTL_SECS: u64 = 86_400;
 
-/// Human-readable default cache location (the real path is computed from
-/// `$HOME`, see [`default_cache_path`]).
-pub const DEFAULT_CACHE_PATH: &str = "~/.local/share/wcode/models.dev.json";
-
 /// Default cache file name.
 pub const DEFAULT_CACHE_FILE_NAME: &str = "models.dev.json";
 
 /// Where a catalog came from — for diagnostics / `--dump-catalog`.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CatalogSource {
+    /// The compiled-in snapshot: no cache, no network (a cold start).
     Seed,
+    /// Read from the on-disk cache (`catalog::load`), however old.
     Cache,
+    /// Fetched over the network (`catalog::refresh`, `--refresh-models`).
     Network,
+}
+
+impl CatalogSource {
+    /// The printed spelling: `seed` / `cache` / `network`. `--dump-catalog`
+    /// shows it next to the resolved provider, so "which catalog am I looking
+    /// at?" is answerable at a glance instead of being a `Debug` dump.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Seed => "seed",
+            Self::Cache => "cache",
+            Self::Network => "network",
+        }
+    }
+}
+
+impl std::fmt::Display for CatalogSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// One model's context/output/price entry. `price` is `None` when models.dev
@@ -158,16 +176,6 @@ impl Fetcher for DefaultFetcher {
     }
 }
 
-static FETCHER: Mutex<Option<Arc<dyn Fetcher>>> = Mutex::new(None);
-
-fn current_fetcher() -> Arc<dyn Fetcher> {
-    FETCHER
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| Arc::new(DefaultFetcher))
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -221,7 +229,7 @@ pub fn normalize_url(url: &str) -> String {
 /// provider/source can be pointed at without recompiling; defaults to
 /// [`MODELS_DEV_URL`] (models.dev). This is the extension point for fetching
 /// from a provider that is not on models.dev: implement [`Fetcher`] for that
-/// source and call [`refresh_from`] (or [`refresh_with_url`]).
+/// source and call [`refresh_at`] (or [`refresh_with_url`]).
 pub fn catalog_url() -> String {
     std::env::var("WCODE_MODELS_URL")
         .ok()
@@ -229,17 +237,11 @@ pub fn catalog_url() -> String {
         .unwrap_or_else(|| MODELS_DEV_URL.to_string())
 }
 
-/// Blocking refresh from the configured catalog source (see [`catalog_url`]).
-/// Used by `--refresh-models`. Single-flight with [`refresh_background`] via
-/// `REFRESH_LOCK`.
+/// Blocking refresh from the configured catalog source (see [`catalog_url`]),
+/// with the built-in [`DefaultFetcher`]. Used by `--refresh-models`.
+/// Single-flight with [`refresh_background`] via `REFRESH_LOCK`.
 pub fn refresh() -> Result<(), CatalogError> {
-    refresh_with_url(catalog_url(), current_fetcher().as_ref())
-}
-
-/// Refresh from an explicit URL using a caller-supplied fetcher (the seam for
-/// adding a new provider/source that is not models.dev).
-pub fn refresh_from(url: &str, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
-    refresh_with_url(url.to_string(), fetcher)
+    refresh_at(&cache_path_from_env_or_default(), &catalog_url(), &DefaultFetcher)
 }
 
 /// Refresh from an explicit URL into an explicit cache path with a
@@ -272,10 +274,6 @@ pub fn refresh_with_url(url: String, fetcher: &dyn Fetcher) -> Result<(), Catalo
     refresh_at(&cache_path_from_env_or_default(), &url, fetcher)
 }
 
-/// Refresh using a caller-supplied fetcher against the default URL (test seam).
-pub fn refresh_with(fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
-    refresh_with_url(MODELS_DEV_URL.to_string(), fetcher)
-}
 pub fn refresh_background() {
     if REFRESHING.swap(true, Ordering::SeqCst) {
         return; // already in flight
@@ -289,7 +287,7 @@ pub fn refresh_background() {
     };
     // Reviewer A7: run the blocking HTTP + file I/O on a blocking thread so we
     // never stall the async runtime; take REFRESH_LOCK only around cache write
-    // + the Arc swap (see refresh_with).
+    // + the Arc swap (see refresh_at).
     handle.spawn_blocking(|| {
         let _ = refresh();
         REFRESHING.store(false, Ordering::SeqCst);
@@ -658,21 +656,6 @@ struct CacheFile {
     providers: BTreeMap<String, ProviderEntry>,
     protocol: BTreeMap<String, Vec<String>>,
 }
-
-// ---------------------------------------------------------------------------
-// Test-only injection
-// ---------------------------------------------------------------------------
-
-// `set_fetcher` swaps the HTTP implementation behind `refresh()`. There is
-// deliberately no catalog setter: a test that wrote the process-global catalog
-// raced every parallel reader (`limits`/`pricing`/`actor`), so tests build
-// their own `Catalog` and go through the `*_in` seams instead (B1).
-pub fn set_fetcher(f: Arc<dyn Fetcher>) {
-    *FETCHER.lock().unwrap() = Some(f);
-}
-
-// Fetcher is nameable outside tests so callers can build stubs (reviewer A5).
-pub use self::Fetcher as FetcherTrait;
 
 fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()

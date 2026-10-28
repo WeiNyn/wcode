@@ -2337,11 +2337,29 @@ async fn main() {
         wcode_harness::catalog::load();
         let cat = wcode_harness::catalog::current();
         let provider = wcode_harness::catalog::provider_for(llm.base_url.as_deref());
-        println!("provider: {:?}", provider);
+        // `(source: seed|cache|network)` answers "which catalog am I looking at?"
+        // — a raw `Debug` of the `Option` answered nothing.
+        match &provider {
+            Some(id) => println!("provider: {id} (source: {})", cat.source),
+            None => println!("provider: none (source: {})", cat.source),
+        }
         if let Some(p) = provider.as_ref().and_then(|id| cat.providers.get(id)) {
             println!("models: {}", p.models.len());
-            if let Some(m) = p.models.get(&llm.model) {
-                println!("model: {} context={} output={}", llm.model, m.context, m.output);
+            // The EFFECTIVE limit, not the raw entry: a windowless entry
+            // (`context: 0`) reads `unknown`, exactly like `model_limit_in`.
+            match wcode_harness::limits::model_limit_in(
+                &cat,
+                llm.base_url.as_deref(),
+                &llm.model,
+            ) {
+                Some(l) => println!(
+                    "model: {} context={} output={}",
+                    llm.model, l.context, l.output
+                ),
+                None => println!(
+                    "model: {} window unknown (no limit in the catalog; the default applies)",
+                    llm.model
+                ),
             }
         }
         std::process::exit(0);
