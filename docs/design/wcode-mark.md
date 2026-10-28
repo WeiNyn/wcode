@@ -64,18 +64,21 @@ value.
 (`icon.svg` / `icon.png`, 128-unit field shipping at 256). This is the tier with
 a colour, and only the tile may have one (§5).
 
-**Terminal tier** — the root surface's empty state, one `Block::Notice`, two
-lines, both `dim` (a notice is dim end to end):
+**Terminal tier** — the root surface's empty state, one `Block::Banner`, five
+lines, all `dim` (W039/D045; the mark retired in favour of the octopus avatar):
 
 ```
-❯▌ wcode
+  ▄████▄
+ █ •  • █
+ ████████
+ ▀█ ▀▀ █▀
 ❯ type a message · /help · F1 keys
 ```
 
-Line 1 is the mark: `❯` and `▌`, both already in the glyph table. Line 2 is the
-hint. They are one block joined by `\n`, so nothing is added to the transcript's
-block kinds. The two rows share a leading `❯` by design: the first is the mark,
-the second is the prompt it belongs to.
+Line 1–4 are the octopus; line 5 is the hint. They are one preformatted block
+(`Block::Banner`), so spaces survive (no `wrap`/`greedy_wrap`) and nothing is
+added to the transcript's block kinds beyond the one variant. The px tier keeps
+the `❯▌` mark until a designer redraws it as an octopus (follow-up).
 
 - **Root surface only.** A member surface's empty state is the hint line alone —
   the team surfaces are already the brand.

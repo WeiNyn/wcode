@@ -17,6 +17,8 @@
   [`W037`](../work/W037-wcode-identity.md)
 - **Amends:** [`tui-design.md`](../tui-design.md) §1.4 (one sentence) and §4
   Transcript (the seeded empty state); **§2 is byte-unchanged**
+- **Amended by:** [`D045`](D045-wcode-octopus-banner.md) — the terminal tier is
+  now the octopus banner (W039); the px tier keeps the `❯▌` mark.
 - **Distinct from:** [`D023`](D023-tui-prose-only-bare.md) — D023 made the screen
   bare, and this record is careful not to spend what it removed: the mark adds no
   glyph, no band and no hue

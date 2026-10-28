@@ -932,6 +932,10 @@ pub(crate) fn block_lines(block: &Block, width: usize) -> Vec<Line<'static>> {
         // orphan with no turn): a single inline tool panel (no `── notes ──` rule).
         Block::Tool(tool) => tool_inline_lines(1, tool, width, TOOL_INDENT),
         Block::Notice(text) => wrap(text, width, "   ", "   ", dim()),
+        Block::Banner(text) => text
+            .split('\n')
+            .map(|l| Line::from(Span::styled(l.to_string(), dim())))
+            .collect(),
         // The transient twin: byte-identical to the `Notice` arm above (same call,
         // same gutter, same `dim()` role, same `width`, so the block's HEIGHT
         // matches and the per-`(rev, width)` render cache stays sound). D018: "A
@@ -2839,7 +2843,7 @@ mod tests {
     use super::*;
     use crate::app::{
         Action, App, AppEvent, EMPTY_HINT, EMPTY_MARK, Key, MouseEvent, MouseKind,
-        ROOT_EMPTY_HINT, help_rows,
+        OCTOPUS_BANNER, ROOT_EMPTY_HINT, help_rows,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -5226,7 +5230,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             "the hint must not linger after history:\n{text}"
         );
         assert!(
-            !text.contains("❯▌"),
+            !text.contains(EMPTY_MARK),
             "the mark must retire with the hint:\n{text}"
         );
     }
@@ -5245,16 +5249,18 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             "the member also gets the hint:\n{text}"
         );
         assert!(
-            !text.contains("❯▌"),
+            !text.contains(EMPTY_MARK),
             "the mark is root-surface-only (D042):\n{text}"
         );
     }
 
     #[test]
-    fn the_root_empty_state_is_the_mark_over_the_member_hint() {
-        // The three literals cannot be composed at const time, so this is the
-        // guard that keeps the root banner from drifting away from its parts.
-        assert_eq!(ROOT_EMPTY_HINT, format!("{EMPTY_MARK}\n{EMPTY_HINT}"));
+    fn the_root_empty_state_is_the_octopus_banner() {
+        // The root empty state is now the octopus banner (W039), which carries
+        // the octopus art followed by the hint.
+        assert!(ROOT_EMPTY_HINT.contains(EMPTY_MARK));
+        assert!(ROOT_EMPTY_HINT.contains(EMPTY_HINT));
+        assert_eq!(ROOT_EMPTY_HINT, OCTOPUS_BANNER);
     }
 
     #[test]
@@ -5288,7 +5294,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
         // The mark row fits too (it is 9 cells + the gutter).
         assert_eq!(
-            rows.iter().filter(|r| r.contains("❯▌")).count(),
+            rows.iter().filter(|r| r.contains(EMPTY_MARK)).count(),
             1,
             "the mark row is intact:\n{frame}"
         );
@@ -6579,7 +6585,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             .unwrap_or_default();
         let below = text
             .lines()
-            .nth(hit.rect.y as usize + 1)
+            .nth(hit.rect.y as usize + 4)
             .unwrap_or_default();
         assert_eq!(
             body.chars().take(26).collect::<String>().trim(),
