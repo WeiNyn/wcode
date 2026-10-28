@@ -65,6 +65,7 @@ Replace wcode's **hardcoded** model context-window table (`limits.rs`, 45 ids) a
 - A **cache** at `~/.local/share/wcode/models.dev.json` (data dir, matching the session store convention) with a staleness policy and atomic write.
 - A **background refresh** (never on the boot path) that fetches models.dev, rewrites the cache, and swaps the in-memory catalog.
 - A **compiled-in seed** (the current 45/32-row snapshot) so a first run with no cache and no network still has today's data.
+- **`DEFAULT_CONTEXT_WINDOW` raised to 256_000** (from 128_000) at the user's explicit request during W038. It is the window used when the catalog knows nothing about the model, so an unknown model now compacts later while a model the catalog knows keeps its real window. Recorded as a decision bullet in [D043](decisions/D043-model-catalog-seam.md).
 - `--refresh-models` (and `WCODE_REFRESH_MODELS=1`) to force a synchronous refresh; `--dump-catalog` to print the resolved provider + counts.
 - Tests for: provider resolution, cache round-trip, staleness, float→micro conversion, unknown→`None`, tier deferral, concurrency of the global swap.
 - Docs: README note, a `D` record, tracker row, `--dump-config` line naming the catalog source.
@@ -78,7 +79,6 @@ Replace wcode's **hardcoded** model context-window table (`limits.rs`, 45 ids) a
 - **Per-model `base_url` overrides for pricing** — `cost_of` keeps using the session's launch base URL.
 - **Audio pricing** (`input_audio`) — no consumer today.
 - **Removing the compiled seed** — the seed is the offline fallback.
-- **Changing `DEFAULT_CONTEXT_WINDOW`** — now 256_000 (updated per user request).
 - **Rewriting the ~15 call sites' signatures** — they keep calling `model_limit`/`model_price`/`model_protocol`.
 
 ---

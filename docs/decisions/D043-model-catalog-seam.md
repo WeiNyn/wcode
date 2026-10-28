@@ -36,6 +36,18 @@ models.dev's advertised `https://opencode.ai/inference/go/openai/v1`.
   swaps the `Arc`. `set_current`/`set_fetcher` are the test seams.
 - **Tiers stored, ignored (D028).** `PriceTier` is persisted but `cost_of` uses
   the base rate.
+- **`DEFAULT_CONTEXT_WINDOW` is 256_000** (raised from 128_000 at the user's
+  explicit request during W038 — locked, not a default to be re-tuned here). It
+  is the window used when the catalog knows NOTHING about the model, and the
+  raise is a deliberate trade in the blind spot:
+  - a model the catalog knows keeps its real window — `CompactionPolicy::context_window`
+    asks the catalog first, so 256k never overrides a real 202k (`glm-5`) or a
+    real 1M (`deepseek-v4.1-flash`);
+  - an UNKNOWN model therefore compacts later than it did at 128k (at
+    256k − the reply reserve instead of 128k − the reserve), and a genuinely
+    128k model that is missing from the catalog can overflow before wcode
+    compacts. The catalog — not the fallback — is what keeps that set small; the
+    fallback is the number that must at least not be absurd for a modern model.
 
 ## Consequences
 
