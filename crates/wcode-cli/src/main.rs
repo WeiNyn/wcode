@@ -4546,6 +4546,36 @@ mod tests {
         assert!(!Args::default().list_themes);
     }
 
+    /// The two catalog one-shots: each flag is its own boolean, defaults off, and
+    /// the pair composes (the flags are independent — `main` exits on whichever
+    /// is handled first).
+    #[test]
+    fn parse_refresh_models_and_dump_catalog_flags() {
+        let Parsed::Args(a) = parse_args(&args(&["--refresh-models"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.refresh_models);
+        assert!(!a.dump_catalog, "the flags do not imply each other");
+
+        let Parsed::Args(a) = parse_args(&args(&["--dump-catalog"])).unwrap() else {
+            panic!("not args");
+        };
+        assert!(a.dump_catalog);
+        assert!(!a.refresh_models);
+
+        let Parsed::Args(a) =
+            parse_args(&args(&["--refresh-models", "--dump-catalog"])).unwrap()
+        else {
+            panic!("not args");
+        };
+        assert!(a.refresh_models && a.dump_catalog);
+        // Both are early-exit one-shots: no prompt, no session, no serve.
+        assert!(a.prompt.is_none() && a.resume.is_none() && !a.serve);
+
+        let def = Args::default();
+        assert!(!def.refresh_models && !def.dump_catalog);
+    }
+
     #[test]
     fn the_view_flag_overrides_the_config_value() {
         // The config sets Focus; `--view all` wins.
