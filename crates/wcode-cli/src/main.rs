@@ -2297,6 +2297,11 @@ async fn main() {
     }
     print_provider_diagnostic(&cfg);
     if args.dump_config {
+        // `catalog::load()` — cache read, NO network. The context line below
+        // answers "why did it compact so early?", so it must describe the real
+        // catalog when one is on disk; `init()` (session boot) is the one that
+        // may additionally refresh.
+        wcode_harness::catalog::load();
         print_config(&cfg);
     }
     let mut llm = cfg.to_llm_opts();
@@ -2327,10 +2332,9 @@ async fn main() {
         std::process::exit(0);
     }
     if args.dump_catalog {
-        // The ONE one-shot that needs the on-disk catalog: read it here, never at
-        // the top of `main` (B9 — a pure flag must not do catalog I/O, and a
-        // cold cache would kick a network refresh).
-        wcode_harness::catalog::init();
+        // The ONE one-shot that inspects the on-disk catalog: LOAD it (a cache
+        // read, no network), never at the top of `main` (B9).
+        wcode_harness::catalog::load();
         let cat = wcode_harness::catalog::current();
         let provider = wcode_harness::catalog::provider_for(llm.base_url.as_deref());
         println!("provider: {:?}", provider);

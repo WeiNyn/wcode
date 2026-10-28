@@ -430,3 +430,72 @@ fn no_project_config_keeps_the_global_team_and_auto_enables_agents() {
         "the global [team] must auto-enable agents: {stderr}"
     );
 }
+
+/// `--dump-config` must answer "why did it compact so early?" from the REAL
+/// catalog, not from the compiled-in seed. `catalog::load()` is the split that
+/// makes that legal: it reads the cache and never touches the network, while
+/// `init()` (session boot) additionally kicks a refresh when the cache is stale.
+///
+/// The cache here carries `cache-only-model`, an id the seed does not know, so a
+/// seed-only reader would print `source: default` and the 256_000 fallback — the
+/// regression THIS test exists to catch. `gpt-image-2` (windowless in the live
+/// catalog) is the opposite half: it must stay `source: default` either way.
+#[test]
+fn dump_config_reads_the_cache_without_the_network() {
+    // A future `fetched_at`: even a session boot would consider this fresh, so
+    // the only way `--dump-config` can see `cache-only-model` is by reading it.
+    let cache = r#"{
+      "schema": 1,
+      "fetched_at": 4000000000,
+      "source_url": "http://127.0.0.1:9/api.json",
+      "providers": {
+        "opencode-go": {
+          "id": "opencode-go",
+          "api": "https://opencode.ai/inference/go/openai/v1",
+          "aliases": [],
+          "models": {
+            "cache-only-model": {"context": 777000, "output": 1234, "price": null, "tiers": []},
+            "gpt-image-2": {"context": 0, "output": 0, "price": null, "tiers": []}
+          }
+        }
+      },
+      "protocol": {}
+    }"#;
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.dev.json");
+    std::fs::write(&path, cache).unwrap();
+
+    let dump = |model: &str, base: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wcode"))
+            .env("HOME", home.path())
+            .env("WCODE_MODELS_CACHE", &path)
+            // A refused port: if this one-shot ever fetched, it would fail loudly
+            // instead of reaching models.dev.
+            .env("WCODE_MODELS_URL", "http://127.0.0.1:9/api.json")
+            .env_remove("WCODE_PROJECT_CONFIG")
+            .env_remove("WCODE_CONFIG")
+            .args([
+                "--dump-config",
+                "--model",
+                model,
+                "--base-url",
+                base,
+            ])
+            .output()
+            .expect("spawn the wcode binary");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let zen = dump("cache-only-model", "https://opencode.ai/zen/go/v1");
+    assert!(
+        zen.contains("context: 777000 tokens (source: model catalog)"),
+        "a cache-only model must be read from the cache: {zen}"
+    );
+
+    let image = dump("gpt-image-2", "https://opencode.ai/zen/go/v1");
+    assert!(
+        image.contains("context: 256000 tokens (source: default)"),
+        "a windowless model stays unknown: {image}"
+    );
+}

@@ -296,23 +296,26 @@ pub fn refresh_background() {
     });
 }
 
-/// Boot wiring: read the cache (or fall back to the seed) into the global,
-/// then kick a background refresh if the cache is missing or stale. Synchronous;
-/// never touches the network.
-pub fn init() {
-    let path = cache_path_from_env_or_default();
-    init_with_path(&path);
+/// Read the cache at the configured path into the global, synchronously, and
+/// NEVER touch the network: no fetch, no staleness check, no background refresh.
+///
+/// This is the half a pure one-shot needs (`--dump-config`'s "why did it compact
+/// so early?" line, `--dump-catalog`): reading the cache is not the same
+/// requirement as refreshing it. When the cache is absent, torn or
+/// schema-mismatched the global keeps the compiled-in [`seed`].
+pub fn load() {
+    let _ = load_into_global(&cache_path_from_env_or_default());
 }
 
-/// Boot wiring with an explicit cache path (tests).
-fn init_with_path(path: &Path) {
-    let cached = load_cache(path);
-    if let Some(cat) = cached.clone() {
-        *global().write().unwrap() = Arc::new(cat);
-    }
-    // Staleness check (stale-while-revalidate): refresh in the background when
-    // the cache is absent or older than the TTL. The seed/global stays usable
-    // in the meantime.
+/// Boot wiring: [`load`] the cache, then kick a background refresh when it is
+/// absent or older than the TTL. The cache/seed stays usable in the meantime
+/// (stale-while-revalidate).
+///
+/// The ONLY catalog entry point that can reach the network, and only through
+/// [`refresh_background`] — which is a no-op outside a tokio runtime and
+/// single-flighted while one refresh is in flight.
+pub fn init() {
+    let cached = load_into_global(&cache_path_from_env_or_default());
     let stale = cached
         .as_ref()
         .map(|cat| is_stale(cat, ttl_secs(), now_unix()))
@@ -322,10 +325,18 @@ fn init_with_path(path: &Path) {
     }
 }
 
+/// Read `path` into the global and return what was installed. `None` = no
+/// usable cache (the global then keeps whatever it had, i.e. the seed).
+fn load_into_global(path: &Path) -> Option<Catalog> {
+    let cat = load_cache(path)?;
+    *global().write().unwrap() = Arc::new(cat.clone());
+    Some(cat)
+}
+
 /// True when `cat` was fetched longer than `ttl` seconds before `now`, or never
-/// (a seed has no `fetched_at`): the pure staleness rule [`init_with_path`]
-/// applies, so the TTL boundary is testable without reading or writing the
-/// global catalog (B1).
+/// (a seed has no `fetched_at`): the pure staleness rule [`init`] applies, so
+/// the TTL boundary is testable without reading or writing the global catalog
+/// (B1).
 fn is_stale(cat: &Catalog, ttl: u64, now: i64) -> bool {
     cat.fetched_at
         .map(|t| now.saturating_sub(t) > ttl as i64)
