@@ -1809,6 +1809,10 @@ async fn serve(
     bg: Arc<Background>,
     orchestrator: &Option<crate::agents::Orchestrator>,
 ) -> ! {
+    // `serve` owns a session but diverges before `dispatch`, so it loads the
+    // catalog itself (B9: one init per session-building path, none on a
+    // pure one-shot).
+    wcode_harness::catalog::init();
     // ── Transport-free setup: identical for the stdio and socket transports. ──
     let session_id = SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
     let handle = SessionActor::spawn(agent);
@@ -1927,6 +1931,12 @@ async fn dispatch(
     agent: Agent,
     bg: Arc<Background>,
 ) -> () {
+    // Every path below builds (or resumes) a SESSION, so the catalog is loaded
+    // once here — cache read + seed fallback, plus a background refresh when it
+    // is stale. The pure one-shots (`--dump-config`, `--dump-system-prompt`,
+    // `--list-themes`, `--status`, `--list-models`) never reach this function,
+    // so a build never opens a socket for them (B9).
+    wcode_harness::catalog::init();
     if let Some(prompt) = &args.prompt {
         let handle = SessionActor::spawn(agent);
         bg.bind(handle.clone());
@@ -2252,7 +2262,6 @@ async fn dispatch(
 async fn main() {
     // Phase 1: parse argv, resolving the `--help`/`--version` early exits.
     let mut args = parse_cli();
-    wcode_harness::catalog::init();
     // A whitespace-only `WCODE_TASK` counts as unset; the `--task` flag wins
     // (a direct read, like `WCODE_CONFIG` — an invocation input, not provider
     // config, so it is not part of `EnvVars`).
@@ -2318,6 +2327,10 @@ async fn main() {
         std::process::exit(0);
     }
     if args.dump_catalog {
+        // The ONE one-shot that needs the on-disk catalog: read it here, never at
+        // the top of `main` (B9 — a pure flag must not do catalog I/O, and a
+        // cold cache would kick a network refresh).
+        wcode_harness::catalog::init();
         let cat = wcode_harness::catalog::current();
         let provider = wcode_harness::catalog::provider_for(llm.base_url.as_deref());
         println!("provider: {:?}", provider);

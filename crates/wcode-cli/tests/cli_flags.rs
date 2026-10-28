@@ -121,6 +121,11 @@ fn a_project_team_auto_enables_agents_without_the_flag() {
         .current_dir(dir.path())
         .env("HOME", dir.path())
         .env("WCODE_RETRY_MAX", "0")
+        // This test boots a real one-shot SESSION, so `dispatch` loads the model
+        // catalog (B9). Point the catalog at the same refused port the provider
+        // uses: a boot must never reach models.dev from a test run.
+        .env("WCODE_MODELS_URL", "http://127.0.0.1:9/api.json")
+        .env("WCODE_MODELS_TTL_SECS", "0")
         .env_remove("WCODE_PROJECT_CONFIG")
         .env_remove("WCODE_CONFIG")
         .args([
@@ -164,6 +169,11 @@ fn a_team_of_md_files_without_a_team_toml_does_not_enable_agents() {
         .current_dir(dir.path())
         .env("HOME", dir.path())
         .env("WCODE_RETRY_MAX", "0")
+        // This test boots a real one-shot SESSION, so `dispatch` loads the model
+        // catalog (B9). Point the catalog at the same refused port the provider
+        // uses: a boot must never reach models.dev from a test run.
+        .env("WCODE_MODELS_URL", "http://127.0.0.1:9/api.json")
+        .env("WCODE_MODELS_TTL_SECS", "0")
         .env_remove("WCODE_PROJECT_CONFIG")
         .env_remove("WCODE_CONFIG")
         .args([
@@ -391,6 +401,10 @@ fn no_project_config_keeps_the_global_team_and_auto_enables_agents() {
         .current_dir(cwd.path())
         .env("HOME", home.path())
         .env("WCODE_RETRY_MAX", "0")
+        // A real one-shot session loads the model catalog (B9); keep the boot off
+        // models.dev by pointing it at the same refused port as the provider.
+        .env("WCODE_MODELS_URL", "http://127.0.0.1:9/api.json")
+        .env("WCODE_MODELS_TTL_SECS", "0")
         .env_remove("WCODE_PROJECT_CONFIG")
         .env_remove("WCODE_CONFIG")
         .args([
