@@ -41,6 +41,15 @@
 6. Remote/`--socket` path: whether a mid-sync catalog change reaches an already-running TUI — unverified.
 7. Cargo dependency availability for HTTP in the harness — unverified.
 8. Size of the full models.dev payload — unrecorded.
+9. ~~A second `reqwest` major in the build (second-layer review B8)~~ —
+   **refuted.** `Cargo.lock` does carry `reqwest 0.12.28`, but
+   `cargo tree -i reqwest@0.12.28` prints nothing: it belongs to
+   `rig-lancedb`/`rig-fastembed`/`hf-hub`, optional `rig` facade dependencies we
+   never enable, so it is never compiled. The harness's own request *unifies*
+   with `rig-core`'s on **`reqwest 0.13.4`** — one HTTP stack — and both crates
+   now take that version from `[workspace.dependencies]`. The real defect in that
+   area was the missing fetch timeout (a stalled connect blocked
+   `--refresh-models` indefinitely), now 30 s in `DefaultFetcher`.
 
 ---
 

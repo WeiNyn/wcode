@@ -124,13 +124,30 @@ pub trait Fetcher: Send + Sync {
     fn fetch(&self, url: &str) -> Result<String, CatalogError>;
 }
 
+/// How long the catalog fetch may take before it is abandoned. Without it a
+/// half-open TCP connect blocked `--refresh-models` (and a background refresh)
+/// forever — `reqwest` has no default request timeout for a blocking client.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 struct DefaultFetcher;
 
 impl Fetcher for DefaultFetcher {
     fn fetch(&self, url: &str) -> Result<String, CatalogError> {
         let url = url.to_string();
+        // The whole request is built AND dropped on a plain thread on purpose:
+        // `refresh()` is called from async `main` (`--refresh-models`), and a
+        // `reqwest::blocking::Client` owns a private tokio runtime — dropping it
+        // inside an async context panics ("Cannot drop a runtime in a context
+        // where blocking is not allowed"). The join keeps this synchronous.
         std::thread::spawn(move || {
-            let resp = reqwest::blocking::get(&url).map_err(|e| CatalogError::Http(e.to_string()))?;
+            let client = reqwest::blocking::Client::builder()
+                .timeout(FETCH_TIMEOUT)
+                .build()
+                .map_err(|e| CatalogError::Http(e.to_string()))?;
+            let resp = client
+                .get(&url)
+                .send()
+                .map_err(|e| CatalogError::Http(e.to_string()))?;
             if !resp.status().is_success() {
                 return Err(CatalogError::Http(format!("status {}", resp.status())));
             }
