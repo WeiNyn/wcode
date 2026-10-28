@@ -33,7 +33,11 @@ models.dev's advertised `https://opencode.ai/inference/go/openai/v1`.
   compiled-in `seed()`) synchronously and kicks `refresh_background()` only when
   stale. `refresh()` is the sole synchronous network path (`--refresh-models`).
 - **Global `Arc<Catalog>` behind an `RwLock`.** Reads clone an `Arc`; a refresh
-  swaps the `Arc`. `set_current`/`set_fetcher` are the test seams.
+  swaps the `Arc`. No TEST writes it: `provider_for_in` / `model_limit_in` /
+  `model_price_in` take an explicit `&Catalog` (the pure seams), so a test edits
+  a catalog it owns and the parallel readers (`limits`, `pricing`, `actor`)
+  cannot be perturbed. `init_with_path` is the only other writer, and it is
+  production boot wiring.
 - **Tiers stored, ignored (D028).** `PriceTier` is persisted but `cost_of` uses
   the base rate.
 - **`DEFAULT_CONTEXT_WINDOW` is 256_000** (raised from 128_000 at the user's

@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn deepseek_v4_1_flash_prices_match_models_dev() {
         assert_eq!(
-            model_price(ZEN, "deepseek-v4.1-flash"),
+            model_price_in(&crate::catalog::seed(), ZEN, "deepseek-v4.1-flash"),
             Some(ModelPrice {
                 input: 150_000,
                 output: 600_000,
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn a_free_model_is_some_zero_not_none() {
         assert_eq!(
-            model_price(ZEN, "step-5-preview-free"),
+            model_price_in(&crate::catalog::seed(), ZEN, "step-5-preview-free"),
             Some(ModelPrice::default())
         );
     }
@@ -238,17 +238,20 @@ mod tests {
     /// `None` as the base all collapse to `None` (never `$0`).
     #[test]
     fn unknown_model_or_provider_is_none() {
+        let cat = crate::catalog::seed();
         // Unknown id behind a zen base.
-        assert_eq!(model_price(ZEN, "no-such-model"), None);
+        assert_eq!(model_price_in(&cat, ZEN, "no-such-model"), None);
         // A known id behind a non-zen base is NOT assumed.
         assert_eq!(
-            model_price(Some("https://api.openai.com/v1"), "deepseek-v4.1-flash"),
+            model_price_in(&cat, Some("https://api.openai.com/v1"), "deepseek-v4.1-flash"),
             None
         );
         // No base at all.
-        assert_eq!(model_price(None, "deepseek-v4.1-flash"), None);
-        // `ox-alpha-free` looks free but has NO row in the pricing snapshot.
-        assert_eq!(model_price(ZEN, "ox-alpha-free"), None);
+        assert_eq!(model_price_in(&cat, None, "deepseek-v4.1-flash"), None);
+        // `ox-alpha-free` has a WINDOW in the seed but no price row: the two
+        // tables answer different questions (and, since B3, the limits table is
+        // the superset).
+        assert_eq!(model_price_in(&cat, ZEN, "ox-alpha-free"), None);
     }
 
     /// The subset rule, in exact micro-USD. For `deepseek-v4.1-flash` with
@@ -258,7 +261,8 @@ mod tests {
     /// (`(1_000·150_000)/1e6 = 150`), i.e. cached tokens are never charged twice.
     #[test]
     fn cost_charges_the_cached_subset_at_the_cache_rate() {
-        let p = model_price(ZEN, "deepseek-v4.1-flash").expect("a priced model");
+        let p = model_price_in(&crate::catalog::seed(), ZEN, "deepseek-v4.1-flash")
+            .expect("a priced model");
         let u = usage(1_000, 500, Some(400), None);
         // (1000-400)*150_000 + 400*3_000 + 500*600_000 = 391_200_000, /1e6 = 391.
         assert_eq!(p.cost_numerator(&u), 391_200_000);

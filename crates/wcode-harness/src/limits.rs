@@ -144,17 +144,19 @@ mod tests {
 
     #[test]
     fn looks_up_configured_model() {
-        let l = model_limit(ZEN, "deepseek-v4.1-flash").expect("known opencode model");
+        let l = model_limit_in(&crate::catalog::seed(), ZEN, "deepseek-v4.1-flash")
+            .expect("known opencode model");
         assert_eq!(l.context, 1_000_000);
         assert_eq!(l.output, 384_000);
     }
 
     #[test]
     fn unknown_model_or_provider_is_none() {
-        assert_eq!(model_limit(ZEN, "no-such-model"), None);
+        let cat = crate::catalog::seed();
+        assert_eq!(model_limit_in(&cat, ZEN, "no-such-model"), None);
         // A known OpenCode id behind a non-opencode endpoint is not assumed.
-        assert_eq!(model_limit(Some("https://api.openai.com/v1"), "kimi-k3"), None);
-        assert_eq!(model_limit(None, "kimi-k3"), None);
+        assert_eq!(model_limit_in(&cat, Some("https://api.openai.com/v1"), "kimi-k3"), None);
+        assert_eq!(model_limit_in(&cat, None, "kimi-k3"), None);
     }
 
     #[test]
@@ -163,7 +165,7 @@ mod tests {
         // (api = https://opencode.ai/zen/go/v1). Missing here, the model fell
         // back to DEFAULT_CONTEXT_WINDOW and compacted at ~11% of its window.
         assert_eq!(
-            model_limit(ZEN, "step-5-preview-free"),
+            model_limit_in(&crate::catalog::seed(), ZEN, "step-5-preview-free"),
             Some(ModelLimit {
                 context: 1_000_000,
                 output: 65_536,
@@ -212,7 +214,7 @@ mod tests {
     #[test]
     fn glm_5_keeps_its_real_window_in_the_seed() {
         assert_eq!(
-            model_limit(ZEN, "glm-5"),
+            model_limit_in(&crate::catalog::seed(), ZEN, "glm-5"),
             Some(ModelLimit {
                 context: 202_752,
                 output: 32_768,

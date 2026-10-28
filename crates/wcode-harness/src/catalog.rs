@@ -276,7 +276,7 @@ pub fn init() {
 }
 
 /// Boot wiring with an explicit cache path (tests).
-pub fn init_with_path(path: &Path) {
+fn init_with_path(path: &Path) {
     let cached = load_cache(path);
     if let Some(cat) = cached.clone() {
         *global().write().unwrap() = Arc::new(cat);
@@ -284,16 +284,23 @@ pub fn init_with_path(path: &Path) {
     // Staleness check (stale-while-revalidate): refresh in the background when
     // the cache is absent or older than the TTL. The seed/global stays usable
     // in the meantime.
-    let stale = match cached {
-        Some(cat) => cat
-            .fetched_at
-            .map(|t| now_unix().saturating_sub(t) > ttl_secs() as i64)
-            .unwrap_or(true),
-        None => true,
-    };
+    let stale = cached
+        .as_ref()
+        .map(|cat| is_stale(cat, ttl_secs(), now_unix()))
+        .unwrap_or(true);
     if stale {
         refresh_background();
     }
+}
+
+/// True when `cat` was fetched longer than `ttl` seconds before `now`, or never
+/// (a seed has no `fetched_at`): the pure staleness rule [`init_with_path`]
+/// applies, so the TTL boundary is testable without reading or writing the
+/// global catalog (B1).
+fn is_stale(cat: &Catalog, ttl: u64, now: i64) -> bool {
+    cat.fetched_at
+        .map(|t| now.saturating_sub(t) > ttl as i64)
+        .unwrap_or(true)
 }
 
 /// Load a cache file. `None` on absence, IO error, parse error, or schema
@@ -610,21 +617,16 @@ struct CacheFile {
 // Test-only injection
 // ---------------------------------------------------------------------------
 
-// Public injection (composition + tests). `set_current` lets a caller install
-// a catalog built for a provider that is not on models.dev; `set_fetcher`
-// swaps the HTTP implementation.
-pub fn set_current(cat: Arc<Catalog>) {
-    *global().write().unwrap() = cat;
-}
-
+// `set_fetcher` swaps the HTTP implementation behind `refresh()`. There is
+// deliberately no catalog setter: a test that wrote the process-global catalog
+// raced every parallel reader (`limits`/`pricing`/`actor`), so tests build
+// their own `Catalog` and go through the `*_in` seams instead (B1).
 pub fn set_fetcher(f: Arc<dyn Fetcher>) {
     *FETCHER.lock().unwrap() = Some(f);
 }
 
 // Fetcher is nameable outside tests so callers can build stubs (reviewer A5).
 pub use self::Fetcher as FetcherTrait;
-
-// Fetcher is nameable outside tests so callers can build stubs (reviewer A5).
 
 fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
@@ -751,21 +753,20 @@ mod tests {
 
     #[test]
     fn provider_for_matrix() {
-        // seed path: catalog::current() defaults to seed() only after init;
-        // ensure global is seeded.
-        set_current(Arc::new(seed()));
+        // A LOCALLY built catalog: no test writes the process-global one (B1).
+        let cat = seed();
         let zen = Some("https://opencode.ai/zen/go/v1");
-        assert_eq!(provider_for(zen), Some("opencode-go".to_string()));
+        assert_eq!(provider_for_in(&cat, zen), Some("opencode-go".to_string()));
         let inf = Some("https://opencode.ai/inference/go/openai/v1");
-        assert_eq!(provider_for(inf), Some("opencode-go".to_string()));
+        assert_eq!(provider_for_in(&cat, inf), Some("opencode-go".to_string()));
         // mixed case + trailing slash
         assert_eq!(
-            provider_for(Some("HTTPS://OPENCODE.AI/ZEN/GO/V1/")),
+            provider_for_in(&cat, Some("HTTPS://OPENCODE.AI/ZEN/GO/V1/")),
             Some("opencode-go".to_string())
         );
         // non-go
-        assert_eq!(provider_for(Some("https://api.openai.com/v1")), None);
-        assert_eq!(provider_for(None), None);
+        assert_eq!(provider_for_in(&cat, Some("https://api.openai.com/v1")), None);
+        assert_eq!(provider_for_in(&cat, None), None);
     }
 
     #[test]
@@ -884,44 +885,57 @@ mod tests {
 
     #[test]
     fn unknown_provider_returns_none() {
-        set_current(Arc::new(seed()));
-        assert_eq!(provider_for(Some("https://unknown.example.com/v1")), None);
+        assert_eq!(
+            provider_for_in(&seed(), Some("https://unknown.example.com/v1")),
+            None
+        );
     }
 
+    /// An edit is visible on the `Catalog` you own and on NOTHING else: the
+    /// global is never written by a test (B1). Removing a model from a local
+    /// value cannot be observed by `current()`, and a fresh `seed()` still has
+    /// it.
     #[test]
-    fn global_swap_visible() {
-        let a = Arc::new(seed());
-        set_current(a.clone());
-        assert_eq!(current().providers.len(), a.providers.len());
-        // swap to a modified catalog
-        let mut c = seed();
-        // remove a model to make it distinguishable
-        if let Some(p) = c.providers.get_mut("opencode-go") {
-            p.models.remove("deepseek-v4.1-flash");
-        }
-        set_current(Arc::new(c));
-        let binding = current();
-        let p = binding.providers.get("opencode-go").unwrap();
-        assert!(!p.models.contains_key("deepseek-v4.1-flash"));
-        // restore baseline
-        set_current(Arc::new(seed()));
+    fn a_local_edit_is_invisible_to_the_global() {
+        let mut mine = seed();
+        mine.providers
+            .get_mut("opencode-go")
+            .unwrap()
+            .models
+            .remove("deepseek-v4.1-flash");
+        // The local value lost the row ...
+        assert!(!mine.providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"));
+        assert_eq!(
+            crate::limits::model_limit_in(&mine, Some("https://opencode.ai/zen/go/v1"), "deepseek-v4.1-flash"),
+            None
+        );
+        // ... the process-global one is untouched ...
+        assert!(
+            current().providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"),
+            "no test writes the global catalog"
+        );
+        // ... and so is a fresh seed.
+        assert!(seed().providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"));
     }
 
+    /// A failed refresh must not swap the global: the SAME `Arc` is still
+    /// installed afterwards (asserted by pointer, so the test does not depend on
+    /// the catalogue's contents and never writes it — B1).
     #[test]
     fn refresh_failure_leaves_previous() {
-        set_current(Arc::new(seed()));
-        let before = current().providers.get("opencode-go").unwrap().models.len();
-        // a fetcher that fails
+        // A fetcher that fails.
         struct FailFetcher;
         impl Fetcher for FailFetcher {
             fn fetch(&self, _url: &str) -> Result<String, CatalogError> {
                 Err(CatalogError::Http("boom".into()))
             }
         }
+        let before = current();
         let res = refresh_with_url("http://example.com".to_string(), &FailFetcher);
         assert!(res.is_err());
-        // previous catalog intact
-        let after = current().providers.get("opencode-go").unwrap().models.len();
-        assert_eq!(before, after);
+        assert!(
+            Arc::ptr_eq(&before, &current()),
+            "a failed refresh leaves the previous catalog installed"
+        );
     }
 }
