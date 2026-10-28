@@ -491,17 +491,8 @@ pub(crate) fn skill_turn(name: &str, body: &str, args: Option<&str>) -> String {
 pub(crate) const EMPTY_HINT: &str = "❯ type a message · /help · F1 keys";
 
 /// The octopus banner (W039): Wcode's avatar, root-surface empty state only.
-/// Frame 0 of [`OCTOPUS_FRAMES`]; rendered verbatim (see `Block::Banner`).
-pub(crate) const OCTOPUS_BANNER: &str = "  ▄████▄\n █ •  • █\n ████████\n ╱╲╱╲╱╲╱╲\n❯ type a message · /help · F1 keys";
-
-/// Animation frames for the octopus banner (W039 follow-up): the head stays put
-/// and the 8 legs wiggle, so the octopus reads as alive and the leg count is
-/// visible. Frame 0 is the canonical [`OCTOPUS_BANNER`].
-pub(crate) const OCTOPUS_FRAMES: &[&str] = &[
-    "  ▄████▄\n █ •  • █\n ████████\n ╱╲╱╲╱╲╱╲\n❯ type a message · /help · F1 keys",
-    "  ▄████▄\n █ •  • █\n ████████\n ╲╱╲╱╲╱╲╱\n❯ type a message · /help · F1 keys",
-    "  ▄████▄\n █ •  • █\n ████████\n ╰╯╰╯╰╯╰╯\n❯ type a message · /help · F1 keys",
-];
+/// Rendered verbatim (see `Block::Banner`) so the block art's spacing survives.
+pub(crate) const OCTOPUS_BANNER: &str = "  ▄████▄\n █ •  • █\n ████████\n ▀█ ▀▀ █▀\n❯ type a message · /help · F1 keys";
 
 /// The wcode mark retired by W039 (kept as a const for back-compat/tests).
 #[allow(dead_code)]
@@ -2813,9 +2804,6 @@ pub struct App {
     /// The transcript's measure (content width) in columns, adjustable at runtime
     /// via `/width` and `Alt-[` / `Alt-]`; clamped to the band at draw time (D011).
     measure: usize,
-    /// Animation frame index for the octopus banner (W039). Only advances while
-    /// the empty state is present.
-    banner_frame: usize,
     /// Screen geometry the last `ui::draw` published for hit-testing. Cleared at
     /// the top of each frame; read by `on_mouse`.
     pub(crate) hit: HitMap,
@@ -2916,8 +2904,7 @@ impl App {
             mouse_focus: (0, 0),
             text_sel: None,
             measure: DEFAULT_MEASURE,
-            banner_frame: 0,
-    }
+        }
     }
 
     /// The current transcript measure (content width) in columns.
@@ -6020,35 +6007,8 @@ impl App {
         &self.focused().changes
     }
 
-    /// Whether the focused surface currently shows the octopus banner (empty
-    /// state). Used to gate idle animation ticks.
-    pub(crate) fn has_empty_banner(&self) -> bool {
-        self.focused()
-            .transcript
-            .iter()
-            .any(|b| matches!(b, Block::Banner(_)))
-    }
-
-    /// Advance the octopus banner's animation frame (W039). No-op unless the
-    /// empty state is present. Returns whether the frame changed.
-    pub(crate) fn advance_banner(&mut self) -> bool {
-        if !self.has_empty_banner() {
-            return false;
-        }
-        self.banner_frame = (self.banner_frame + 1) % OCTOPUS_FRAMES.len();
-        let text = OCTOPUS_FRAMES[self.banner_frame].to_string();
-        let surf = self.focused_mut();
-        if let Some(i) = surf.transcript.iter().position(|b| matches!(b, Block::Banner(_))) {
-            surf.transcript[i] = Block::Banner(text);
-            if i < surf.block_revs.len() {
-                surf.block_revs[i] = surf.block_revs[i].wrapping_add(1);
-            }
-            self.dirty = true;
-            return true;
-        }
-        false
-    }
-
+    /// Seed the focused surface's D5 empty-state hint if it is empty (called by
+    /// `ui::draw`; a no-op once real content lands).
     pub(crate) fn seed_empty_hint(&mut self) {
         // In All mode the hint belongs only when EVERY surface is empty.
         if self.view == ViewMode::All && !self.merged_order().is_empty() {

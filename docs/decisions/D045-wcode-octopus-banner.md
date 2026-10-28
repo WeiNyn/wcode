@@ -64,8 +64,7 @@ glyph table, so this request requires amending both (Option A of the brief).
 
 - `cargo test --workspace` and `cargo clippy --workspace --all-targets` clean.
 - `cargo run -p wcode-tui --example dump -- empty` shows the octopus on the
-  root empty frame at 80 and 48 cols, retired after a resumed session. The legs
-  animate (3 frames, ~120 ms) only while the empty state is present.
+  root empty frame at 80 and 48 cols, retired after a resumed session.
 - `docs/tui-design.md` §2 md5 changed (intentionally — the amendment is the
   point); every other § is byte-unchanged.
 
