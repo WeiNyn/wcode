@@ -586,11 +586,12 @@ async fn event_loop(
             Some(event) = replies.recv() => app.handle(event),
             // Only fires while a run is in flight; idle, the loop parks on
             // input and draws nothing.
-            _ = tick.tick(), if app.running() => {
+            _ = tick.tick(), if app.running() || app.has_empty_banner() => {
                 for (id, started) in &run_start {
                     app.set_run_elapsed(id, started.elapsed());
                 }
                 app.handle(AppEvent::Tick);
+                app.advance_banner();
             }
         }
 

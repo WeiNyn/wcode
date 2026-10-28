@@ -101,7 +101,7 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | queued prompts | `⇥` | dim (the composer foot's `⇥ N queued` count, W029; the enqueue notice carries no glyph) |
 | abort / paste chip | `⏹` / `❰ ❱` | dim |
 | context gauge | `used/limit` | plain text (e.g. `14.2k/272k`), flush-left on the foot (D023) |
-| banner (octopus, W039) | `▄ █ ▀ •` | the root surface's empty-state avatar, preformatted (`Block::Banner`); dim; admitted by D045 |
+| banner (octopus, W039) | `▄ █ ▀ • ╱ ╲ ╰ ╯` | the root surface's empty-state avatar, preformatted (`Block::Banner`); dim; admitted by D045 |
 
 ## 3. Layout drafts
 
