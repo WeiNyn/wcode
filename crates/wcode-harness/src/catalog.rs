@@ -225,22 +225,34 @@ pub fn refresh_from(url: &str, fetcher: &dyn Fetcher) -> Result<(), CatalogError
     refresh_with_url(url.to_string(), fetcher)
 }
 
-/// Refresh from an explicit URL using a caller-supplied fetcher.
-pub fn refresh_with_url(url: String, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
+/// Refresh from an explicit URL into an explicit cache path with a
+/// caller-supplied [`Fetcher`].
+///
+/// The seam [`refresh`] delegates to, and the one tests use with a
+/// `tempfile::tempdir()` — no test writes `~/.local/share/wcode/models.dev.json`.
+/// Fetch + parse happen OUTSIDE `REFRESH_LOCK` (reviewer A7); only the cache
+/// write and the `Arc` swap are under it, so a reader always sees a whole
+/// catalogue and a failed fetch/write leaves the previous one installed.
+pub fn refresh_at(path: &Path, url: &str, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
     // Fetch + parse OUTSIDE the lock (reviewer A7).
-    let body = fetcher.fetch(&url)?;
+    let body = fetcher.fetch(url)?;
     let mut cat = from_models_dev_json(&body)?;
     if cat.protocol.is_empty() {
         cat.protocol = current().protocol.clone();
     }
     cat.fetched_at = Some(now_unix());
     cat.source = CatalogSource::Network;
-    let path = cache_path_from_env_or_default();
     let _guard = REFRESH_LOCK.lock().unwrap();
     // Record the source URL in the cache file for diagnostics.
-    write_cache_with_url(&path, &cat, &url)?;
+    write_cache_with_url(path, &cat, url)?;
     *global().write().unwrap() = Arc::new(cat);
     Ok(())
+}
+
+/// Refresh from an explicit URL using a caller-supplied fetcher, into the cache
+/// path from the environment (or the default).
+pub fn refresh_with_url(url: String, fetcher: &dyn Fetcher) -> Result<(), CatalogError> {
+    refresh_at(&cache_path_from_env_or_default(), &url, fetcher)
 }
 
 /// Refresh using a caller-supplied fetcher against the default URL (test seam).
@@ -436,10 +448,16 @@ fn cache_path_from_env_or_default() -> PathBuf {
         .unwrap_or_else(default_cache_path)
 }
 
+/// Staleness TTL in seconds: `WCODE_MODELS_TTL_SECS`, else
+/// [`DEFAULT_TTL_SECS`]. A junk value falls back rather than failing boot.
 fn ttl_secs() -> u64 {
-    std::env::var("WCODE_MODELS_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    ttl_secs_from(std::env::var("WCODE_MODELS_TTL_SECS").ok().as_deref())
+}
+
+/// [`ttl_secs`] without the env read — pure, so the env handling is testable
+/// without mutating the process environment.
+fn ttl_secs_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|s| s.trim().parse().ok())
         .unwrap_or(DEFAULT_TTL_SECS)
 }
 
@@ -795,14 +813,6 @@ mod tests {
         assert!(load_cache(&path).is_none());
     }
 
-    #[test]
-    fn load_cache_schema_mismatch_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("catalog.json");
-        std::fs::write(&path, r#"{"schema":999,"providers":{},"protocol":{}}"#).unwrap();
-        assert!(load_cache(&path).is_none());
-    }
-
     /// B3: the seed is a SUPERset of the two retired static tables. These 17 ids
     /// are ones the live models.dev `opencode-go` listing no longer serves; the
     /// seed keeps them so offline/first-run behaviour matches pre-W038 exactly
@@ -847,6 +857,225 @@ mod tests {
         let cat = seed();
         let price = cat.providers["opencode-go"].models["kimi-k3"].price.unwrap();
         assert_eq!(price.cache_write, 3_000_000);
+    }
+
+    /// B5: the SCHEMA path, specifically. The earlier version of this test wrote
+    /// `{"schema":999,"providers":{},"protocol":{}}` — which fails to parse at
+    /// all (`CacheFile` also requires `fetched_at` + `source_url`), so it exited
+    /// through `serde_json::from_str(..).ok()?` and never reached the schema
+    /// check it claimed to pin. Every field is now supplied, so the ONLY reason
+    /// to reject this file is `schema != SCHEMA_VERSION`; the same file with the
+    /// current schema loads, which pins that (a missing-field trap would fail
+    /// both halves).
+    #[test]
+    fn load_cache_schema_mismatch_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let file = |schema: u32| {
+            format!(
+                r#"{{"schema":{schema},"fetched_at":1700000000,"source_url":"https://example.invalid/api.json","providers":{{}},"protocol":{{}}}}"#
+            )
+        };
+        std::fs::write(&path, file(SCHEMA_VERSION + 1)).unwrap();
+        assert!(
+            load_cache(&path).is_none(),
+            "a newer schema is treated as absent"
+        );
+        std::fs::write(&path, file(SCHEMA_VERSION)).unwrap();
+        assert!(
+            load_cache(&path).is_some(),
+            "the same file at the current schema loads — the rejection above was the schema"
+        );
+    }
+
+    /// The positive refresh path the brief's P4 gate names: a stubbed fetch
+    /// replaces the catalogue AND writes the cache. Everything is a tempdir — no
+    /// test touches `~/.local/share/wcode/models.dev.json`.
+    ///
+    /// The stub payload is built FROM the seed (plus a marker id) on purpose:
+    /// `compaction`'s precedence tests read `current()`, and this test swaps it,
+    /// so the swapped value has to behave exactly like the seed.
+    #[test]
+    fn a_refresh_replaces_the_catalog_and_writes_the_cache() {
+        let _gate = refresh_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.dev.json");
+        let payload = seed_payload(&[("w038-probe", 123_456)]);
+        let before = current();
+        assert!(
+            !before.providers["opencode-go"]
+                .models
+                .contains_key("w038-probe")
+        );
+
+        refresh_at(&path, "https://example.invalid/api.json", &Stub(payload)).unwrap();
+
+        let after = current();
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "a refresh installs a new Arc"
+        );
+        assert!(
+            after.providers["opencode-go"]
+                .models
+                .contains_key("w038-probe"),
+            "the fetched payload is live"
+        );
+        // The same catalogue visible to a reader answers through the pure seam.
+        assert_eq!(
+            crate::limits::model_limit_in(
+                &after,
+                Some("https://opencode.ai/zen/go/v1"),
+                "w038-probe"
+            )
+            .map(|l| l.context),
+            Some(123_456)
+        );
+        // ... and the cache file round-trips, with schema, timestamp and the
+        // source URL recorded.
+        let cached = load_cache(&path).expect("the refresh wrote the cache");
+        assert!(cached.providers["opencode-go"].models.contains_key("w038-probe"));
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["schema"], SCHEMA_VERSION);
+        assert_eq!(raw["source_url"], "https://example.invalid/api.json");
+        assert!(raw["fetched_at"].as_i64().unwrap() > 0);
+    }
+
+    /// The other half of P4: a failing stub leaves the previous catalogue
+    /// installed (same `Arc`) and writes NOTHING — not even a temp file. Both
+    /// failure kinds are covered: the FETCH fails, and the fetch succeeds but
+    /// the body does not parse.
+    #[test]
+    fn a_failed_refresh_leaves_the_previous_catalog_and_writes_nothing() {
+        let _gate = refresh_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.dev.json");
+        let before = current();
+
+        // (a) the fetch itself fails.
+        let err = refresh_at(&path, "https://example.invalid/api.json", &FailingFetch)
+            .expect_err("a refused fetch is an error");
+        assert!(matches!(err, CatalogError::Http(_)), "got {err:?}");
+        assert!(
+            Arc::ptr_eq(&before, &current()),
+            "a failed refresh leaves the previous catalog installed"
+        );
+        assert!(!path.exists(), "a failed refresh writes nothing");
+
+        // (b) the fetch succeeds, the payload is unparseable.
+        let err = refresh_at(&path, "https://example.invalid/api.json", &Stub("{not json".into()))
+            .expect_err("an unparseable payload is an error");
+        assert!(matches!(err, CatalogError::Json(_)), "got {err:?}");
+        assert!(Arc::ptr_eq(&before, &current()));
+        assert!(
+            !dir.path().join("models.dev.tmp").exists(),
+            "no torn temp file either"
+        );
+    }
+
+    /// Serialises the two tests that DO write the global (via `refresh_at`):
+    /// they are the only writers, so a `before` snapshot inside the gate is
+    /// stable. Readers never take it — the swapped catalogue is seed-equivalent.
+    fn refresh_tests() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: Mutex<()> = Mutex::new(());
+        GATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A `Fetcher` that returns a fixed body — the refresh tests' HTTP seam.
+    struct Stub(String);
+
+    impl Fetcher for Stub {
+        fn fetch(&self, _url: &str) -> Result<String, CatalogError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A `Fetcher` that always fails, like a refused connect.
+    struct FailingFetch;
+
+    impl Fetcher for FailingFetch {
+        fn fetch(&self, _url: &str) -> Result<String, CatalogError> {
+            Err(CatalogError::Http("boom".into()))
+        }
+    }
+
+    /// Render `seed()`'s `opencode-go` slice back into the models.dev payload
+    /// shape, plus `extra` marker models — the input a refresh test feeds the
+    /// stub, so the swapped catalogue is behaviourally the seed.
+    fn seed_payload(extra: &[(&str, u64)]) -> String {
+        let cat = seed();
+        let mut models = serde_json::Map::new();
+        for (id, entry) in &cat.providers["opencode-go"].models {
+            let mut m = serde_json::Map::new();
+            if entry.context > 0 {
+                m.insert(
+                    "limit".into(),
+                    serde_json::json!({ "context": entry.context, "output": entry.output }),
+                );
+            }
+            if let Some(p) = entry.price {
+                m.insert(
+                    "cost".into(),
+                    serde_json::json!({
+                        "input": p.input as f64 / 1e6,
+                        "output": p.output as f64 / 1e6,
+                        "cache_read": p.cache_read as f64 / 1e6,
+                        "cache_write": p.cache_write as f64 / 1e6,
+                    }),
+                );
+            }
+            models.insert(id.clone(), serde_json::Value::Object(m));
+        }
+        for (id, context) in extra {
+            models.insert(
+                (*id).to_string(),
+                serde_json::json!({ "limit": { "context": context, "output": 4096 } }),
+            );
+        }
+        serde_json::json!({
+            "opencode-go": {
+                "id": "opencode-go",
+                "api": "https://opencode.ai/inference/go/openai/v1",
+                "models": models,
+            }
+        })
+        .to_string()
+    }
+
+    /// The TTL boundary, on the pure rule: strictly-greater is stale, exactly
+    /// the TTL is not (so a 24 h cache is refreshed on the 24 h + 1 s tick), and
+    /// a catalogue that was never fetched (the seed) is always stale.
+    #[test]
+    fn is_stale_at_the_ttl_boundary() {
+        let cat_at = |fetched_at: Option<i64>| Catalog {
+            fetched_at,
+            ..seed()
+        };
+        // Just under, exactly at, just over a 100 s TTL.
+        assert!(!is_stale(&cat_at(Some(1_000)), 100, 1_099));
+        assert!(
+            !is_stale(&cat_at(Some(1_000)), 100, 1_100),
+            "exactly at the TTL is still fresh"
+        );
+        assert!(is_stale(&cat_at(Some(1_000)), 100, 1_101));
+        // Never fetched ⇒ stale, whatever the clock.
+        assert!(is_stale(&cat_at(None), 100, 1_000));
+        // A ttl of 0 makes any elapsed second stale, and the same second not.
+        assert!(!is_stale(&cat_at(Some(1_000)), 0, 1_000));
+        assert!(is_stale(&cat_at(Some(1_000)), 0, 1_001));
+    }
+
+    /// `WCODE_MODELS_TTL_SECS` wins over the default; a junk/blank value falls
+    /// back instead of failing boot.
+    #[test]
+    fn ttl_secs_honours_the_env_var() {
+        assert_eq!(ttl_secs_from(None), DEFAULT_TTL_SECS);
+        assert_eq!(ttl_secs_from(Some("60")), 60);
+        assert_eq!(ttl_secs_from(Some(" 120 ")), 120);
+        assert_eq!(ttl_secs_from(Some("0")), 0);
+        assert_eq!(ttl_secs_from(Some("soon")), DEFAULT_TTL_SECS);
+        assert_eq!(ttl_secs_from(Some("")), DEFAULT_TTL_SECS);
     }
 
     #[test]
@@ -918,24 +1147,4 @@ mod tests {
         assert!(seed().providers["opencode-go"].models.contains_key("deepseek-v4.1-flash"));
     }
 
-    /// A failed refresh must not swap the global: the SAME `Arc` is still
-    /// installed afterwards (asserted by pointer, so the test does not depend on
-    /// the catalogue's contents and never writes it — B1).
-    #[test]
-    fn refresh_failure_leaves_previous() {
-        // A fetcher that fails.
-        struct FailFetcher;
-        impl Fetcher for FailFetcher {
-            fn fetch(&self, _url: &str) -> Result<String, CatalogError> {
-                Err(CatalogError::Http("boom".into()))
-            }
-        }
-        let before = current();
-        let res = refresh_with_url("http://example.com".to_string(), &FailFetcher);
-        assert!(res.is_err());
-        assert!(
-            Arc::ptr_eq(&before, &current()),
-            "a failed refresh leaves the previous catalog installed"
-        );
-    }
 }
