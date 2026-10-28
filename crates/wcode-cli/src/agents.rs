@@ -923,7 +923,7 @@ mod tests {
         let (factory, registry) = factory_full(
             stream_fn,
             LlmOpts {
-                model: "deepseek-v4.1-flash".into(),
+                model: "glm-5".into(),
                 base_url: Some("https://opencode.ai/zen/go/v1".into()),
                 effort: Some("high".into()),
                 ..LlmOpts::default()
@@ -932,7 +932,7 @@ mod tests {
         let orch = SessionId::agent("orch");
         let w = factory.spawn(&orch, WorkerSpec::default()).unwrap();
         assert_eq!(registry.effort_of(&w.id).as_deref(), Some("high"));
-        assert_eq!(registry.window_of(&w.id), Some(1_000_000), "deepseek-v4.1-flash's window");
+        assert_eq!(registry.window_of(&w.id), Some(202_752), "glm-5's window");
     }
 
     #[tokio::test]
@@ -943,7 +943,7 @@ mod tests {
         let (factory, registry) = factory_full(
             stream_fn,
             LlmOpts {
-                model: "deepseek-v4.1-flash".into(),
+                model: "glm-5".into(),
                 base_url: Some("https://opencode.ai/zen/go/v1".into()),
                 effort: Some("high".into()),
                 ..LlmOpts::default()

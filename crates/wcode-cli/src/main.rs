@@ -3636,15 +3636,15 @@ mod tests {
         let id = SessionId::new("root");
         // A KNOWN provider/model settles a real window; `effort` is copied through.
         let known = LlmOpts {
-            model: "deepseek-v4.1-flash".into(),
+            model: "glm-5".into(),
             base_url: Some("https://opencode.ai/zen/go/v1".into()),
             effort: Some("high".into()),
             ..LlmOpts::default()
         };
         record_root_meta(&registry, &id, &known);
-        assert_eq!(registry.model_of(&id).as_deref(), Some("deepseek-v4.1-flash"));
+        assert_eq!(registry.model_of(&id).as_deref(), Some("glm-5"));
         assert_eq!(registry.effort_of(&id).as_deref(), Some("high"));
-        assert_eq!(registry.window_of(&id), Some(1_000_000), "deepseek-v4.1-flash's window");
+        assert_eq!(registry.window_of(&id), Some(202_752), "glm-5's window");
 
         // An unknown provider/model falls back to DEFAULT_CONTEXT_WINDOW.
         let unknown = LlmOpts {

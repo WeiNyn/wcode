@@ -200,6 +200,26 @@ mod tests {
         assert_eq!(p.context_window(ZEN, "step-5-preview-free"), 1_000_000);
     }
 
+    /// B3: `glm-5` was dropped from the seed when it was regenerated from a live
+    /// models.dev payload that no longer lists it, so a `glm-5` session silently
+    /// fell back to `DEFAULT_CONTEXT_WINDOW` (256k) instead of its real 202_752
+    /// — it then compacted ~26% late, past the model's actual window. The seed
+    /// is a SUPERset of the pre-W038 tables, so the row is back.
+    ///
+    /// This is the regression B3 names: assert the REAL window, never the 256k
+    /// fallback (the mutation — deleting the row from `SEED_LIMITS` — makes
+    /// `model_limit` `None` here).
+    #[test]
+    fn glm_5_keeps_its_real_window_in_the_seed() {
+        assert_eq!(
+            model_limit(ZEN, "glm-5"),
+            Some(ModelLimit {
+                context: 202_752,
+                output: 32_768,
+            })
+        );
+    }
+
     /// B2: models.dev omits `limit` for 160 live models (`openai/gpt-image-2`,
     /// many `nvidia/*`). `#[serde(default)]` makes that a hard `0`, and a
     /// `Some(ModelLimit { context: 0, .. })` would make compaction fire every

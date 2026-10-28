@@ -343,8 +343,18 @@ pub fn write_cache_with_url(
     Ok(())
 }
 
-/// Compiled-in snapshot (the old 45/32 rows). Offline fallback and seed for a
-/// first run. Moved here from `limits.rs` / `pricing.rs` (W038).
+/// Compiled-in snapshot: a **superset** of the two retired static tables (the
+/// old 45-row limit and 32-row price literals) plus everything the live
+/// models.dev `opencode-go` listing carried when it was last refreshed — 54
+/// limit rows and 37 price rows today, of which 17 are ids the catalogue no
+/// longer serves (`glm-5`, `grok-4.6`, `kimi-k2.5`, …).
+///
+/// Offline fallback and seed for a first run; moved here from `limits.rs` /
+/// `pricing.rs` (W038). It is a superset on purpose: offline/first-run
+/// behaviour must match the pre-W038 tables exactly, so an id the live payload
+/// no longer lists is KEPT (see `scripts/refresh-seed.sh`, which merges by
+/// default and needs `--prune` to delete). Where both name an id the live value
+/// wins (`kimi-k3`'s `cache_write`).
 pub fn seed() -> Catalog {
     use std::collections::BTreeMap;
     let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
@@ -628,38 +638,55 @@ const SEED_LIMITS: &[(&str, u64, u64)] = &[
     ("beam-free", 1048576, 131072),
     ("cat-jam-free", 1048576, 131072),
     ("claude-haiku-5-5", 1000000, 128000),
+    ("deepseek-v4-flash", 1000000, 384000),
+    ("deepseek-v4-flash-vision-exp", 1000000, 384000),
     ("deepseek-v4-pro", 1000000, 384000),
     ("deepseek-v4.1-flash", 1000000, 384000),
     ("gemini-4-argon", 1048576, 65536),
     ("gemini-4-argon-contributor", 1048576, 65536),
+    ("glm-5", 202752, 32768),
+    ("glm-5.1", 202752, 32768),
     ("glm-5.2", 1000000, 131072),
     ("glm-5.3", 1000000, 131072),
     ("glm-5.3-flash", 1000000, 131072),
     ("gpt-5.6-luna", 1050000, 128000),
     ("gpt-6-luna", 1050000, 128000),
+    ("grok-4.5", 500000, 500000),
+    ("grok-4.6", 500000, 500000),
     ("grok-4.7", 500000, 500000),
     ("hy3", 256000, 128000),
     ("hy4-preview", 1024000, 64000),
     ("iceman-contributor-free", 262144, 131072),
+    ("kimi-k2.5", 262144, 65536),
+    ("kimi-k2.6", 262144, 65536),
     ("kimi-k2.7-code", 262144, 262144),
     ("kimi-k3", 1048576, 131072),
     ("kimi-k3.1-pro", 1048576, 131072),
     ("longcat-2.0", 1000000, 131072),
     ("longcat-2.5-preview-free", 1000000, 131072),
+    ("mimo-v2-omni", 262144, 128000),
+    ("mimo-v2-pro", 1048576, 128000),
     ("mimo-v2.5", 1000000, 128000),
     ("mimo-v2.5-pro", 1048576, 128000),
     ("mimo-v2.6-flash", 1048576, 131072),
     ("mimo-v2.6-pro", 1048576, 131072),
+    ("minimax-m2.5", 204800, 65536),
     ("minimax-m2.7", 204800, 131072),
     ("minimax-m3", 1000000, 131072),
     ("minimax-m3.1-flash", 1000000, 512000),
     ("minimax-m3.1-flash-free", 1000000, 512000),
     ("muse-spark-1.2-contributor", 1048576, 131072),
     ("muse-spark-1.3-contributor", 1048576, 131072),
+    ("omen-alpha", 500000, 128000),
+    ("ox-alpha-free", 1000000, 131072),
+    ("qwen3.5-plus", 262144, 65536),
+    ("qwen3.6-plus", 1000000, 65536),
+    ("qwen3.7-max", 1000000, 65536),
     ("qwen3.7-plus", 1000000, 65536),
     ("qwen3.8-flash", 1000000, 131072),
     ("qwen3.8-max", 1000000, 131072),
     ("space-bunny", 1048576, 524288),
+    ("space-bunny-free", 1048576, 524288),
     ("step-5-preview", 1000000, 65536),
     ("step-5-preview-free", 1000000, 65536),
 ];
@@ -773,6 +800,52 @@ mod tests {
         let path = dir.path().join("catalog.json");
         std::fs::write(&path, r#"{"schema":999,"providers":{},"protocol":{}}"#).unwrap();
         assert!(load_cache(&path).is_none());
+    }
+
+    /// B3: the seed is a SUPERset of the two retired static tables. These 17 ids
+    /// are ones the live models.dev `opencode-go` listing no longer serves; the
+    /// seed keeps them so offline/first-run behaviour matches pre-W038 exactly
+    /// (`grok-4.6` also has to stay: `SEED_RESPONSES_ONLY` names it, and the two
+    /// lists must not disagree about whether a model exists).
+    #[test]
+    fn the_seed_keeps_the_ids_the_live_payload_dropped() {
+        let cat = seed();
+        let models = &cat.providers.get("opencode-go").unwrap().models;
+        for id in [
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+            "glm-5",
+            "glm-5.1",
+            "grok-4.5",
+            "grok-4.6",
+            "kimi-k2.5",
+            "kimi-k2.6",
+            "mimo-v2-omni",
+            "mimo-v2-pro",
+            "minimax-m2.5",
+            "omen-alpha",
+            "ox-alpha-free",
+            "qwen3.5-plus",
+            "qwen3.6-plus",
+            "qwen3.7-max",
+            "space-bunny-free",
+        ] {
+            let entry = models.get(id).unwrap_or_else(|| panic!("`{id}` missing from the seed"));
+            assert!(entry.context > 0, "`{id}` must keep a real window");
+        }
+        // The responses-only snapshot names `grok-4.6`, so the limit table must
+        // know it too — that inconsistency is what the drop created.
+        assert!(cat.protocol["opencode-go"].iter().any(|id| id == "grok-4.6"));
+        assert!(models.contains_key("grok-4.6"));
+    }
+
+    /// A live value wins where both tables name an id: `kimi-k3`'s `cache_write`
+    /// is 3_000_000 in the refreshed payload and 0 in the old static table.
+    #[test]
+    fn a_live_value_beats_the_retired_table() {
+        let cat = seed();
+        let price = cat.providers["opencode-go"].models["kimi-k3"].price.unwrap();
+        assert_eq!(price.cache_write, 3_000_000);
     }
 
     #[test]
