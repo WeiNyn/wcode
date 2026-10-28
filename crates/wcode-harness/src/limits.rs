@@ -57,12 +57,37 @@ pub fn is_opencode_go(base_url: Option<&str>) -> bool {
     base_url.is_some_and(|u| u.to_ascii_lowercase().contains("opencode.ai/zen/go"))
 }
 
-/// Limits for `model` served from `base_url`, when we recognize the provider.
-/// `None` = unknown provider/model (the caller falls back to a default budget).
+/// Limits for `model` served from `base_url`, when we recognize the provider
+/// AND the model's window is known.
+///
+/// `None` = unknown provider, unknown model, or a known model whose entry
+/// carries no window (`context == 0` — models.dev omits `limit` for e.g.
+/// `openai/gpt-image-2`). The caller then falls back to a default budget
+/// (`CompactionPolicy` → [`DEFAULT_CONTEXT_WINDOW`]).
+///
+/// A zero window is NEVER returned: `event.rs`'s `context_limit: None` contract
+/// says "unknown — never `0`, and never a guess", and a `Some(ModelLimit {
+/// context: 0, .. })` would make `CompactionPolicy::should_compact` fire on
+/// every turn (`used >= 0`).
+///
+/// Thin wrapper over [`model_limit_in`] against [`crate::catalog::current`].
 pub fn model_limit(base_url: Option<&str>, model: &str) -> Option<ModelLimit> {
-    let provider = crate::catalog::provider_for(base_url)?;
-    let cat = crate::catalog::current();
+    model_limit_in(&crate::catalog::current(), base_url, model)
+}
+
+/// [`model_limit`] against an explicit catalog — pure, no globals, no I/O. The
+/// seam tests use (B1); the zero-context guard lives here so both entry points
+/// inherit it.
+pub fn model_limit_in(
+    cat: &crate::catalog::Catalog,
+    base_url: Option<&str>,
+    model: &str,
+) -> Option<ModelLimit> {
+    let provider = crate::catalog::provider_for_in(cat, base_url)?;
     let entry = cat.providers.get(&provider)?.models.get(model)?;
+    if entry.context == 0 {
+        return None; // window unknown, not zero (see the doc above)
+    }
     Some(ModelLimit {
         context: entry.context,
         output: entry.output,
@@ -103,6 +128,7 @@ pub fn model_protocol(base_url: Option<&str>, model: &str) -> Option<LlmEndpoint
 mod tests {
     use super::*;
     use crate::compaction::CompactionPolicy;
+    use crate::pricing::{ModelPrice, model_price_in};
 
     const ZEN: Option<&str> = Some("https://opencode.ai/zen/go/v1");
 
@@ -172,6 +198,59 @@ mod tests {
         assert_eq!(p.context_window(ZEN, "not-a-real-model"), 200_000);
         // Catalog hit: it wins, and the override is ignored.
         assert_eq!(p.context_window(ZEN, "step-5-preview-free"), 1_000_000);
+    }
+
+    /// B2: models.dev omits `limit` for 160 live models (`openai/gpt-image-2`,
+    /// many `nvidia/*`). `#[serde(default)]` makes that a hard `0`, and a
+    /// `Some(ModelLimit { context: 0, .. })` would make compaction fire every
+    /// turn (`used >= 0`). A zero window is UNKNOWN, so `model_limit_in` is
+    /// `None` — while the entry is KEPT, so the price still answers.
+    ///
+    /// Mutation direction: delete the `context == 0` guard in `model_limit_in`
+    /// and this test fails on the `Some(ModelLimit { context: 0, output: 0 })`
+    /// it then returns.
+    #[test]
+    fn a_windowless_model_is_unknown_not_zero() {
+        // Live shape: `gpt-image-2` has a `cost` block and NO `limit` at all;
+        // `gpt-image-2-mini` carries an explicit zero window.
+        let json = r#"{
+            "openai": {
+                "api": "https://api.openai.com/v1",
+                "models": {
+                    "gpt-image-2": {"cost": {"input": 1.0, "output": 4.0}},
+                    "gpt-image-2-mini": {
+                        "cost": {"input": 0.5, "output": 1.0},
+                        "limit": {"context": 0, "output": 0}
+                    },
+                    "gpt-6-luna": {"limit": {"context": 1050000, "output": 128000}}
+                }
+            }
+        }"#;
+        let cat = crate::catalog::from_models_dev_json(json).unwrap();
+        let openai = Some("https://api.openai.com/v1");
+
+        // No window ⇒ None (an unknown window), never `Some(.., 0)`.
+        assert_eq!(model_limit_in(&cat, openai, "gpt-image-2"), None);
+        assert_eq!(model_limit_in(&cat, openai, "gpt-image-2-mini"), None);
+        // ... but the entry survives, so its PRICE still answers: a model can be
+        // priced and windowless at once (1.0/4.0 USD/Mtok → micro-USD).
+        assert_eq!(
+            model_price_in(&cat, openai, "gpt-image-2"),
+            Some(ModelPrice {
+                input: 1_000_000,
+                output: 4_000_000,
+                cache_read: 0,
+                cache_write: 0,
+            })
+        );
+        // A real window is untouched by the guard.
+        assert_eq!(
+            model_limit_in(&cat, openai, "gpt-6-luna"),
+            Some(ModelLimit {
+                context: 1_050_000,
+                output: 128_000,
+            })
+        );
     }
 
     #[test]

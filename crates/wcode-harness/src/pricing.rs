@@ -104,9 +104,23 @@ impl ModelPrice {
 /// Generic over any provider `provider_for` resolves (W038): a known id behind a
 /// non-matching base is NOT assumed. Tier rates remain deferred (D028).
 /// Providers without cost data (e.g. ollama) return `None` → `$` omitted, never `$0`.
+///
+/// A model with no context window (models.dev has no `limit` for it) still
+/// prices: the window and the price are independent facts, so this does NOT
+/// consult `ModelEntry::context`.
+///
+/// Thin wrapper over [`model_price_in`] against [`crate::catalog::current`].
 pub fn model_price(base_url: Option<&str>, model: &str) -> Option<ModelPrice> {
-    let provider = crate::catalog::provider_for(base_url)?;
-    let cat = crate::catalog::current();
+    model_price_in(&crate::catalog::current(), base_url, model)
+}
+
+/// [`model_price`] against an explicit catalog — pure, no globals, no I/O (B1).
+pub fn model_price_in(
+    cat: &crate::catalog::Catalog,
+    base_url: Option<&str>,
+    model: &str,
+) -> Option<ModelPrice> {
+    let provider = crate::catalog::provider_for_in(cat, base_url)?;
     cat.providers.get(&provider)?.models.get(model)?.price
 }
 

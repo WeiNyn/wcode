@@ -48,6 +48,13 @@ pub enum CatalogSource {
 /// One model's context/output/price entry. `price` is `None` when models.dev
 /// carries no `cost` block for the id (rare); `tiers` are stored but ignored
 /// in v1 (D028 base-rate-only).
+///
+/// `context == 0` means the window is UNKNOWN, not zero: models.dev omits the
+/// `limit` block for a multimodal/id-less model (160 of them live —
+/// `openai/gpt-image-2`, many `nvidia/*`), and `#[serde(default)]` turns that
+/// absence into a hard `0`. [`crate::limits::model_limit_in`] therefore treats
+/// a zero-context entry as "no limit known" and returns `None`; the entry is
+/// still kept so its `price` keeps answering.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ModelEntry {
     pub context: u64,
@@ -155,9 +162,17 @@ pub fn current() -> Arc<Catalog> {
 
 /// Resolve a runtime `base_url` to a provider id using the live catalog.
 /// Returns `None` when no provider matches (unknown endpoint).
+///
+/// Thin wrapper over [`provider_for_in`] against `current()`: the pure seam is
+/// what tests (and any caller holding its own catalog) use, so no test has to
+/// write the process-global catalog (B1).
 pub fn provider_for(base_url: Option<&str>) -> Option<String> {
+    provider_for_in(&current(), base_url)
+}
+
+/// [`provider_for`] against an explicit catalog — pure, no globals, no I/O.
+pub fn provider_for_in(cat: &Catalog, base_url: Option<&str>) -> Option<String> {
     let key = normalize_url(base_url?);
-    let cat = current();
     for (id, provider) in &cat.providers {
         if normalize_url(&provider.api) == key {
             return Some(id.clone());
@@ -491,6 +506,8 @@ struct RawModel {
 
 #[derive(Deserialize, Default)]
 struct RawLimit {
+    /// A genuinely absent `limit` block deserializes to `0` — which the rest of
+    /// the kernel reads as UNKNOWN (see [`ModelEntry`]), never as a zero window.
     #[serde(default)]
     context: u64,
     #[serde(default)]
