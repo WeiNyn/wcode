@@ -529,6 +529,10 @@ fn syntaxes() -> &'static SyntaxSet {
 /// Install/REPLACE the process syntax theme: `Box::leak` the new theme (for the
 /// `'static` borrow `HighlightLines` needs) and swap the pointer. The leak is
 /// bounded by the number of `set`s (a handful of `/theme` switches).
+///
+/// PROCESS-GLOBAL shared state: a TEST that calls this, and a test that asserts
+/// about a highlighted colour, must hold `theme::lock_presentation`
+/// first and leave the seed ([`default_syntect_theme`]) behind (item 110).
 pub(crate) fn install_syntax_theme(theme: syntect::highlighting::Theme) {
     *SYNTAX_THEME.write().unwrap_or_else(PoisonError::into_inner) =
         Box::leak(Box::new(theme));
@@ -1223,6 +1227,12 @@ mod tests {
 
     #[test]
     fn a_rust_fence_has_multiple_distinct_styles() {
+        // Item 110: the syntect theme is process-global, so a neighbour's `set`
+        // can leave the mono grey installed. Take the lock and establish the seed
+        // this assertion is about — then the count below is the theme's fact, not
+        // a scheduling accident.
+        let _global = crate::theme::lock_presentation();
+        install_syntax_theme(default_syntect_theme());
         let lines = render_mode("```rust\nlet x = 1; // c\n```", 60, ColorMode::Rgb);
         let count = distinct_styles(
             lines
@@ -1523,6 +1533,9 @@ mod tests {
     fn install_syntax_theme_swaps_the_process_theme() {
         // The `LazyLock<RwLock<&'static Theme>>` swap: a `set` is visible to a
         // later `syntax_theme()`. Restored immediately (process-global).
+        // Item 110: the lock keeps a concurrent `theme::set` — which writes the
+        // same global — out of the install→assert window.
+        let _global = crate::theme::lock_presentation();
         let mut custom = default_syntect_theme();
         custom.settings.foreground = Some(syntect::highlighting::Color {
             r: 1,

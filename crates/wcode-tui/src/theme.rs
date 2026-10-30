@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, PoisonError, RwLock};
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard};
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -171,6 +173,10 @@ pub(crate) fn theme() -> Theme {
 /// Install/REPLACE the process theme — the re-callable form of the old one-shot
 /// `install`. Rewrites the UI lock, swaps the syntect theme, and bumps the
 /// generation so caches invalidate.
+///
+/// PROCESS-GLOBAL shared state: a TEST that calls this (or [`set_preset`]) must
+/// hold `lock_presentation` first and restore both the UI theme and the
+/// `base16-ocean.dark` syntect seed (item 110).
 pub(crate) fn set(spec: ThemeSpec) {
     let palette = spec.palette();
     // Recorded DERIVED FROM THE SPEC (A9), before `resolve` consumes it: no side
@@ -184,6 +190,51 @@ pub(crate) fn set(spec: ThemeSpec) {
         .unwrap_or_else(crate::markdown::grey_syntect_theme);
     crate::markdown::install_syntax_theme(syntax);
     GENERATION.fetch_add(1, Ordering::Relaxed); // cache-invalidation signal
+}
+
+/// The crate-wide TEST lock for the **process-global presentation state**:
+/// `THEME`/`ACTIVE_NAME`/`GENERATION` here and — because [`set`] writes them in
+/// the same breath — `markdown`'s `SYNTAX_THEME`.
+///
+/// WHY IT EXISTS (item 110). `cargo test` runs a crate's tests in ONE process on
+/// N threads, so those globals are shared state, not per-test state, and the two
+/// `markdown` tests that assert about a rendered colour raced the `theme` test
+/// that moves it: `a_set_rewrites_the_process_theme` ends by applying
+/// `ThemeSpec::default()`, whose absent palette routes the syntect theme to the
+/// mono grey ([`crate::markdown::grey_syntect_theme`]) — one grey for every token,
+/// and a leftover one for whoever renders next. Observed both ways:
+/// `install_syntax_theme_swaps_the_process_theme` read `125/135/144` (the grey)
+/// instead of its custom `1/2/3`, and
+/// `a_rust_fence_has_multiple_distinct_styles` counted ONE distinct token style
+/// instead of two.
+///
+/// WHY SERIALISE THE TESTS INSTEAD OF GUARDING THE RENDER PATH (item 110's
+/// option 1, "the read takes the same lock as the write"): the racing window is
+/// BETWEEN two statements of a single test — `install(custom)` then
+/// `assert(syntax_theme() == custom)` — and between one test's leftover value and
+/// the next test's render. A read guard held for the duration of a highlight
+/// closes neither: the value can already be the other test's before the highlight
+/// starts, and the leftover grey is a value, not an overlap. Production has no
+/// equivalent hazard to close: [`set`]/[`crate::markdown::install_syntax_theme`]
+/// store a `Box::leak`ed `&'static Theme` under the `SYNTAX_THEME` write lock and
+/// the render path copies that pointer under the read lock, so a `/theme` switch
+/// during a draw is sound — a leaked theme is never freed, and the worst case is
+/// one frame whose fences mix two palettes, replaced on the next frame. A
+/// `--test-threads=1` run is NOT this fix: it hides the race instead of naming it.
+///
+/// The rule: a test that MUTATES either global, and a test that asserts about a
+/// colour derived from it, takes this lock first and restores what it found.
+#[cfg(test)]
+pub(crate) static PRESENTATION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take [`PRESENTATION_LOCK`] for the body of a test that touches a process
+/// presentation global. Poisoning is recovered like every other lock here: one
+/// failing test's panic must not turn its neighbours into `PoisonError` panics.
+#[cfg(test)]
+pub(crate) fn lock_presentation() -> MutexGuard<'static, ()> {
+    PRESENTATION_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The BASE spec — the config `[theme]` spec — retained so a runtime switch can
@@ -1456,6 +1507,7 @@ mod tests {
     fn a_set_rewrites_the_process_theme() {
         // The `RwLock` store: a `set` is visible to a later `theme()` copy. The
         // global is restored immediately (it is process-wide).
+        let _global = lock_presentation(); // item 110: `set` also swaps SYNTAX_THEME
         if no_color() {
             return; // NO_COLOR forces `plain`; a role override is ignored by design
         }
@@ -1464,6 +1516,12 @@ mod tests {
         set(spec);
         assert_eq!(theme().accent.fg, Some(Color::Red));
         set(ThemeSpec::default());
+        // The UI theme is back, but `ThemeSpec::default()`'s absent palette sends
+        // the syntect theme to the mono grey. The process SEED is
+        // `base16-ocean.dark` (markdown's `LazyLock`), so restore that too: a
+        // fence test running later must not inherit one grey for every token
+        // (item 110, `a_rust_fence_has_multiple_distinct_styles`).
+        crate::markdown::install_syntax_theme(crate::markdown::default_syntect_theme());
     }
 
     #[test]
