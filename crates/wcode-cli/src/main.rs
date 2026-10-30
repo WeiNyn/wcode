@@ -1806,6 +1806,80 @@ fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) 
     registry.set_context_window(session_id.clone(), window);
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W040 §13.2 items 1–2 — `serve()` IS THE FACTORY IT ALREADY ALMOST IS.
+//
+// `serve()`'s transport-free head (`:1895`-`:1959`) is exactly what
+// `roots::Root::adopt` must do, in exactly today's order. That is the whole
+// argument for §13.2 item 2 (`RootSpec` factory injected by the CLI): there is no
+// new construction logic to invent, only a name and a struct. Compare, line for
+// line:
+//
+//     :1895  let session_id = SessionId::new(agent.session_id().unwrap_or_else(|| "local".to_string()));
+//     :1896  let handle = SessionActor::spawn(agent);
+//     :1897  bg.bind(handle.clone());
+//     :1898  if let Some(o) = orchestrator {
+//     :1899      o.register_root(handle.clone());
+//     :1900  }
+//     :1907  let registry = orchestrator … .unwrap_or_default();   <- the per-root Registry
+//     :1915  record_root_meta(&registry, &session_id, llm);
+//     :1929  let roster = match orchestrator { Some(o) => live_roster(o.registry(), o.id().clone()), …
+//
+// So the edit is a DELETION plus one call. The head of `serve()` becomes:
+//
+//     let root = roots::Root::adopt(roots::RootParts {
+//         id: ConversationId::first(),   // the RESERVED startup id: `Roots::new`
+//                                        // begins minting at 1, so seq 0 is this
+//                                        // root's and `serve` never calls `mint`
+//                                        // (finding 8)
+//         label: cwd_label(),                       // main.rs:2093-region, shared with the TUI
+//         agent,
+//         bg,
+//         orchestrator: orchestrator.clone(),       // Option<Orchestrator>; Clone
+//         group,                                    // from SessionSetup.active_group
+//         session_path: agent.session_path().map(Path::to_path_buf),
+//         model: llm.model.clone(),
+//         members: Vec::new(),                      // serve() has no surface list today
+//     })
+//     .unwrap_or_else(|e| { eprintln!("serve: {e}"); std::process::exit(1) });
+//     let (root_tuple, roster) = root.as_protocol_root();
+//     let registry = root.registry.clone();
+//
+// …and then `:1964` (`if args.stdio {`) and `:1983`-region (`serve_at`) are
+// UNCHANGED, because `wcode_protocol::serve_stdio`/`serve_at` already take
+// `(Registry, Roster, Root, DefineHandler)` (`:41` `pub type Root = (SessionId,
+// SessionHandle);`). Three consequences to record:
+//
+// 1. **`root` must outlive the transport call.** `root_tuple` and `registry` are
+//    clones; the `Root` itself owns the supervisor and the `bg`. Dropping it
+//    before `serve_at(..).await` is not a use-after-free (the clones keep the
+//    actors alive) but it DOES stop the supervisor from being joinable and drops
+//    the `bg` scope tag — so keep `root` in scope, or the exit path cannot
+//    `tear_down` what it served. Move it into a local that lives until the
+//    function's diverging tail.
+//
+// 2. **`serve()` still serves exactly ONE root.** §13.10 defers "a per-root socket
+//    so a TUI or the editor can attach to a hub-owned conversation". So this
+//    process adopts root 0 into its `Roots` and serves only it on
+//    `serve_stdio`/`serve_at`; a second conversation in a `serve` process (there
+//    is none today — `serve` is one root, `dispatch` runs neither the TUI nor the
+//    REPL) would be reachable only over a future HTTP surface (finding 6,
+//    open). Writing more than root 0
+//    into the socket `Roster` would silently ship the deferred item.
+//
+// 3. **The `define` handler (`:1941`-region) stays per-root.** It closes over
+//    `orchestrator` (`o.clone()`), and an orchestrator is per-root, so a
+//    multi-root server would need one handler per root — a problem for whoever
+//    takes finding 6, not for this item.
+//
+// And the one thing `serve()` does NOT get: a reverse channel. A socket server
+// has no `Action` vector; its client speaks `Request`s over the wire. Whether an
+// HTTP host would call `roots::Roots::close`/`Factories` directly is the OPEN
+// finding-6 question (`W040` §13.5.2) — this module is inside a binary, so
+// nothing here is reachable from another crate today. Candidate reuse, not a
+// claim.
+// ==== /SKETCH ====
+
 /// P7: `serve` — spawn the `SessionActor`, register the root, build the
 /// registry/roster/`define` handler, print the `serving ...` lines, and run
 /// `serve_at`. Non-unix `serve` is `exit(2)`. Diverges.
@@ -2045,6 +2119,207 @@ async fn dispatch(
                 config: config_dump(cfg),
             };
             let session_path = agent.session_path().map(Path::to_path_buf);
+            // ==== SKETCH (review-only, not real code) ====
+            // W040 §13.2 items 1–4 + 8 — THE STARTUP ROOT AND THE REVERSE CHANNEL
+            // (the LOCAL TUI branch; `:1199` is the socket client's `run` call and
+            // is untouched).
+            //
+            // Six edits — (0), (A), (B), (C), (C2), (E) — plus two notes ((D) is an
+            // explicit non-change, (F) is the input struct) take this branch from
+            // "one hand-built surface list" to "root 0 in a `Roots`, plus a host
+            // task". Today's whole region is `:2118`–`:2422`; nothing before it
+            // moves.
+            //
+            // THE ORDER IS PART OF THE CONTRACT (first-layer B1). Read them as ONE
+            // sequence, not as independent edits:
+            //
+            //     channels  →  adopt root0  →  root0.surface_specs()
+            //               →  install_surface_sink(&root0, ..)   // the LAST &root0
+            //               →  roots.insert(root0)                // move it IN
+            //               →  tokio::spawn(run_host(roots, ..))
+            //
+            // `roots.insert(root0)` is not optional punctuation: without it `Roots`
+            // reaches the host EMPTY, so `close_all()` closes nothing, `get(c0)` is
+            // `None`, and "closing tab 0 is no special case" is simply false. The
+            // `mut` on `roots` is the tell — it is mutating once and then moved.
+            //
+            // ------------------------------------------------------------------
+            // (0) FIRST, THE CHANNELS. All four are created at the TOP of this
+            // branch (before (A)), because `Roots::new` needs the `RootEvent`
+            // sender and `adopt` installs the supervisor that writes to it.
+            //     let (root_event_tx, root_event_rx) = …::<roots::RootEvent>();
+            //
+            // (A) THE ROOT IS ADOPTED, NOT HAND-ASSEMBLED. Replace `:2323`–`:2326`
+            //
+            //     let handle = SessionActor::spawn(agent);
+            //     bg.bind(handle.clone());
+            //     if let Some(o) = &rt.orchestrator {
+            //         o.register_root(handle.clone());
+            //     }
+            //
+            // with
+            //
+            //     let mut roots = roots::Roots::new(root_event_tx.clone());
+            //     let root0 = roots::Root::adopt(roots::RootParts {
+            //         // THE RESERVED ID (finding 8). `Roots::new` starts its mint at
+            //         // 1 precisely so `ConversationId::first()` (seq 0) belongs to
+            //         // THIS root, which is built outside `Roots::start` because it
+            //         // already exists before the client runs. Do NOT also mint it:
+            //         // minting here is what double-booked `c0` onto the first
+            //         // `/tab new`.
+            //         id: ConversationId::first(),
+            //         // The cwd basename, captured BEFORE `cwd` is moved into the
+            //         // `Options` literal above (`:2093`-region): one clone, two readers.
+            //         label: tab_label.clone(),
+            //         agent,
+            //         bg,
+            //         orchestrator: rt.orchestrator.clone(),
+            //         group: setup.active_group.clone(),
+            //         session_path: session_path.clone(),
+            //         model: llm.model.clone(),
+            //         members: Vec::new(),   // filled by `surface_specs` below, from
+            //                                // the SAME `member_names` loop (`:2348`
+            //                                // region) so N = 1 keeps today's order
+            //     })
+            //     .unwrap_or_else(|e| { eprintln!("tui: {e}"); std::process::exit(1) });
+            //
+            // `agent` moves INTO the root — so `session_path` (already captured one
+            // line above, `:2118`) stays the local copy the exit arms need
+            // (`print_relaunch`, `:2428`-region), and the `surfaces` vec below is
+            // built from the ROOT, not from `agent`.
+            //
+            // ------------------------------------------------------------------
+            // (B) THE SURFACE LIST COMES FROM THE ROOT. The `vec![SurfaceSpec { … }]`
+            // at `:2330` and the `[team]` loop at `:2348`–`:2383` become
+            //
+            //     let surfaces = root0.surface_specs().unwrap_or_else(|e| { … });
+            //
+            // `Root::surface_specs` reproduces both, byte for byte: the root row
+            // labelled `wcode` with model `llm.model` (`:2296`-region), then
+            // `member_names` from `scan_members`/`cfg.team` (`:2348`-region) each
+            // resolved through `o.worker_backend(&name)` (`:2360`). The
+            // reason it must move into the root: a `/tab new` root needs the same
+            // list, and a second copy of that loop is a second ordering rule — the
+            // exact drift `canonical_order`'s doc warns about (`app.rs` D34).
+            //
+            // ------------------------------------------------------------------
+            // (C) THE MEMBER FEED IS TAGGED AND PER-ROOT. Replace `:2385`–`:2396`
+            //
+            //     let new_surfaces = if args.owner.is_none() { … o.set_spawn_sink(tx) … };
+            //
+            // with
+            //
+            //     let (fan_tx, new_surfaces) =
+            //         tokio::sync::mpsc::unbounded_channel::<(ConversationId, wcode_tui::SurfaceSpec)>();
+            //     if args.owner.is_none() {
+            //         roots::install_surface_sink(&root0, fan_tx.clone());
+            //     }
+            //
+            // — the sink installed only AFTER the `[team]` loop, exactly as the
+            // current comment demands ("so preset members … are not re-emitted"),
+            // and now carrying the conversation id, because the TUI's flat
+            // `SessionId` routing cannot tell two roots' `w1` apart
+            // (`agents.rs:339` `if !self.registry.contains(&SessionId::agent(&candidate))`
+            // — the uniqueness check is per-orchestrator, so every root has a `w1`).
+            //
+            // ------------------------------------------------------------------
+            // (D) THE TASK FEED STAYS ROOT-0-ONLY — and that is a reported gap, not
+            // an oversight. `wcode_tui::TaskItem` (`app.rs:1546` `pub struct
+            // TaskItem {`) has no conversation field and `App.tasks` is ONE list
+            // (`crates/wcode-tui/src/lib.rs:294` `pub tasks: Vec<TaskItem>,`), so
+            // two roots' plans would overwrite each other. Leave `:2401`–`:2421`
+            // exactly as it is (it reads `rt.orchestrator`, root 0's) and record in
+            // the doc that `/tasks` shows ROOT 0's plan whatever tab is active.
+            // Fixing it needs a `TaskItem` change on the TUI side — "the one task
+            // list"
+            //
+            // ------------------------------------------------------------------
+            // (C2) ROOT 0 ENTERS THE REGISTRY — the B1 fix, and it goes here
+            // because this is the first point where nothing borrows `root0` any
+            // more (`surface_specs` and `install_surface_sink` both take `&root0`;
+            // a `Backend` is cheap to clone but a `Root` is moved):
+            //
+            //     roots.insert(root0).unwrap_or_else(|e| {
+            //         eprintln!("tui: {e}");
+            //         std::process::exit(1);
+            //     });
+            //
+            // The SAME `eprintln!("tui: {e}")` / `exit(1)` as (A)'s `adopt` — a
+            // startup that cannot register its own root must not limp on into
+            // `run_host`, because every later `/tab close` would then be addressing
+            // an empty registry. `insert` only fails on a duplicate id or a `Resume`
+            // dir already live, and neither is reachable for the startup root.
+            //
+            // ------------------------------------------------------------------
+            // (E) THE HOST TASK. Before `:2423` (`match wcode_tui::run(surfaces,
+            // options, new_surfaces, new_tasks).await {`) the reverse pair is
+            // created and the host is spawned — with `roots` ALREADY holding root 0
+            // from (C2), which is why `run_host` takes it by value and gives it
+            // back:
+            //
+            //     let (req_tx, req_rx) =
+            //         tokio::sync::mpsc::unbounded_channel::<wcode_tui::conversations::ConversationRequest>();
+            //     let (evt_tx, evt_rx) =
+            //         tokio::sync::mpsc::unbounded_channel::<wcode_tui::conversations::ConversationEvent>();
+            //     let feeds = wcode_tui::conversations::ConversationFeeds {
+            //         incoming: Some(evt_rx),
+            //         outbound: Some(req_tx),
+            //     };
+            //     let factory = roots::factory_for(run_inputs.clone());        // (F)
+            //     let host = tokio::spawn(roots::run_host(
+            //         roots,
+            //         factory,
+            //         roots::HostChannels {
+            //             requests: req_rx, events: evt_tx, surfaces: fan_tx,
+            //             root_events: root_event_rx,
+            //         },
+            //     ));
+            //
+            //     // `run` gains ONE parameter for `feeds`. The TUI's `run`
+            //     // signature is not yet changed on disk — reported, not fixed here.
+            //     let outcome = wcode_tui::run(surfaces, options, new_surfaces, new_tasks, feeds).await;
+            //     // The TUI is gone: `feeds.outbound` dropped, so the host's
+            //     // `requests` receiver closed and `run_host` returned the roots it
+            //     // still holds. Close them all — every actor, every bg scope, every
+            //     // registry entry — then continue to the unchanged exit arms.
+            //     let mut roots = host.await.expect("host task");
+            //     roots.close_all();   // root 0 included — it is in the registry
+            //
+            // THE EXIT ARMS DO NOT CHANGE (`:2423`-region onward): `Quit`,
+            // `Abandoned`, `Reload`, `Resume`, `New`, `Team` all stay re-exec /
+            // exit paths. `/tab new` is the FIRST thing this process does without
+            // a re-exec, and that is the whole point of §13.2 item 8.
+            // `Background::shutdown_all()` in the `Quit`/`Abandoned` arms stays as
+            // the belt: `close_all` is the braces.
+            //
+            // ------------------------------------------------------------------
+            // (F) THE FACTORY'S INPUTS — ONE struct, `repl::RunInputs`
+            // (first-layer finding 9; `roots::RootInputs` is deleted and this file
+            // must not name it). The factory captures a clone of it, so `dispatch`
+            // builds `run_inputs` ONCE, hands it to `repl::run` and clones it for
+            // `factory_for`:
+            //
+            //     let run_inputs = repl::RunInputs { llm, hooks, tools, compaction,
+            //         title_after_turns, instructions, skills, team, guidelines,
+            //         overlay, no_project_config, owner, name, orchestrator,
+            //         args: args.clone(), cfg: cfg.clone(), cwd, session_dir };
+            //
+            // THE ONE REAL-CODE EDIT THIS NEEDS (finding 9's `private_interfaces`
+            // warning): `Args` (`main.rs:145`-`146`) is neither `Clone` nor `pub`,
+            // and `RunInputs` is `pub(crate)`, so a `pub args: Args` field would
+            // leak a private type through a `pub(crate)` struct's field:
+            //
+            //     -    #[derive(Debug, Default, PartialEq)]
+            //     -    struct Args {
+            //     +    #[derive(Clone, Debug, Default, PartialEq)]
+            //     +    pub(crate) struct Args {
+            //
+            // Both are mechanical and neither introduces a bound (`Args` is already
+            // `Default + PartialEq`). The alternative — a narrowed `ArgsParts` — is
+            // rejected: it is a struct that must be kept in sync with `Args`
+            // forever, which is the drift finding 9 is about — and `Args` not being
+            // `Clone` is "the `Args` gap".
+            // ==== /SKETCH ====
             let handle = SessionActor::spawn(agent);
             bg.bind(handle.clone());
             if let Some(o) = &rt.orchestrator {

@@ -149,6 +149,86 @@ pub enum Action {
     /// it only emits this; the event loop in `lib.rs` reads `path` and sends
     /// `skill_turn(name, body, args)` as `Request::Submit`.
     LoadSkill { name: String, path: PathBuf, args: Option<String> },
+
+    // ==== SKETCH (review-only, not real code) ====
+    // W040 §13.2 item 8 — THE REVERSE CHANNEL. Two new variants; no other
+    // change to this enum. `RootSpec`/`ConversationId` come from
+    // `wcode_protocol` (`crates/wcode-protocol/src/conversation.rs`, new), so the
+    // derive above still holds: both are `Clone + Debug + PartialEq`.
+    //
+    // WHY A NEW VARIANT AND NOT A `pending_*` FLAG. Every outward decision this
+    // enum describes is *local* today; the only things the TUI cannot do itself
+    // are answered at EXIT (`pending_resume`/`pending_team`/`pending_reload`/
+    // `pending_new`, `app.rs:2951`-region) and the CLI re-execs. A tab cannot
+    // re-exec — the other conversations' actors would die with the process — so
+    // "new conversation" needs a LIVE round trip: `Action` out to the event loop,
+    // `ConversationRequest` out to the CLI, `ConversationEvent` back down the
+    // inbound side, exactly as `new_surfaces` already does for members
+    // (`lib.rs:579` `Some(spec) = recv_opt(&mut new_surfaces) => {`).
+    //
+    // WHY THE APP CANNOT DO IT (and why the variant is data, not a closure):
+    // `Options` (`lib.rs:284`) is this crate's whole injection list — no `llm`, no
+    // session dir, no `Background`, no `Agent`, no `cfg`. A conversation is built
+    // by the *composition root*: `load_session` + `build_runtime` +
+    // `build_agent_for` + `SessionActor::spawn` (`main.rs:1286`, `:1462`, `:1737`,
+    // `agent.rs:273`). §13.2 item 2: the factory is injected by the CLI, per the
+    // `DefineHandler` precedent (`wcode-protocol/src/server.rs:68`).
+    //
+    // WHAT HAPPENS TO THE PENDING REPLY (the part that bites):
+    //  - `App` sets `pending_conversation = true` when it emits this, and clears it
+    //    on `ConversationEvent::Added` OR `::Failed` (never on a timeout — there
+    //    is no timeout: the factory is a sync build, milliseconds).
+    //  - The event loop sends `ConversationRequest::Start(spec)` and, if the CLI's
+    //    receiver is GONE (the CLI dropped it: a shutdown in progress), it answers
+    //    the app itself with `ConversationEvent::Failed { error: "host is gone" }`
+    //    — the `AskTo` synthetic-error rule (`lib.rs:641`-region, "answer it
+    //    SYNTHETICALLY so the collector can finish"), applied to the same hazard.
+    //  - Conversely, if the TUI's `Added` receiver is gone (the user quit while
+    //    the CLI was building), the CLI's `send` fails and the CLI MUST tear the
+    //    freshly built root down — `Background::shutdown_scope(id)` + drop the
+    //    handle; otherwise a `/tab new` + immediate `Ctrl-C` leaks an actor, a
+    //    session file and a `bg` scope. That obligation is why the CLI-side
+    //    `SpawnedRoot` owns its `bg` (see the `main.rs` block).
+    //
+    // WHY `Start` CARRIES A `RootSpec` AND NOT A MESSAGE: `RootSpec` is the TUI's
+    // *intent* (`Fresh` / `Resume { dir }`). The CLI converts it into its own
+    // `RootSpec`-shaped work; the TUI never names a build step.
+    //
+    // Ask the host to build ONE more conversation (§13.2 item 8). Not emitted
+    // over a socket (`remote`), where `/tab new` refuses first — the
+    // `/reload`/`/new`/`/team` precedent (`app.rs:6472`, `:6484`, `:6059`).
+    //
+    // # Contracts
+    // - Only emitted when `!remote` and `!pending_conversation`.
+    // - The engine performs it by sending [`crate::conversations::ConversationRequest::Start`];
+    //   a closed outbound channel is answered with
+    //   [`crate::conversations::ConversationEvent::Failed`], never silently
+    //   dropped.
+    // - It does NOT change `App.focus`, `App.surfaces` or `Conversations` — the
+    //   tab appears when the reply lands.
+    // NewConversation(RootSpec),
+
+    // Ask the host to tear ONE conversation down (§13.2 items 3–4). Emitted by
+    // `/tab close`, and refused before that by the reducer when ANY of its
+    // surfaces is running (a running MEMBER counts — see
+    // `request_close_conversation`) or when it is the only conversation.
+    //
+    // The host's verb is **cancel-then-abandon**: `Request::Cancel` best-effort,
+    // the orchestrator token cancelled, `Background::shutdown_scope` for every
+    // `bg` child the conversation created (root and members), `Registry::remove`
+    // per id, handles dropped, and the group dir LEFT ON DISK. Idempotent (an
+    // unknown id is a no-op) and never awaited — the reducer's refusal is what
+    // keeps that abandonment from ever racing a live turn.
+    //
+    // # Contracts
+    // - The tab is NOT removed optimistically: the host echoes
+    //   [`crate::conversations::ConversationEvent::Stopped`] after it has
+    //   released the handles, and only then does `App` drop the surfaces. A
+    //   teardown that fails therefore leaves a tab whose backend still answers,
+    //   instead of a tab that lies.
+    // - Idempotent on the host side: closing an unknown id is a no-op.
+    // CloseConversation(ConversationId),
+    // ==== /SKETCH ====
 }
 
 /// One **exchange**: a user prompt → the assistant's answer, as ONE block.
@@ -941,6 +1021,155 @@ const COMMANDS: &[Command] = &[
         summary: "list commands",
     },
 ];
+
+// ==== SKETCH (review-only, not real code) ====
+// W040 — `/tab` and the cycle keys. THREE real edits live behind this block; the
+// developer makes them where the block says, then deletes it.
+//
+// ---------------------------------------------------------------------------
+// (1) A NEW `COMMANDS` ENTRY — add it to the table above, immediately AFTER the
+//     `surface` entry (`app.rs:973`, `summary: "switch surface"`), because
+//     the two answer the same question at two levels ("which member" / "which
+//     conversation"). Table order IS the `/help` listing and the completion
+//     order, so no other file changes.
+//
+//     Command {
+//         name: "tab",
+//         aliases: &[],
+//         args: Some("[new|close|<n>]"),
+//         summary: "new / close / switch conversation",
+//     },
+//
+//     Why `COMMANDS` and not a hidden key handler: §13.2 item 7 — the table is the
+//     single source for dispatch, the generated `/help` and inline completion
+//     (`app.rs:866` "the single source of truth for dispatch, the generated
+//     /help, and inline completion"). No aliases: `/new` keeps its destructive
+//     re-exec meaning on purpose (§13.4 recommendation, unchanged by this sketch).
+//
+// ---------------------------------------------------------------------------
+// (2) THE `run_command` ARM — add beside `"surface" => self.open_surface_picker(),`
+//     (inside `fn run_command`, `app.rs:5084`). The `debug_assert!(false,
+//     "COMMANDS entry without a run_command arm: …")` tail (`app.rs:5247`-region)
+//     is the gate: a missing arm is a debug panic, not a silent no-op.
+//
+//     "tab" => match arg {
+//         None => self.open_info("tab", tab_text(self.conversations())),
+//         Some("new") => self.request_conversation(),
+//         Some("close") => self.request_close_conversation(),
+//         Some(n) => match n.parse::<usize>() {
+//             Ok(k) => self.activate_conversation_number(k),
+//             Err(_) => self.transient("usage: /tab [new|close|<n>]"),
+//         },
+//     },
+//
+//     - Bare `/tab` opens the info modal, NOT a picker: the body is a document
+//       over every conversation (label · state · member count · `*`), the
+//       `/tasks`/`/team roster` shape, and a picker would have to invent a
+//       "select" meaning the sidebar click already owns.
+//     - `/tab <n>` is 1-BASED, matching the sidebar's `Alt-N` badges and `/tab`'s
+//       own listing. `0` and out-of-range are a `transient`, never a panic.
+//     - The argument is parsed as a number only; `/tab api` is not a label match
+//       (labels are renameable — a command that targets one would break the moment
+//       `/rename` runs; "the tab label's single source").
+//
+//     /// The `/tab` info body: one row per conversation.
+//     /// `* c0  wcode     idle     3 agents`, the active row first and starred —
+//     /// the `/tasks`/`team_text` prose convention, not a new table format.
+//     fn tab_text(&self, conversations: &Conversations) -> String { todo!() }
+//
+// ---------------------------------------------------------------------------
+// (3) THE KEY ROW — REPLACE the existing `KEYS` row
+//     `("Ctrl-N / Shift-Tab", "focus the next / previous surface")`
+//     (`app.rs:1375`) with:
+//
+//     ("Ctrl-N / Shift-Tab", "cycle conversations (one tab: cycle surfaces)"),
+//
+//     and REPLACE `("Alt-1..9", "focus sidebar row N")` (`app.rs:1376`) with:
+//
+//     ("Alt-1..9", "focus agent row N of this conversation"),
+//
+//     A one-row-per-chord table cannot say "same chord, two scopes" any more
+//     honestly than the parenthetical above; the alternative (a second row) would
+//     make `F1` claim two bindings for one key. The `KEYS` length is asserted
+//     only as `COMMANDS.len() + KEYS.len() + 3` (`app.rs:9655`), so growing the
+//     table by ONE command row and zero key rows keeps that test green.
+//
+// ---------------------------------------------------------------------------
+// (4) THE KEY-HANDLING CHANGE — `app.rs:4880`/`:4881`:
+//
+//     -       Key::Ctrl('n') => self.focus_next(),
+//     -       Key::BackTab => self.focus_prev(),
+//     +       // One chord, two scopes, and the scope is VISIBLE (the tab band has
+//     +       // height 0 at N = 1), which is what makes a modal binding honest.
+//     +       Key::Ctrl('n') => self.cycle_or_focus(1),
+//     +       Key::BackTab => self.cycle_or_focus(-1),
+//
+//     /// `Ctrl-N` / `Shift-Tab`: cycle CONVERSATIONS when there is more than one
+//     /// (W040), else cycle SURFACES exactly as before. The N = 1 branch is not a
+//     /// fallback — it is the contract, and `backtab_moves_focus_backwards_and_wraps`
+//     /// (`app.rs:9995`) is its tripwire: it exercises the chord at N = 1 and must
+//     /// stay GREEN UNMODIFIED. Member cycling at N > 1 stays on `Alt-1..9`,
+//     /// the sidebar click, and `/surface`.
+//     fn cycle_or_focus(&mut self, step: isize) { todo!() }
+//
+//     RECOMMENDATION (the §13.4 open question, answered): keep ONE chord for both
+//     scopes, selected by `conversations.len()`, rather than redefining `Ctrl-N`
+//     unconditionally or inventing a chord. Reasons, in order:
+//       1. It is the only variant that leaves N = 1 byte-identical — including
+//          the two tests that pin today's behaviour
+//          (`backtab_moves_focus_backwards_and_wraps`, `app.rs:9995`;
+//          `slash_surface_and_the_cycle_key_switch_focus`, `app.rs:9439`-region,
+//          which asserts `Ctrl-N` wraps 0 → 1 → 0). A NEW chord (`Ctrl-]`,
+//          `Alt-.`) would leave them green too, but costs the human a learning
+//          step for the more common action and puts the tab cycle off the home
+//          row.
+//       2. Conversations are the OUTER level: at N > 1 the thing you want to move
+//          between first is the tab, and members are one `Alt-N` away.
+//       3. There is no third scope to grow into. If one appears (W041 panes),
+//          `Ctrl-N` cycles panes and this function grows a third arm — the
+//          dispatch stays a function, not a keymap.
+//
+// ---------------------------------------------------------------------------
+// (5) AUXILIARY REDUCER METHODS (in `impl App`, beside the other `request_*`
+//     helpers at `app.rs:6472`-region — `fn request_reload` / `fn request_new`
+//     and the `/team` family at `:6059`):
+//
+//     /// `/tab new`: ask the host for one more conversation (§13.2 item 8).
+//     fn request_conversation(&mut self) { todo!() }
+//
+//     /// `/tab close`: ask the host to tear the ACTIVE conversation down.
+//     /// REFUSES (a `transient`, nothing emitted) when
+//     ///  - `self.remote` — "unavailable over a socket", the `/new` wording;
+//     ///  - `self.conversations.len() == 1` — "cannot close the only conversation";
+//     ///  - **ANY surface of `active().surface_ids()` is `Running`** — "cancel it
+//     ///    first". NOT `active().state == Running` (first-layer finding 10): the
+//     ///    tab state never promotes a running MEMBER, so a conversation whose
+//     ///    worker is mid-turn reads `Idle` and would be closable — and the host's
+//     ///    `Background::shutdown_scope` would then kill that member's `bg`
+//     ///    children under a live turn. The predicate must walk the surfaces:
+//     ///
+//     ///        let busy = self.active_conversation().surface_ids().iter()
+//     ///            .filter_map(|id| self.surface_index(id))
+//     ///            .any(|i| self.surfaces[i].state() == TeamState::Running);
+//     ///
+//     ///    (`Surface::state()` is reachable from `impl App` — same module,
+//     ///    `app.rs:2150` `fn state(&self) -> TeamState {`.)
+//     ///
+//     /// Otherwise emits `Action::CloseConversation(active_id)`.
+//     ///
+//     /// WHY REFUSE RATHER THAN CANCEL-THEN-CLOSE. The host's close IS
+//     /// cancel-then-abandon (idempotent, never awaited, files kept) — so it is
+//     /// safe at rest and destructive under a live turn, and the two ends must say
+//     /// the same thing. Refusing here keeps that abandon path reachable ONLY when
+//     /// nothing of this conversation is running, which is the one condition under
+//     /// which "abandon" loses nothing the user can see. The user who wants it
+//     /// anyway presses `Esc` (cancel) and then `/tab close`, which is also the
+//     /// order that lets them watch the abort land.
+//     fn request_close_conversation(&mut self) { todo!() }
+//
+//     /// `/tab <n>`: activate the nth conversation (1-based), if it exists.
+//     fn activate_conversation_number(&mut self, n: usize) { todo!() }
+// ==== /SKETCH ====
 
 /// One candidate in the inline `/`-command completion popup. Commands come
 /// first (in [`COMMANDS`] order), then skills (in discovery order). A skill
@@ -2628,6 +2857,68 @@ pub(crate) struct SidebarHit {
     pub(crate) members: Vec<(usize, u16)>,
 }
 
+// ==== SKETCH (review-only, not real code) ====
+// W040 — THE TAB BAR'S HIT MAP. Three additions; the fourth is a ONE-FIELD edit
+// inside an existing struct, given below as a diff so it is unmistakable.
+//
+// ---------------------------------------------------------------------
+// (1) THE HIT STRUCT — add beside `SidebarHit` above (same file, same idiom:
+//     a drawn-geometry record the click handler reads back):
+//
+//     /// The tab bar as drawn: its rect and, per drawn tab, the conversation it
+//     /// opens and its horizontal extent. The tab-bar sibling of [`SidebarHit`].
+//     /// `None` on any frame where the band has height 0 (the N = 1 case), so a
+//     /// click there falls through to the bands exactly as today.
+//     #[derive(Clone, Debug, Default)]
+//     pub(crate) struct TabsHit {
+//         /// The band's rect. `row != rect.y` is not a tab hit.
+//         pub(crate) rect: Rect,
+//         /// `(conversation id, x, width)` per drawn tab, in draw order. `x` is
+//         /// absolute (screen col), so `x..x + width` is the clickable span —
+//         /// including the `·` separators, which belong to the tab on their LEFT
+//         /// (the sidebar's badge column precedent: a click between rows is a
+//         /// no-op, a click on a row is precise).
+//         pub(crate) tabs: Vec<(ConversationId, u16, u16)>,
+//     }
+//
+// ---------------------------------------------------------------------
+// (2) THE `HitMap` FIELD — a ONE-LINE addition inside
+//     `pub(crate) struct HitMap {` (`app.rs:2820`, beside
+//     `pub(crate) sidebar: Option<SidebarHit>,` at `:2827`):
+//
+//     +    /// The tab band, when it was drawn this frame (i.e. N > 1). `None`
+//     +    /// otherwise — the `sidebar` field's exact contract.
+//     +    pub(crate) tabs: Option<TabsHit>,
+//
+//     `HitMap` derives/constructs with `Option` defaults, and
+//     `clear_hit_map` (`app.rs:4332`) resets the whole value each frame,
+//     so a closed tab band can never leave stale geometry — the same reason the
+//     sidebar field exists.
+//
+// ---------------------------------------------------------------------
+// (3) THE PUBLISHER + THE CLICK — beside `set_sidebar_hit`
+//     (`app.rs:4346`) and inside `on_mouse_down` (`:4368`-region):
+//
+//     /// Publish the tab band's geometry for this frame.
+//     pub(crate) fn set_tabs_hit(&mut self, rect: Rect, tabs: Vec<(ConversationId, u16, u16)>) { todo!() }
+//
+//     /// The conversation a click cell lands on, if any.
+//     pub(crate) fn tab_at(&self, col: u16, row: u16) -> Option<ConversationId> { todo!() }
+//
+//     In `on_mouse_down`, BEFORE the sidebar branch (the tab band is above it on
+//     screen, and the two rects cannot overlap — different bands — so the order
+//     is for readability, not correctness):
+//
+//     +        if let Some(id) = self.tab_at(col, row) {
+//     +            self.activate_conversation_id(id);
+//     +            return; // a tab click never starts a transcript selection
+//     +        }
+//
+//     /// Activate by id — the click path, and the `ConversationEvent` path's
+//     /// sibling of `activate_conversation(idx)`.
+//     fn activate_conversation_id(&mut self, id: ConversationId) -> bool { todo!() }
+// ==== /SKETCH ====
+
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 pub struct App {
     /// One entry per conversation surface. Index 0 is the root; the rest are
@@ -3004,6 +3295,165 @@ impl App {
             self.dirty = true;
         }
     }
+
+    // ==== SKETCH (review-only, not real code) ====
+    // W040 — THE CONTAINER IN `App` (§13.2 item 5). Two new fields, then the
+    // derived accessors that keep ~12.5k lines and their tests compiling.
+    //
+    // ---------------------------------------------------------------------
+    // (1) THE FIELDS — add INSIDE `pub struct App {` (`app.rs:2923` `pub struct App {`),
+    //     directly after the two they govern:
+    //
+    //         surfaces: Vec<Surface>,   // app.rs:2926 — UNCHANGED, stays flat
+    //         focus: usize,            // app.rs:2928 — UNCHANGED, an index into it
+    //
+    //     /// The tab container (W040): conversations in creation order, each
+    //     /// holding IDs ONLY — the `Surface` bodies stay in [`App::surfaces`],
+    //     /// so every `self.surfaces[i]` / `self.focus` site in this file is
+    //     /// untouched. INVARIANT: every `Surface.id` is owned by exactly one
+    //     /// conversation (see `conversations.rs`, "the N = 1 delegation
+    //     /// contract").
+    //     conversations: Conversations,
+    //
+    //     /// A `/tab new` is in flight: the [`Action::NewConversation`] went out
+    //     /// and `ConversationEvent::Added`/`::Failed` has not come back. Gates a
+    //     /// second request (one build at a time) and is released on BOTH replies
+    //     /// — never on a timer (the factory is a sync build).
+    //     pending_conversation: bool,
+    //
+    //     `App::new` (`app.rs:3141` `pub fn new() -> Self {`) seeds them with
+    //     `conversations: Conversations::single(&[])` — the empty slice yields the
+    //     default-root conversation (`SessionId::agent("root")`, label `"wcode"`),
+    //     i.e. exactly the surface `App::new` already seeds — and
+    //     `pending_conversation: false`, so the container is valid from the first
+    //     frame. `set_surfaces` then re-adopts from `Options.conversations` (below).
+    //
+    // ---------------------------------------------------------------------
+    // (2) `set_surfaces` / `add_surface` — these two are the ONLY writers of the
+    //     flat store from the outside and both must maintain the invariant.
+    //     **`SurfaceInfo` gains NO field** (first-layer finding 2: the container
+    //     comes from `Options.conversations`, per `conversations.rs`'s module
+    //     header, which is authoritative):
+    //
+    //     pub fn set_surfaces(&mut self, surfaces: Vec<SurfaceInfo>) { … }
+    //         // Signature and bodies UNCHANGED. The container is adopted
+    //         // separately, once, from the injected list:
+    //         //     self.conversations =
+    //         //         Conversations::from_parts(options.conversations, &infos);
+    //         // and `self.focus = 0` stays (index 0 is conversation 0's root,
+    //         // because the CLI emits the startup conversation first — `main.rs`
+    //         // surface list). An EMPTY `options.conversations` (a test, a socket
+    //         // client, `examples/dump.rs`) falls back to
+    //         // `Conversations::single(&infos)`, which groups EVERY surface into
+    //         // one conversation — so a team run at N = 1 keeps
+    //         // `canonical_order` == all indices and
+    //         // `backtab_moves_focus_backwards_and_wraps` stays green UNMODIFIED.
+    //         todo!()
+    //
+    //     /// The tagged sibling of the existing `add_surface` — the runtime member
+    //     /// feed carries `(ConversationId, SurfaceSpec)`, and `SurfaceSpec::info()`
+    //     /// (`lib.rs:268`-region) drops the tag, so it is passed in here.
+    //     pub fn add_surface_in(&mut self, conversation: ConversationId, info: SurfaceInfo) { todo!() }
+    //         // Pushes the body AND `self.conversations.add_surface_in(conversation,
+    //         // info)`. A member for an UNKNOWN conversation is refused (the CLI
+    //         // emitted it for a tab the user just closed): the body is NOT added,
+    //         // so the invariant cannot break.
+    //         //
+    //         // The existing `pub fn add_surface(&mut self, info: SurfaceInfo)`
+    //         // (`app.rs:3232`) gains ONE line and delegates:
+    //         //     self.add_surface_in(self.conversations.active().id, info)
+    //         // so its nine test call sites keep compiling untouched.
+    //         todo!()
+    //
+    // ---------------------------------------------------------------------
+    // (3) THE DERIVED ACCESSORS — the whole reason the flat store survives.
+    //
+    //     /// The tab container (read-only: `ui::draw_tab_bar`, `/tab`, and the
+    //     /// event loop's `ConversationEvent` arm).
+    //     pub fn conversations(&self) -> &Conversations { todo!() }
+    //
+    //     /// The active conversation. Always available (the container is never
+    //     /// empty), so this is the narrow read every scoped accessor uses.
+    //     fn active_conversation(&self) -> &Conversation { todo!() }
+    //
+    //     /// The ACTIVE conversation's surface indices, in canonical order — THE
+    //     /// narrowing seam. `canonical_order` (`app.rs:3269`) becomes
+    //     /// `ids.iter().filter_map(|id| self.surface_index(id)).collect()`;
+    //     /// everything built on it narrows for free:
+    //     /// `member_rows_indexed` (`app.rs:4467`), `sidebar_rows_indexed`
+    //     /// (`:4520`), `member_rows` (`:3880`), `working_team_rows` (`:3865`),
+    //     /// `focus_step`/`focus_digit` (`:3282`/`:3502`), and the
+    //     /// `/surface` picker (`open_surface_picker`, `:6121`).
+    //     /// At N = 1 it yields exactly today's `Vec<usize>`.
+    //     fn active_surface_indices(&self) -> Vec<usize> { todo!() }
+    //
+    //     /// The `merged_order` fixup (`app.rs:5633`): the All view iterates EVERY
+    //     /// surface for blocks, so narrowing `canonical_order` alone is NOT
+    //     /// enough — the block loop must skip surfaces whose conversation is not
+    //     /// active, or two conversations' turns interleave into one transcript.
+    //     /// Cheap test: `self.active_surface_indices().contains(&si)`.
+    //     fn surface_in_active_conversation(&self, si: usize) -> bool { todo!() }
+    //
+    //     `canonical_order`'s own doc (`app.rs:3269`) already says it is
+    //     "the single source of truth for the sidebar rows, the working strip, and
+    //     `Alt-1..N`") — which is exactly why the narrowing belongs THERE and
+    //     nowhere else.
+    //
+    // ---------------------------------------------------------------------
+    // (4) THE RECONCILE — what happens when a conversation closes, arrives, or
+    //     dies. Add these beside the other `cycle_*`/`focus_*` helpers.
+    //
+    //     /// Activate conversation `idx` and point `focus` at ITS ROOT, so the
+    //     /// composer, header and transcript switch atomically. A no-op (and
+    //     /// `false`) when `idx` is out of range.
+    //     fn activate_conversation(&mut self, idx: usize) -> bool { todo!() }
+    //
+    //     /// `Ctrl-N` / `Shift-Tab`: see the `cycle_or_focus` sketch above the
+    //     /// `KEYS` table. Delegates to `Conversations::cycle` when N > 1, else to
+    //     /// `focus_step` — byte-identical at N = 1.
+    //     fn cycle_or_focus(&mut self, step: isize) { todo!() }
+    //
+    //     /// `ConversationEvent::Added`: register the conversation, add every
+    //     /// surface body, ACTIVATE it (the user asked for this tab — the
+    //     /// `add_surface` "must not steal focus" rule does NOT apply, because this
+    //     /// one was requested), and release `pending_conversation`.
+    //     pub fn add_conversation(&mut self, spec: ConversationSpec) { todo!() }
+    //
+    //     /// `ConversationEvent::Failed`: release `pending_conversation` and push a
+    //     /// `transient` with the host's error (the `/reload`-refusal idiom).
+    //     pub fn conversation_failed(&mut self, error: String) { todo!() }
+    //
+    //     /// `ConversationEvent::Died` (§13.2 item 4): mark the tab `Failed` and
+    //     /// push a `transient`, but KEEP the conversation and its surfaces — a root
+    //     /// whose actor panicked must remain readable, so the user can see what it
+    //     /// said before it died. Never unwinds, never quits.
+    //     pub fn conversation_died(&mut self, id: ConversationId) { todo!() }
+    //
+    //     /// `ConversationEvent::Stopped`, or `/tab close`'s echo: THE ONE PLACE
+    //     /// that removes surfaces. `Conversations::close` returns the ids; this
+    //     /// method then
+    //     ///   1. drains each id from `self.surfaces` (by `retain`, keeping order);
+    //     ///   2. remaps `self.focus`: if it pointed into the removed set, focus
+    //     ///      the NEW active conversation's root index; otherwise subtract the
+    //     ///      number of removed indices BELOW it;
+    //     ///   3. drops state that names a removed surface: `usage_collect`
+    //     ///      (`app.rs:3000` — a fan-out still waiting on a closed
+    //     ///      conversation would never drain and its modal would never open),
+    //     ///      `deferred_settings` (App-level, not per-surface), and the browse
+    //     ///      selection/search (they index the FOCUSED surface's transcript,
+    //     ///      so a focus change already invalidates them — call the existing
+    //     ///      reset path rather than re-implementing it);
+    //     ///   4. releases `pending_conversation` if the closed id was the pending
+    //     ///      one (a `Failed` reply can then find no tab);
+    //     ///   5. marks the frame dirty.
+    //     /// # Contract
+    //     /// - `self.surfaces` is NEVER left empty (the `App::focused` invariant):
+    //     ///   the container refuses closing the last conversation, so at least one
+    //     ///   root remains — `debug_assert!(!self.surfaces.is_empty())`.
+    //     /// - Removing an id that is not present is not an error (the host may
+    //     ///   echo `Stopped` twice; the second is a no-op).
+    //     pub fn remove_conversation(&mut self, id: ConversationId) { todo!() }
+    // ==== /SKETCH ====
 
     /// Expand or collapse every tool row on the focused surface — the all-tools
     /// complement to browse mode's per-block toggle (`Ctrl-T`). All expanded
@@ -4166,6 +4616,49 @@ impl App {
                 }
             }
             AppEvent::Agent(id, event) => {
+                // ==== SKETCH (review-only, not real code) ====
+                // W040 — THE TWO CONTAINER HOOKS. Both belong HERE, at the arm's
+                // head, BEFORE the routing block below: `Surface::apply` consumes
+                // `event` by value (`app.rs:2294`-region handles
+                // `AgentEvent::SessionTitle` itself), so any fact the CONTAINER
+                // needs must be read from `&event` first — exactly the discipline
+                // the arm already uses for `started`/`acked`/`errored`/`ended`.
+                //
+                // (1) THE TAB LABEL — `SessionTitle` and nothing else.
+                //
+                //     if let AgentEvent::SessionTitle { title } = &event {
+                //         // Only the ROOT's title renames the tab; a member's
+                //         // `/rename` names the member (the sidebar already shows
+                //         // it). `set_label` ignores a non-root id.
+                //         self.conversations.set_label(&id, title.clone());
+                //     }
+                //
+                //     WHY THE EVENT, NOT THE `/rename` REPLY (the invariant
+                //     `the_tab_label_arrives_from_session_title_not_the_action_reply`
+                //     pins): `/rename` emits ONLY `Action::Ask(Request::SetTitle)`
+                //     and deliberately does not write `status.title`
+                //     (`app.rs:5195` "Only the Ask: the reducer applies the
+                //     reply, and the actor also STREAMS `SessionTitle` (so a socket
+                //     client learns it too)"). Reading the label off the `/tab`
+                //     action's reply would give a LOCAL tab a name a REMOTE tab
+                //     never gets, and two sources could disagree after a `--title`
+                //     launch flag (main.rs:1737-region). One stream, one truth.
+                //
+                // (2) THE TAB STATE — derived from the ROOT surface, after the
+                //     routing block has applied the event (so `state()` is current).
+                //     Place it just after `if let Some(idx) = self.surface_index(&id)`
+                //     closes, i.e. at the very END of this arm:
+                //
+                //     if let Some(s) = self.surface_index(&id).map(|i| self.surfaces[i].state()) {
+                //         self.conversations.set_state_from(&id, s);
+                //     }
+                //
+                //     `Surface::state()` (`app.rs:2150` `fn state(&self) -> TeamState {`) is the four-valued
+                //     `TeamState`; `Conversations::set_state_from` maps
+                //     `Idle|Done → Idle`, `Running → Running`, `Failed → Failed`
+                //     and IGNORES a non-root surface — a running worker must not
+                //     promote the tab (`a_member_running_does_not_promote_the_tab_state`).
+                // ==== /SKETCH ====
                 // The `/usage` fan-out drains FIRST. A reply it asked for is NOT
                 // the surface's: a `Usage`-ask `Ack` must not clear an unrelated
                 // `/plan` toggle (`Surface::apply`'s

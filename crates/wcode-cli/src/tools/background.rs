@@ -286,6 +286,192 @@ impl Registry {
 /// cover every agent.
 static LIVE: OnceLock<Mutex<Vec<Weak<Background>>>> = OnceLock::new();
 
+// ==== SKETCH (review-only, not real code) ====
+// W040 §13.2 item 3 — `LIVE` BECOMES SCOPED, plus the ONE cycle-breaker that
+// makes a close actually end the actor (first-layer finding 5). Five additions,
+// all in this file. No existing line changes except the struct's field list and
+// `new()`'s body; both are given as diffs so the deletion is unmistakable.
+//
+// THE PROBLEM, precisely. `shutdown_all()` (`:601`) is the ONE teardown the exit
+// paths call, and it signals **every** `Background` in the process. That was
+// correct while one process was one root. With N roots it is a bug in the most
+// destructive direction: closing tab 2 would kill tab 0's `bash { background:
+// true }` tasks, whose supervisors then push `Exited`/`Killed` completions into a
+// live agent. And the per-root handle is NOT enough on its own: every *worker*
+// builds its own (`crates/wcode-cli/src/agents.rs:399` `let bg =
+// Background::new();`, inside `SessionFactory::build_with`), so a conversation's
+// `bg` tasks are spread across 1 + N(team) `Arc`s and there is no list of them
+// anywhere except `LIVE`.
+//
+// THE SECOND PROBLEM (finding 5, and it is a LEAK, not a kill). `Background`
+// holds the agent's own `SessionHandle` (`notify`), and the agent holds the tool
+// set, and the tool set holds `Arc<Background>`:
+//
+//     actor ─owns─► Agent ─owns─► tools ─hold─► Arc<Background> ─► notify
+//       ▲                                                          │
+//       └──────────────── inbox_tx ◄── SessionHandle ◄─────────────┘
+//
+// so `inbox.recv()` (`actor.rs:296`) never sees a closed mailbox: the parked actor
+// task, its `Agent`, its tools, its `Arc<Background>`, and one registry-watcher
+// task per registered peer (`registry.rs:126` `let registry = self.clone();`,
+// each holding a `Registry` clone) all outlive a `/tab close`. `release_notify()`
+// in (5) is the fix; `Roots::close` step 4 calls it.
+//
+// ---------------------------------------------------------------------
+// (1) THE TAG — one field in `pub struct Background {` (`:476`), after `next_id`:
+//
+//     +    /// Which conversation created this registry (W040 §13.2 item 3).
+//     +    /// Inherited, never chosen: a worker's `Background` is built deep
+//     +    /// inside `SessionFactory::build_with` and cannot be handed a scope,
+//     +    /// so it is read from the ambient install ([`Background::with_scope`]).
+//     scope: ConversationId,
+//
+//     `use wcode_protocol::ConversationId;` joins the `wcode_harness::protocol`
+//     imports at the head of the file. That is a new *crate* edge for the tools
+//     (they import `wcode-harness` today); the alternative is a plain `u64` tag
+//     with no type safety at the boundary — rejected because `Roots::close`
+//     (`roots.rs`) takes a `ConversationId` and a silent `u64`/`ConversationId`
+//     mix-up is exactly the class of bug that survives review. `wcode-cli`
+//     already depends on `wcode-protocol` (`main.rs:15` `use wcode_protocol::{Backend, Registry};`).
+//
+// ---------------------------------------------------------------------
+// (2) THE NOTIFIER BECOMES RELEASABLE (finding 5). One field changes type
+//     (`:481`):
+//
+//     -    /// Late-bound push target (D16): filled by [`Background::bind`] right
+//     -    /// after the actor spawns. …
+//     -    notify: OnceLock<SessionHandle>,     // `:481`
+//     +    /// Late-bound push target (D16). `OnceLock` was binding forever, which
+//     +    /// is why it was a cycle: this field is the ONLY path from the tool set
+//     +    /// back to the actor's own mailbox, so holding it keeps `inbox.recv()`
+//     +    /// from ever returning `None` (finding 5). `Mutex<Option<…>>` so
+//     +    /// [`Background::release_notify`] can drop it at teardown.
+//     +    ///
+//     +    /// Short critical sections only — never held across an `.await` (D10).
+//     +    notify: Mutex<Option<SessionHandle>>,
+//
+//     `bind`'s body adapts (`let _ = self.notify.set(handle)` → `if
+//     self.notify.lock().unwrap().is_none() { *…= Some(handle) }`, preserving
+//     D16's "a second call is ignored"), and every reader takes the lock briefly.
+//
+// ---------------------------------------------------------------------
+// (3) `new()` KEEPS ITS SIGNATURE AND ITS MEANING. Diff at `:488`:
+//
+//     -        let bg = Arc::new(Self {
+//     -            registry: Mutex::new(Registry::default()),
+//     -            notify: OnceLock::new(),
+//     -            next_id: AtomicU64::new(1),
+//     -        });
+//     +        let bg = Arc::new(Self {
+//     +            registry: Mutex::new(Registry::default()),
+//     +            notify: Mutex::new(None),
+//     +            next_id: AtomicU64::new(1),
+//     +            scope: ambient_scope(),
+//     +        });
+//
+//     Why not a `new_in(scope)` parameter: the two construction sites that must be
+//     scoped (`repl::build_agent` at `repl.rs:395`, `agents.rs:399`) are reached
+//     through `AgentSpec`/`WorkerTemplate`, so a parameter means threading a
+//     `ConversationId` through two structs and every test that builds an agent —
+//     40-ish literal edits for a tag. Instead:
+//
+//     /// Process-global "the conversation being built right now" (W040 §13.2
+//     /// item 3). `0..=1` value at a time: [`Background::with_scope`] is installed
+//     /// around a SYNC build (`roots::build_root`) and `roots::run_host`
+//     /// serialises builds, so it is never contended.
+//     ///
+//     /// # Invariant (the whole safety argument)
+//     /// The closure passed to `with_scope` must not `.await`. If the factory ever
+//     /// becomes async, this MUST become a `tokio::task_local!`. Recorded here
+//     /// because the compiler cannot enforce it.
+//     static SCOPE: Mutex<Option<ConversationId>> = Mutex::new(None);   // OnceLock in practice
+//
+//     /// Run `f` with `scope` installed; restore the previous value on exit
+//     /// (including on panic, via a guard). Used by `roots::build_root`, which
+//     /// wraps the WHOLE build so the root's `Background` and every worker's are
+//     /// tagged alike.
+//     pub fn with_scope<R>(scope: ConversationId, f: impl FnOnce() -> R) -> R { todo!() }
+//
+//     /// The installed scope, or `ConversationId::first()` when a build is not in
+//     /// progress (a test, a one-shot `-p`, the REPL). Defaulting to the startup
+//     /// conversation is what keeps N = 1 byte-identical: every existing
+//     /// `Background::new()` keeps landing in the same scope `shutdown_all` would
+//     /// have covered.
+//     fn ambient_scope() -> ConversationId { todo!() }
+//
+//     // and the read accessor `Roots`/tests use:
+//     pub fn scope(&self) -> ConversationId { todo!() }
+//
+// ---------------------------------------------------------------------
+// (4) `shutdown_scope` — the only new teardown. Beside `shutdown_all` (`:601`):
+//
+//     /// Signal every RUNNING child whose owning `Background` was created in
+//     /// `scope`, **release each one's notifier**, then prune those entries. The
+//     /// per-conversation twin of [`Background::shutdown_all`] (§13.2 item 3).
+//     ///
+//     /// # Contract
+//     /// - Reuses [`Background::shutdown`] (`:590`) per matching handle, so the
+//     ///   `Running ⇒ pid.is_some()` invariant (BLOCK-1, `:570`-region) is upheld
+//     ///   unchanged — this adds a filter, not a new signal path.
+//     /// - **Calls [`Background::release_notify`] on every in-scope handle it
+//     ///   upgrades out of `LIVE`** (finding 5). Without it the actor's mailbox
+//     ///   stays open through the tool set and nothing this function signalled
+//     ///   ever becomes unreachable — the children are killed, the *task* is not.
+//     ///   Release therefore happens BEFORE the `Weak` is pruned: pruning alone
+//     ///   would drop our only route to the `Background` and leak it with the
+//     ///   notifier intact.
+//     /// - **Prunes the scope's `Weak`s** as it goes (`retain`), so a closed
+//     ///   conversation's dead entries do not accumulate in `LIVE` for the life of
+//     ///   the process. `shutdown_all` already prunes; this must too, or a
+//     ///   long-lived TUI with 50 closed tabs pays for all of them on every exit.
+//     /// - Signals ONLY: no `wait`, no drain, no `.await` — the supervisors own that
+//     ///   (`:515` `pub(crate) fn register(`-region's siblings), exactly as `shutdown_all` does today.
+//     /// - Unknown/empty scope is a no-op.
+//     /// - Does NOT kill a `bg` task belonging to a *peer* conversation whose
+//     ///   `Background` happened to be created inside this scope by a nested build
+//     ///   (impossible today: builds are serialised), nor anything created outside
+//     ///   one.
+//     pub fn shutdown_scope(scope: ConversationId) { todo!() }
+//
+// ---------------------------------------------------------------------
+// (5) `release_notify` — the cycle-breaker (finding 5). Beside `bind` (`:504`):
+//
+//     /// Drop the notifier, breaking the `tools → Arc<Background> → SessionHandle
+//     /// → inbox` cycle so the actor's `inbox.recv()` can finally return `None`
+//     /// and the task can end. Called by [`Background::shutdown_scope`] for every
+//     /// in-scope handle at teardown; idempotent, and a no-op for a `Background`
+//     /// that was never bound.
+//     ///
+//     /// # Contract
+//     /// - Takes the lock, takes the `Option`, drops the handle OUTSIDE no lock
+//     ///   scope that matters (D10: short sections, never across an `.await`).
+//     /// - **Idempotent**: a second call is a no-op. `bind` after `release` is
+//     ///   ALSO a no-op — a released `Background` belongs to a dead conversation,
+//     ///   and re-binding would resurrect the cycle for a task nothing will read.
+//     /// - After release, a supervisor that reaches its terminal state has nobody
+//     ///   to `Wake` (`:400`-region). That is correct: nobody is listening.
+//     /// - **This is a leak fix, not a kill fix.** `LIVE` holds only `Weak`s, so
+//     ///   `shutdown_all()` at process exit still reaches every live
+//     ///   `Background` and signals each child by pid — the children were never
+//     ///   unkillable. What leaked was memory and parked tasks: the actor, its
+//     ///   `Agent`, its tool set, the `Arc<Background>`, and one
+//     ///   registry-watcher task per registered peer, all alive for the life of
+//     ///   the process after their conversation was closed.
+//     pub fn release_notify(&self) { todo!() }
+//
+// ---------------------------------------------------------------------
+// (6) `shutdown_all()` STAYS, UNCHANGED, AND MUST. It is called from ~10 process
+//     exit paths (`main.rs:1203`, `:1209`, `:2027`, `:2072`, `:2367`) and the
+//     REPL tails) where conversation scoping is meaningless — the process is
+//     leaving. It is also the belt to `Roots::close_all`'s braces: an exit that
+//     races a build cannot leak a child if `shutdown_all` still runs. Keeping both
+//     is not redundancy, it is two different questions ("this tab" vs "this
+//     process"). §13.2 item 3 asks for the first; nothing asks to remove the
+//     second. Note it does NOT call `release_notify`: at process exit the parked
+//     tasks die with the runtime, and releasing would only change the order they
+//     wind down in.
+// ==== /SKETCH ====
+
 /// One per agent: the task registry AND the late-bound notifier (D2/D16). Built
 /// by the CLI where it builds the agent and threaded in as a parameter.
 pub struct Background {
