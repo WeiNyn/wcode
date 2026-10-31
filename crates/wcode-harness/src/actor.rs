@@ -943,6 +943,11 @@ mod tests {
     /// `roots::spawn_supervisor` reports a resolved handle as `Died` — if a tool
     /// panic ever escaped, every conversation whose worker tool panicked would
     /// look dead to the client.
+    ///
+    /// The test also asserts the panic *happened*: it watches for the synthetic
+    /// `ToolExecutionEnd { is_error: true, output: "aborted: tool panicked" }`.
+    /// Without that, a test whose tool was never dispatched would pass identically,
+    /// and removing `catch_unwind` would leave it green.
     #[derive(Deserialize, schemars::JsonSchema)]
     struct PanicArgs {}
 
@@ -992,7 +997,37 @@ mod tests {
         )));
         let mut rx = handle.subscribe();
         handle.send(Request::Submit { text: "hi".into() }).unwrap();
-        wait_for_end(&mut rx).await;
+        // Collect as we go: `wait_for_end` stops at `AgentEnd` and throws the rest
+        // away, so it would pass identically if `PanicTool` never ran at all. The
+        // assertion below is the proof that the panic HAPPENED and was caught.
+        let mut aborted = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("an event within the timeout")
+                .expect("the outbox stays open");
+            match event {
+                AgentEvent::ToolExecutionEnd {
+                    name,
+                    output,
+                    is_error,
+                    ..
+                } if name == "boom" => {
+                    assert!(is_error, "a panicking tool is reported as an error");
+                    assert_eq!(
+                        output, "aborted: tool panicked",
+                        "R3's catch_unwind (`loop_.rs:664`) is what turned the panic into this"
+                    );
+                    aborted = true;
+                }
+                AgentEvent::AgentEnd => break,
+                _ => {}
+            }
+        }
+        assert!(
+            aborted,
+            "the tool did run and did panic: without the abort event this test proves nothing"
+        );
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
