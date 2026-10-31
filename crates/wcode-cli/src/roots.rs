@@ -229,12 +229,10 @@ impl Root {
     ///   today's order.
     /// - `address` is the orchestrator's id, or `SessionId::agent("root")`;
     ///   `surface = mint_surface_id(id, address)`.
-    /// - `bg` should already be tagged with `id`
-    ///   ([`Background::with_scope`]`(id, …)` around the build), because teardown
-    ///   finds a conversation's **members'** `Background`s by that tag. The root's
-    ///   own notifier is released explicitly ([`Root::tear_down`]), so a root
-    ///   adopted outside a scoped build still closes cleanly — it just cannot
-    ///   reach its members' tasks.
+    /// - `bg` carries `id` ([`Background::new`]`(id)` where the agent was built):
+    ///   teardown finds a conversation's **own and its members'** `Background`s by
+    ///   that tag, so a mis-tagged root leaks an actor and, worse, is signalled by
+    ///   another conversation's close. Debug-asserted (§13.2.1(a)).
     /// - Registers the supervisor ([`spawn_supervisor`]).
     ///
     /// `Result` is kept for the caller's sake — `insert` and `adopt` are handled
@@ -253,6 +251,11 @@ impl Root {
             members,
             events,
         } = parts;
+        debug_assert_eq!(
+            bg.scope(),
+            id,
+            "a root's Background carries its own conversation tag"
+        );
         let (handle, task) = SessionActor::spawn_supervised(agent);
         bg.bind(handle.clone());
         if let Some(o) = &orchestrator {
@@ -748,18 +751,11 @@ mod tests {
     use wcode_harness::streamfn::LlmOpts;
 
     /// An agent that never touches the network: the rig stream fn is built but no
-    /// run is ever started by these tests.
-    ///
-    /// The build runs WITHOUT an ambient scope ([`Background::with_scope`]) even
-    /// though production wraps one around it. That scope is process-global, and a
-    /// `cargo test` process runs tests in parallel: a scoped build here would tag
-    /// another test's `Background` with this conversation, and a later
-    /// `shutdown_scope` would signal a stranger's child (observed: the `bg` tests'
-    /// children killed). The fixture therefore keeps production's *ownership*
-    /// (the `Background` the tools hold IS the one `adopt` receives — the notifier
-    /// cycle is real, so the leak gate has teeth) and drops only the tagging,
-    /// which the scope test below covers with [`Background::new_in`].
-    fn build(_id: ConversationId) -> (Agent, Arc<Background>) {
+    /// run is ever started by these tests. Its `Background` — the one the tools
+    /// hold and `adopt` receives, so the notifier cycle is the production graph —
+    /// is tagged with `id`, exactly as `build_agent`'s callers now do it
+    /// (§13.2.1(a): a parameter, not ambient state).
+    fn build(id: ConversationId) -> (Agent, Arc<Background>) {
         let tools = ToolsConfig::default();
         let instructions = InstructionSet::default();
         let skills = SkillSet::default();
@@ -782,6 +778,34 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            id,
+        )
+    }
+
+    /// An orchestrator whose workers belong to `id` — the runtime-spawn path
+    /// (`SessionFactory::build_with`) without a network.
+    fn orchestrator_in(id: ConversationId) -> crate::agents::Orchestrator {
+        use wcode_harness::streamfn::{LlmStream, StreamFn};
+        let stream_fn: StreamFn = Arc::new(|_ctx, _sys, _tools, _opts| {
+            Box::pin(futures::stream::empty()) as LlmStream
+        });
+        crate::agents::Orchestrator::new(
+            Registry::new(),
+            crate::agents::WorkerTemplate {
+                system: "sys".into(),
+                llm: LlmOpts {
+                    model: "m1".into(),
+                    ..LlmOpts::default()
+                },
+                stream_fn,
+                hooks: HooksSet::default(),
+                tools: ToolsConfig::default(),
+                compaction: CompactionPolicy::default(),
+                working_dir: std::env::temp_dir(),
+                members_dir: None,
+                sessions_dir: std::env::temp_dir(),
+            },
+            id,
         )
     }
 
@@ -814,6 +838,20 @@ mod tests {
         mpsc::unbounded_channel()
     }
 
+    /// A `Roots` whose mint starts at `base`, so each test owns a disjoint id
+    /// block. Every `Roots` mint starts at 1 by contract, and these tests run in
+    /// parallel in one process: without blocks, a `shutdown_scope(c1)` in one test
+    /// would release a `Background` another test tagged `c1`. The skipped ids are
+    /// burned (never live, never reused) — `base` is a test allocation, not a
+    /// production rule.
+    fn roots_in(tx: mpsc::UnboundedSender<RootEvent>, base: u64) -> Roots {
+        let mut roots = Roots::new(tx);
+        for _ in 1..base {
+            roots.mint();
+        }
+        roots
+    }
+
     /// Yield until `cond` or the bound is spent. Never sleeps: a `sleep` would
     /// turn a hang into a slower hang.
     async fn until(mut cond: impl FnMut() -> bool) -> bool {
@@ -830,7 +868,7 @@ mod tests {
     async fn two_roots_do_not_share_a_registry_or_roster() {
         // §13.2 item 1: each conversation is an INDEPENDENT root runtime.
         let (tx, _rx) = channels();
-        let mut mints = Roots::new(tx.clone());
+        let mut mints = roots_in(tx.clone(), 90);
         let c0 = ConversationId::first();
         let c1 = mints.mint();
         let a = adopt(c0, None, &tx);
@@ -856,7 +894,7 @@ mod tests {
         // the `tools → Arc<Background> → notify → inbox` cycle keeps the actor
         // parked forever, so the supervisor's handle never resolves.
         let (tx, mut rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 20);
         let c1 = roots.mint();
         roots.insert(adopt(c1, None, &tx)).expect("inserted");
 
@@ -899,11 +937,12 @@ mod tests {
         // the interesting one — a worker builds its OWN `Background`
         // (`agents.rs:399`), so the tag is the only route to it, and a
         // conversation's close must not touch a neighbour's.
-        let c0 = ConversationId::first();
-        let c1 = ConversationId::new(1);
-        let a = Background::new_in(c0);
-        let b = Background::new_in(c1);
-        let c = Background::new_in(c1);
+        // Scopes nobody else in this test binary closes (see `roots_in`).
+        let c0 = ConversationId::new(9001);
+        let c1 = ConversationId::new(9002);
+        let a = Background::new(c0);
+        let b = Background::new(c1);
+        let c = Background::new(c1);
         Background::shutdown_scope(c1);
         assert!(b.is_notifier_released());
         assert!(c.is_notifier_released());
@@ -913,10 +952,10 @@ mod tests {
         );
         Background::shutdown_scope(ConversationId::new(77)); // unknown: a no-op
         assert!(!a.is_notifier_released());
-        // And the lock-free part of the same rule at the Roots level: closing a
-        // conversation releases ITS root's notifier, and nobody else's.
+        // And the same rule at the Roots level: closing a conversation releases
+        // ITS root's notifier, and nobody else's.
         let (tx, _rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 80);
         let root0 = roots.mint();
         let root1 = roots.mint();
         roots.insert(adopt(root0, None, &tx)).expect("inserted");
@@ -934,7 +973,7 @@ mod tests {
         // the process does not unwind and the neighbours stay live.
         let (tx, mut rx) = channels();
         let c0 = ConversationId::first();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 30);
         let c1 = roots.mint();
         roots.insert(adopt(c0, None, &tx)).expect("inserted");
         roots.insert(adopt(c1, None, &tx)).expect("inserted");
@@ -971,15 +1010,13 @@ mod tests {
             .await
             .expect("c0 answers");
         assert!(matches!(history, AgentEvent::History { .. }));
-        // And `Dead` is sticky: a later `Failed` cannot downgrade it.
-        roots.insert(adopt(c1, None, &tx)).ok();
     }
 
     #[tokio::test]
     async fn dead_is_sticky() {
         let (tx, _rx) = channels();
         let c0 = ConversationId::first();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 100);
         roots.insert(adopt(c0, None, &tx)).expect("inserted");
         assert!(roots.set_state(c0, RootState::Dead));
         assert!(
@@ -998,7 +1035,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("a tempdir");
         let group = crate::session_groups::create_group(tmp.path()).expect("a group");
         let (tx, _rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 60);
         roots
             .insert(adopt(ConversationId::first(), Some(group.clone()), &tx))
             .expect("the first owner");
@@ -1024,7 +1061,7 @@ mod tests {
         crate::session_groups::create_root_session(&group.dir, tmp.path()).expect("a session");
 
         let (tx, _rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 50);
         // A MINTED id, not `first()`: `shutdown_scope(c0)` is process-wide for
         // every `Background` that was built outside a scoped build, which in a
         // `cargo test` process means other tests' fixtures. Conversation 0's own
@@ -1065,7 +1102,8 @@ mod tests {
         // FINDING 8's gate, PINNED: monotone, never reused.
         let (tx, _rx) = channels();
         let mut roots = Roots::new(tx.clone());
-        // `Roots::new` reserves seq 0: the first mint is c1, never c0.
+        // `Roots::new` reserves seq 0: the first mint is c1, never c0. This test
+        // owns block 1 on purpose — it asserts the mint sequence itself.
         assert_eq!(roots.mint(), ConversationId::new(1));
 
         let failing: Factories =
@@ -1111,7 +1149,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("a tempdir");
         let group = crate::session_groups::create_group(tmp.path()).expect("a group");
         let (tx, _rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 70);
         roots
             .insert(adopt(ConversationId::first(), Some(group.clone()), &tx))
             .expect("the first owner");
@@ -1129,13 +1167,136 @@ mod tests {
     #[tokio::test]
     async fn stop_is_close_and_an_unknown_id_is_a_no_op() {
         let (tx, _rx) = channels();
-        let mut roots = Roots::new(tx.clone());
+        let mut roots = roots_in(tx.clone(), 10);
         let c0 = roots.mint();
         roots.insert(adopt(c0, None, &tx)).expect("inserted");
         assert!(roots.stop(c0));
         assert!(!roots.stop(c0), "idempotent: an unknown id is a no-op");
         assert!(roots.is_empty(), "the last close leaves an empty registry");
         roots.close_all(); // and close_all on an empty registry is a no-op
+    }
+
+    /// FINDING 1's gate — the test that would have caught the ambient-scope bug.
+    ///
+    /// `SessionFactory::build_with` is reached from the `team`/`spawn` tools
+    /// *inside an actor's turn* (`tools/team.rs:139` → `agents.rs:734` →
+    /// `:296` → `:399`), where no build was in progress. With an ambient scope and
+    /// a `c0` default, every runtime-spawned worker of every conversation `c1`+
+    /// was tagged `c0`: `close(c1)` never found it (child and actor both leak) and
+    /// `close(c0)` signalled it. So: a worker spawned by a `c1` orchestrator must
+    /// carry `c1`. Scope `9003` is private to this test, so the count is exact.
+    #[tokio::test]
+    async fn a_runtime_spawned_worker_is_tagged_with_its_orchestrators_conversation() {
+        let id = ConversationId::new(9003);
+        let orchestrator = orchestrator_in(id);
+        let tagged = |id: ConversationId| {
+            Background::live_scopes()
+                .into_iter()
+                .filter(|scope| *scope == id)
+                .count()
+        };
+        let before = tagged(id);
+        let worker = orchestrator
+            .spawn_worker(crate::agents::WorkerSpec::default())
+            .expect("a worker spawns");
+        assert_eq!(
+            tagged(id),
+            before + 1,
+            "the worker's Background carries the orchestrator's conversation ({id}), not c0"
+        );
+        assert_eq!(
+            tagged(ConversationId::first()),
+            Background::live_scopes()
+                .into_iter()
+                .filter(|scope| *scope == ConversationId::first())
+                .count(),
+            "sanity: the c0 count is read the same way"
+        );
+        // Clean up: the worker's own scope teardown releases its notifier.
+        Background::shutdown_scope(id);
+        drop(worker);
+    }
+
+    /// §13.2.1(a)'s guard: a root whose `Background` was built for another
+    /// conversation would be torn down by that conversation's close and leak its
+    /// own worker's tasks. The assert is what makes the mistake loud at the call
+    /// site instead of invisible at teardown.
+    #[tokio::test]
+    #[should_panic(expected = "a root's Background carries its own conversation tag")]
+    async fn a_mis_tagged_background_trips_adopts_guard() {
+        let (tx, _rx) = channels();
+        let (agent, bg) = build(ConversationId::new(9004)); // tagged 9004 …
+        let _ = Root::adopt(RootParts {
+            id: ConversationId::new(9005), // … adopted as 9005
+            label: "mismatch".into(),
+            agent,
+            bg,
+            orchestrator: None,
+            group: None,
+            session_path: None,
+            model: "m1".into(),
+            members: Vec::new(),
+            events: tx.clone(),
+        });
+    }
+
+    /// FINDING 1's destructive half, and the reason the tag exists: closing one
+    /// conversation signals ITS children and only its own. The previous gate
+    /// observed a released notifier — it never observed a killed child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_a_conversation_kills_only_its_own_background_children() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        fn sleeper() -> tokio::process::Child {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.arg("-c").arg("sleep 30");
+            // Its own process group, exactly as `Bash::execute` spawns one, so
+            // `shutdown`'s group signal reaches it.
+            crate::tools::background::spawn_group(&mut cmd);
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("a sleeper")
+        }
+
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 120);
+        let c0 = ConversationId::first();
+        let c1 = roots.mint();
+        let root0 = adopt(c0, None, &tx);
+        let root1 = adopt(c1, None, &tx);
+        let (bg0, bg1) = (root0.bg.clone(), root1.bg.clone());
+        roots.insert(root0).expect("inserted");
+        roots.insert(root1).expect("inserted");
+
+        // One real child per conversation, registered the way the `bash` tool
+        // registers one (`Background::register(cmd, cwd, child.id())`).
+        let mut child0 = sleeper();
+        let mut child1 = sleeper();
+        bg0.register("sleep 30", Path::new("."), child0.id());
+        bg1.register("sleep 30", Path::new("."), child1.id());
+
+        assert!(roots.close(c1), "the c1 conversation closes");
+
+        // c1's child is SIGKILLed (by process group) …
+        let killed = tokio::time::timeout(Duration::from_secs(5), child1.wait())
+            .await
+            .expect("c1's child ends")
+            .expect("wait");
+        assert_eq!(
+            killed.signal(),
+            Some(libc::SIGKILL),
+            "c1's child was signalled, not merely abandoned: {killed:?}"
+        );
+        // … and c0's is untouched.
+        assert!(
+            child0.try_wait().expect("try_wait").is_none(),
+            "c0's child still runs after c1 closed"
+        );
+        let _ = child0.start_kill();
+        let _ = child0.wait().await;
     }
 
     #[tokio::test]
@@ -1165,7 +1326,7 @@ mod tests {
     #[tokio::test]
     async fn the_supervisor_reports_on_the_sink_the_caller_gave() {
         let (tx, mut rx) = channels();
-        let id = Roots::new(tx.clone()).mint();
+        let id = roots_in(tx.clone(), 40).mint();
         let mut root = adopt(id, None, &tx);
         let supervisor = root.take_supervisor().expect("supervised");
         root.bg.release_notify();

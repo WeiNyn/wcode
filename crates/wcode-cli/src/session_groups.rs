@@ -850,7 +850,11 @@ mod tests {
     }
 
     fn orchestrator(members_dir: Option<PathBuf>) -> Orchestrator {
-        Orchestrator::new(Registry::new(), template_with(members_dir, stub_stream()))
+        Orchestrator::new(
+            Registry::new(),
+            template_with(members_dir, stub_stream()),
+            wcode_protocol::ConversationId::first(),
+        )
     }
 
     /// A root session handle to receive a worker's report-back.
@@ -1349,6 +1353,7 @@ mod tests {
         let first = Orchestrator::new(
             Registry::new(),
             template_with(Some(group.members_dir.clone()), answering_stream()),
+            wcode_protocol::ConversationId::first(),
         );
         let root1 = root_session();
         first.register_root(root1.clone());
@@ -1389,6 +1394,7 @@ mod tests {
         let second = Orchestrator::new(
             Registry::new(),
             template_with(Some(group.members_dir.clone()), answering_stream()),
+            wcode_protocol::ConversationId::first(),
         );
         let root2 = root_session();
         second.register_root(root2.clone());

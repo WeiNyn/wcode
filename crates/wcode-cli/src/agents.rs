@@ -27,7 +27,7 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_harness::session::Session;
 use wcode_harness::streamfn::{LlmOpts, StreamFn};
 use wcode_harness::tool::{Tool, erased};
-use wcode_protocol::{Backend, Registry};
+use wcode_protocol::{Backend, ConversationId, Registry};
 use wcode_tui::SurfaceSpec;
 
 use crate::config::ToolsConfig;
@@ -168,6 +168,11 @@ pub struct SpawnedWorker {
 pub struct SessionFactory {
     registry: Registry,
     template: WorkerTemplate,
+    /// The conversation that owns every worker this factory builds (W040 §13.2
+    /// item 3): `build_with` tags the worker's `Background` with it, so a
+    /// `close(c1)` finds c1's runtime-spawned workers — and a `close(c0)` cannot
+    /// reach them. Threaded from `build_runtime`, not read by default (§13.2.1(a)).
+    conversation: ConversationId,
     seq: AtomicUsize,
     /// The runtime feed a live TUI adds surfaces from (set by the composition
     /// root after the `[team]` startup loop). `None` until installed.
@@ -175,14 +180,20 @@ pub struct SessionFactory {
 }
 
 impl SessionFactory {
-    pub fn new(registry: Registry, template: WorkerTemplate) -> Arc<Self> {
+    pub fn new(
+        registry: Registry,
+        template: WorkerTemplate,
+        conversation: ConversationId,
+    ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             template,
+            conversation,
             seq: AtomicUsize::new(1),
             sink: Mutex::new(None),
         })
     }
+
 
     pub fn registry(&self) -> &Registry {
         &self.registry
@@ -252,7 +263,11 @@ impl SessionFactory {
     /// set. `spawn` is absent by construction (a worker cannot spawn); `message`
     /// is also always kept. Use [`Self::validate_tools`] as the allow-list gate.
     pub fn default_tool_names(&self) -> Vec<String> {
-        default_tools(&self.template.tools, &self.template.sessions_dir, Background::new())
+        default_tools(
+            &self.template.tools,
+            &self.template.sessions_dir,
+            Background::new(self.conversation),
+        )
             .iter()
             .map(|tool| tool.name().to_string())
             .collect()
@@ -396,7 +411,7 @@ impl SessionFactory {
         session: Option<Session>,
         context: Vec<AgentMessage>,
     ) -> (SessionHandle, SessionMeta) {
-        let bg = Background::new();
+        let bg = Background::new(self.conversation);
         let config = self.worker_config_with(id, owner, spec, session, context, bg.clone());
         let meta = SessionMeta::from_llm(&config.llm);
         let handle = SessionActor::spawn(Agent::new(config));
@@ -408,7 +423,7 @@ impl SessionFactory {
     /// convenience over [`Self::worker_config_with`].
     #[cfg(test)]
     fn worker_config(&self, id: &SessionId, owner: &SessionId, spec: &WorkerSpec) -> AgentConfig {
-        self.worker_config_with(id, owner, spec, None, Vec::new(), Background::new())
+        self.worker_config_with(id, owner, spec, None, Vec::new(), Background::new(wcode_protocol::ConversationId::first()))
     }
 
     /// The full worker config: like [`Self::worker_config`], but the worker is
@@ -619,15 +634,20 @@ impl Orchestrator {
     // Convenience ctor over an in-memory plan; the composition root uses
     // `with_tasks` (a journaled list), so this is exercised by tests.
     #[allow(dead_code)]
-    pub fn new(registry: Registry, template: WorkerTemplate) -> Self {
-        Self::with_tasks(registry, template, TaskList::new())
+    pub fn new(registry: Registry, template: WorkerTemplate, conversation: ConversationId) -> Self {
+        Self::with_tasks(registry, template, TaskList::new(), conversation)
     }
 
     /// Like [`Self::new`], but over a caller-provided plan — the composition root
     /// passes a journaled/loaded [`TaskList`] so the graph survives a crash (P4).
-    pub fn with_tasks(registry: Registry, template: WorkerTemplate, tasks: TaskList) -> Self {
+    pub fn with_tasks(
+        registry: Registry,
+        template: WorkerTemplate,
+        tasks: TaskList,
+        conversation: ConversationId,
+    ) -> Self {
         Self {
-            factory: SessionFactory::new(registry.clone(), template),
+            factory: SessionFactory::new(registry.clone(), template, conversation),
             registry,
             id: SessionId::agent("orchestrator"),
             phonebook: Phonebook::default(),
@@ -912,7 +932,10 @@ mod tests {
             members_dir: None,
             sessions_dir: std::env::temp_dir(),
         };
-        (SessionFactory::new(registry.clone(), template), registry)
+        (
+            SessionFactory::new(registry.clone(), template, ConversationId::first()),
+            registry,
+        )
     }
 
     #[tokio::test]
@@ -1289,7 +1312,7 @@ mod tests {
             members_dir: Some(base.path().join("members")),
             sessions_dir: std::env::temp_dir(),
         };
-        let factory = SessionFactory::new(registry.clone(), template);
+        let factory = SessionFactory::new(registry.clone(), template, ConversationId::first());
         let orch = SessionId::agent("orch");
         let root = session();
         registry.register(orch.clone(), root.clone());
@@ -1405,7 +1428,7 @@ mod tests {
             members_dir: None,
             sessions_dir: std::env::temp_dir(),
         };
-        let o = Orchestrator::new(registry.clone(), template);
+        let o = Orchestrator::new(registry.clone(), template, ConversationId::first());
 
         let me = SessionId::agent("w1");
         let (tools, hook) = o.as_worker(me.clone(), orch.clone());
@@ -1456,7 +1479,7 @@ mod tests {
             members_dir: None,
             sessions_dir: std::env::temp_dir(),
         };
-        Orchestrator::new(Registry::new(), template)
+        Orchestrator::new(Registry::new(), template, ConversationId::first())
     }
 
     fn tool_names(cfg: &AgentConfig) -> Vec<String> {
@@ -1825,7 +1848,7 @@ mod tests {
         let cfg = factory.worker_config(&id, &owner, &WorkerSpec::default());
 
         let mut expected: Vec<String> =
-            default_tools(&factory.template.tools, &factory.template.sessions_dir, Background::new())
+            default_tools(&factory.template.tools, &factory.template.sessions_dir, Background::new(wcode_protocol::ConversationId::first()))
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -1896,7 +1919,7 @@ mod tests {
         assert!(root.contains(&"member".to_string()), "root tools: {root:?}");
 
         let defaults: Vec<String> =
-            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new())
+            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new(wcode_protocol::ConversationId::first()))
             .iter()
             .map(|t| t.name().to_string())
             .collect();
@@ -1929,7 +1952,7 @@ mod tests {
         assert!(root.contains(&"spawn".to_string()), "root tools: {root:?}");
 
         let defaults: Vec<String> =
-            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new())
+            default_tools(&ToolsConfig::default(), &std::env::temp_dir(), Background::new(wcode_protocol::ConversationId::first()))
                 .iter()
                 .map(|t| t.name().to_string())
                 .collect();

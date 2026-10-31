@@ -393,6 +393,8 @@ mod tests {
                 members_dir: None,
                 sessions_dir: std::env::temp_dir(),
             },
+            // test fixture: the startup conversation
+            wcode_protocol::ConversationId::first(),
         )
     }
 

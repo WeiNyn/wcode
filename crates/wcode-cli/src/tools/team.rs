@@ -227,7 +227,11 @@ mod tests {
     }
 
     fn orchestrator() -> Orchestrator {
-        Orchestrator::new(Registry::new(), template())
+        Orchestrator::new(
+            Registry::new(),
+            template(),
+            wcode_protocol::ConversationId::first(),
+        )
     }
 
     fn ctx(dir: &Path) -> ToolContext {

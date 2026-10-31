@@ -592,7 +592,7 @@ mod tests {
     async fn echo_reports_exit_code_zero() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "echo hello".into(),
@@ -611,7 +611,7 @@ mod tests {
     async fn non_zero_exit_is_error() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "echo oops >&2; exit 3".into(),
@@ -632,7 +632,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         let started = Instant::now();
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "sleep 5".into(),
@@ -659,7 +659,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             cancel.cancel();
         });
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "sleep 5".into(),
@@ -681,7 +681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("bg.pid");
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()),
@@ -719,7 +719,7 @@ mod tests {
     async fn streams_partial_output_updates() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "echo a; sleep 0.05; echo b".into(),
@@ -744,7 +744,7 @@ mod tests {
     async fn streams_stderr_lines_with_live_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "printf 'oops\\n' >&2".into(),
@@ -771,7 +771,7 @@ mod tests {
     async fn small_output_stays_inline_without_spilling() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "echo hello".into(),
@@ -795,7 +795,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         // ~100 KiB, well over MAX_INLINE_BYTES.
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "seq 1 20000".into(),
@@ -834,7 +834,7 @@ mod tests {
     async fn stderr_spills_independently_of_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "seq 1 20000 >&2".into(),
@@ -865,7 +865,7 @@ mod tests {
     async fn live_updates_are_capped() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, mut rx) = super::super::test_ctx(dir.path());
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "seq 1 1000".into(),
@@ -892,7 +892,7 @@ mod tests {
         // 200 KiB of 'a' with no newline: `read_until` would otherwise grow one
         // line to the full 200 KiB; the chunker turns it into MAX_LINE_BYTES
         // pseudo-lines so the live updates and the memory stay bounded.
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "dd if=/dev/zero bs=200000 count=1 2>/dev/null | tr '\\0' 'a'"
@@ -982,7 +982,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
         let started = Instant::now();
-        let out = Bash::new(Background::new())
+        let out = Bash::new(Background::new(wcode_protocol::ConversationId::first()))
             .execute(
                 BashArgs {
                     command: "read x; echo \"got:$x\"".into(),

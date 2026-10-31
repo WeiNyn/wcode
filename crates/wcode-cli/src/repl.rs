@@ -385,14 +385,21 @@ pub struct AgentSpec<'a> {
     pub guidelines: Option<&'a str>,
 }
 
+/// Build one agent. `scope` names the **conversation that owns it**, so every
+/// `Background` this agent's tools hold is torn down by that conversation's close
+/// and by no other (W040 §13.2 item 3 + §13.2.1(a): the tag is a parameter, not
+/// ambient state). The REPL and the startup path pass
+/// [`ConversationId::first`](wcode_protocol::ConversationId::first) until W040's
+/// later commits wire real ids.
 pub fn build_agent(
     spec: AgentSpec<'_>,
     session: Option<Session>,
     context: Vec<AgentMessage>,
     extra_tools: Vec<Tool>,
+    scope: wcode_protocol::ConversationId,
 ) -> (Agent, Arc<Background>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let bg = Background::new();
+    let bg = Background::new(scope);
     let mut tools = default_tools(spec.tools, &session_dir(), bg.clone());
     tools.extend(extra_tools);
     // One handle shared by the `PlanModeHooks` and the agent, so `set_plan_mode`
@@ -893,7 +900,7 @@ pub enum SessionSource {
 //     `Fn` closure those borrows come from the CLOSURE'S OWN captured fields, so
 //     `AgentSpec { tools: &inputs.tools, … }` is legal and `'static` by
 //     construction. The only thing `build_agent` gains is the ambient
-//     `Background` scope around its `:396` `let bg = Background::new();` — which
+//     `Background` scope around its `:396` `let bg = Background::new(wcode_protocol::ConversationId::first());` — which
 //     is a caller-side wrapper (`Background::with_scope`), not a new parameter.
 //     See the `background.rs` block.
 //
@@ -1094,6 +1101,9 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
+                            // The REPL is one conversation: the startup/root id
+                            // (W040 §13.2.1(a) — an explicit tag, never a default).
+                            wcode_protocol::ConversationId::first(),
                         );
                         let handle = SessionActor::spawn(new_agent);
                         new_bg.bind(handle.clone());
@@ -1250,6 +1260,7 @@ pub async fn run(
                                         .as_ref()
                                         .map(|o| o.tools())
                                         .unwrap_or_default(),
+                                    wcode_protocol::ConversationId::first(),
                                 );
                                 let handle = SessionActor::spawn(new_agent);
                                 new_bg.bind(handle.clone());
@@ -1299,6 +1310,9 @@ pub async fn run(
                                 .as_ref()
                                 .map(|o| o.tools())
                                 .unwrap_or_default(),
+                            // The REPL is one conversation: the startup/root id
+                            // (W040 §13.2.1(a) — an explicit tag, never a default).
+                            wcode_protocol::ConversationId::first(),
                         );
                         let handle = SessionActor::spawn(new_agent);
                         new_bg.bind(handle.clone());
@@ -2271,6 +2285,8 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            // the startup conversation (test fixture)
+            wcode_protocol::ConversationId::first(),
         );
         assert_eq!(
             agent.title_after_turns(),
@@ -2302,6 +2318,8 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            // the startup conversation (test fixture)
+            wcode_protocol::ConversationId::first(),
         );
         assert_eq!(agent.title_after_turns(), 3);
 
@@ -2327,6 +2345,8 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            // the startup conversation (test fixture)
+            wcode_protocol::ConversationId::first(),
         );
         assert_eq!(agent.title_after_turns(), 2);
     }
@@ -2354,6 +2374,8 @@ mod tests {
             None,
             Vec::new(),
             Vec::new(),
+            // the startup conversation (test fixture)
+            wcode_protocol::ConversationId::first(),
         );
         assert!(
             shared.is_empty(),

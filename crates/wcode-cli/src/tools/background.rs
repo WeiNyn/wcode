@@ -287,20 +287,6 @@ impl Registry {
 /// cover every agent.
 static LIVE: OnceLock<Mutex<Vec<Weak<Background>>>> = OnceLock::new();
 
-/// The conversation a [`Background`] belongs to (W040 §13.2 item 3), installed
-/// around a **synchronous** build by [`Background::with_scope`].
-///
-/// One value at a time, and never contended: `roots::build_root` wraps the whole
-/// build and `roots::run_host` serialises builds, so no two builds overlap.
-///
-/// # Invariant (the whole safety argument)
-/// The closure passed to [`Background::with_scope`] must not `.await`. The lock
-/// is released before the closure runs, so a suspension point inside it would
-/// let a second build's scope be installed under the first one's feet. If the
-/// factory ever becomes async this MUST become a `tokio::task_local!`. Recorded
-/// because the compiler cannot enforce it.
-static SCOPE: Mutex<Option<ConversationId>> = Mutex::new(None);
-
 /// The notifier's three states. `OnceLock` (D16) could not be released, which is
 /// why it was a CYCLE (W040 first-layer finding 5): this field is the only path
 /// from the tool set back to the actor's own mailbox, so holding it keeps
@@ -338,42 +324,22 @@ pub struct Background {
     notify: Mutex<Notifier>,
     /// Per-registry monotonic id source (`bg1`, `bg2`, …) (D13).
     next_id: AtomicU64,
-    /// Which conversation created this registry (W040 §13.2 item 3).
-    /// Inherited, never chosen: a worker's `Background` is built deep inside
-    /// `SessionFactory::build_with`, so it is read from the ambient install
-    /// ([`Background::with_scope`]) rather than threaded through every builder.
+    /// Which conversation owns this registry (W040 §13.2 item 3) — a
+    /// construction parameter ([`Background::new`]), so it can never be inherited
+    /// by accident. `close(c1)` must find every `c1` task and no `c0` one.
     scope: ConversationId,
 }
 
 impl Background {
     /// Build the per-agent handle and register it on the global weak list (D8).
     ///
-    /// The conversation scope is **inherited** from
-    /// [`Background::with_scope`], or `ConversationId::first()` when no build is
-    /// in progress (a test, a one-shot `-p`, the REPL) — which is what keeps
-    /// N = 1 byte-identical: every existing `Background::new()` lands in the
-    /// scope `shutdown_all` would have covered.
-    pub fn new() -> Arc<Self> {
-        let bg = Arc::new(Self {
-            registry: Mutex::new(Registry::default()),
-            notify: Mutex::new(Notifier::Unset),
-            next_id: AtomicU64::new(1),
-            scope: ambient_scope(),
-        });
-        let list = LIVE.get_or_init(|| Mutex::new(Vec::new()));
-        list.lock().unwrap().push(Arc::downgrade(&bg));
-        bg
-    }
-
-    /// [`Background::new`] with an EXPLICIT scope, for tests.
-    ///
-    /// The ambient scope is process-global by design (one build at a time), and a
-    /// `cargo test` process runs tests in parallel: a scoped *build* in one test
-    /// would tag another test's `Background`, and then a `shutdown_scope` would
-    /// signal a stranger's child. Tests that need a tagged handle take this
-    /// instead, so nothing depends on another thread's timing.
-    #[cfg(test)]
-    pub(crate) fn new_in(scope: ConversationId) -> Arc<Self> {
+    /// `scope` is the **conversation that owns this agent** — a construction
+    /// parameter, never ambient state (W040 §13.2.1(a)). Nothing serialises one
+    /// build against another: `SessionFactory::build_with` is reached from the
+    /// `team`/`spawn` tools *inside an actor's turn*, so an ambient scope would
+    /// tag every runtime-spawned worker of every conversation `c1`+ as `c0` —
+    /// `close(c0)` would then signal them and `close(c1)` would never find them.
+    pub fn new(scope: ConversationId) -> Arc<Self> {
         let bg = Arc::new(Self {
             registry: Mutex::new(Registry::default()),
             notify: Mutex::new(Notifier::Unset),
@@ -411,9 +377,6 @@ impl Background {
     /// and parked tasks — the actor, its `Agent`, its tool set, the
     /// `Arc<Background>`, and one registry-watcher task per registered peer, all
     /// alive for the life of the process after their conversation closed.
-    // The consumer is `roots::Root::tear_down` (W040 commit 3, not yet wired
-    // into a caller); this allow comes off with the host wiring in commit 6.
-    #[allow(dead_code)]
     pub fn release_notify(&self) {
         let dead = {
             let mut slot = self.notify.lock().unwrap_or_else(PoisonError::into_inner);
@@ -424,6 +387,21 @@ impl Background {
         };
         // Dropped outside the lock (D10): short sections, never across an `.await`.
         drop(dead);
+    }
+
+    /// Every live `Background`'s conversation, for the tests that must show a
+    /// registry landed in the right scope (`LIVE` holds only `Weak`s).
+    #[cfg(test)]
+    pub(crate) fn live_scopes() -> Vec<ConversationId> {
+        let Some(list) = LIVE.get() else {
+            return Vec::new();
+        };
+        list.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(|weak| weak.upgrade())
+            .map(|bg| bg.scope())
+            .collect()
     }
 
     /// Whether [`Background::release_notify`] has run — the observable half of
@@ -438,34 +416,8 @@ impl Background {
 
     /// The conversation this `Background` belongs to — what
     /// [`Background::shutdown_scope`] filters on.
-    // See `release_notify`: consumed by `roots` (commit 3), wired in commit 6.
-    #[allow(dead_code)]
     pub fn scope(&self) -> ConversationId {
         self.scope
-    }
-
-    /// Run `f` with `scope` installed as the ambient conversation, restoring the
-    /// previous value on exit (including on panic).
-    ///
-    /// Used by a root build, which wraps the WHOLE build so the root's
-    /// `Background` and every worker's are tagged alike. Never hold the lock
-    /// across `f`: see [`SCOPE`]'s invariant.
-    // The caller is `roots::build_root` (W040 commit 4); until it lands this is
-    // deliberately ahead of its call site, and its tests already use it.
-    #[allow(dead_code)]
-    pub fn with_scope<R>(scope: ConversationId, f: impl FnOnce() -> R) -> R {
-        struct Restore(Option<ConversationId>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                *SCOPE.lock().unwrap_or_else(PoisonError::into_inner) = self.0;
-            }
-        }
-        let previous = SCOPE
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(scope);
-        let _restore = Restore(previous);
-        f()
     }
 
     /// Allocate the next id (`bg{n}`, D13).
@@ -575,8 +527,6 @@ impl Background {
     /// - A `Background` from another scope is kept, and a dead one is pruned, so a
     ///   long-lived TUI with 50 closed tabs does not accumulate entries. An
     ///   unknown/empty scope is a no-op.
-    // See `release_notify`: consumed by `roots::Root::tear_down` (commit 3).
-    #[allow(dead_code)]
     pub fn shutdown_scope(scope: ConversationId) {
         let Some(list) = LIVE.get() else {
             return;
@@ -621,13 +571,6 @@ impl Background {
     fn lock(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap()
     }
-}
-
-/// The installed conversation scope, or [`ConversationId::first`] when no build
-/// is in progress (a test, a one-shot `-p`, the REPL). Defaulting to the startup
-/// conversation is what keeps N = 1 byte-identical — see [`Background::new`].
-fn ambient_scope() -> ConversationId {
-    (*SCOPE.lock().unwrap_or_else(PoisonError::into_inner)).unwrap_or_else(ConversationId::first)
 }
 
 // ==========================================================================
@@ -1243,7 +1186,7 @@ mod tests {
         Arc<Background>,
         tokio::sync::broadcast::Receiver<AgentEvent>,
     ) {
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
         let handle = session_with(done_stream());
         let rx = handle.subscribe();
         bg.bind(handle);
@@ -1289,7 +1232,7 @@ mod tests {
     async fn start_then_list_shows_a_running_task() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         let out = start_bg(&bg, &ctx, "sleep 5").await;
         assert!(!out.is_error, "{}", out.output);
@@ -1305,7 +1248,7 @@ mod tests {
     async fn kill_transitions_to_killed_and_is_a_noop_after_exit() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         start_bg(&bg, &ctx, "sleep 30").await;
         let killed = run_bg(&bg, &ctx, args("kill", "bg1")).await;
@@ -1322,7 +1265,7 @@ mod tests {
     async fn wait_on_a_short_task_returns_the_exit_code() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         start_bg(&bg, &ctx, "true").await;
         let mut a = args("wait", "bg1");
@@ -1336,7 +1279,7 @@ mod tests {
     async fn output_is_capped_and_names_the_spill_file() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         // ~100 KiB, well over MAX_INLINE_BYTES.
         start_bg(&bg, &ctx, "seq 1 20000").await;
@@ -1366,7 +1309,7 @@ mod tests {
     async fn two_concurrent_tasks_get_distinct_ids() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         let a = start_bg(&bg, &ctx, "sleep 5").await;
         let b = start_bg(&bg, &ctx, "sleep 5").await;
@@ -1384,7 +1327,7 @@ mod tests {
     async fn kill_leaves_no_orphaned_group() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
         let pidfile = dir.path().join("bg.pid");
 
         start_bg(
@@ -1426,7 +1369,7 @@ mod tests {
     async fn shutdown_kills_a_running_group() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         start_bg(&bg, &ctx, "sleep 30").await;
         bg.shutdown();
@@ -1442,14 +1385,14 @@ mod tests {
         );
 
         // An empty `shutdown()` is a no-op.
-        Background::new().shutdown();
+        Background::new(wcode_protocol::ConversationId::first()).shutdown();
     }
 
     #[tokio::test]
     async fn wait_aborts_on_cancel() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         start_bg(&bg, &ctx, "sleep 30").await;
         let cancel = ctx.cancel.clone();
@@ -1472,7 +1415,7 @@ mod tests {
     async fn shutdown_never_signals_an_exited_task() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _rx) = super::super::test_ctx(dir.path());
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
 
         start_bg(&bg, &ctx, "true").await;
         let mut wait = args("wait", "bg1");
@@ -1541,7 +1484,7 @@ mod tests {
             }])) as LlmStream
         });
 
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
         let handle = session_with(stream_fn);
         let mut rx = handle.subscribe();
         bg.bind(handle);
@@ -1614,7 +1557,7 @@ mod tests {
             })
         };
 
-        let bg = Background::new();
+        let bg = Background::new(wcode_protocol::ConversationId::first());
         let handle = session_with(stream_fn);
         let mut rx = handle.subscribe();
         bg.bind(handle.clone());

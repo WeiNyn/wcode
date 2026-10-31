@@ -1520,7 +1520,14 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         // `Orchestrator` (so `dispatch` can reach a clone), and, through both, a
         // headless run's deadline / Ctrl-C.
         let cancel = tokio_util::sync::CancellationToken::new();
-        crate::agents::Orchestrator::with_tasks(wcode_protocol::Registry::new(), template, tasks)
+        // W040 §13.2 item 3: every worker this orchestrator builds belongs to the
+        // STARTUP conversation until the TUI host owns real ids (commits 4–6).
+        crate::agents::Orchestrator::with_tasks(
+            wcode_protocol::Registry::new(),
+            template,
+            tasks,
+            wcode_protocol::ConversationId::first(),
+        )
             .with_team(std::sync::Arc::new(cfg.team.clone()), !cfg.team.is_empty())
             .with_cancel(cancel)
     });
@@ -1781,6 +1788,9 @@ fn build_agent_for(
         session,
         context,
         extra_tools,
+        // The startup conversation's tag (§13.2.1(a)): this agent's `Background`
+        // must be found by `close(c0)` and by no other conversation's close.
+        wcode_protocol::ConversationId::first(),
     );
     // W031: an explicit name is written BEFORE any run — so it is on disk before
     // the auto-titler's first short-circuit sees it, and `-p` cannot race turn 1

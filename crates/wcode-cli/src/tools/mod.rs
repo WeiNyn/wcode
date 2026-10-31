@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     fn names(cfg: &ToolsConfig) -> Vec<String> {
-        default_tools(cfg, &std::env::temp_dir(), background::Background::new())
+        default_tools(cfg, &std::env::temp_dir(), background::Background::new(wcode_protocol::ConversationId::first()))
             .iter()
             .map(|t| t.name().to_string())
             .collect()
@@ -183,7 +183,7 @@ mod tests {
         let tools = default_tools(
             &ToolsConfig::default(),
             &std::env::temp_dir(),
-            background::Background::new(),
+            background::Background::new(wcode_protocol::ConversationId::first()),
         );
         let mut total = 0usize;
         for t in &tools {
@@ -215,7 +215,7 @@ mod tests {
         let tools = default_tools(
             &ToolsConfig::default(),
             &std::env::temp_dir(),
-            background::Background::new(),
+            background::Background::new(wcode_protocol::ConversationId::first()),
         );
         let webfetch = tools
             .iter()
@@ -247,7 +247,7 @@ mod tests {
             find: true,
             ..ToolsConfig::default()
         };
-        for tool in default_tools(&cfg, &std::env::temp_dir(), background::Background::new()) {
+        for tool in default_tools(&cfg, &std::env::temp_dir(), background::Background::new(wcode_protocol::ConversationId::first())) {
             if tool.mutating() {
                 assert!(
                     wcode_harness::hooks::MUTATING_TOOLS.contains(&tool.name()),
