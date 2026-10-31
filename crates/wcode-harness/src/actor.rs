@@ -271,16 +271,40 @@ pub struct SessionActor;
 
 impl SessionActor {
     pub fn spawn(agent: Agent) -> SessionHandle {
+        Self::spawn_supervised(agent).0
+    }
+
+    /// [`SessionActor::spawn`], but the actor task's `JoinHandle` comes back too,
+    /// so a caller can *supervise* the session instead of only talking to it.
+    ///
+    /// [`SessionActor::spawn`] discards `tokio::spawn`'s handle, which leaves a
+    /// caller no way to learn that the actor ended: the session's liveness is not
+    /// observable through [`SessionHandle`] — the handle clones BOTH channel
+    /// senders (`inbox`, `events`), so neither `subscribe()` closing nor the
+    /// `state` watch can report the task's exit. Only a failing
+    /// [`SessionHandle::send`] does, and probing for that means sending real
+    /// requests.
+    ///
+    /// The handle resolves when the task ends, for whatever reason:
+    ///
+    /// - every [`SessionHandle`] dropped ⇒ `inbox.recv()` returns `None` ⇒ `Ok(())`;
+    /// - the actor panicked ⇒ `Err(JoinError)` with `is_panic()` set.
+    ///
+    /// Awaiting it is how a supervisor turns "this session is gone" into an
+    /// event (`wcode-cli`'s `roots::spawn_supervisor`). Dropping it instead is
+    /// only a *detach*: the task keeps running, exactly as `spawn` behaves.
+    pub fn spawn_supervised(agent: Agent) -> (SessionHandle, tokio::task::JoinHandle<()>) {
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(EVENT_BUFFER);
         let events = events_tx.clone();
         let (state_tx, _state_rx) = watch::channel(MemberState::Idle);
-        tokio::spawn(serve(agent, inbox_rx, events_tx, state_tx.clone()));
-        SessionHandle {
+        let task = tokio::spawn(serve(agent, inbox_rx, events_tx, state_tx.clone()));
+        let handle = SessionHandle {
             inbox: inbox_tx,
             events,
             state: state_tx,
-        }
+        };
+        (handle, task)
     }
 }
 
@@ -879,6 +903,108 @@ mod tests {
             }
         }
         assert!(saw_text, "the streamed text reached the subscriber");
+    }
+
+    /// The supervised spawn's whole point: the returned handle tracks the ACTOR
+    /// TASK, so its exit is observable — and it is only observable, never caused,
+    /// by holding the handle.
+    ///
+    /// Teeth: `spawn_supervised` that dropped `tokio::spawn`'s handle and
+    /// re-derived one (or spawned a no-op task) cannot satisfy both halves —
+    /// `!is_finished()` while the session is alive AND a resolved `Ok(())` once
+    /// the last `SessionHandle` drops. The second half is what
+    /// `roots::spawn_supervisor` reports as `Died`; the first half is what keeps
+    /// a live conversation's tab from flickering to `Failed`.
+    #[tokio::test]
+    async fn spawn_supervised_returns_the_actor_task_handle() {
+        let rec = Recorder::default();
+        let (handle, join) = SessionActor::spawn_supervised(Agent::new(agent_config(
+            fake_stream_fn(&rec),
+            vec![],
+        )));
+        // The actor is parked on its inbox: nothing has ended it.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!join.is_finished(), "the actor outlives a few yields");
+
+        // Drop the last handle: `inbox.recv()` returns `None` and `serve` breaks.
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("the actor task ends once the last handle drops")
+            .expect("the actor ended without panicking");
+    }
+
+    /// A panicking *tool* must NOT take the actor task down: R3 catches it in the
+    /// loop (`loop_.rs:664` `catch_unwind`), so the supervised handle stays
+    /// unresolved while the session keeps answering. Recorded here because
+    /// `roots::spawn_supervisor` reports a resolved handle as `Died` — if a tool
+    /// panic ever escaped, every conversation whose worker tool panicked would
+    /// look dead to the client.
+    #[derive(Deserialize, schemars::JsonSchema)]
+    struct PanicArgs {}
+
+    /// A tool that panics on the first call — R3's `catch_unwind` is the only
+    /// thing standing between it and the actor task.
+    struct PanicTool;
+
+    #[async_trait::async_trait]
+    impl TypedTool for PanicTool {
+        type Args = PanicArgs;
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn description(&self) -> &str {
+            "panics"
+        }
+        async fn execute(&self, _args: PanicArgs, _ctx: &ToolContext) -> ToolOutput {
+            panic!("tool panic")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_tool_does_not_resolve_the_supervisor_handle() {
+        let rec = Recorder::default();
+        rec.push(vec![
+            LlmStreamEvent::ToolCall {
+                id: "c1".into(),
+                name: "boom".into(),
+                arguments: json!({}),
+            },
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: None,
+            },
+        ]);
+        // Then a plain answer, so the run finishes normally after the panic.
+        rec.push(vec![
+            LlmStreamEvent::TextDelta("survived".into()),
+            LlmStreamEvent::Done {
+                stop_reason: StopReason::Stop,
+                usage: None,
+            },
+        ]);
+        let (handle, join) = SessionActor::spawn_supervised(Agent::new(agent_config(
+            fake_stream_fn(&rec),
+            vec![erased(PanicTool)],
+        )));
+        let mut rx = handle.subscribe();
+        handle.send(Request::Submit { text: "hi".into() }).unwrap();
+        wait_for_end(&mut rx).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !join.is_finished(),
+            "a tool panic is caught by the loop, so the actor is still alive"
+        );
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("the actor ends when the last handle drops")
+            .expect("and it never saw the tool's panic");
     }
 
     #[tokio::test]
