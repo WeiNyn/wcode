@@ -110,8 +110,9 @@ pub enum RootState {
     Dead,
 }
 
-/// The several things one root is built from, grouped so [`Root::adopt`] and the
-/// build path cannot drift apart.
+/// The several things one root is built from, grouped so [`Roots::adopt`] and the
+/// build path cannot drift apart. No event sink: that is [`Roots`]'s
+/// (see [`Roots::adopt`]).
 pub struct RootParts {
     pub id: ConversationId,
     pub label: String,
@@ -124,13 +125,6 @@ pub struct RootParts {
     /// The team, in display order. Empty at startup for a fresh root — the
     /// `[team]` loop inside the build fills it.
     pub members: Vec<SessionId>,
-    /// Where the supervisor reports a death ([`RootEvent`]).
-    ///
-    /// It is a `RootParts` field, and not something `Root::adopt` looks up,
-    /// because only the caller knows which [`Roots`] this root is about to join —
-    /// and a root whose death nobody hears is exactly the invisible failure
-    /// §13.2 item 4 exists to end.
-    pub events: mpsc::UnboundedSender<RootEvent>,
 }
 
 /// **One live conversation's runtime.** Everything the host needs to talk to it,
@@ -233,12 +227,17 @@ impl Root {
     ///   teardown finds a conversation's **own and its members'** `Background`s by
     ///   that tag, so a mis-tagged root leaks an actor and, worse, is signalled by
     ///   another conversation's close. Debug-asserted (§13.2.1(a)).
-    /// - Registers the supervisor ([`spawn_supervisor`]).
+    /// - Registers the supervisor ([`spawn_supervisor`]) on `events`.
     ///
-    /// `Result` is kept for the caller's sake — `insert` and `adopt` are handled
-    /// alike at both call sites — and no variant is produced today: `bind` now
-    /// ignores a second call instead of reporting it.
-    pub fn adopt(parts: RootParts) -> Result<Root, RootError> {
+    /// Infallible: every step is (`spawn_supervised`, `bind` — a no-op on a
+    /// second call, `register_root`, `mint_surface_id`, `watch::channel`,
+    /// `Registry::default`), so a `Result` here only forced dead
+    /// `unwrap_or_else(|e| … exit(1))` at every call site (W040 §13.2.1(d)).
+    ///
+    /// Private, and reached only through [`Roots::adopt`]: that is what makes a
+    /// root reporting to a sink other than its registry's unrepresentable
+    /// (§13.2.1(c)).
+    fn adopt(parts: RootParts, events: mpsc::UnboundedSender<RootEvent>) -> Root {
         let RootParts {
             id,
             label,
@@ -249,7 +248,6 @@ impl Root {
             session_path,
             model,
             members,
-            events,
         } = parts;
         debug_assert_eq!(
             bg.scope(),
@@ -278,7 +276,7 @@ impl Root {
         let surface = mint_surface_id(id, &address);
         let closing = Arc::new(AtomicBool::new(false));
         let supervisor = spawn_supervisor(id, task, closing.clone(), events);
-        Ok(Root {
+        Root {
             id,
             label,
             address,
@@ -295,7 +293,7 @@ impl Root {
             state: RootState::Live,
             closing,
             supervisor: Some(supervisor),
-        })
+        }
     }
 
     /// Take the actor task's `JoinHandle` — for a caller that wants to await the
@@ -453,6 +451,23 @@ impl Roots {
     /// vocabulary as the channel. Returns `false` when the id is unknown.
     pub fn stop(&mut self, id: ConversationId) -> bool {
         self.close(id)
+    }
+
+    /// **Build one root from already-built parts**, wired to THIS registry's
+    /// event sink. Infallible.
+    ///
+    /// # Why this shape (§13.2.1(c))
+    /// The sketch had two independent parameters — `Roots::new(events)` and
+    /// `RootParts { events }` — and `Root` does not retain the sender, so a root
+    /// built with one sink and inserted into a `Roots` listening on another could
+    /// never be detected: its death would be reported into the void. One method
+    /// owning the sink makes that pair unrepresentable, and it is the same object
+    /// that owns the id reservation (`next`).
+    ///
+    /// The caller registers the result with [`Roots::insert`], which keeps its
+    /// `Result`: a duplicate id and a live `Resume` dir are real failures.
+    pub fn adopt(&mut self, parts: RootParts) -> Root {
+        Root::adopt(parts, self.events.clone())
     }
 
     /// Mint the next id — **the single id authority** (finding 8).
@@ -809,14 +824,13 @@ mod tests {
         )
     }
 
-    /// A root for `id`, with `group` when the test wants one.
-    fn adopt(
-        id: ConversationId,
-        group: Option<SessionGroup>,
-        events: &mpsc::UnboundedSender<RootEvent>,
-    ) -> Root {
+    /// The parts for a root of `id`, with `group` when the test wants one. The
+    /// `Background` is the one `build_agent` created and tagged with `id` — the
+    /// production graph — and the sink is the registry's, not ours (there is no
+    /// `events` field: `Roots::adopt` supplies it, §13.2.1(c)).
+    fn parts(id: ConversationId, group: Option<SessionGroup>) -> RootParts {
         let (agent, bg) = build(id);
-        Root::adopt(RootParts {
+        RootParts {
             id,
             label: format!("label-{id}"),
             agent,
@@ -826,9 +840,13 @@ mod tests {
             session_path: None,
             model: "m1".into(),
             members: Vec::new(),
-            events: events.clone(),
-        })
-        .expect("adopt cannot fail")
+        }
+    }
+
+    /// Adopt + insert in one call: the shape every test uses.
+    fn add(roots: &mut Roots, id: ConversationId, group: Option<SessionGroup>) {
+        let root = roots.adopt(parts(id, group));
+        roots.insert(root).expect("inserted");
     }
 
     fn channels() -> (
@@ -871,8 +889,10 @@ mod tests {
         let mut mints = roots_in(tx.clone(), 90);
         let c0 = ConversationId::first();
         let c1 = mints.mint();
-        let a = adopt(c0, None, &tx);
-        let b = adopt(c1, None, &tx);
+        let mut reg_a = roots_in(tx.clone(), 91);
+        let mut reg_b = roots_in(tx.clone(), 92);
+        let a = reg_a.adopt(parts(c0, None));
+        let b = reg_b.adopt(parts(c1, None));
 
         let probe = SessionId::agent("x");
         a.registry.register(probe.clone(), b.handle.clone());
@@ -896,7 +916,7 @@ mod tests {
         let (tx, mut rx) = channels();
         let mut roots = roots_in(tx.clone(), 20);
         let c1 = roots.mint();
-        roots.insert(adopt(c1, None, &tx)).expect("inserted");
+        add(&mut roots, c1, None);
 
         // Subscribe BEFORE closing: the receiver is what outlives the handles.
         let mut events = roots.get(c1).expect("live").handle.subscribe();
@@ -958,8 +978,8 @@ mod tests {
         let mut roots = roots_in(tx.clone(), 80);
         let root0 = roots.mint();
         let root1 = roots.mint();
-        roots.insert(adopt(root0, None, &tx)).expect("inserted");
-        roots.insert(adopt(root1, None, &tx)).expect("inserted");
+        add(&mut roots, root0, None);
+        add(&mut roots, root1, None);
         let bg0 = roots.get(root0).expect("live").bg.clone();
         let bg1 = roots.get(root1).expect("live").bg.clone();
         assert!(roots.close(root1));
@@ -975,8 +995,8 @@ mod tests {
         let c0 = ConversationId::first();
         let mut roots = roots_in(tx.clone(), 30);
         let c1 = roots.mint();
-        roots.insert(adopt(c0, None, &tx)).expect("inserted");
-        roots.insert(adopt(c1, None, &tx)).expect("inserted");
+        add(&mut roots, c0, None);
+        add(&mut roots, c1, None);
 
         // Take c1 out without closing it, drop every handle (releasing the
         // notifier first — otherwise the actor is unreachable by design), and the
@@ -1017,7 +1037,7 @@ mod tests {
         let (tx, _rx) = channels();
         let c0 = ConversationId::first();
         let mut roots = roots_in(tx.clone(), 100);
-        roots.insert(adopt(c0, None, &tx)).expect("inserted");
+        add(&mut roots, c0, None);
         assert!(roots.set_state(c0, RootState::Dead));
         assert!(
             !roots.set_state(c0, RootState::Failed),
@@ -1036,13 +1056,11 @@ mod tests {
         let group = crate::session_groups::create_group(tmp.path()).expect("a group");
         let (tx, _rx) = channels();
         let mut roots = roots_in(tx.clone(), 60);
-        roots
-            .insert(adopt(ConversationId::first(), Some(group.clone()), &tx))
-            .expect("the first owner");
+        add(&mut roots, ConversationId::first(), Some(group.clone()));
 
         assert!(roots.contains_session_path(&group.dir));
         let dup_id = roots.mint();
-        let dup = adopt(dup_id, Some(group.clone()), &tx);
+        let dup = roots.adopt(parts(dup_id, Some(group.clone())));
         match roots.insert(dup) {
             Err(RootError::AlreadyLive(what)) => {
                 assert!(what.contains("_"), "names the group dir: {what}")
@@ -1067,9 +1085,7 @@ mod tests {
         // `cargo test` process means other tests' fixtures. Conversation 0's own
         // teardown is the same code path.
         let id = roots.mint();
-        roots
-            .insert(adopt(id, Some(group.clone()), &tx))
-            .expect("inserted");
+        add(&mut roots, id, Some(group.clone()));
         assert!(roots.close(id));
 
         assert!(root_path.is_file(), "root.jsonl stays");
@@ -1115,20 +1131,11 @@ mod tests {
         assert_eq!(roots.len(), 0, "nothing half-inserted");
 
         // The next attempt gets c3, not the c2 the failure consumed.
+        // A factory cannot reach `Roots::adopt` (it is the host's method), so it
+        // builds through a scratch registry of its own — infallibly.
         let ok: Factories = Arc::new(|id, _spec| {
-            let (agent, bg) = build(id);
-            Root::adopt(RootParts {
-                id,
-                label: format!("label-{id}"),
-                agent,
-                bg,
-                orchestrator: None,
-                group: None,
-                session_path: None,
-                model: "m1".into(),
-                members: Vec::new(),
-                events: mpsc::unbounded_channel().0,
-            })
+            let mut scratch = Roots::new(mpsc::unbounded_channel().0);
+            Ok(scratch.adopt(parts(id, None)))
         });
         let id = roots
             .start(&ok, RootSpec::Fresh { label: None })
@@ -1136,9 +1143,7 @@ mod tests {
         assert_eq!(id, ConversationId::new(3), "the failed id was burned");
         assert_eq!(roots.len(), 1);
         // And the reserved startup id is still free for the startup root.
-        roots
-            .insert(adopt(ConversationId::first(), None, &tx))
-            .expect("the reserved id is not double-booked");
+        add(&mut roots, ConversationId::first(), None);
         assert_eq!(roots.len(), 2);
     }
 
@@ -1150,9 +1155,7 @@ mod tests {
         let group = crate::session_groups::create_group(tmp.path()).expect("a group");
         let (tx, _rx) = channels();
         let mut roots = roots_in(tx.clone(), 70);
-        roots
-            .insert(adopt(ConversationId::first(), Some(group.clone()), &tx))
-            .expect("the first owner");
+        add(&mut roots, ConversationId::first(), Some(group.clone()));
 
         let never_called: Factories = Arc::new(|_id, _spec| {
             panic!("the factory must not run for a live Resume dir")
@@ -1169,7 +1172,7 @@ mod tests {
         let (tx, _rx) = channels();
         let mut roots = roots_in(tx.clone(), 10);
         let c0 = roots.mint();
-        roots.insert(adopt(c0, None, &tx)).expect("inserted");
+        add(&mut roots, c0, None);
         assert!(roots.stop(c0));
         assert!(!roots.stop(c0), "idempotent: an unknown id is a no-op");
         assert!(roots.is_empty(), "the last close leaves an empty registry");
@@ -1225,8 +1228,9 @@ mod tests {
     #[should_panic(expected = "a root's Background carries its own conversation tag")]
     async fn a_mis_tagged_background_trips_adopts_guard() {
         let (tx, _rx) = channels();
+        let mut roots = roots_in(tx, 9004);
         let (agent, bg) = build(ConversationId::new(9004)); // tagged 9004 …
-        let _ = Root::adopt(RootParts {
+        let _ = roots.adopt(RootParts {
             id: ConversationId::new(9005), // … adopted as 9005
             label: "mismatch".into(),
             agent,
@@ -1236,7 +1240,6 @@ mod tests {
             session_path: None,
             model: "m1".into(),
             members: Vec::new(),
-            events: tx.clone(),
         });
     }
 
@@ -1265,11 +1268,12 @@ mod tests {
         let mut roots = roots_in(tx.clone(), 120);
         let c0 = ConversationId::first();
         let c1 = roots.mint();
-        let root0 = adopt(c0, None, &tx);
-        let root1 = adopt(c1, None, &tx);
-        let (bg0, bg1) = (root0.bg.clone(), root1.bg.clone());
-        roots.insert(root0).expect("inserted");
-        roots.insert(root1).expect("inserted");
+        add(&mut roots, c0, None);
+        add(&mut roots, c1, None);
+        let (bg0, bg1) = (
+            roots.get(c0).expect("live").bg.clone(),
+            roots.get(c1).expect("live").bg.clone(),
+        );
 
         // One real child per conversation, registered the way the `bash` tool
         // registers one (`Background::register(cmd, cwd, child.id())`).
@@ -1320,14 +1324,15 @@ mod tests {
         );
     }
 
-    /// `adopt`'s `RootParts::events` sink is what makes a death reportable: a root
-    /// whose supervisor has nobody to tell is the invisible failure item 4 exists
-    /// to end.
+    /// `Roots::adopt` wires the supervisor to **the registry's own** sink
+    /// (§13.2.1(c)): a root whose death nobody hears is the invisible failure
+    /// item 4 exists to end, so the wiring gets its own test.
     #[tokio::test]
-    async fn the_supervisor_reports_on_the_sink_the_caller_gave() {
+    async fn the_supervisor_reports_on_the_registrys_sink() {
         let (tx, mut rx) = channels();
-        let id = roots_in(tx.clone(), 40).mint();
-        let mut root = adopt(id, None, &tx);
+        let mut roots = roots_in(tx.clone(), 40);
+        let id = roots.mint();
+        let mut root = roots.adopt(parts(id, None));
         let supervisor = root.take_supervisor().expect("supervised");
         root.bg.release_notify();
         drop(root);
