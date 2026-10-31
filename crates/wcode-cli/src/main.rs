@@ -21,6 +21,11 @@ mod frontmatter;
 mod instructions;
 mod judge;
 mod repl;
+// W040 commits 4-6 wire the rest of `roots` in (the build path, the host loop, the
+// TUI adapters), so its API is deliberately ahead of its callers until then. The
+// allow is scoped to this module and comes off with the last of those commits.
+#[allow(dead_code)]
+mod roots;
 mod rtk;
 mod scheduler;
 mod session_groups;
