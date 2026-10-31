@@ -1,9 +1,4 @@
-//! **SKETCH — review-only, not real code. NOT a module of this crate yet.**
-//!
-//! Do NOT add `mod conversation;` / `pub use conversation::…` to `lib.rs` until
-//! this file is implemented. Until then it is inert: it is not compiled, it may
-//! not compile, and that is the point (see
-//! `.wcode/skills/interface-sketch/SKILL.md` §0 Form A).
+//! **A conversation's identity, and how to ask for one** (W040 §13.3).
 //!
 //! # What this module is
 //!
@@ -72,10 +67,11 @@ use std::path::PathBuf;
 ///
 /// # Contracts
 ///
-/// - **Distinct.** Two live conversations never share an id; `Roots::push`
-///   refuses a duplicate (it is a `debug_assert!` + `Result`, not a silent
-///   overwrite — the `Orchestrator::spawn_worker` precedent,
-///   `crates/wcode-cli/src/agents.rs:742`).
+/// - **Distinct.** Two live conversations never share an id; the host's
+///   `Roots::insert` refuses a duplicate (a `debug_assert!` + `Result`, not a
+///   silent overwrite — the `Orchestrator::spawn_worker` precedent,
+///   `crates/wcode-cli/src/agents.rs:742`), and `Roots::new` reserves seq `0`
+///   for the startup conversation (`first()`) so the first mint is `c1`.
 /// - **Not a `SessionId`.** A conversation is a *root and its team*; a session is
 ///   one agent. The root's `SessionId` is `agent:orchestrator`
 ///   (`crates/wcode-cli/src/agents.rs:780` `pub fn id(&self) -> &SessionId`) or
@@ -106,25 +102,25 @@ impl ConversationId {
     /// one `wcode` opens — so a single-conversation process always has id 0 and
     /// every "the only conversation" test can name it.
     pub fn new(seq: u64) -> Self {
-        todo!()
+        Self(seq)
     }
 
     /// The sequence number (the CLI's mint source: `next += 1` per root).
     pub fn seq(self) -> u64 {
-        todo!()
+        self.0
     }
 
     /// The startup conversation. Named so no call site writes `ConversationId::new(0)`
     /// and drifts from the CLI's mint rule.
     pub fn first() -> Self {
-        todo!()
+        Self(0)
     }
 }
 
 impl std::fmt::Display for ConversationId {
     /// `c0`, `c1`, … — the tab bar's log token and W041's URL segment.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "c{}", self.0)
     }
 }
 
@@ -165,10 +161,16 @@ impl std::fmt::Display for ConversationId {
 pub enum RootSpec {
     /// A brand-new session group + root.
     Fresh {
-        /// The tab label to seed. `None` = the host's default (the cwd's basename,
-        /// as `crates/wcode-cli/src/main.rs:2022` seeds `Options.cwd`). A label
-        /// never survives long: the first `AgentEvent::SessionTitle` (W031)
-        /// replaces it ("the tab label's single source").
+        /// The tab label to seed, `None` = "no seed requested".
+        ///
+        /// PRECEDENCE (W040 §13.6.1): `agent.title()` → this seed → the cwd's
+        /// basename (`crates/wcode-cli/src/main.rs:2022` seeds `Options.cwd` from
+        /// it). The `Agent` accessor comes FIRST because it is the same source the
+        /// header already reads: a `/tab new` root built with `--title`, or a
+        /// `Resume` that restored a `Title` entry, has a name from the first frame
+        /// and must not disagree with the band above it. A label never survives
+        /// long anyway: the first `AgentEvent::SessionTitle` (W031) replaces it
+        /// ("the tab label's single source").
         label: Option<String>,
     },
     /// Resume an existing group dir on disk (`--resume <dir>` semantics).
@@ -181,36 +183,83 @@ pub enum RootSpec {
 
 #[cfg(test)]
 mod tests {
-    //! Behaviour-named stubs. Each name IS the assertion the developer must make
-    //! true; none of these tests may be deleted, only filled.
-
     use super::*;
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     fn ids_are_distinct_per_sequence_and_display_short() {
-        // `ConversationId::new(2) != ConversationId::new(3)`;
-        // `ConversationId::new(2).to_string() == "c2"`; `first().seq() == 0`.
-        todo!()
+        assert_ne!(ConversationId::new(2), ConversationId::new(3));
+        assert_eq!(ConversationId::new(2).seq(), 2);
+        assert_eq!(ConversationId::new(2).to_string(), "c2");
+        // The startup conversation, and the reservation that keeps it unique.
+        assert_eq!(ConversationId::first().seq(), 0);
+        assert_eq!(ConversationId::first().to_string(), "c0");
     }
 
     #[test]
     fn an_id_is_hashable_and_ordered_by_sequence() {
         // The TUI stores ids in a `HashMap`/`BTreeMap`; ordering must be mint
         // order, not pointer order (`Hash + Ord` both derived).
-        todo!()
+        let mut seen: HashMap<ConversationId, &str> = HashMap::new();
+        seen.insert(ConversationId::new(2), "two");
+        seen.insert(ConversationId::first(), "zero");
+        assert_eq!(seen.get(&ConversationId::new(2)).copied(), Some("two"));
+        assert_eq!(seen.len(), 2);
+
+        // Rust 2024 allows `c0..=c2` here; spell the seqs out so the assertion is
+        // about the derived `Ord`, not about a `Range` impl.
+        let mut ordered: BTreeMap<ConversationId, ()> = BTreeMap::new();
+        for seq in [2_u64, 0, 1] {
+            ordered.insert(ConversationId::new(seq), ());
+        }
+        let seqs: Vec<u64> = ordered.keys().map(|id| id.seq()).collect();
+        assert_eq!(seqs, vec![0, 1, 2], "ordered by mint sequence");
     }
 
     #[test]
     fn root_spec_fresh_and_resume_are_distinguishable() {
-        // `RootSpec::Fresh { label: None } != RootSpec::Resume { dir: … }` even
-        // for the same dir, so the CLI's factory cannot confuse the two arms.
-        todo!()
+        let dir = PathBuf::from("/tmp/group");
+        let fresh = RootSpec::Fresh { label: None };
+        let resume = RootSpec::Resume { dir: dir.clone() };
+        assert_ne!(fresh, resume, "the factory cannot confuse the two arms");
+        // `Fresh` carries no dir, so the same path cannot make them equal.
+        assert_ne!(RootSpec::Fresh { label: Some("x".into()) }, fresh);
+        assert_eq!(resume.clone(), RootSpec::Resume { dir });
     }
 
     #[test]
     fn an_id_serializes_transparently_for_the_browser() {
-        // `serde_json::to_string(&ConversationId::new(7)) == "7"` — W041's URL
-        // segment; NOT a wire type of this item (no `Frame` change).
-        todo!()
+        // W041's URL segment; NOT a wire type of this item (no `Frame` change).
+        assert_eq!(
+            serde_json::to_string(&ConversationId::new(7)).unwrap(),
+            "7"
+        );
+        let back: ConversationId = serde_json::from_str("7").unwrap();
+        assert_eq!(back, ConversationId::new(7));
+    }
+
+    /// **The module adds nothing to the wire** (W040 §13.3). This is the pin that
+    /// stops a later hand from putting `ConversationId` into `Frame` "because it
+    /// serializes": the version stays `1` and a `Request` frame's JSON is exactly
+    /// what it was.
+    #[test]
+    fn the_wire_is_untouched_by_this_module() {
+        use wcode_harness::protocol::{Frame, PROTOCOL_VERSION, Request, SessionId};
+
+        assert_eq!(PROTOCOL_VERSION, 1, "no protocol bump for W040");
+
+        let frame = Frame::new(0, SessionId::new("s1"), Request::Cancel);
+        let json = serde_json::to_string(&frame).unwrap();
+        assert_eq!(
+            json,
+            r#"{"v":1,"id":0,"session":"s1","type":"cancel"}"#,
+            "a Request frame is byte-identical to the pre-W040 wire"
+        );
+        for word in ["conversation", "RootSpec", "root_spec", " \"c"] {
+            assert!(
+                !json.contains(word),
+                "the frame must not grow a conversation field: {json}"
+            );
+        }
     }
 }

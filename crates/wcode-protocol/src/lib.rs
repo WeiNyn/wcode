@@ -21,10 +21,12 @@
 //! [`SessionHandle`]: wcode_harness::actor::SessionHandle
 
 mod backend;
+mod conversation;
 mod frame;
 mod registry;
 
 pub use backend::{AskError, Backend, Closed};
+pub use conversation::{ConversationId, RootSpec};
 pub use frame::{read_frame, write_frame};
 pub use registry::{Registry, RouteError};
 
