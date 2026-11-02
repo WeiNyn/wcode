@@ -315,6 +315,12 @@ impl Conversations {
         true
     }
 
+    /// Every conversation, in creation order — the tab band's draw order and
+    /// `/tab`'s numbering (1-based, exactly like the sidebar's badges).
+    pub fn iter(&self) -> impl Iterator<Item = &Conversation> {
+        self.items.iter()
+    }
+
     /// How many conversations. `1` means the tab band has height 0 (contract 4).
     pub fn len(&self) -> usize {
         self.items.len()

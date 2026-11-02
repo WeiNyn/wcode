@@ -18,6 +18,8 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
 use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
+use crate::conversations::{Conversation, ConversationState, Conversations};
+use wcode_protocol::ConversationId;
 use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
 use crate::settings::{Setting, SettingKind};
 use crate::markdown;
@@ -76,68 +78,19 @@ const MEASURE_MIN_BAND: usize = 84;
 /// dropped its `─` rule). A fixed top band; it never scrolls with the transcript.
 const HEADER_H: u16 = 1;
 
-// ==== SKETCH (review-only, not real code) ====
-// W040 — THE TAB BAND, in full. Add `TABS_H` beside `HEADER_H` above, and the two
-// functions below beside `draw` (before `draw_search_prompt`). Every band/frame
-// decision is grounded in the current `draw` (see the layout diff inside it).
-//
-// /// The conversation tab band's height in rows (W040) — ONE bare row, no rule,
-// /// exactly like the pinned header. Reserved only when there is more than one
-// /// conversation (see `draw`), so a single-conversation frame never sees it.
-// const TABS_H: u16 = 1;
-//
-// /// Draw the conversation tab bar (W040) and publish its click geometry.
-// ///
-// /// One row, left-aligned from the band's gutter, clipped at the right edge by a
-// /// `Paragraph` (no wrap, no scroll): `▌ wcode  ·  api  ⠋ tests  ·  ✗ broken`.
-// ///
-// /// # What each state renders (the ONLY four cases)
-// ///
-// /// | `ConversationState` | mark | style |
-// /// |---|---|---|
-// /// | `Idle`              | none | `dim` |
-// /// | `Running`           | `⠋`  | `accent` (the composer foot's running spinner) |
-// /// | `Failed`            | `✗`  | `error` |
-// /// | `is_remote`         | the word `remote`, after the label | `muted` |
-// ///
-// /// The ACTIVE tab is marked by a leading `▌` in `accent` — the §2 vocabulary's
-// /// **selection bar** / **live cursor** glyph, reused verbatim: it is already the
-// /// browse selection bar and the streaming cursor, so no new glyph enters the
-// /// table. The active label is `body` (full strength), every other label `dim`;
-// /// under palette B `accent` resolves to the grey ramp, so the `▌` and the
-// /// strength contrast carry the distinction with NO hue (D023: `error` red stays
-// /// the only colour). Roles used, and only these: `accent`, `dim`, `muted`,
-// /// `error`, `body` (`crates/wcode-tui/src/theme.rs:25`-region).
-// ///
-// /// # Contracts
-// /// - `N == 1` ⇒ this function is never called (the band has height 0), and if it
-// ///   were it would draw one `▌ label` — so a frame cannot gain a row by accident.
-// /// - Never wider than `area`: `clipped_row` (`ui.rs` sidebar helper) is the
-// ///   clipping primitive; a crowded bar loses the LAST tabs, never the `▌`
-// ///   (the active tab is drawn first if it does not fit — see R6 in the report).
-// /// - Publishes `app.set_tabs_hit(area, tabs)` for the click path
-// ///   (`app.rs` sketch, `TabsHit`); the hit map is cleared every frame by
-// ///   `app.clear_hit_map()`, so a hidden band leaves no geometry behind.
-// /// # Panics
-// /// None. A zero-width/zero-height area returns immediately (the `draw_sidebar`
-// /// guard, `ui.rs:2770`-region).
-// fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) { todo!() }
-//
-// /// The pure row builder `draw_tab_bar` renders and the pixel tests assert on —
-// /// split out exactly as `session_head_row` (`ui.rs:1124`) is split out of
-// /// `draw_header`, so the bar's grammar is testable without a terminal.
-// ///
-// /// `active` is the active conversation's index (0-based); each labelled span
-// /// carries the state mark of its own conversation. `width` is the band's width,
-// /// used only to publish each tab's clickable extent.
-// fn tab_row(conversations: &Conversations, active: usize, width: usize) -> (Line<'static>, Vec<(ConversationId, u16, u16)>) { todo!() }
-// ==== /SKETCH ====
+/// The conversation tab band's height in rows (W040) — ONE bare row, no rule,
+/// exactly like the pinned header. Reserved only when there is more than one
+/// conversation (see `draw`), so a single-conversation frame never sees it.
+const TABS_H: u16 = 1;
+
 
 /// Draw the full frame. Stateless: everything comes from `app`.
 ///
 /// Bands (top → bottom), in the bands column to the right of the optional
-/// sidebar: the transcript (flex), the working-team region (0..=3 rows — a
-/// rider, only while a member runs), and the composer band. The composer's head
+/// sidebar: the conversation tab bar (0..=1 row — W040; present only with more
+/// than one conversation), the pinned header (one row), the transcript (flex),
+/// the working-team region (0..=3 rows — a rider, only while a member runs), and
+/// the composer band. The composer's head
 /// and foot lines carry the chrome the old status band used to. The team region
 /// collapses to nothing when no
 /// teammate is running.
@@ -204,8 +157,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // at least one transcript row is reserved; the composer band (the input and the
     // foot line) then has priority over the team region, so a short terminal
     // degrades gracefully instead of overflowing.
+    // The conversation tab band (W040): height 0 unless there is more than one
+    // conversation AND the terminal can seat a row without starving the
+    // transcript. Height 0 ⇒ `Layout` reserves nothing ⇒ the frame below is
+    // byte-identical to today's. That is the N = 1 guarantee, made STRUCTURAL
+    // rather than tested-for.
+    let tabs_h = if app.conversations().len() > 1 && area.height > TABS_H + HEADER_H + 1 {
+        TABS_H
+    } else {
+        0
+    };
     let header_h = if area.height > HEADER_H + 1 { HEADER_H } else { 0 };
-    let spare = area.height.saturating_sub(header_h + 1);
+    let spare = area.height.saturating_sub(tabs_h + header_h + 1);
     let box_h = (input_height + 1).min(spare).max(1);
     team_h = team_h.min(spare.saturating_sub(box_h));
 
@@ -273,7 +236,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // WHY ABOVE THE HEADER, not inside it (§13.4's open question, answered):
     // the header is the FOCUSED conversation's chrome — `WCODE · session <id> ─
     // project · ⎇ branch` (`ui.rs:839` `fn draw_header(`, and the spec at
-    // `docs/tui-design.md:249` "**Header** (D010; amended by D023) — a **pinned top
+    // `docs/tui-design.md:279` "**Header** (D010; amended by D023) — a **pinned top
     // band**"). A tab strip is *selection* chrome over N conversations: inside the
     // header row it would read as part of the focused session's identity, and at
     // 48 cols it would compete with the header's own ladder (which sheds `session`
@@ -286,17 +249,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // over the sidebar would claim the sidebar's own click column.
     // ==== /SKETCH ====
     let areas = Layout::vertical([
+        Constraint::Length(tabs_h),   // conversation tabs (0..=1, W040)
         Constraint::Length(header_h), // pinned book header (head row)
         Constraint::Min(1),           // transcript (flexes)
         Constraint::Length(team_h),   // working-team region (a rider, 0..=3)
         Constraint::Length(box_h),    // composer band (input · foot)
     ])
     .split(area);
-    let header = areas[0];
-    let body = areas[1];
-    let team = areas[2];
-    let editor = areas[3];
+    let tabs = areas[0];
+    let header = areas[1];
+    let body = areas[2];
+    let team = areas[3];
+    let editor = areas[4];
 
+    if tabs_h > 0 {
+        draw_tab_bar(frame, tabs, app);
+    }
     draw_header(frame, header, &head);
     draw_transcript(frame, body, app);
     if team_h > 0 {
@@ -337,6 +305,123 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// The popup anchors on a 1-row `above` rect at the composer band's top row
 /// (the input line), so it floats over the transcript interior and never covers
 /// the composer.
+/// Draw the conversation tab bar (W040) and publish its click geometry.
+///
+/// One row, left-aligned from the band's gutter, clipped at the right edge by a
+/// `Paragraph` (no wrap, no scroll): `▌ wcode  ·  api  ⠋ tests  ·  ✗ broken`.
+///
+/// # What each state renders (the ONLY four cases)
+///
+/// | `ConversationState` | mark | style |
+/// |---|---|---|
+/// | `Idle`              | none | `dim` |
+/// | `Running`           | `⠋`  | `accent` (the composer foot's running spinner) |
+/// | `Failed`            | `✗`  | `error` |
+/// | `is_remote`         | the word `remote`, after the label | `muted` |
+///
+/// The ACTIVE tab is marked by a leading `▌` in `accent` — the §2 vocabulary's
+/// **selection bar** / **live cursor** glyph, reused verbatim: it is already the
+/// browse selection bar and the streaming cursor, so no new glyph enters the
+/// table. The active label is `body` (full strength), every other label `dim`;
+/// under palette B `accent` resolves to the grey ramp, so the `▌` and the strength
+/// contrast carry the distinction with NO hue (D023: `error` red stays the only
+/// colour). Roles used, and only these: `accent`, `dim`, `muted`, `error`, `body`.
+///
+/// # Contracts
+/// - `N == 1` ⇒ this function is never called (the band has height 0), and if it
+///   were it would draw one `▌ label` — so a frame cannot gain a row by accident.
+/// - Never wider than `area`: a crowded bar loses the LAST tabs, never the `▌`
+///   (R6: when the active tab does not fit, the bar starts AT the active tab and
+///   sheds the ones to its right first).
+/// # Panics
+/// None. A zero-width/zero-height area returns immediately.
+fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let (row, _tabs) = tab_row(
+        app.conversations(),
+        app.conversations().active_index(),
+        area.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(row),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+}
+
+/// The pure row builder `draw_tab_bar` renders and the pixel tests assert on —
+/// split out exactly as `session_head_row` is split out of `draw_header`, so the
+/// bar's grammar is testable without a terminal.
+///
+/// `active` is the active conversation's index (0-based). The row is
+/// `▌ <label>[ remote][ ⠋| ✗]  ·  <label> …`, and R6's shed rule applies: the
+/// spans are added from the ACTIVE tab onward (wrapping around), so when the band
+/// is too narrow the tabs SHED to the right of the active one and the `▌` stays
+/// visible. The returned `Vec` is each tab's `(id, start, end)` column extent.
+fn tab_row(
+    conversations: &Conversations,
+    active: usize,
+    width: usize,
+) -> (Line<'static>, Vec<(ConversationId, u16, u16)>) {
+    let items: Vec<&Conversation> = conversations.iter().collect();
+    // R6: start at the active tab, wrap once — the active tab is drawn first, so
+    // a narrow band can only ever lose the ones to its right.
+    let order: Vec<usize> = (0..items.len())
+        .map(|k| (active + k) % items.len().max(1))
+        .collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut extents: Vec<(ConversationId, u16, u16)> = Vec::new();
+    let mut col = 0u16;
+    for (n, &idx) in order.iter().enumerate() {
+        let c = items[idx];
+        let is_active = idx == active;
+        let mut parts: Vec<Span<'static>> = Vec::new();
+        if is_active {
+            parts.push(Span::styled("▌ ", accent()));
+        }
+        parts.push(Span::styled(
+            c.label.clone(),
+            if is_active {
+                theme::theme().body
+            } else {
+                dim()
+            },
+        ));
+        if c.is_remote {
+            parts.push(Span::styled(" remote", muted()));
+        }
+        match c.state {
+            ConversationState::Idle => {}
+            ConversationState::Running => parts.push(Span::styled(" ⠋", accent())),
+            ConversationState::Failed => parts.push(Span::styled(" ✗", theme::theme().error)),
+        }
+        // Every glyph the bar can emit is single-width (`▌`, `⠋`, `✗`, `·` and
+        // the labels), so the char count IS the column count — no width crate
+        // (W040 adds no dependency).
+        let len: u16 = parts.iter().map(|sp| sp.content.chars().count() as u16).sum();
+        // A separator JOINs everything after the active tab (the `▌` needs no
+        // leading gap) — the design's `▌ wcode  ·  api`.
+        if n > 0 {
+            spans.push(Span::styled("  ·  ", muted()));
+            col = col.saturating_add(5);
+        }
+        let start = col;
+        spans.extend(parts);
+        col = col.saturating_add(len);
+        extents.push((c.id, start, col));
+    }
+    // The clip is structural: `Paragraph` truncates at the band's width, and the
+    // shed order above guarantees the `▌` is inside it.
+    let _ = width;
+    (Line::from(spans), extents)
+}
+
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
     let Some(query) = app.search_query() else {
         return;

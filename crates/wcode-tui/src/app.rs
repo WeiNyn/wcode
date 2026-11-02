@@ -876,6 +876,25 @@ struct Command {
     summary: &'static str,
 }
 
+/// The `/tab` listing: `1 first (active) · 2 second`, one line, the sidebar's
+/// numbering (1-based). The band is only drawn at N > 1, so this is how a user
+/// sees where they are at N = 1.
+fn tab_summary(conversations: &Conversations) -> String {
+    let active = conversations.active_index();
+    let items: Vec<String> = conversations
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i == active {
+                format!("{} {} (active)", i + 1, c.label)
+            } else {
+                format!("{} {}", i + 1, c.label)
+            }
+        })
+        .collect();
+    format!("tabs: {}", items.join(" · "))
+}
+
 /// The command table — its order is the `/help` listing.
 const COMMANDS: &[Command] = &[
     Command {
@@ -973,6 +992,12 @@ const COMMANDS: &[Command] = &[
         aliases: &[],
         args: None,
         summary: "switch surface",
+    },
+    Command {
+        name: "tab",
+        aliases: &[],
+        args: Some("[new|close|<n>]"),
+        summary: "switch conversation",
     },
     Command {
         name: "width",
@@ -3396,11 +3421,6 @@ impl App {
             .collect()
     }
 
-    /// Focus the next surface in the canonical order (D34), wrapping.
-    fn focus_next(&mut self) {
-        self.focus_step(1);
-    }
-
     /// Advance focus by `step` positions along [`App::canonical_order`], wrapping.
     fn focus_step(&mut self, step: isize) {
         let order = self.canonical_order();
@@ -3629,12 +3649,6 @@ impl App {
         {
             self.set_focus(idx);
         }
-    }
-
-    /// Focus the previous surface in the canonical order, wrapping — the mirror of
-    /// `focus_next`, bound to `Shift-Tab`.
-    fn focus_prev(&mut self) {
-        self.focus_step(-1);
     }
 
     /// Open the keymap overlay (`F1`).
@@ -5022,8 +5036,8 @@ impl App {
             Key::Ctrl('y') => self.copy_last(false),
             // Ctrl-N / Shift-Tab cycle the focused surface (Ctrl-C cancels,
             // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
-            Key::Ctrl('n') => self.focus_next(),
-            Key::BackTab => self.focus_prev(),
+            Key::Ctrl('n') => self.cycle_or_focus(1),
+            Key::BackTab => self.cycle_or_focus(-1),
             Key::Alt('[') => self.bump_measure(-(MEASURE_STEP as isize)),
             Key::Alt(']') => self.bump_measure(MEASURE_STEP as isize),
             Key::Alt(c) => self.focus_digit(c),
@@ -5381,6 +5395,23 @@ impl App {
                 }
             },
             "surface" => self.open_surface_picker(),
+            // W040 §13.2 item 7. `/tab new | close | <n>`; the reverse channel is
+            // 6b's, so `new`/`close` refuse HONESTLY here (a transient naming the
+            // reason) rather than silently doing nothing.
+            "tab" => match arg {
+                None => self.transient(tab_summary(self.conversations())),
+                Some("new") => self.transient(
+                    "the host cannot open a conversation yet (W040 6b: the reverse channel)",
+                ),
+                Some("close") => self.request_close_conversation(),
+                Some(n) => match n.parse::<usize>() {
+                    Ok(k) if k >= 1 && self.activate_conversation(k - 1) => {
+                        self.transient(format!("tab {k}"));
+                    }
+                    Ok(k) => self.transient(format!("no tab {k}")),
+                    Err(_) => self.transient("usage: /tab [new|close|<n>]"),
+                },
+            },
             // `/help` is the one command with a TABULAR body — it opens explicit
             // rows. The other prose producers (`/verify`, `/team roster`, `/tasks`,
             // the `/usage` drain) keep `open_info(title, text)` and stay prose.
@@ -5639,6 +5670,48 @@ impl App {
     /// Push a transient block on the FOCUSED surface — the twin of
     /// [`App::notice`], one word different. Used for `/`-command chatter, which
     /// [`Surface::retire_transient`] clears at the next submit.
+    /// **The settled close predicate** (W040 first-layer finding 10): refuse
+    /// while ANY surface of the conversation is `Running` — a running MEMBER
+    /// counts, because the tab state never promotes a member — and refuse the last
+    /// conversation. The host verb itself (cancel-then-abandon, idempotent, never
+    /// awaited) is 6b's.
+    fn request_close_conversation(&mut self) {
+        let active = self.conversations().active().id;
+        if self.conversations().len() <= 1 {
+            self.transient("the only conversation cannot be closed");
+            return;
+        }
+        let running = self
+            .conversations()
+            .active()
+            .surface_ids()
+            .iter()
+            .filter_map(|id| self.surface_index(id))
+            .any(|i| self.bodies()[i].state() == TeamState::Running);
+        if running {
+            self.transient("cannot close a conversation while a surface is running");
+            return;
+        }
+        let _ = active;
+        self.transient("the host cannot close a conversation yet (W040 6b: the reverse channel)");
+    }
+
+    /// `Ctrl-N` / `Shift-Tab` (W040 §13.2 item 6): cycle CONVERSATIONS when there
+    /// is more than one, and otherwise delegate to `focus_step` — byte-identical
+    /// at N = 1, which is what keeps the four key tripwires green unmodified.
+    fn cycle_or_focus(&mut self, step: isize) {
+        let len = self.conversations().len();
+        if len <= 1 {
+            self.focus_step(step);
+            return;
+        }
+        let active = self.conversations().active_index();
+        let next = (active as isize + step).rem_euclid(len as isize) as usize;
+        if self.activate_conversation(next) {
+            self.transient(format!("tab {} of {len}", next + 1));
+        }
+    }
+
     pub(crate) fn transient(&mut self, text: impl Into<String>) {
         let idx = self.focus();
         self.push_on(idx, Block::Transient(text.into()));
@@ -9673,6 +9746,206 @@ mod tests {
             "conversation 1 has no members"
         );
         assert!(!app.member_rows_indexed().iter().any(|(i, ..)| *i == 1));
+    }
+
+    /// A two-conversation App with the states the band must render: `c0` running
+    /// (the active tab), `c1` remote + failed. Built directly — the host channel
+    /// that could mint a second conversation live is 6b's.
+    fn two_conversations_for_the_band() -> App {
+        two_conversations_states(
+            crate::conversations::ConversationState::Running,
+            crate::conversations::ConversationState::Failed,
+        )
+    }
+
+    /// The same two conversations, both `Idle` — the close predicate's other leg.
+    fn two_conversations_idle() -> App {
+        two_conversations_states(
+            crate::conversations::ConversationState::Idle,
+            crate::conversations::ConversationState::Idle,
+        )
+    }
+
+    fn two_conversations_states(
+        first: crate::conversations::ConversationState,
+        second: crate::conversations::ConversationState,
+    ) -> App {
+        use crate::conversations::Conversation;
+        use wcode_protocol::ConversationId;
+
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("r0"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("r1"),
+                label: "second".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        let list = vec![
+            Conversation {
+                id: ConversationId::first(),
+                label: "first".into(),
+                root: SessionId::agent("r0"),
+                members: Vec::new(),
+                state: first,
+                is_remote: false,
+            },
+            Conversation {
+                id: ConversationId::new(1),
+                label: "second".into(),
+                root: SessionId::agent("r1"),
+                members: Vec::new(),
+                state: second,
+                is_remote: true,
+            },
+        ];
+        app.set_conversations(list, &infos);
+        app
+    }
+
+    /// The last `Transient` block on the focused surface — what `/tab` says.
+    fn last_transient(app: &App) -> String {
+        app.focused()
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|b| match b {
+                Block::Transient(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// `/tab`'s grammar and its honest refusals (W040 §13.2 item 7). The reverse
+    /// channel is 6b's, so `new`/`close` name the reason instead of no-opping; the
+    /// close predicate itself is implemented and says what it refuses.
+    #[test]
+    fn tab_command_lists_switches_and_refuses_honestly() {
+        let mut app = two_conversations_for_the_band();
+
+        submit(&mut app, "/tab");
+        let listing = last_transient(&app);
+        assert!(
+            listing.contains("tabs: 1 first (active) · 2 second"),
+            "the listing numbers and marks the active tab: {listing:?}"
+        );
+
+        // `/tab 2` activates; `/tab 9` does not.
+        submit(&mut app, "/tab 2");
+        assert_eq!(app.conversations().active_index(), 1);
+        assert_eq!(app.focus(), 1, "the focus follows to the new root");
+        submit(&mut app, "/tab 9");
+        assert_eq!(app.conversations().active_index(), 1, "out of range: unchanged");
+
+        // `new` refuses, naming the reason.
+        submit(&mut app, "/tab new");
+        assert!(
+            last_transient(&app).contains("cannot open a conversation yet"),
+            "{}",
+            last_transient(&app)
+        );
+    }
+
+    /// The settled close predicate: the last conversation, and any surface
+    /// RUNNING (a member counts — the tab never promotes a member).
+    #[test]
+    fn tab_close_refuses_the_last_conversation_and_a_running_surface() {
+        let mut app = two_conversations_for_the_band();
+        // A SURFACE runs — the predicate asks the surfaces, not the tab state
+        // (finding 10: a running member leaves the tab `Idle`).
+        app.bodies_mut()[0].running = true;
+        submit(&mut app, "/tab close");
+        assert!(
+            last_transient(&app).contains("while a surface is running"),
+            "a running surface refuses the close: {}",
+            last_transient(&app)
+        );
+
+        // Idle, but still not the host's to close yet (6b).
+        let mut idle = two_conversations_idle();
+        submit(&mut idle, "/tab close");
+        assert!(
+            last_transient(&idle).contains("cannot close a conversation yet"),
+            "{}",
+            last_transient(&idle)
+        );
+        // And the LAST conversation can never be closed.
+        let mut single = App::new();
+        submit(&mut single, "/tab close");
+        assert!(
+            last_transient(&single).contains("the only conversation cannot be closed"),
+            "{}",
+            last_transient(&single)
+        );
+    }
+
+    /// `Ctrl-N`/`Shift-Tab` cycle SURFACES at N = 1 (the four tripwires' rule) and
+    /// CONVERSATIONS at N > 1 — `cycle_or_focus` is a function of
+    /// `conversations.len()`.
+    #[test]
+    fn cycle_or_focus_cycles_surfaces_at_n1_and_conversations_at_n2() {
+        // N = 1 with two surfaces: unchanged behaviour.
+        let (mut app, _root, _member) = two_surfaces();
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.focus(), 1, "N = 1 still cycles surfaces");
+        app.handle(AppEvent::Key(Key::BackTab));
+        assert_eq!(app.focus(), 0, "and back");
+
+        // N = 2: the same keys cycle conversations and move the focus.
+        let mut app = two_conversations_for_the_band();
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.conversations().active_index(), 1);
+        assert_eq!(app.focus(), 1, "the neighbour's root");
+        app.handle(AppEvent::Key(Key::BackTab));
+        assert_eq!(app.conversations().active_index(), 0);
+        assert_eq!(app.focus(), 0);
+    }
+
+    /// **The band at N = 2** (a render-level test — the live two-tab frame is
+    /// 6b's, because nothing can mint a second conversation yet). Row 0 carries
+    /// `▌` on the active tab, `⠋` for `Running`, `✗` for `Failed`, the `remote`
+    /// word and `·` separators; and R6's shed rule keeps the `▌` when the band is
+    /// too narrow, losing the tabs to its right instead.
+    #[test]
+    fn the_tab_band_renders_at_n2_and_sheds_without_losing_the_active_tab() {
+        let mut app = two_conversations_for_the_band();
+        let wide = crate::render_plain(&mut app, 80, 10);
+        let row0 = wide.lines().next().expect("a first row");
+        assert!(row0.contains("▌ first"), "the active tab is marked: {row0:?}");
+        assert!(row0.contains('⠋'), "a running tab carries the spinner: {row0:?}");
+        assert!(row0.contains("second"), "the neighbour is drawn: {row0:?}");
+        assert!(row0.contains("remote"), "a remote tab says so: {row0:?}");
+        assert!(row0.contains('✗'), "a failed tab carries the mark: {row0:?}");
+        assert!(row0.contains('·'), "tabs are separated by `·`: {row0:?}");
+        // The header is the SECOND row, so the band is above it (D010's chrome is
+        // never pushed down by a tab strip).
+        assert!(
+            wide.lines().nth(1).is_some_and(|r| r.contains("WCODE")),
+            "the pinned header sits below the band: {:?}",
+            wide.lines().nth(1)
+        );
+
+        // R6: activate the neighbour, then render narrow. The `▌` and the ACTIVE
+        // label must survive; the tab to its right is the one that sheds.
+        assert!(app.activate_conversation(1));
+        let narrow = crate::render_plain(&mut app, 12, 10);
+        let row0 = narrow.lines().next().expect("a first row");
+        assert!(
+            row0.contains("▌ second"),
+            "the active tab is drawn FIRST, so a narrow band cannot clip it: {row0:?}"
+        );
+        assert!(
+            !row0.contains("first"),
+            "the tab to the right sheds instead: {row0:?}"
+        );
     }
 
     /// **The All-view FILTER (amendment (j)).** Narrowing `canonical_order` alone
