@@ -21,9 +21,13 @@ mod frontmatter;
 mod instructions;
 mod judge;
 mod repl;
-// W040 commits 4-6 wire the rest of `roots` in (the build path, the host loop, the
-// TUI adapters), so its API is deliberately ahead of its callers until then. The
-// allow is scoped to this module and comes off with the last of those commits.
+// W040 6b-ii-a wires the host in, but six items are still ahead of a caller —
+// named so the next commit can finish them rather than rediscover them:
+// `RootState::Failed` (the client-derived mirror; only `Dead` is written today),
+// `Roots::{iter,len,is_empty,state_of}` (the band reads `App`'s container, not the
+// registry), `Root::as_protocol_root` + `Root.roster` (the W041 seam — `serve()`
+// still hand-rolls its tuple), and `Root::take_supervisor` (tests only). The allow
+// is scoped to this module and goes when those are wired or deleted.
 #[allow(dead_code)]
 mod roots;
 mod rtk;
@@ -2206,7 +2210,7 @@ async fn dispatch(
                 p.file_name().map(|n| n.to_string_lossy().into_owned())
             });
             let git = git_branch_dirty();
-            let options = wcode_tui::Options {
+            let mut options = wcode_tui::Options {
                 status,
                 models: wcode_harness::streamfn::list_models(&llm)
                     .await
@@ -2226,304 +2230,77 @@ async fn dispatch(
                 git,
                 // One builder, two surfaces: the flag and the panel show the same bytes.
                 config: config_dump(cfg),
-                // W040 5a: one conversation, and its `single` fallback groups
-                // EVERY startup surface into it (root + `[team]` members) — so the
-                // narrowed accessors keep today's canonical order. Commit 6 hands
-                // the fully-built list over from the host's `Roots`.
+                // W040 §13.2 item 5: the CLI, which alone knows which root a
+                // surface belongs to, hands the container over fully built — root
+                // 0's row here, and a second one arrives through the host's
+                // `Added` reply (the same `Conversation` shape).
+                // Filled from the root below, once it exists (§13.2 item 5).
                 conversations: Vec::new(),
             };
             let session_path = agent.session_path().map(Path::to_path_buf);
-            // ==== SKETCH (review-only, not real code) ====
-            // W040 §13.2 items 1–4 + 8 — THE STARTUP ROOT AND THE REVERSE CHANNEL
-            // (the LOCAL TUI branch; `:1199` is the socket client's `run` call and
-            // is untouched).
-            //
-            // Six edits — (0), (A), (B), (C), (C2), (E) — plus two notes ((D) is an
-            // explicit non-change, (F) is the input struct) take this branch from
-            // "one hand-built surface list" to "root 0 in a `Roots`, plus a host
-            // task". Today's whole region is `:2118`–`:2422`; nothing before it
-            // moves.
-            //
-            // THE ORDER IS PART OF THE CONTRACT (first-layer B1). Read them as ONE
-            // sequence, not as independent edits:
-            //
-            //     channels  →  adopt root0  →  root0.surface_specs()
-            //               →  install_surface_sink(&root0, ..)   // the LAST &root0
-            //               →  roots.insert(root0)                // move it IN
-            //               →  tokio::spawn(run_host(roots, ..))
-            //
-            // `roots.insert(root0)` is not optional punctuation: without it `Roots`
-            // reaches the host EMPTY, so `close_all()` closes nothing, `get(c0)` is
-            // `None`, and "closing tab 0 is no special case" is simply false. The
-            // `mut` on `roots` is the tell — it is mutating once and then moved.
-            //
-            // ------------------------------------------------------------------
-            // (0) FIRST, THE CHANNELS. All four are created at the TOP of this
-            // branch (before (A)), because `Roots::new` needs the `RootEvent`
-            // sender and `adopt` installs the supervisor that writes to it.
-            //     let (root_event_tx, root_event_rx) = …::<roots::RootEvent>();
-            //
-            // (A) THE ROOT IS ADOPTED, NOT HAND-ASSEMBLED. Replace `:2323`–`:2326`
-            //
-            //     let handle = SessionActor::spawn(agent);
-            //     bg.bind(handle.clone());
-            //     if let Some(o) = &rt.orchestrator {
-            //         o.register_root(handle.clone());
-            //     }
-            //
-            // with
-            //
-            //     let mut roots = roots::Roots::new(root_event_tx.clone());
-            //     let root0 = roots.adopt(roots::RootParts {
-            //         // THE RESERVED ID (finding 8). `Roots::new` starts its mint at
-            //         // 1 precisely so `ConversationId::first()` (seq 0) belongs to
-            //         // THIS root, which is built outside `Roots::start` because it
-            //         // already exists before the client runs. Do NOT also mint it:
-            //         // minting here is what double-booked `c0` onto the first
-            //         // `/tab new`.
-            //         id: ConversationId::first(),
-            //         // The cwd basename, captured BEFORE `cwd` is moved into the
-            //         // `Options` literal above (`:2093`-region): one clone, two readers.
-            //         label: tab_label.clone(),
-            //         agent,
-            //         bg,
-            //         orchestrator: rt.orchestrator.clone(),
-            //         group: setup.active_group.clone(),
-            //         session_path: session_path.clone(),
-            //         model: llm.model.clone(),
-            //         members: Vec::new(),   // filled by `surface_specs` below, from
-            //                                // the SAME `member_names` loop (`:2348`
-            //                                // region) so N = 1 keeps today's order
-            //     })
-            //     .unwrap_or_else(|e| { eprintln!("tui: {e}"); std::process::exit(1) });
-            //
-            // `agent` moves INTO the root — so `session_path` (already captured one
-            // line above, `:2118`) stays the local copy the exit arms need
-            // (`print_relaunch`, `:2428`-region), and the `surfaces` vec below is
-            // built from the ROOT, not from `agent`.
-            //
-            // ------------------------------------------------------------------
-            // (B) THE SURFACE LIST COMES FROM THE ROOT. The `vec![SurfaceSpec { … }]`
-            // at `:2330` and the `[team]` loop at `:2348`–`:2383` become
-            //
-            //     let surfaces = root0.surface_specs().unwrap_or_else(|e| { … });
-            //
-            // `Root::surface_specs` reproduces both, byte for byte: the root row
-            // labelled `wcode` with model `llm.model` (`:2296`-region), then
-            // `member_names` from `scan_members`/`cfg.team` (`:2348`-region) each
-            // resolved through `o.worker_backend(&name)` (`:2360`). The
-            // reason it must move into the root: a `/tab new` root needs the same
-            // list, and a second copy of that loop is a second ordering rule — the
-            // exact drift `canonical_order`'s doc warns about (`app.rs` D34).
-            //
-            // ------------------------------------------------------------------
-            // (C) THE MEMBER FEED IS TAGGED AND PER-ROOT. Replace `:2385`–`:2396`
-            //
-            //     let new_surfaces = if args.owner.is_none() { … o.set_spawn_sink(tx) … };
-            //
-            // with
-            //
-            //     let (fan_tx, new_surfaces) =
-            //         tokio::sync::mpsc::unbounded_channel::<(ConversationId, wcode_tui::SurfaceSpec)>();
-            //     if args.owner.is_none() {
-            //         roots::install_surface_sink(&root0, fan_tx.clone());
-            //     }
-            //
-            // — the sink installed only AFTER the `[team]` loop, exactly as the
-            // current comment demands ("so preset members … are not re-emitted"),
-            // and now carrying the conversation id, because the TUI's flat
-            // `SessionId` routing cannot tell two roots' `w1` apart
-            // (`agents.rs:339` `if !self.registry.contains(&SessionId::agent(&candidate))`
-            // — the uniqueness check is per-orchestrator, so every root has a `w1`).
-            //
-            // ------------------------------------------------------------------
-            // (D) THE TASK FEED STAYS ROOT-0-ONLY — and that is a reported gap, not
-            // an oversight. `wcode_tui::TaskItem` (`app.rs:1546` `pub struct
-            // TaskItem {`) has no conversation field and `App.tasks` is ONE list
-            // (`crates/wcode-tui/src/lib.rs:294` `pub tasks: Vec<TaskItem>,`), so
-            // two roots' plans would overwrite each other. Leave `:2401`–`:2421`
-            // exactly as it is (it reads `rt.orchestrator`, root 0's) and record in
-            // the doc that `/tasks` shows ROOT 0's plan whatever tab is active.
-            // Fixing it needs a `TaskItem` change on the TUI side — "the one task
-            // list"
-            //
-            // ------------------------------------------------------------------
-            // (C2) ROOT 0 ENTERS THE REGISTRY — the B1 fix, and it goes here
-            // because this is the first point where nothing borrows `root0` any
-            // more (`surface_specs` and `install_surface_sink` both take `&root0`;
-            // a `Backend` is cheap to clone but a `Root` is moved):
-            //
-            //     roots.insert(root0).unwrap_or_else(|e| {
-            //         eprintln!("tui: {e}");
-            //         std::process::exit(1);
-            //     });
-            //
-            // The SAME `eprintln!("tui: {e}")` / `exit(1)` as (A)'s `adopt` — a
-            // startup that cannot register its own root must not limp on into
-            // `run_host`, because every later `/tab close` would then be addressing
-            // an empty registry. `insert` only fails on a duplicate id or a `Resume`
-            // dir already live, and neither is reachable for the startup root.
-            //
-            // ------------------------------------------------------------------
-            // (E) THE HOST TASK. Before `:2423` (`match wcode_tui::run(surfaces,
-            // options, new_surfaces, new_tasks).await {`) the reverse pair is
-            // created and the host is spawned — with `roots` ALREADY holding root 0
-            // from (C2), which is why `run_host` takes it by value and gives it
-            // back:
-            //
-            //     let (req_tx, req_rx) =
-            //         tokio::sync::mpsc::unbounded_channel::<wcode_tui::conversations::ConversationRequest>();
-            //     let (evt_tx, evt_rx) =
-            //         tokio::sync::mpsc::unbounded_channel::<wcode_tui::conversations::ConversationEvent>();
-            //     let feeds = wcode_tui::conversations::ConversationFeeds {
-            //         incoming: Some(evt_rx),
-            //         outbound: Some(req_tx),
-            //     };
-            //     let factory = roots::factory_for(run_inputs.clone());        // (F)
-            //     let host = tokio::spawn(roots::run_host(
-            //         roots,
-            //         factory,
-            //         roots::HostChannels {
-            //             requests: req_rx, events: evt_tx, surfaces: fan_tx,
-            //             root_events: root_event_rx,
-            //         },
-            //     ));
-            //
-            //     // `run` gains ONE parameter for `feeds`. The TUI's `run`
-            //     // signature is not yet changed on disk — reported, not fixed here.
-            //     let outcome = wcode_tui::run(surfaces, options, new_surfaces, new_tasks, feeds).await;
-            //     // The TUI is gone: `feeds.outbound` dropped, so the host's
-            //     // `requests` receiver closed and `run_host` returned the roots it
-            //     // still holds. Close them all — every actor, every bg scope, every
-            //     // registry entry — then continue to the unchanged exit arms.
-            //     let mut roots = host.await.expect("host task");
-            //     roots.close_all();   // root 0 included — it is in the registry
-            //
-            // THE EXIT ARMS DO NOT CHANGE (`:2423`-region onward): `Quit`,
-            // `Abandoned`, `Reload`, `Resume`, `New`, `Team` all stay re-exec /
-            // exit paths. `/tab new` is the FIRST thing this process does without
-            // a re-exec, and that is the whole point of §13.2 item 8.
-            // `Background::shutdown_all()` in the `Quit`/`Abandoned` arms stays as
-            // the belt: `close_all` is the braces.
-            //
-            // ------------------------------------------------------------------
-            // (F) THE FACTORY'S INPUTS — ONE struct, `repl::RunInputs`
-            // (first-layer finding 9; `roots::RootInputs` is deleted and this file
-            // must not name it). The factory captures a clone of it, so `dispatch`
-            // builds `run_inputs` ONCE, hands it to `repl::run` and clones it for
-            // `factory_for`:
-            //
-            //     let run_inputs = repl::RunInputs { llm, hooks, tools, compaction,
-            //         title_after_turns, instructions, skills, team, guidelines,
-            //         overlay, no_project_config, owner, name, orchestrator,
-            //         args: args.clone(), cfg: cfg.clone(), cwd, session_dir };
-            //
-            // THE ONE REAL-CODE EDIT THIS NEEDS (finding 9's `private_interfaces`
-            // warning): `Args` (`main.rs:145`-`146`) is neither `Clone` nor `pub`,
-            // and `RunInputs` is `pub(crate)`, so a `pub args: Args` field would
-            // leak a private type through a `pub(crate)` struct's field:
-            //
-            //     -    #[derive(Debug, Default, PartialEq)]
-            //     -    struct Args {
-            //     +    #[derive(Clone, Debug, Default, PartialEq)]
-            //     +    pub(crate) struct Args {
-            //
-            // Both are mechanical and neither introduces a bound (`Args` is already
-            // `Default + PartialEq`). The alternative — a narrowed `ArgsParts` — is
-            // rejected: it is a struct that must be kept in sync with `Args`
-            // forever, which is the drift finding 9 is about — and `Args` not being
-            // `Clone` is "the `Args` gap".
-            // ==== /SKETCH ====
-            let handle = SessionActor::spawn(agent);
-            bg.bind(handle.clone());
-            if let Some(o) = &rt.orchestrator {
-                o.register_root(handle.clone());
-            }
-            // Surface list: the root, then one per team member — only for
-            // the root orchestrator (a served `--owner` worker has no team).
-            let mut surfaces = vec![wcode_tui::SurfaceSpec {
-                id: rt
-                    .orchestrator
-                    .as_ref()
-                    .map(|o| o.id().clone())
-                    .unwrap_or_else(|| SessionId::agent("root")),
-                // `wcode` — the header's reverse-video `WCODE` run lowercased —
-                // so the sidebar's row 0 reads `wcode` (D018/O3).
-                label: "wcode".to_string(),
+            // ── W040 §13.2 items 1–4, 8 ─────────────────────────────────────
+            // Root 0 becomes a `Roots` entry and the TUI's member feed becomes
+            // the ROOT's own sink. The order is load-bearing (first-layer B1):
+            // adopt → surface_specs() → install_surface_sink → roots.adopt →
+            // run_host, with the sink installed only AFTER the member list is
+            // built, so preset members are not re-emitted.
+            let (root_event_tx, root_event_rx) =
+                tokio::sync::mpsc::unbounded_channel::<roots::RootEvent>();
+            let mut roots = roots::Roots::new(root_event_tx.clone());
+            // The team, in display order, as A2A ADDRESSES: `surface_specs`
+            // resolves each to its live backend and MINTS every client-facing id.
+            let member_names: Vec<String> = if args.owner.is_none() {
+                match (setup.resuming_group, &setup.active_group) {
+                    (true, Some(group)) => session_groups::scan_members(group)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                        .collect(),
+                    _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
+                }
+            } else {
+                Vec::new()
+            };
+            let root0 = roots.adopt(roots::RootParts {
+                // THE RESERVED ID (finding 8): `Roots::new` mints from 1, so seq 0
+                // is the startup conversation's and `mint` is never called for it.
+                id: wcode_protocol::ConversationId::first(),
+                // The tab label's seed: `agent.title()` → this → the cwd basename
+                // (§13.6.1) is `Root::label`'s job for a factory-built root; root 0
+                // is adopted, so the seed is the cwd's.
+                label: options
+                    .cwd
+                    .clone()
+                    .unwrap_or_else(|| "wcode".to_string()),
+                agent,
+                bg,
+                orchestrator: rt.orchestrator.clone(),
+                group: setup.active_group.clone(),
+                session_path: session_path.clone(),
                 model: llm.model.clone(),
-                is_root: true,
-                backend: Backend::from(handle),
-            }];
-            if args.owner.is_none()
-                && let Some(o) = &rt.orchestrator
-            {
-                // A resumed group's members come from its files; otherwise
-                // from `[team]`. Either way the phonebook resolves each name.
-                let member_names: Vec<String> =
-                    match (setup.resuming_group, &setup.active_group) {
-                        (true, Some(group)) => session_groups::scan_members(group)
-                            .unwrap_or_default()
-                            .iter()
-                            .filter_map(|p| {
-                                p.file_stem().and_then(|s| s.to_str()).map(str::to_string)
-                            })
-                            .collect(),
-                        _ => cfg.team.iter().map(|m| m.name.clone()).collect(),
-                    };
-                for name in member_names {
-                    if let Some(backend) = o.worker_backend(&name) {
-                        let model = match (setup.resuming_group, &setup.active_group) {
-                            (true, Some(group)) => {
-                                session_groups::member_spec(group, &name).model
-                            }
-                            _ => cfg
-                                .team
-                                .iter()
-                                .find(|m| m.name == name)
-                                .and_then(|m| m.model.clone()),
-                        };
-                        surfaces.push(wcode_tui::SurfaceSpec {
-                            id: SessionId::agent(&name),
-                            label: name.clone(),
-                            model: model.unwrap_or_else(|| llm.model.clone()),
-                            is_root: false,
-                            backend,
-                        });
-                    }
-                }
-            }
-            // Runtime-spawned workers reach the TUI through this feed. Install
-            // the sink only AFTER the `[team]` loop above, so preset members
-            // (already in `surfaces`) are not re-emitted. A served worker
-            // (`--owner`) has no team surfaces, so it installs nothing.
-            // W040 5a: the feed's element is now `(ConversationId, SurfaceSpec)`,
-            // so the sink's specs are tagged on the way through. Every runtime
-            // spawn today belongs to the STARTUP conversation — the CLI cannot
-            // mint a second one until commit 6's host loop exists — so the tag is
-            // `ConversationId::first()`, a real value rather than a default.
-            // Commit 6 replaces this with `roots::install_surface_sink`.
+                members: member_names
+                    .iter()
+                    .map(SessionId::agent)
+                    .collect(),
+            });
+            // The client surface list comes from the ROOT (one ordering rule).
+            let surfaces = root0.surface_specs().unwrap_or_else(|e| {
+                eprintln!("tui: {e}");
+                std::process::exit(1)
+            });
+            // The startup conversation's view-model row (the container is handed
+            // over fully built: id, label, minted root + member ids, state).
+            options.conversations = vec![root0.conversation()];
+            // The member feed is now the ROOT's sink (one forwarder per root,
+            // which is what tags a runtime-spawned member with its conversation
+            // and MINTS its surface id on the way through).
+            let (fan_tx, fan_rx) = tokio::sync::mpsc::unbounded_channel::<(
+                wcode_protocol::ConversationId,
+                wcode_tui::SurfaceSpec,
+            )>();
             let new_surfaces = if args.owner.is_none() {
-                match &rt.orchestrator {
-                    Some(o) => {
-                        let (sink_tx, mut sink_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
-                        o.set_spawn_sink(sink_tx);
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
-                            wcode_protocol::ConversationId,
-                            wcode_tui::SurfaceSpec,
-                        )>();
-                        tokio::spawn(async move {
-                            let tag = wcode_protocol::ConversationId::first();
-                            while let Some(spec) = sink_rx.recv().await {
-                                if tx.send((tag, spec)).is_err() {
-                                    return;
-                                }
-                            }
-                        });
-                        Some(rx)
-                    }
-                    None => None,
-                }
+                roots::install_surface_sink(&root0, fan_tx.clone());
+                Some(fan_rx)
             } else {
                 None
             };
@@ -2552,7 +2329,55 @@ async fn dispatch(
                 });
                 rx
             });
-            match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
+            // The reverse channel. Nothing emits `ConversationRequest`s yet
+            // (`Action::NewConversation` is the next commit's), so the sender is
+            // held for the TUI's lifetime and dropped when it returns — which is
+            // what ends `run_host` and hands the roots back for `close_all`.
+            let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<
+                wcode_tui::conversations::ConversationRequest,
+            >();
+            let (evt_tx, _evt_rx) = tokio::sync::mpsc::unbounded_channel::<
+                wcode_tui::conversations::ConversationEvent,
+            >();
+            let run_inputs = repl::RunInputs {
+                args: args.clone(),
+                cfg: cfg.clone(),
+                llm: llm.clone(),
+                hooks: rt.hooks.clone(),
+                tools: cfg.tools,
+                compaction: cfg.compaction,
+                title_after_turns: cfg.session.title_after_turns,
+                instructions: rt.instructions.clone(),
+                skills: rt.skills.clone(),
+                team: cfg.team.clone(),
+                guidelines: cfg.orchestrator.guidelines.clone(),
+                overlay: args.config.clone(),
+                no_project_config: args.no_project_config,
+                owner: args.owner.clone(),
+                name: args.name.clone(),
+                orchestrator: rt.orchestrator.clone(),
+                cwd: setup.cwd.clone(),
+                dir: repl::session_dir(),
+            };
+            let host = tokio::spawn(roots::run_host(
+                roots,
+                roots::factory_for(run_inputs),
+                roots::HostChannels {
+                    requests: req_rx,
+                    events: evt_tx,
+                    surfaces: fan_tx,
+                    root_events: root_event_rx,
+                },
+            ));
+            let outcome = wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await;
+            // The TUI is gone: drop the request sender so `run_host` ends and
+            // hands the registry back, then close EVERY root — every actor, every
+            // `bg` scope, every registry entry — before any exit path below. A
+            // leaked root set is the parked-worker defect one level up.
+            drop(req_tx);
+            let mut roots = host.await.expect("host task");
+            roots.close_all();
+            match outcome {
                 Ok(wcode_tui::Outcome::Quit) => {
                     // The terminal is already restored: print the exact
                     // command to bring this session back (nothing when there
