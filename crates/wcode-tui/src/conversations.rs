@@ -407,16 +407,26 @@ impl Conversations {
         conversation: ConversationId,
         info: crate::SurfaceInfo,
     ) -> Result<(), String> {
-        if self
-            .items
-            .iter()
-            .any(|c| c.root == info.id || c.members.contains(&info.id))
-        {
-            return Err(format!("surface {} is already tracked", info.id));
+        // A surface owned by ANOTHER conversation is never ours to take.
+        if self.items.iter().any(|c| {
+            c.id != conversation && (c.root == info.id || c.members.contains(&info.id))
+        }) {
+            return Err(format!("surface {} is owned by another conversation", info.id));
         }
         let Some(item) = self.items.iter_mut().find(|c| c.id == conversation) else {
             return Err(format!("conversation {conversation} is not live"));
         };
+        // **The root is not a member** (and is already tracked as the root): a
+        // `ConversationSpec` lists `root + members`, so the root reaches this
+        // method on every `Added` reply. Accepting it idempotently is what makes
+        // "every listed surface has a body" true; refusing it (the first cut)
+        // silently dropped the root's body while its backend was wired.
+        if item.root == info.id {
+            return Ok(());
+        }
+        if item.members.contains(&info.id) {
+            return Err(format!("surface {} is already tracked", info.id));
+        }
         item.members.push(info.id);
         Ok(())
     }

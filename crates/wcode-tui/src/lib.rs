@@ -1199,6 +1199,160 @@ mod tests {
         }
     }
 
+    /// **The shape the host actually sends** (`Root::surface_specs`): a
+    /// `ConversationSpec` whose `surfaces` is `root + members`. The first cut of
+    /// `App::add_conversation` pushed the row with `root: <first id>` and then ran
+    /// EVERY surface through `Conversations::add_surface_in`, which refused the
+    /// root as "already tracked" — silently dropping the root's body while
+    /// `accept_conversation` still pushed its backend. One extra backend, always:
+    /// `backends = bodies + 1`, and a live `/tab new` tripped the alignment
+    /// invariant. 1,579 green tests coexisted with it because no test used the
+    /// real spec shape.
+    #[tokio::test]
+    async fn accepting_a_rooted_conversation_keeps_backends_and_bodies_aligned() {
+
+        let root = SessionId::agent("r0");
+        let m1 = SessionId::agent("m1");
+        let m2 = SessionId::agent("m2");
+        let mut app = App::new();
+        // The startup conversation, so the new one is not the only tab.
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("c0root"),
+            label: "first".into(),
+            model: "m".into(),
+            is_root: true,
+        }];
+        app.set_surfaces(infos.clone());
+        app.set_conversations(
+            vec![crate::Conversations::single(&infos)
+                .active()
+                .clone()],
+            &infos,
+        );
+        let mut backends: Vec<(SessionId, Backend)> = vec![(SessionId::agent("c0root"), backend())];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+
+        let spec = conversations::ConversationSpec {
+            id: ConversationId::new(1),
+            label: "second".into(),
+            surfaces: vec![
+                SurfaceSpec {
+                    id: root.clone(),
+                    label: "wcode".into(),
+                    model: "m".into(),
+                    is_root: true,
+                    backend: backend(),
+                },
+                SurfaceSpec {
+                    id: m1.clone(),
+                    label: "m1".into(),
+                    model: "m".into(),
+                    is_root: false,
+                    backend: backend(),
+                },
+                SurfaceSpec {
+                    id: m2.clone(),
+                    label: "m2".into(),
+                    model: "m".into(),
+                    is_root: false,
+                    backend: backend(),
+                },
+            ],
+        };
+        assert!(
+            accept_conversation(&mut app, &mut backends, &agent_tx, spec),
+            "the conversation is accepted"
+        );
+        assert_eq!(
+            backends.len(),
+            app.bodies().len(),
+            "backends and bodies are index-for-index"
+        );
+        // A body exists for every listed surface — the ROOT included, which is
+        // exactly what the bug dropped. `surface_index` is the public probe.
+        assert!(
+            app.surface_index(&root).is_some(),
+            "the ROOT has a body (this is what the bug dropped)"
+        );
+        assert!(app.surface_index(&m1).is_some());
+        assert!(app.surface_index(&m2).is_some());
+        assert_eq!(app.conversations().len(), 2);
+        // The root is the conversation's root, not one of its members.
+        let row = app
+            .conversations()
+            .iter()
+            .find(|c| c.id == ConversationId::new(1))
+            .expect("the new conversation");
+        assert_eq!(row.root, root);
+        assert_eq!(
+            row.members,
+            vec![m1.clone(), m2.clone()],
+            "the root is NOT a member (it would appear in the sidebar twice)"
+        );
+    }
+
+    /// **The rollback.** A surface the container refuses (here: a member already
+    /// owned by the startup conversation) must make the whole conversation fail —
+    /// `accept_conversation` then pushes no backend, so a half-added conversation
+    /// can never reach the screen.
+    #[tokio::test]
+    async fn a_refused_surface_rolls_the_new_conversation_back() {
+        let owned = SessionId::agent("taken");
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("c0root"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: owned.clone(),
+                label: "taken".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        app.set_conversations(vec![crate::Conversations::single(&infos).active().clone()], &infos);
+        let mut backends: Vec<(SessionId, Backend)> = vec![
+            (SessionId::agent("c0root"), backend()),
+            (owned.clone(), backend()),
+        ];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let before_bodies = app.bodies().len();
+        let before_backends = backends.len();
+
+        let spec = conversations::ConversationSpec {
+            id: ConversationId::new(7),
+            label: "doomed".into(),
+            surfaces: vec![
+                SurfaceSpec {
+                    id: SessionId::agent("r7"),
+                    label: "wcode".into(),
+                    model: "m".into(),
+                    is_root: true,
+                    backend: backend(),
+                },
+                SurfaceSpec {
+                    id: owned.clone(), // already a member of conversation 0
+                    label: "taken".into(),
+                    model: "m".into(),
+                    is_root: false,
+                    backend: backend(),
+                },
+            ],
+        };
+        assert!(
+            !accept_conversation(&mut app, &mut backends, &agent_tx, spec),
+            "a refused surface fails the conversation"
+        );
+        assert_eq!(app.conversations().len(), 1, "the row was rolled back");
+        assert_eq!(app.bodies().len(), before_bodies, "no half-added body");
+        assert_eq!(backends.len(), before_backends, "and no backend");
+        assert!(app.surface_index(&SessionId::agent("r7")).is_none());
+    }
+
     /// A surface handed over the runtime feed is delivered to the loop's arm —
     /// the headless seam the event loop's runtime-add branch reads — **with its
     /// conversation tag**, which is the whole reason the element type is a pair

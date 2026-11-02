@@ -3259,8 +3259,20 @@ impl App {
         if self.conversations.push(row).is_err() {
             return false;
         }
+        // EVERY listed surface must land, the root included (`Root::surface_specs`
+        // emits `root + members`). A refusal is a half-added conversation — the
+        // exact shape that crashed the live `/tab new` — so it rolls back instead
+        // of returning a `true` with a body missing.
+        let mut added: Vec<SessionId> = Vec::new();
         for surface in spec.surfaces {
-            self.add_surface_in(spec.id, surface.info());
+            let id = surface.id.clone();
+            if !self.add_surface_in(spec.id, surface.info()) {
+                self.conversations.remove(spec.id);
+                self.bodies_mut().retain(|s| !added.contains(&s.id));
+                self.dirty = true;
+                return false;
+            }
+            added.push(id);
         }
         if let Some(idx) = self.conversations.index_of(spec.id) {
             self.activate_conversation(idx);
@@ -3410,7 +3422,7 @@ impl App {
         &self.focused().id
     }
 
-    fn surface_index(&self, id: &SessionId) -> Option<usize> {
+    pub(crate) fn surface_index(&self, id: &SessionId) -> Option<usize> {
         self.bodies().iter().position(|s| &s.id == id)
     }
 
