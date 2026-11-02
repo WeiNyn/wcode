@@ -21,14 +21,6 @@ mod frontmatter;
 mod instructions;
 mod judge;
 mod repl;
-// W040 6b-ii-a wires the host in, but six items are still ahead of a caller —
-// named so the next commit can finish them rather than rediscover them:
-// `RootState::Failed` (the client-derived mirror; only `Dead` is written today),
-// `Roots::{iter,len,is_empty,state_of}` (the band reads `App`'s container, not the
-// registry), `Root::as_protocol_root` + `Root.roster` (the W041 seam — `serve()`
-// still hand-rolls its tuple), and `Root::take_supervisor` (tests only). The allow
-// is scoped to this module and goes when those are wired or deleted.
-#[allow(dead_code)]
 mod roots;
 mod rtk;
 mod scheduler;

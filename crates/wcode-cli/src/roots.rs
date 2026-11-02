@@ -104,6 +104,12 @@ pub enum RootState {
     Live,
     /// The last run failed — client-derived; the host mirrors it only if a
     /// client asks ([`Roots::set_state`]).
+    ///
+    /// Written by the tests' truth table only (amendment (k)): no production path
+    /// mirrors a run failure (the client derives it from its own surfaces), so this
+    /// retires with the `/usage`-style host mirror, or when `run_host` learns to
+    /// read a failed run.
+    #[allow(dead_code)]
     Failed,
     /// The actor task resolved: panicked, or ended without a `close`
     /// (§13.2 item 4). Sticky; the handles are still held so the client can read
@@ -177,6 +183,9 @@ pub struct Root {
     /// orchestrator's tools.
     pub registry: Registry,
     /// The live team, root excluded.
+    ///
+    /// Read only by [`Root::as_protocol_root`] (amendment (k)); retires with it.
+    #[allow(dead_code)]
     pub roster: Roster,
     /// The root's background-task registry+notifier; also the scope tag its
     /// members' `Background`s inherit (§13.2 item 3).
@@ -190,6 +199,10 @@ pub struct Root {
     pub members: Vec<SessionId>,
     /// The root's session file, when sessions are on. `None` for `--no-session`
     /// and for a served worker with no local file.
+    ///
+    /// Read by nobody yet (amendment (k)): it retires when `serve()` adopts a root
+    /// (`as_protocol_root`'s neighbour) or with W041's hub.
+    #[allow(dead_code)]
     pub session_path: Option<PathBuf>,
     /// The group dir, when this root has one. The unit of "resume this
     /// conversation".
@@ -298,7 +311,9 @@ impl Root {
     }
 
     /// Take the actor task's `JoinHandle` — for a caller that wants to await the
-    /// death itself (a test, or a host that drains before closing).
+    /// death itself. **Test-only** (amendment (k)): the host lets the supervisor
+    /// report and never joins.
+    #[cfg(test)]
     pub fn take_supervisor(&mut self) -> Option<JoinHandle<()>> {
         self.supervisor.take()
     }
@@ -451,6 +466,11 @@ impl Roots {
 
     /// The `Stop` verb — [`Roots::close`]'s alias, so both hosts speak the same
     /// vocabulary as the channel. Returns `false` when the id is unknown.
+    ///
+    /// Called by the tests only (amendment (k)): `run_host`'s `Stop` arm still
+    /// calls `close` directly, so this retires when a second host speaks the
+    /// channel, or when the arm switches to it.
+    #[allow(dead_code)]
     pub fn stop(&mut self, id: ConversationId) -> bool {
         self.close(id)
     }
@@ -516,18 +536,15 @@ impl Roots {
         self.items.iter_mut().find(|root| root.id == id)
     }
 
-    /// Every live root, creation order.
-    pub fn iter(&self) -> impl Iterator<Item = &Root> {
-        self.items.iter()
-    }
-
-    /// How many live roots. `1` at startup, always ≥ 0.
+    /// How many live roots. **Test-only** (amendment (k)).
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    /// Never true after `Roots::new` + one `insert`; present for the
-    /// `clippy::len_without_is_empty` gate.
+    /// Never true after `Roots::new` + one `insert`. **Test-only** (amendment (k));
+    /// it exists for `clippy::len_without_is_empty` beside the test-only `len`.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -551,7 +568,9 @@ impl Roots {
         Some(self.items.remove(idx))
     }
 
-    /// The liveness the host reports for `id`.
+    /// The liveness the host reports for `id`. **Test-only** (amendment (k)): the
+    /// host writes state through `set_state` and the client reads the tab.
+    #[cfg(test)]
     pub fn state_of(&self, id: ConversationId) -> Option<RootState> {
         self.get(id).map(|root| root.state)
     }
@@ -1183,6 +1202,9 @@ impl Root {
         Ok(specs)
     }
 
+    // Read by nobody yet (amendment (k)): `serve()` still hand-rolls its root
+    // tuple. It retires when `serve()` adopts a root, or with W041's hub.
+    #[allow(dead_code)]
     /// The `serve`-shaped view of this root — **no TUI type**, so a second host
     /// could pass it straight to `serve_at`/`serve_stdio` (candidate reuse,
     /// finding 6 open): the root tuple those take plus the live roster. This is
