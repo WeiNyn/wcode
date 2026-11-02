@@ -924,6 +924,144 @@ fn build_root_inner(
 }
 
 // ==========================================================================
+// §6 — the reverse channel (the host loop, §13.2 item 8)
+// ==========================================================================
+
+/// The three channels one host owns — the two the TUI already has
+/// (`new_surfaces`, `new_tasks`), plus the reverse pair from
+/// `wcode_tui::conversations::ConversationFeeds`.
+///
+/// | direction | type |
+/// |---|---|
+/// | client → host | `UnboundedSender<ConversationRequest>` (`ConversationFeeds::outbound`) |
+/// | host → client | `UnboundedReceiver<ConversationEvent>` (`ConversationFeeds::incoming`) |
+/// | host → client (members) | `UnboundedSender<(ConversationId, SurfaceSpec)>` — the TAGGED `new_surfaces` |
+///
+/// **This is the TUI edge of the module.** §§1–5 name no `wcode_tui` type;
+/// `HostChannels` and [`Root::surface_specs`] do. Whether a second host shares
+/// them VERBATIM is the open finding-6 question (`W040` §13.5.2) — **candidate
+/// reuse, pending that ruling**, never a claim. The handlers behind the edge
+/// ([`Roots::start`]/[`Roots::stop`]) are the part that might carry over.
+pub struct HostChannels {
+    /// `Start`/`Stop` from the client.
+    pub requests: mpsc::UnboundedReceiver<wcode_tui::conversations::ConversationRequest>,
+    /// `Added`/`Failed`/`Stopped`/`Died` to the client.
+    pub events: mpsc::UnboundedSender<wcode_tui::conversations::ConversationEvent>,
+    /// Members spawned at runtime, tagged with their conversation.
+    pub surfaces: mpsc::UnboundedSender<(ConversationId, wcode_tui::SurfaceSpec)>,
+    /// The supervisor end. `Roots::new` gets the matching SENDER, so the receiver
+    /// must be handed to the loop that selects on it — this field. Splitting the
+    /// pair is deliberate: `Roots` owns the sink (so no root can be inserted
+    /// without one) while the loop owns the wake-up.
+    pub root_events: mpsc::UnboundedReceiver<RootEvent>,
+}
+
+/// **Service the reverse channel until the client goes away.** The whole of
+/// §13.2 item 8's "a reverse channel" is this loop.
+///
+/// # Contract
+///
+/// - `Start(spec)` → [`Roots::start`] (mint + build + insert — the verb any other
+///   host would call) → `events.send(Added(ConversationSpec { id, label,
+///   surfaces }))`. **If that `send` fails** (the client quit while we were
+///   building), the root is closed immediately — otherwise a `/tab new` plus an
+///   instant `Ctrl-C` leaks an actor, a `bg` scope and a session file.
+/// - A failed build answers `Failed { error }`. **That reply carries no id**, so
+///   only ONE build may be in flight — which is what `Roots::start`'s `&mut self`
+///   guarantees: the borrow is held across the (synchronous) build, and this loop
+///   is the only caller, so two `Start`s cannot interleave. A second host would
+///   have to keep that property; it is stated here because the type cannot.
+/// - `Stop(id)` → [`Roots::close`] → `events.send(Stopped { id })`. `Stopped` is
+///   sent even for an unknown id, so a client waiting for its echo cannot hang.
+/// - `RootEvent::Died` → `set_state(id, Dead)` then `Died { id }`; the tab keeps
+///   its surfaces (a root whose actor panicked must stay readable).
+/// - The loop ends when `requests` closes; it returns [`Roots`] so the caller can
+///   [`Roots::close_all`].
+/// - A blocking build inside the `select!` is accepted: creating a group and an
+///   agent is milliseconds and touches no network. `spawn_blocking` is NOT used —
+///   it would move `build_runtime`'s `tokio::spawn`s off the reactor's task
+///   context for no gain.
+pub async fn run_host(roots: Roots, factory: Factories, channel: HostChannels) -> Roots {
+    use wcode_tui::conversations::{ConversationEvent, ConversationRequest};
+
+    let HostChannels {
+        mut requests,
+        events,
+        surfaces,
+        mut root_events,
+    } = channel;
+    let mut roots = roots;
+    loop {
+        tokio::select! {
+            request = requests.recv() => {
+                let Some(request) = request else { break }; // the client is gone
+                match request {
+                    ConversationRequest::Start(spec) => {
+                        match roots.start(&factory, spec) {
+                            Ok(id) => {
+                                // `surface_specs` cannot fail for a root we just
+                                // inserted; an error is a bug, and the honest
+                                // answer is the same `Failed` the client handles.
+                                let reply = match roots.get(id) {
+                                    Some(root) => root.surface_specs().map(|surfaces| {
+                                        wcode_tui::conversations::ConversationSpec {
+                                            id,
+                                            label: root.label.clone(),
+                                            surfaces,
+                                        }
+                                    }),
+                                    None => Err(RootError::AlreadyLive(id.to_string())),
+                                };
+                                match reply {
+                                    Ok(conversation) => {
+                                        if events
+                                            .send(ConversationEvent::Added(conversation))
+                                            .is_err()
+                                        {
+                                            // The client quit mid-build: tear the
+                                            // fresh root down rather than leak it.
+                                            roots.close(id);
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = events.send(ConversationEvent::Failed {
+                                            error: e.to_string(),
+                                        });
+                                        roots.close(id);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = events
+                                    .send(ConversationEvent::Failed { error: e.to_string() });
+                            }
+                        }
+                    }
+                    ConversationRequest::Stop(id) => {
+                        roots.close(id);
+                        let _ = events.send(ConversationEvent::Stopped { id });
+                    }
+                }
+            }
+            event = root_events.recv() => {
+                let Some(RootEvent::Died { id, reason }) = event else {
+                    // Every sender dropped: no root can report again.
+                    continue;
+                };
+                let _ = reason;
+                roots.set_state(id, RootState::Dead);
+                let _ = events.send(ConversationEvent::Died { id });
+            }
+        }
+    }
+    // The member feed's sender is owned by the caller; this loop only forwards
+    // through `install_surface_sink`, so it has nothing to drain here.
+    let _ = surfaces;
+    roots
+}
+
+// ==========================================================================
 // §6 — the member feed (§13.2 item 8)
 // ==========================================================================
 
@@ -960,6 +1098,101 @@ pub fn install_surface_sink(
             }
         }
     });
+}
+
+// ==========================================================================
+// §7 — the TUI adapters (the ONLY TUI-shaped code in this file)
+// ==========================================================================
+
+impl Root {
+    /// The client's view-model row: id, label, root surface, members, state.
+    ///
+    /// `is_remote` is always `false` here — a locally built root is
+    /// `Backend::Local` by §13.2 item 1; a socket client's single conversation is
+    /// built by `main.rs` and never comes through this module.
+    pub fn conversation(&self) -> wcode_tui::conversations::Conversation {
+        use wcode_tui::conversations::{Conversation, ConversationState};
+
+        Conversation {
+            id: self.id,
+            label: self.label.clone(),
+            root: self.surface.clone(),
+            members: self
+                .members
+                .iter()
+                .map(|address| mint_surface_id(self.id, address))
+                .collect(),
+            state: match self.state {
+                RootState::Live => ConversationState::Idle,
+                RootState::Failed => ConversationState::Failed,
+                RootState::Dead => ConversationState::Failed,
+            },
+            is_remote: false,
+        }
+    }
+
+    /// The client's attachments for this root: the root surface first
+    /// (`is_root: true`), then `members` in display order.
+    ///
+    /// # Every `id` is MINTED (invariant 6, finding 3)
+    /// `id: mint_surface_id(self.id, &self.address)` for the root, and
+    /// `mint_surface_id(self.id, address)` for each member — the ADDRESS is
+    /// `members`' entry, the ID is the label. `short_name` is applied to the
+    /// ADDRESS for the label, never to the id (an id may be `agent:w1@c2`, which
+    /// would render as `w1@c2` in the sidebar and diverge from the roster).
+    ///
+    /// # Errors
+    /// `RootError::AlreadyLive` is not reachable here; the `Result` exists so a
+    /// surface that cannot be built is reported instead of silently dropped — a
+    /// surface the client never learns about is a backend it can never address.
+    pub fn surface_specs(&self) -> Result<Vec<wcode_tui::SurfaceSpec>, RootError> {
+        let mut specs = Vec::with_capacity(1 + self.members.len());
+        // The root row: labelled `wcode` (the header's reverse-video run
+        // lowercased, D018/O3), its backend the root's own actor.
+        specs.push(wcode_tui::SurfaceSpec {
+            id: mint_surface_id(self.id, &self.address),
+            label: "wcode".to_string(),
+            model: self.model.clone(),
+            is_root: true,
+            backend: wcode_protocol::Backend::Local(self.handle.clone()),
+        });
+        for address in &self.members {
+            let name = crate::agents::short_name(address);
+            // A member's model comes from its recorded launch spec when this root
+            // has a group (a resumed team keeps each worker's own), and from the
+            // root's otherwise — the member list carries addresses, not models.
+            let model = self
+                .group
+                .as_ref()
+                .map(|group| crate::session_groups::member_spec(group, &name).model)
+                .and_then(|m| m.or(Some(self.model.clone())))
+                .unwrap_or_else(|| self.model.clone());
+            let backend = self
+                .orchestrator
+                .as_ref()
+                .and_then(|o| o.worker_backend(&name))
+                .ok_or_else(|| RootError::AlreadyLive(format!("member `{name}` is not live")))?;
+            specs.push(wcode_tui::SurfaceSpec {
+                id: mint_surface_id(self.id, address),
+                label: name,
+                model,
+                is_root: false,
+                backend,
+            });
+        }
+        Ok(specs)
+    }
+
+    /// The `serve`-shaped view of this root — **no TUI type**, so a second host
+    /// could pass it straight to `serve_at`/`serve_stdio` (candidate reuse,
+    /// finding 6 open): the root tuple those take plus the live roster. This is
+    /// the seam W041 would consume if the human picks resolution (D).
+    pub fn as_protocol_root(&self) -> (wcode_protocol::Root, Roster) {
+        (
+            (self.address.clone(), self.handle.clone()),
+            self.roster.clone(),
+        )
+    }
 }
 
 // ==========================================================================
@@ -1724,6 +1957,203 @@ mod tests {
         );
         let _ = child0.start_kill();
         let _ = child0.wait().await;
+    }
+
+    /// **The vocabulary round-trips through the host loop** (the sketch's
+    /// `the_request_and_event_vocabulary_round_trips`): `Start` mints, builds,
+    /// inserts and answers `Added` with root-first surfaces, and `Stop` closes and
+    /// echoes `Stopped`.
+    #[tokio::test]
+    async fn the_request_and_event_vocabulary_round_trips() {
+        use wcode_tui::conversations::{ConversationEvent, ConversationRequest};
+
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let (tx, rx) = channels();
+        let mut roots = roots_in(tx, 400);
+        let (requests, req_rx) = mpsc::unbounded_channel();
+        let (evt_tx, mut events) = mpsc::unbounded_channel();
+        let (surface_tx, _surface_rx) = mpsc::unbounded_channel();
+        let host = tokio::spawn(run_host(
+            {
+                roots.close_all();
+                roots
+            },
+            factory_for(run_inputs(tmp.path())),
+            HostChannels {
+                requests: req_rx,
+                events: evt_tx,
+                surfaces: surface_tx,
+                root_events: rx,
+            },
+        ));
+
+        requests
+            .send(ConversationRequest::Start(RootSpec::Fresh { label: None }))
+            .expect("the host is alive");
+        let added = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("a reply")
+            .expect("alive");
+        let id = match added {
+            ConversationEvent::Added(spec) => {
+                assert_eq!(spec.id, ConversationId::new(400), "the first mint");
+                assert_eq!(spec.surfaces.len(), 1, "a fresh root has no members");
+                assert!(spec.surfaces[0].is_root);
+                // The root's surface id is `mint_surface_id(id, address)`, so it
+                // matches the mint rule for whatever id this host handed out.
+                assert_eq!(
+                    spec.surfaces[0].id,
+                    mint_surface_id(spec.id, &SessionId::agent("root")),
+                    "the root row is the minted address"
+                );
+                assert_eq!(spec.surfaces[0].label, "wcode");
+                spec.id
+            }
+            _ => panic!("expected Added"),
+        };
+
+        requests
+            .send(ConversationRequest::Stop(id))
+            .expect("the host is alive");
+        let stopped = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("a reply")
+            .expect("alive");
+        match stopped {
+            ConversationEvent::Stopped { id: gone } => assert_eq!(gone, id),
+            _ => panic!("expected Stopped"),
+        }
+
+        drop(requests);
+        let roots = tokio::time::timeout(Duration::from_secs(5), host)
+            .await
+            .expect("the host returns")
+            .expect("no panic");
+        assert_eq!(roots.len(), 0, "Start added it, Stop removed it");
+    }
+
+    /// FINDING 3's gate: a member's surface id is MINTED, its A2A address is not,
+    /// and the label comes from the address. Conversation 0 keeps the bare ids.
+    #[tokio::test]
+    async fn every_members_surface_id_is_minted_not_its_a2a_address() {
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 500);
+        let c0 = ConversationId::first();
+        let c1 = roots.mint();
+
+        // `surface_specs` needs the workers to be live in the orchestrator, so
+        // build them: the same path a `[team]` takes at startup.
+        let build = |id: ConversationId| {
+            let o = orchestrator_in(id);
+            let mut addresses = Vec::new();
+            for name in ["w1", "w2"] {
+                let worker = o
+                    .spawn_worker(crate::agents::WorkerSpec {
+                        name: Some(name.to_string()),
+                        ..Default::default()
+                    })
+                    .expect("a worker spawns");
+                addresses.push(worker.id);
+            }
+            let (agent, bg) = build(id);
+            RootParts {
+                id,
+                label: format!("label-{id}"),
+                agent,
+                bg,
+                orchestrator: Some(o),
+                group: None,
+                session_path: None,
+                model: "m1".into(),
+                members: addresses,
+            }
+        };
+        for id in [c0, c1] {
+            let parts = build(id);
+            let root = roots.adopt(parts);
+            roots.insert(root).expect("inserted");
+        }
+
+        let zero = roots.get(c0).expect("live").surface_specs().expect("specs");
+        let one = roots.get(c1).expect("live").surface_specs().expect("specs");
+        assert_eq!(zero.len(), 3, "root + two members");
+        assert_eq!(one.len(), 3);
+
+        // N = 1: the bare ids and the plain labels (the root's address is the
+        // orchestrator's, `agent:orchestrator`, as in any `--agents` run).
+        assert_eq!(zero[0].id.to_string(), "agent:orchestrator");
+        assert_eq!(zero[1].id.to_string(), "agent:w1");
+        assert_eq!(zero[1].label, "w1", "the label is the address's short name");
+        // N = 2: minted ids, and the SAME plain labels.
+        assert_eq!(one[0].id.to_string(), "agent:orchestrator@c500");
+        assert_eq!(one[1].id.to_string(), "agent:w1@c500", "minted per surface");
+        assert_eq!(one[1].label, "w1", "never `w1@c500` in the sidebar");
+        // No two entries across the two roots share an id (the flat-map collision).
+        let all: Vec<String> = zero
+            .iter()
+            .chain(one.iter())
+            .map(|s| s.id.to_string())
+            .collect();
+        let mut deduped = all.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(all.len(), deduped.len(), "ids are unique across roots: {all:?}");
+
+        // The ADDRESS still works in the registry's space, and the minted id does
+        // not — the invariant-6 separation, asserted rather than described.
+        let root = roots.get(c1).expect("live");
+        let address = SessionId::agent("w1");
+        assert!(root.members.contains(&address), "members hold ADDRESSES");
+        assert!(
+            !root.registry.contains(&one[1].id),
+            "a surface id is never a registry key"
+        );
+    }
+
+    /// A `Start` whose reply cannot be delivered (the client quit mid-build) closes
+    /// the root it just built, instead of leaking its actor, its `bg` scope and its
+    /// session dir.
+    #[tokio::test]
+    async fn a_failed_send_tears_the_new_root_down() {
+        use wcode_tui::conversations::ConversationRequest;
+
+        let (tx, rx) = channels();
+        let mut roots = roots_in(tx, 600);
+        let (requests, req_rx) = mpsc::unbounded_channel();
+        let (evt_tx, events) = mpsc::unbounded_channel();
+        let (surface_tx, _surface_rx) = mpsc::unbounded_channel();
+        // Nobody is listening: the `Added` reply will fail.
+        drop(events);
+        let host = tokio::spawn(run_host(
+            {
+                roots.close_all();
+                roots
+            },
+            factory_for(run_inputs(Path::new("/tmp"))),
+            HostChannels {
+                requests: req_rx,
+                events: evt_tx,
+                surfaces: surface_tx,
+                root_events: rx,
+            },
+        ));
+        requests
+            .send(ConversationRequest::Start(RootSpec::Fresh { label: None }))
+            .expect("the host is alive");
+        drop(requests);
+        let roots = tokio::time::timeout(Duration::from_secs(5), host)
+            .await
+            .expect("the host returns")
+            .expect("no panic");
+        assert_eq!(roots.len(), 0, "the fresh root was closed, not kept");
+        let parked: Vec<_> = Background::live_scopes()
+            .into_iter()
+            .filter(|scope| *scope == ConversationId::new(600))
+            .collect();
+        assert!(
+            parked.is_empty(),
+            "and its bg scope was released: {parked:?}"
+        );
     }
 
     #[tokio::test]
