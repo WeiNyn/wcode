@@ -105,12 +105,6 @@ pub enum RootState {
     /// The last run failed — client-derived; the host mirrors it only if a
     /// client asks ([`Roots::set_state`]).
     ///
-    /// Written by the tests' truth table only (amendment (k)): no production path
-    /// mirrors a run failure (the client derives it from its own surfaces), so this
-    /// retires with the `/usage`-style host mirror, or when `run_host` learns to
-    /// read a failed run.
-    #[allow(dead_code)]
-    Failed,
     /// The actor task resolved: panicked, or ended without a `close`
     /// (§13.2 item 4). Sticky; the handles are still held so the client can read
     /// what the root produced.
@@ -1141,9 +1135,12 @@ impl Root {
                 .iter()
                 .map(|address| mint_surface_id(self.id, address))
                 .collect(),
+            // The ONLY derivation: a `Dead` root is `Failed` in the container.
+            // The host has two facts (live / the actor resolved); a *failed run* is
+            // the CLIENT's derivation from its own surfaces, so the container's
+            // three-valued state stays the single answer.
             state: match self.state {
                 RootState::Live => ConversationState::Idle,
-                RootState::Failed => ConversationState::Failed,
                 RootState::Dead => ConversationState::Failed,
             },
             is_remote: false,
@@ -1513,12 +1510,12 @@ mod tests {
         add(&mut roots, c0, None);
         assert!(roots.set_state(c0, RootState::Dead));
         assert!(
-            !roots.set_state(c0, RootState::Failed),
-            "Dead is terminal: a later Failed cannot downgrade it"
+            !roots.set_state(c0, RootState::Live),
+            "Dead is terminal: a later Live cannot downgrade it"
         );
         assert_eq!(roots.state_of(c0), Some(RootState::Dead));
         assert!(roots.set_state(c0, RootState::Dead), "re-setting Dead is fine");
-        assert!(!roots.set_state(ConversationId::new(99), RootState::Failed));
+        assert!(!roots.set_state(ConversationId::new(99), RootState::Dead));
     }
 
     #[tokio::test]
