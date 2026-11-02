@@ -1426,6 +1426,15 @@ pub(crate) struct BootError {
 }
 
 impl BootError {
+    /// The message for a CLIENT (`RootError::Config`, a TUI transient): no
+    /// `error: ` prefix, which is terminal noise anywhere but `boot_exit`.
+    pub(crate) fn detail(&self) -> String {
+        self.message
+            .strip_prefix("error: ")
+            .unwrap_or(&self.message)
+            .to_string()
+    }
+
     /// A misconfiguration: `exit(2)` territory.
     pub(crate) fn config(message: impl Into<String>) -> Self {
         Self {
@@ -3631,6 +3640,32 @@ fn task_items(orchestrator: &Option<crate::agents::Orchestrator>) -> Vec<wcode_t
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The "byte-identical operator experience" claim, pinned instead of trusted:
+    /// the three constructors produce exactly the lines the old `eprintln!`s did,
+    /// and `detail()` is what a CLIENT sees (no terminal prefix).
+    #[test]
+    fn boot_errors_keep_the_exact_line_the_code_and_the_client_form() {
+        let config = BootError::config("[team] requires --agents");
+        assert_eq!(config.message, "error: [team] requires --agents");
+        assert_eq!(config.code, 2, "a misconfiguration exits 2");
+        assert_eq!(
+            config.detail(),
+            "[team] requires --agents",
+            "a TUI transient does not repeat `error: `"
+        );
+
+        let session = BootError::session("create session: boom");
+        assert_eq!(session.message, "error: create session: boom");
+        assert_eq!(session.code, 1, "session IO exits 1");
+
+        // `no sessions in <dir>` was printed WITHOUT the `error: ` prefix; the
+        // prefix rule must not "fix" that, or the diff stops being byte-identical.
+        let bare = BootError::bare("no sessions in /tmp/x", 1);
+        assert_eq!(bare.message, "no sessions in /tmp/x");
+        assert_eq!(bare.code, 1);
+        assert_eq!(bare.detail(), "no sessions in /tmp/x");
+    }
 
     use std::time::Duration;
     use wcode_harness::agent::AgentConfig;

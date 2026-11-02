@@ -756,15 +756,58 @@ pub(crate) fn factory_for(inputs: RunInputs) -> Factories {
 ///
 /// It does NOT spawn: [`Roots::adopt`] does, so the sink is the registry's.
 ///
+/// **It emits the same informational stderr lines the single-root boot does** —
+/// `workflow: present but inert (no --task)`, `team: …`, `workflow: {n} nodes` —
+/// because it runs the same `build_runtime`. "Never `exit`, never a stdout write"
+/// is literally true and misses the point: a multi-root host would interleave
+/// those lines on one terminal. **Commit 6 decides** whether they move into
+/// [`RootParts`]/`ConversationSpec`; until then a client must tolerate them.
+///
 /// # Errors
 ///
 /// [`RootError`]: `BadResume`/`Session` from the group, `Config` from the
 /// previously-exiting build path. Never `exit`, never a stdout write, never a
 /// panic on a user-supplied path.
+///
+/// **A failed build tears itself down.** By the time the runtime's or the
+/// agent's step fails, `build_runtime` has already spawned `[team]` members (and
+/// possibly the scheduler), and each worker's `Background` holds its own
+/// notifier — dropping the local `Orchestrator` would leave every one of those
+/// actors parked for the life of the process, plus a `Registry` watcher each.
+/// So the error path runs the same [`Background::shutdown_scope`] that
+/// [`Roots::close`] uses; it is harmless on the session-step failures, where
+/// nothing is tagged `id` yet. A `Fresh` root that got as far as creating its
+/// group dir also REMOVES that dir: `list_groups` has no content filter, so a
+/// leftover empty group would be offered by `/resume`. An existing dir (a
+/// `Resume`) is never ours to delete.
 pub(crate) fn build_root(
     inputs: &RunInputs,
     id: ConversationId,
     spec: RootSpec,
+) -> Result<RootParts, RootError> {
+    // Which group dir (if any) THIS build created — the only one it may delete.
+    let created: std::cell::Cell<Option<PathBuf>> = std::cell::Cell::new(None);
+    let created_ref = &created;
+    let outcome = build_root_inner(inputs, id, &spec, created_ref);
+    if let Err(err) = &outcome {
+        // The teardown slice A made possible: release every `Background` tagged
+        // with this conversation (the workers `build_runtime` already spawned),
+        // so no actor parks and no registry watcher outlives the failure.
+        crate::tools::background::Background::shutdown_scope(id);
+        if let Some(dir) = created.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let _ = err;
+    }
+    outcome
+}
+
+/// The body of [`build_root`]: no teardown, no cleanup — the wrapper owns both.
+fn build_root_inner(
+    inputs: &RunInputs,
+    id: ConversationId,
+    spec: &RootSpec,
+    created: &std::cell::Cell<Option<PathBuf>>,
 ) -> Result<RootParts, RootError> {
     let args = &inputs.args;
     let cfg = &inputs.cfg;
@@ -779,6 +822,9 @@ pub(crate) fn build_root(
             } else {
                 let group =
                     crate::session_groups::create_group(&inputs.dir).map_err(RootError::Session)?;
+                // Ours from here on: a later failure removes it, so `/resume`
+                // never offers a half-built conversation.
+                created.set(Some(group.dir.clone()));
                 let session = crate::session_groups::create_root_session(&group.dir, &inputs.cwd)
                     .map_err(RootError::Session)?;
                 (Some(session), Vec::new(), Some(group), false)
@@ -823,7 +869,7 @@ pub(crate) fn build_root(
 
     // 2. The runtime, then the agent — both carrying THIS root's id.
     let rt = crate::build_runtime(args, cfg, &llm, &setup, id)
-        .map_err(|e| RootError::Config(e.message))?;
+        .map_err(|e| RootError::Config(e.detail()))?;
     let root = crate::RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },
         guidelines: if args.owner.is_some() {
@@ -833,11 +879,11 @@ pub(crate) fn build_root(
         },
     };
     let (agent, bg) = crate::build_agent_for(args, cfg, &llm, &rt, root, session, context, id)
-        .map_err(|e| RootError::Config(e.message))?;
+        .map_err(|e| RootError::Config(e.detail()))?;
 
     // 3. The label: `agent.title()` → the requested seed → the cwd basename.
     let session_path = agent.session_path().map(std::path::Path::to_path_buf);
-    let seed = match &spec {
+    let seed = match spec {
         RootSpec::Fresh { label } => label.clone(),
         RootSpec::Resume { dir } => dir
             .file_name()
@@ -1341,9 +1387,30 @@ mod tests {
         // must be closed first — a LIVE root over the dir is what the guard
         // refuses (two writers to one `root.jsonl`).
         assert!(roots.close(a), "the first root closes, its files stay");
+        // A SECOND input set whose launch model is `m9` and no `--model` flag: the
+        // assertion below can only hold if the resume restored the session's own
+        // model. With the fixture's own `m1`, "restored" and "never restored"
+        // would be the same value.
+        //
+        // A never-run group records no `ModelChange`, so write the entry a run
+        // would have written — that is exactly what "the session's model" is.
+        {
+            use wcode_harness::session::{Session, SessionEntry};
+            let mut session =
+                Session::open(&dir_a.join("root.jsonl")).expect("the root transcript");
+            session
+                .append(SessionEntry::ModelChange {
+                    id: "test".into(),
+                    model: "m1".into(),
+                })
+                .expect("record the model");
+        }
+        let mut resume_inputs = run_inputs(tmp.path());
+        resume_inputs.llm.model = "m9".into();
+        let resume_factory = factory_for(resume_inputs);
         let c = roots
             .start(
-                &factory,
+                &resume_factory,
                 RootSpec::Resume {
                     dir: dir_a.clone(),
                 },
@@ -1355,18 +1422,78 @@ mod tests {
             dir_a,
             "Resume reuses the group dir"
         );
-        assert_eq!(resumed.model, "m1", "the session's model was restored");
+        assert_eq!(
+            resumed.model, "m1",
+            "the session's model overrode the launch default `m9`"
+        );
 
         // A second live root over one dir is refused BEFORE the build.
         let err = roots
             .start(
-                &factory,
+                &resume_factory,
                 RootSpec::Resume {
                     dir: dir_a.clone(),
                 },
             )
             .expect_err("a live Resume dir is refused");
         assert!(matches!(err, RootError::AlreadyLive(_)), "{err}");
+    }
+
+    /// The failure path the review caught: `build_runtime` spawns `[team]`
+    /// members as it goes, so a member that fails validation AFTER earlier ones
+    /// spawned leaves every one of those actors parked (its `Background` holds
+    /// the notifier) plus a `Registry` watcher each — and, before this fix, an
+    /// empty group dir that `/resume` would offer. `build_root` now tears a
+    /// partial build down with the same tool `Roots::close` uses.
+    #[tokio::test]
+    async fn a_failed_team_build_releases_what_it_already_spawned() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let mut inputs = run_inputs(tmp.path());
+        inputs.args.agents = true;
+        inputs.cfg.team = vec![
+            crate::config::TeamMember {
+                name: "w1".into(),
+                ..crate::config::TeamMember::default()
+            },
+            // `spawn` is refused for a worker (`agents.rs:281`) — and refused
+            // only AFTER w1 has been spawned and bound.
+            crate::config::TeamMember {
+                name: "w2".into(),
+                tools: Some(vec!["spawn".into()]),
+                ..crate::config::TeamMember::default()
+            },
+        ];
+        let factory = factory_for(inputs);
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 300);
+        let before = roots.len();
+
+        let err = roots
+            .start(&factory, RootSpec::Fresh { label: None })
+            .expect_err("the second member is refused");
+        assert!(err.to_string().contains("spawn"), "names the tool: {err}");
+        assert_eq!(roots.len(), before, "nothing half-inserted");
+
+        // The failed build's id (block 300's first mint). w1's `Background` was
+        // tagged with it, so a live entry means the teardown did NOT run.
+        let failed = ConversationId::new(300);
+        let parked: Vec<_> = Background::live_scopes()
+            .into_iter()
+            .filter(|scope| *scope == failed)
+            .collect();
+        assert!(
+            parked.is_empty(),
+            "the already-spawned worker was released, not parked: {parked:?}"
+        );
+        // And the group dir this build created is gone: `/resume` must not offer
+        // a half-built conversation (`list_groups` has no content filter).
+        let left: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("the tempdir")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a failed Fresh build removes the group dir it created"
+        );
     }
 
     #[tokio::test]
