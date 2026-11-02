@@ -1121,6 +1121,10 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                         git,
                         // One builder, two surfaces: the flag and the panel show the same bytes.
                         config: config_dump(cfg),
+                        // A socket client is served ONE root: the container's
+                        // `single` fallback groups every surface into it, exactly
+                        // as `from_parts` would.
+                        conversations: Vec::new(),
                     };
                     // One surface per served session (root first), all over the
                     // one connection. A failed roster falls back to the legacy
@@ -1157,8 +1161,14 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     // the server pushes the connection-wide roster when it grows,
                     // and a task emits a surface for each id not already seeded
                     // from the initial `ListSessions`.
+                    // W040 5a: the feed carries the conversation tag beside the
+                    // spec. A socket client is served ONE root, so every runtime
+                    // session belongs to the startup conversation.
                     let new_surfaces = {
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
+                            wcode_protocol::ConversationId,
+                            wcode_tui::SurfaceSpec,
+                        )>();
                         let mut roster_rx = client.subscribe_roster();
                         let mut seeded: std::collections::HashSet<SessionId> =
                             roster.iter().map(|info| info.id.clone()).collect();
@@ -1187,7 +1197,10 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                                         ),
                                     };
                                     // A closed receiver means the TUI has exited.
-                                    if tx.send(spec).is_err() {
+                                    if tx
+                                        .send((wcode_protocol::ConversationId::first(), spec))
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -2213,6 +2226,11 @@ async fn dispatch(
                 git,
                 // One builder, two surfaces: the flag and the panel show the same bytes.
                 config: config_dump(cfg),
+                // W040 5a: one conversation, and its `single` fallback groups
+                // EVERY startup surface into it (root + `[team]` members) — so the
+                // narrowed accessors keep today's canonical order. Commit 6 hands
+                // the fully-built list over from the host's `Roots`.
+                conversations: Vec::new(),
             };
             let session_path = agent.session_path().map(Path::to_path_buf);
             // ==== SKETCH (review-only, not real code) ====
@@ -2478,12 +2496,30 @@ async fn dispatch(
             // the sink only AFTER the `[team]` loop above, so preset members
             // (already in `surfaces`) are not re-emitted. A served worker
             // (`--owner`) has no team surfaces, so it installs nothing.
+            // W040 5a: the feed's element is now `(ConversationId, SurfaceSpec)`,
+            // so the sink's specs are tagged on the way through. Every runtime
+            // spawn today belongs to the STARTUP conversation — the CLI cannot
+            // mint a second one until commit 6's host loop exists — so the tag is
+            // `ConversationId::first()`, a real value rather than a default.
+            // Commit 6 replaces this with `roots::install_surface_sink`.
             let new_surfaces = if args.owner.is_none() {
                 match &rt.orchestrator {
                     Some(o) => {
-                        let (tx, rx) =
+                        let (sink_tx, mut sink_rx) =
                             tokio::sync::mpsc::unbounded_channel::<wcode_tui::SurfaceSpec>();
-                        o.set_spawn_sink(tx);
+                        o.set_spawn_sink(sink_tx);
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
+                            wcode_protocol::ConversationId,
+                            wcode_tui::SurfaceSpec,
+                        )>();
+                        tokio::spawn(async move {
+                            let tag = wcode_protocol::ConversationId::first();
+                            while let Some(spec) = sink_rx.recv().await {
+                                if tx.send((tag, spec)).is_err() {
+                                    return;
+                                }
+                            }
+                        });
                         Some(rx)
                     }
                     None => None,

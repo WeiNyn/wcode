@@ -157,6 +157,9 @@ async fn main() -> std::io::Result<()> {
         git: None,
         // No config section in the demo: the panel shows its placeholder row.
         config: String::new(),
+        // W040 5a: no CLI list — `Conversations::single` groups the roster's
+        // surfaces into one conversation (the pre-W040 shape).
+        conversations: Vec::new(),
     };
     // A static roster so the example shows the team sidebar (root + two members).
     let surfaces = vec![

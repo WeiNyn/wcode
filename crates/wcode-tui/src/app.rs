@@ -20,7 +20,9 @@ use wcode_harness::protocol::{Request, SessionId};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
+use crate::conversations::{Conversation, Conversations};
 use crate::{SurfaceInfo, TeamState};
+use wcode_protocol::ConversationId;
 
 /// Lines per mouse-wheel notch — a nudge, not a page (PgUp/PgDn page).
 ///
@@ -2926,6 +2928,13 @@ pub struct App {
     surfaces: Vec<Surface>,
     /// Index into `surfaces` of the focused surface.
     focus: usize,
+    /// **The tab container (W040 5a: a DERIVED VIEW).** Written by three paths —
+    /// `set_surfaces` reconciles it, the `SessionTitle` arm renames a tab, the
+    /// agent-event arm records a tab's state — and not yet read for rendering:
+    /// the flat `surfaces`/`focus` above remain authoritative until 5b deletes
+    /// them. `Conversations::reset_from` is what keeps the two from disagreeing
+    /// (a label or a `Failed` survives a roster rebuild).
+    conversations: Conversations,
     input: Vec<Atom>,
     /// Cursor as a *gap index* between atoms (`0..=input.len()`).
     cursor: usize,
@@ -3142,6 +3151,9 @@ impl App {
         App {
             surfaces: vec![default_root()],
             focus: 0,
+            // The placeholder N = 1 conversation: valid before `set_surfaces`
+            // runs, and replaced by it (same shape, same default root).
+            conversations: Conversations::single(&[]),
             input: Vec::new(),
             cursor: 0,
             paste_id: 0,
@@ -3218,6 +3230,11 @@ impl App {
     /// Replace the surface list (index 0 is the root) and focus the root. The
     /// list is never left empty, so [`App::focused`] cannot panic.
     pub fn set_surfaces(&mut self, surfaces: Vec<SurfaceInfo>) {
+        // W040 5a: the container RECONCILES from the same list — a `/rename` or a
+        // `Failed` on the startup conversation survives the rebuild
+        // (`Conversations::reset_from`), so the derived view can never disagree
+        // with the authoritative flat store.
+        self.conversations.reset_from(&surfaces);
         self.surfaces = surfaces.into_iter().map(Surface::new).collect();
         if self.surfaces.is_empty() {
             self.surfaces.push(default_root());
@@ -3230,7 +3247,44 @@ impl App {
     /// if its id is already present; unlike [`App::set_surfaces`], focus is left
     /// where it is — a new teammate must not steal the user's perspective.
     pub fn add_surface(&mut self, info: SurfaceInfo) {
+        // An untagged member belongs to the ACTIVE conversation — the pre-W040
+        // feed's shape, and the same default `Options.conversations` uses.
+        let tag = self.conversations.active().id;
+        self.add_surface_in(tag, info);
+    }
+
+    /// **Adopt the CLI's startup conversation list** (W040 §13.2 item 5), after
+    /// [`App::set_surfaces`] installed the bodies.
+    ///
+    /// `Conversations::from_parts` validates the list against `surfaces` and falls
+    /// back to one conversation holding EVERY surface (finding 4) on any mismatch
+    /// or an empty list — so a test, `examples/dump.rs` and a `--socket` client are
+    /// the pre-W040 shape exactly, and no surface is ever orphaned from the
+    /// narrowed accessors.
+    pub fn set_conversations(&mut self, list: Vec<Conversation>, surfaces: &[SurfaceInfo]) {
+        self.conversations = Conversations::from_parts(list, surfaces);
+        self.dirty = true;
+    }
+
+    /// The tab container (read-only): the event loop's `ConversationEvent` arm and,
+    /// from 5b, the renderers.
+    pub fn conversations(&self) -> &Conversations {
+        &self.conversations
+    }
+
+    /// **The tagged sibling of [`App::add_surface`]** (W040 5a): the runtime member
+    /// feed carries `(ConversationId, SurfaceSpec)`, and `SurfaceSpec::info()`
+    /// drops the tag, so it is passed in here.
+    ///
+    /// A member for an UNKNOWN conversation is refused outright — the CLI emitted
+    /// it for a tab the user just closed — so the body is never added and the
+    /// container's invariant ("every surface id is in exactly one conversation")
+    /// cannot break.
+    pub fn add_surface_in(&mut self, conversation: ConversationId, info: SurfaceInfo) {
         if self.surface_index(&info.id).is_some() {
+            return;
+        }
+        if self.conversations.add_surface_in(conversation, info.clone()).is_err() {
             return;
         }
         self.surfaces.push(Surface::new(info));
@@ -4616,13 +4670,27 @@ impl App {
                 }
             }
             AppEvent::Agent(id, event) => {
-                // ==== SKETCH (review-only, not real code) ====
-                // W040 — THE TWO CONTAINER HOOKS. Both belong HERE, at the arm's
+                // W040 5a — THE TWO CONTAINER HOOKS. (1) is HERE, at the arm's
                 // head, BEFORE the routing block below: `Surface::apply` consumes
-                // `event` by value (`app.rs:2294`-region handles
-                // `AgentEvent::SessionTitle` itself), so any fact the CONTAINER
-                // needs must be read from `&event` first — exactly the discipline
-                // the arm already uses for `started`/`acked`/`errored`/`ended`.
+                // `event` by value (it handles `AgentEvent::SessionTitle` itself),
+                // so any fact the CONTAINER needs must be read from `&event`
+                // first — exactly the discipline the arm already uses for
+                // `started`/`acked`/`errored`/`ended`.
+                //
+                // (1) THE TAB LABEL — `SessionTitle` and nothing else. Only the
+                // ROOT's title renames the tab (`set_label` ignores a member's: a
+                // worker's `/rename` names the worker, and the sidebar shows it).
+                // The event, not the `/rename` reply: `/rename` emits only
+                // `Action::Ask(Request::SetTitle)` and the actor also STREAMS
+                // `SessionTitle` (so a socket client learns it too) — one stream,
+                // one truth, and a local tab cannot end up named differently from
+                // a remote one.
+                if let AgentEvent::SessionTitle { title } = &event {
+                    self.conversations.set_label(&id, title.clone());
+                }
+                // ==== SKETCH (review-only, not real code) ====
+                // (1) is now real code above; the notes below record why, and (2)
+                // is the arm's tail hook — see the end of this arm.
                 //
                 // (1) THE TAB LABEL — `SessionTitle` and nothing else.
                 //
@@ -4788,6 +4856,14 @@ impl App {
                             self.dequeue_next(idx);
                         }
                     }
+                }
+                // W040 5a hook (2) — the TAB STATE, after the routing block, so
+                // `state()` is the post-event truth (`AgentEnd` clears `running`
+                // there). A member's state never promotes the tab
+                // (`set_state_from` ignores a non-root surface) and `Failed` is
+                // sticky until the next `Running`.
+                if let Some(state) = self.surface_index(&id).map(|i| self.surfaces[i].state()) {
+                    self.conversations.set_state_from(&id, state);
                 }
             }
             AppEvent::Tick => {}

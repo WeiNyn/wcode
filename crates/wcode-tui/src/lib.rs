@@ -11,6 +11,7 @@
 //! surface's backend, and a draw happens only on a state change.
 
 pub mod app;
+pub mod conversations;
 
 mod clipboard;
 mod event;
@@ -32,11 +33,15 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{MissedTickBehavior, interval};
 use wcode_harness::event::AgentEvent;
 use wcode_harness::protocol::{Request, SessionId};
-use wcode_protocol::{AskError, Backend};
+use wcode_protocol::{AskError, Backend, ConversationId};
 
 pub use crate::app::{
     Action, App, AppEvent, Block, Key, SessionItem, Signal, SkillItem, Status, TaskItem, Tool,
     ViewMode, DEFAULT_MEASURE, MEASURE_LIMIT, MEASURE_MIN,
+};
+pub use crate::conversations::{
+    Conversation, ConversationEvent, ConversationFeeds, ConversationRequest, ConversationSpec,
+    ConversationState, Conversations,
 };
 pub use crate::theme::{ThemeSpec, parse_theme, parse_theme_table};
 
@@ -324,6 +329,13 @@ pub struct Options {
     /// `branch`, with a `*` dirty marker, from the CLI's git probe. `None`
     /// outside a work tree (or when git is absent).
     pub git: Option<String>,
+    /// **The startup conversation list** (W040 §13.2 item 5): the CLI, which alone
+    /// knows which root a surface belongs to, hands the container over fully
+    /// built. `Conversations::from_parts` validates it against the surface list
+    /// and falls back to one conversation grouping EVERY surface (finding 4), so
+    /// an empty list — a test, `examples/dump.rs`, a `--socket` client — is the
+    /// pre-W040 shape exactly.
+    pub conversations: Vec<Conversation>,
 }
 
 /// How a TUI run ended — the return value tells the composition root whether to
@@ -375,7 +387,10 @@ fn outcome_of(app: &App) -> Outcome {
 pub async fn run(
     surfaces: Vec<SurfaceSpec>,
     options: Options,
-    new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+    // The runtime member feed carries its conversation tag beside the spec (see
+    // `event_loop`); the startup list does not need one — `Options.conversations`
+    // associates every startup surface with its conversation.
+    new_surfaces: Option<mpsc::UnboundedReceiver<(ConversationId, SurfaceSpec)>>,
     new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
 ) -> io::Result<Outcome> {
     // Index 0 (the root) is mandatory — its backend drives the loop. Guard the
@@ -397,6 +412,7 @@ pub async fn run(
         cwd,
         git,
         config,
+        conversations,
     } = options;
     // Install the theme before the terminal is entered and anything draws.
     theme::install(theme);
@@ -417,7 +433,13 @@ pub async fn run(
     app.set_teams(teams);
     app.set_skills(skills);
     app.set_tasks(tasks);
-    app.set_surfaces(surfaces.iter().map(SurfaceSpec::info).collect());
+    let surface_infos: Vec<SurfaceInfo> = surfaces.iter().map(SurfaceSpec::info).collect();
+    app.set_surfaces(surface_infos.clone());
+    // W040 5a: adopt the CLI's conversation list AFTER the bodies exist — it is
+    // validated against them and falls back to `Conversations::single` (one
+    // conversation holding EVERY surface) on any mismatch. An empty list is the
+    // pre-W040 shape.
+    app.set_conversations(conversations, &surface_infos);
     // The root's full status line (members derive a reduced one).
     app.set_status(status);
     app.set_remote(remote);
@@ -516,7 +538,11 @@ async fn event_loop(
     terminal: &mut terminal::Tui,
     mut backends: Vec<(SessionId, Backend)>,
     app: &mut App,
-    mut new_surfaces: Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
+    // A runtime member carries its CONVERSATION tag beside the spec: the CLI's
+    // spawn sink is per-orchestrator and an orchestrator is per conversation, so
+    // the pair is the only shape that can place a member in the right tab
+    // (`SurfaceSpec::info()` drops everything but the display fields).
+    mut new_surfaces: Option<mpsc::UnboundedReceiver<(ConversationId, SurfaceSpec)>>,
     mut new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
@@ -576,9 +602,11 @@ async fn event_loop(
                 app.handle(AppEvent::Agent(id, event));
             }
             // A worker spawned at runtime: add its surface and forward its stream.
-            Some(spec) = recv_opt(&mut new_surfaces) => {
+            Some((conversation, spec)) = recv_opt(&mut new_surfaces) => {
                 spawn_forwarder(&agent_tx, &spec.id, &spec.backend);
-                app.add_surface(spec.info());
+                // Tagged: a member for a tab that is gone is refused inside
+                // `add_surface_in`, so its body is never added.
+                app.add_surface_in(conversation, spec.info());
                 backends.push((spec.id.clone(), spec.backend));
             }
             // The orchestrator's plan changed: replace the whole list.
@@ -725,8 +753,8 @@ async fn recv_tasks(
 }
 
 async fn recv_opt(
-    rx: &mut Option<mpsc::UnboundedReceiver<SurfaceSpec>>,
-) -> Option<SurfaceSpec> {
+    rx: &mut Option<mpsc::UnboundedReceiver<(ConversationId, SurfaceSpec)>>,
+) -> Option<(ConversationId, SurfaceSpec)> {
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
@@ -1042,21 +1070,28 @@ mod tests {
     }
 
     /// A surface handed over the runtime feed is delivered to the loop's arm —
-    /// the headless seam the event loop's runtime-add branch reads.
+    /// the headless seam the event loop's runtime-add branch reads — **with its
+    /// conversation tag**, which is the whole reason the element type is a pair
+    /// (`SurfaceSpec::info()` drops everything but the display fields).
     #[tokio::test]
-    async fn recv_opt_yields_a_runtime_surface() {
-        let (tx, rx) = mpsc::unbounded_channel::<SurfaceSpec>();
+    async fn recv_opt_yields_a_runtime_surface_and_its_tag() {
+        let (tx, rx) = mpsc::unbounded_channel::<(ConversationId, SurfaceSpec)>();
         let mut feed = Some(rx);
-        tx.send(SurfaceSpec {
-            id: SessionId::agent("explorer"),
-            label: "explorer".into(),
-            model: "m".into(),
-            is_root: false,
-            backend: backend(),
-        })
+        let tag = ConversationId::new(1);
+        tx.send((
+            tag,
+            SurfaceSpec {
+                id: SessionId::agent("explorer"),
+                label: "explorer".into(),
+                model: "m".into(),
+                is_root: false,
+                backend: backend(),
+            },
+        ))
         .unwrap();
 
-        let got = recv_opt(&mut feed).await.expect("a spec");
+        let (got_tag, got) = recv_opt(&mut feed).await.expect("a tagged spec");
+        assert_eq!(got_tag, tag);
         assert_eq!(got.label, "explorer");
         assert_eq!(got.id.as_str(), "agent:explorer");
     }
@@ -1100,6 +1135,9 @@ mod tests {
             cwd: None,
             git: None,
             config: String::new(),
+            // No CLI list: `Conversations::from_parts` falls back to one
+            // conversation holding every surface (the pre-W040 shape).
+            conversations: Vec::new(),
         };
         assert_eq!(
             run(Vec::new(), options, None, None).await.unwrap(),
