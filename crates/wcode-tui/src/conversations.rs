@@ -305,6 +305,16 @@ impl Conversations {
         self.items.iter().find(|c| c.contains(surface))
     }
 
+    /// Activate by index. `false` (and no change) when out of range — the
+    /// `App::set_focus` tolerance.
+    pub fn activate(&mut self, idx: usize) -> bool {
+        if idx >= self.items.len() {
+            return false;
+        }
+        self.active = idx;
+        true
+    }
+
     /// How many conversations. `1` means the tab band has height 0 (contract 4).
     pub fn len(&self) -> usize {
         self.items.len()

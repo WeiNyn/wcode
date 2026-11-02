@@ -3273,9 +3273,28 @@ impl App {
     }
 
     /// The tab container (read-only): the event loop's `ConversationEvent` arm and,
-    /// from 5b, the renderers.
+    /// from 6a-ii, the renderers.
     pub fn conversations(&self) -> &Conversations {
         &self.conversations
+    }
+
+    /// Activate conversation `idx` and point the focus at ITS root, so the
+    /// composer, the header and the transcript switch atomically.
+    ///
+    /// `false` (and no change) when `idx` is out of range — the `set_focus`
+    /// tolerance. 6a-ii's `/tab <n>` and `Ctrl-N`/`Shift-Tab` call this; it is
+    /// also what the narrowing tests use to prove the seam moves rows.
+    pub fn activate_conversation(&mut self, idx: usize) -> bool {
+        if !self.conversations.activate(idx) {
+            return false;
+        }
+        if let Some(root) = self.conversations.active().surface_ids().first().cloned()
+            && let Some(i) = self.surface_index(&root)
+        {
+            self.focus_idx = i;
+        }
+        self.dirty = true;
+        true
     }
 
     /// **The tagged sibling of [`App::add_surface`]** (W040 5a): the runtime member
@@ -3311,6 +3330,16 @@ impl App {
 
     /// The focused surface's index into [`App::bodies`] — the same number
     /// `lib.rs` uses to index its `backends` vector.
+    ///
+    /// # Invariant (the one cross-crate contract this slice does not change)
+    /// `crates/wcode-tui/src/lib.rs` dispatches every action as
+    /// `let idx = app.focus(); let (id, backend) = &backends[idx];`, so
+    /// **`backends` must stay aligned with [`App::bodies`]**: every
+    /// conversation's surfaces, flat, in the same creation order. That is why
+    /// this accessor is NOT narrowed to the active conversation (W040 amendment
+    /// (i)) — narrowing here would pass every N = 1 gate and silently dispatch a
+    /// neighbour's backend at N = 2. The narrowing lives in
+    /// [`App::active_surface_indices`], for the renderers and the key handlers.
     pub fn focus(&self) -> usize {
         self.focus_idx
     }
@@ -3341,10 +3370,30 @@ impl App {
     /// (The invariant `surfaces[0]` is the root makes this the identity today, but
     /// naming it keeps the three consumers from drifting apart again.)
     pub(crate) fn canonical_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.bodies().len()).collect();
-        // Stable sort: the root first, everything else in its (creation) order.
+        let mut order = self.active_surface_indices();
         order.sort_by_key(|&i| !self.bodies()[i].is_root);
         order
+    }
+
+    /// **The narrowing seam** (W040 amendment (i)): the ACTIVE conversation's
+    /// surface indices into [`App::bodies`], in creation order (root first).
+    ///
+    /// It is the ONE place the container narrows the flat store, and
+    /// [`App::canonical_order`] is its only consumer — which is what makes the
+    /// five readers (`focus_step`, `focus_digit`, `working_team_rows`,
+    /// `member_rows_indexed`, `sidebar_rows_indexed`) narrow for free. At N = 1
+    /// it returns every index in order, so the frame is byte-identical.
+    ///
+    /// [`App::merged_order`] is NOT one of those readers: it must additionally
+    /// FILTER, because a skipped surface would otherwise keep rank 0 and sort a
+    /// neighbour's blocks to the front (amendment (j)).
+    pub(crate) fn active_surface_indices(&self) -> Vec<usize> {
+        self.conversations
+            .active()
+            .surface_ids()
+            .iter()
+            .filter_map(|id| self.surface_index(id))
+            .collect()
     }
 
     /// Focus the next surface in the canonical order (D34), wrapping.
@@ -5733,7 +5782,12 @@ impl App {
             rank[si] = r;
         }
         let mut items: Vec<(u64, usize, usize, usize)> = Vec::new();
-        for (si, surface) in self.bodies().iter().enumerate() {
+        // Iterate the ACTIVE conversation's surfaces only — the filter, not just
+        // the ranking (W040 amendment (j)): a skipped surface would keep
+        // `rank[si] == 0` and its blocks would sort to the FRONT of the All view,
+        // which is worse than merely appearing. Absent, not first.
+        for &si in &canonical {
+            let surface = &self.bodies()[si];
             for bi in 0..surface.transcript.len() {
                 let seq = surface.seqs.get(bi).copied().unwrap_or(0);
                 items.push((seq, rank[si], bi, si));
@@ -9511,6 +9565,141 @@ mod tests {
             app.transcript().last(),
             Some(Block::Error(m)) if m == "boom"
         ));
+    }
+
+    /// A two-conversation App, built DIRECTLY (there is no host channel yet, so
+    /// `Options.conversations` cannot carry two — this is the only way to exercise
+    /// the narrowing seam, and it is a unit-level fixture, not a live proof).
+    ///
+    /// `bodies` = `[r0, m0, r1]`; conversation 0 = `{r0, m0}`, conversation 1 =
+    /// `{r1}`. `backends` would hold all three, flat — the `focus()` invariant.
+    fn two_conversations() -> App {
+        use crate::conversations::{Conversation, ConversationState};
+        use wcode_protocol::ConversationId;
+
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("r0"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("m0"),
+                label: "m0".into(),
+                model: "m".into(),
+                is_root: false,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("r1"),
+                label: "second".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        let list = vec![
+            Conversation {
+                id: ConversationId::first(),
+                label: "first".into(),
+                root: SessionId::agent("r0"),
+                members: vec![SessionId::agent("m0")],
+                state: ConversationState::Idle,
+                is_remote: false,
+            },
+            Conversation {
+                id: ConversationId::new(1),
+                label: "second".into(),
+                root: SessionId::agent("r1"),
+                members: Vec::new(),
+                state: ConversationState::Idle,
+                is_remote: false,
+            },
+        ];
+        app.set_conversations(list, &infos);
+        app
+    }
+
+    /// **The narrowing seam (6a-i).** `canonical_order` — and therefore all five
+    /// readers built on it — covers the ACTIVE conversation only, so the sidebar,
+    /// the working strip, `Alt-1..N` and the focus cycle cannot walk into a
+    /// neighbour's surfaces.
+    #[test]
+    fn the_narrowing_seam_hides_every_other_conversations_surfaces() {
+        let mut app = two_conversations();
+        assert_eq!(
+            app.canonical_order(),
+            vec![0, 1],
+            "the active conversation is r0 + m0; r1 is a neighbour"
+        );
+        // The five readers, all built on `canonical_order`. The strip lists
+        // RUNNING members, so make m0 run — and make the NEIGHBOUR run too, which
+        // is what makes its absence meaningful.
+        app.bodies_mut()[1].running = true;
+        app.bodies_mut()[2].running = true;
+        let team: Vec<&str> = app.working_team_rows().iter().map(|(n, ..)| *n).collect();
+        assert_eq!(team, vec!["m0"], "the strip shows the ACTIVE team only");
+        let sidebar: Vec<String> = app
+            .sidebar_rows_indexed()
+            .iter()
+            .map(|row| format!("{row:?}"))
+            .collect();
+        assert!(
+            sidebar.iter().all(|r| !r.contains("r1") && !r.contains("second")),
+            "the sidebar never lists a neighbour's root: {sidebar:?}"
+        );
+        let members: Vec<usize> = app.member_rows_indexed().iter().map(|(i, ..)| *i).collect();
+        assert!(members.contains(&1), "m0 is a member row: {members:?}");
+        assert!(!members.contains(&2), "r1 is not: {members:?}");
+        // `Alt-N` and the cycle key. From r0, `Alt-1` is m0; `Alt-2` is out of
+        // range (the active conversation has one member row).
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 1, "Alt-1 focuses m0");
+        app.handle(AppEvent::Key(Key::Alt('2')));
+        assert_eq!(app.focus(), 1, "Alt-2 is out of range: r1 is not reachable");
+        // Tab wraps inside the active conversation, never into r1.
+        app.focus_step(1);
+        assert_eq!(app.focus(), 0, "the cycle wraps back to r0");
+        app.focus_step(-1);
+        assert_eq!(app.focus(), 1, "and back to m0");
+
+        // Switching the active conversation moves the rows.
+        assert!(app.activate_conversation(1));
+        assert_eq!(app.canonical_order(), vec![2], "now r1 alone");
+        assert_eq!(app.focus(), 2, "focus follows to the new root");
+        assert!(
+            app.working_team_rows().is_empty(),
+            "conversation 1 has no members"
+        );
+        assert!(!app.member_rows_indexed().iter().any(|(i, ..)| *i == 1));
+    }
+
+    /// **The All-view FILTER (amendment (j)).** Narrowing `canonical_order` alone
+    /// would leave a skipped surface at rank 0, so a neighbour's blocks would sort
+    /// to the FRONT — so the assertion is about ABSENCE, which is the only form
+    /// that can tell "filtered" from "ranked first".
+    #[test]
+    fn the_all_view_omits_a_neighbours_blocks_rather_than_ranking_them_first() {
+        let mut app = two_conversations();
+        // The active root gets a block; the NEIGHBOUR gets one too.
+        app.push_on(0, Block::Notice("active".into()));
+        app.push_on(2, Block::Notice("neighbour".into()));
+        let order = app.merged_order();
+        assert!(
+            !order.iter().any(|(si, _)| *si == 2),
+            "a neighbour's block is ABSENT from the All view (not merely ordered): {order:?}"
+        );
+        assert!(
+            order.iter().any(|(si, _)| *si == 0),
+            "and the active conversation's block is present: {order:?}"
+        );
+        // The control: with both conversations' blocks seeded, switching the tab
+        // swaps which side is present.
+        assert!(app.activate_conversation(1));
+        let order = app.merged_order();
+        assert!(!order.iter().any(|(si, _)| *si == 0), "{order:?}");
+        assert!(order.iter().any(|(si, _)| *si == 2), "{order:?}");
     }
 
     #[test]
