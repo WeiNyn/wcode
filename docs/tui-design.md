@@ -18,7 +18,10 @@ TUI reads as the same product, given a full screen.
 
 ## 1. Principles
 
-1. **The base is the header over the transcript over the composer.** A pinned
+1. **The base is the tab band (0 or 1 rows) over the header over the
+   transcript over the composer.** The tab band has height 0 when exactly one
+   conversation exists, so a single-conversation frame is **byte-identical** to
+   the pre-W040 layout (W040). A pinned
    **header band** — ONE bare row, no rule (D023) — carries the running
    head `WCODE · session <id> ──── project · ⎇ branch` with `model · effort` far
    right (D010); the head row's only `─` is the **leader** between its own runs.
@@ -101,6 +104,11 @@ The **single** glyph table. §4 names elements but never re-declares a glyph.
 | queued prompts | `⇥` | dim (the composer foot's `⇥ N queued` count, W029; the enqueue notice carries no glyph) |
 | abort / paste chip | `⏹` / `❰ ❱` | dim |
 | context gauge | `used/limit` | plain text (e.g. `14.2k/272k`), flush-left on the foot (D023) |
+
+No row is added for the tab band: `▌` carries **three** meanings, all `accent`
+— the live cursor, the browse **selection bar**, and **the active conversation
+tab** (the tab band, §4, W040). One glyph at three scales, one reading: *you are
+here*.
 
 ## 3. Layout drafts
 
@@ -246,6 +254,29 @@ selection bar.
   session: they are the record of what the run did. The seeded hint has its own
   retirement (`clear_hint` at the first block) and is in neither list.
 
+- **Tab band** (W040) — the conversation selector: ONE bare row, no rule, above
+  the pinned header — never inside it. It is a band, not a transcript block, and
+  it lives in the bands column (right of a docked sidebar) exactly as the header
+  does. It is drawn **only when there is more than one conversation**: at N = 1
+  it has height 0, so nothing is reserved and the frame is byte-identical to the
+  pre-W040 layout (§1.1 — the `SIDEBAR_MIN_WIDTH` rule, applied vertically).
+  Tabs sit flush at the band's left edge, the header row's own alignment, and
+  read `▌ wcode · api ⠋ tests · ✗ broken`: `▌` marks the **active** tab
+  (`accent`) and its label is `body`, every other label `dim`; a `Running`
+  conversation puts `⠋` before its label in `accent`, a `Failed` one `✗` in
+  `error`; a remote conversation appends the word `remote` in `muted` after its
+  label; the separators are `·` in `dim`. The row **clips** at the right edge,
+  never wraps, and the clip never takes the active tab: a crowded bar sheds the
+  tabs to its right, and the active tab is drawn first when it would otherwise
+  be cut. It is **selection chrome**, not the session band — **D010 stands
+  unamended**: the header remains the pinned top *session* band and this band
+  merely sits above it — so it is none of §1.1's three absent rows (no session
+  row, no status row, no composer head row: this row exists only while there is
+  something to select between), and as chrome it is never a browse target and
+  never copied. Five roles, all already on `Theme` (`accent`, `dim`, `muted`,
+  `error`, `body`) and no new glyph — §2's `▌`, spinner, `✗` and `·` — so under
+  palette B every one but `error` resolves to the grey ramp and the `▌` plus the
+  label's weight carry the active tab with no hue (D023).
 - **Header** (D010; amended by D023) — a **pinned top band**, not a transcript
   block: ONE bare row, no rule, carrying the running
   head `WCODE · session <id> ──── project · ⎇ branch`. The only `─` is the
@@ -369,7 +400,12 @@ kitty/xterm-`modifyOtherKeys`; Ctrl-J is the portable newline.)
 
 **Layout** — top to bottom (the sidebar, `Ctrl-B`, is an optional left column):
 0. the **header** band (pinned, D010; D023) — ONE bare row (the running head),
-   no rule, always visible;
+   no rule, always visible. **The topmost row and the session frame are two
+   things:** this is band 0 *of the session frame*, and the **tab band**
+   (W040, §4) is selection chrome above it — 0 rows unless there is more than
+   one conversation, so at N = 1 this list is the whole frame row for row.
+   "Pinned top" therefore still means what D010 meant: the top of the session
+   frame, not the top of the terminal;
 1. the **transcript** (flex, plain, scrollable). Committed assistant messages render as
    markdown — headings, bullets, fenced code, aligned tables, inline
    `code`/`**bold**`. It renders in a **measure** — a content column, **default
