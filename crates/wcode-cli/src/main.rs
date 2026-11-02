@@ -1210,7 +1210,17 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                     // Tasks are unavailable across a socket: the server owns the
                     // plan, and the client holds no `TaskList`.
                     let new_tasks = None;
-                    match wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await {
+                    match wcode_tui::run(
+                        surfaces,
+                        options,
+                        new_surfaces,
+                        new_tasks,
+                        // A socket client has no local build capability:
+                        // `/tab new|close` refuse before emitting (`App.remote`).
+                        wcode_tui::conversations::ConversationFeeds::none(),
+                    )
+                    .await
+                    {
                         Ok(wcode_tui::Outcome::Quit) => {
                             // A socket client owns no local Background, but the
                             // seam is shared: signal any live group before exit (D8).
@@ -2328,7 +2338,7 @@ async fn dispatch(
             let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<
                 wcode_tui::conversations::ConversationRequest,
             >();
-            let (evt_tx, _evt_rx) = tokio::sync::mpsc::unbounded_channel::<
+            let (evt_tx, evt_rx) = tokio::sync::mpsc::unbounded_channel::<
                 wcode_tui::conversations::ConversationEvent,
             >();
             let run_inputs = repl::RunInputs {
@@ -2361,7 +2371,17 @@ async fn dispatch(
                     root_events: root_event_rx,
                 },
             ));
-            let outcome = wcode_tui::run(surfaces, options, new_surfaces, new_tasks).await;
+            let outcome = wcode_tui::run(
+                surfaces,
+                options,
+                new_surfaces,
+                new_tasks,
+                wcode_tui::conversations::ConversationFeeds {
+                    incoming: Some(evt_rx),
+                    outbound: Some(req_tx.clone()),
+                },
+            )
+            .await;
             // The TUI is gone: drop the request sender so `run_host` ends and
             // hands the registry back, then close EVERY root — every actor, every
             // `bg` scope, every registry entry — before any exit path below. A

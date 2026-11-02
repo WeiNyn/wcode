@@ -1882,14 +1882,6 @@ mod tests {
             before + 1,
             "the worker's Background carries the orchestrator's conversation ({id}), not c0"
         );
-        assert_eq!(
-            tagged(ConversationId::first()),
-            Background::live_scopes()
-                .into_iter()
-                .filter(|scope| *scope == ConversationId::first())
-                .count(),
-            "sanity: the c0 count is read the same way"
-        );
         // Clean up: the worker's own scope teardown releases its notifier.
         Background::shutdown_scope(id);
         drop(worker);
@@ -2043,12 +2035,36 @@ mod tests {
             _ => panic!("expected Stopped"),
         }
 
+        // FINDING 8's end-to-end prediction: a CLOSED id is never reused — the
+        // next `Start` mints the NEXT one (the same rule `a_failed_build_…` pins
+        // for a failed build; this is the close/`Stopped` path).
+        requests
+            .send(ConversationRequest::Start(RootSpec::Fresh { label: None }))
+            .expect("the host is alive");
+        match tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("a reply")
+            .expect("alive")
+        {
+            ConversationEvent::Added(spec) => assert_eq!(
+                spec.id,
+                ConversationId::new(401),
+                "the closed c400 is not reused; the mint advanced"
+            ),
+            _ => panic!("expected Added"),
+        }
+
         drop(requests);
         let roots = tokio::time::timeout(Duration::from_secs(5), host)
             .await
             .expect("the host returns")
             .expect("no panic");
-        assert_eq!(roots.len(), 0, "Start added it, Stop removed it");
+        assert_eq!(
+            roots.len(),
+            1,
+            "Start added it, Stop removed it, and the SECOND Start (the id-burn \
+             check) is still live when the client goes away"
+        );
     }
 
     /// FINDING 3's gate: a member's surface id is MINTED, its A2A address is not,

@@ -312,6 +312,57 @@ impl Conversations {
         self.items.iter().find(|c| c.contains(surface))
     }
 
+    /// Append a conversation the host just announced. `Err` on a duplicate id or a
+    /// root already owned by another conversation (never a panic). Does NOT
+    /// activate: the caller decides (a `/tab new` activates; a background reply
+    /// must not steal the view).
+    pub fn push(&mut self, c: Conversation) -> Result<(), String> {
+        if self.items.iter().any(|i| i.id == c.id) {
+            return Err(format!("conversation {} is already live", c.id));
+        }
+        if self
+            .items
+            .iter()
+            .any(|i| i.root == c.root || i.members.contains(&c.root))
+        {
+            return Err(format!("surface {} is already owned", c.root));
+        }
+        self.items.push(c);
+        Ok(())
+    }
+
+    /// Remove a conversation and return every surface id it owned, for the caller
+    /// that owns the bodies. `None` (and no change) for the LAST conversation: a
+    /// host cannot close its only tab, and `active()` must stay valid.
+    pub fn remove(&mut self, id: ConversationId) -> Option<Vec<SessionId>> {
+        if self.items.len() <= 1 {
+            return None;
+        }
+        let idx = self.items.iter().position(|c| c.id == id)?;
+        let gone = self.items.remove(idx);
+        // Keep the same conversation active: clamp into range.
+        self.active = self.active.min(self.items.len() - 1);
+        Some(gone.surface_ids())
+    }
+
+    /// Record the host's verdict that a conversation's root runtime is gone
+    /// (§13.2 item 4). Sticky `Failed` — the tab must not lie that it is idle.
+    /// `false` when the id is unknown (a `Died` racing a close is not an error).
+    pub fn mark_died(&mut self, id: ConversationId) -> bool {
+        match self.items.iter_mut().find(|c| c.id == id) {
+            Some(item) => {
+                item.state = ConversationState::Failed;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Index of `id`, if any.
+    pub fn index_of(&self, id: ConversationId) -> Option<usize> {
+        self.items.iter().position(|c| c.id == id)
+    }
+
     /// Activate by index. `false` (and no change) when out of range — the
     /// `App::set_focus` tolerance.
     pub fn activate(&mut self, idx: usize) -> bool {
@@ -506,6 +557,14 @@ pub struct ConversationFeeds {
     pub incoming: Option<tokio::sync::mpsc::UnboundedReceiver<ConversationEvent>>,
     /// Requests out to the CLI.
     pub outbound: Option<tokio::sync::mpsc::UnboundedSender<ConversationRequest>>,
+}
+
+impl ConversationFeeds {
+    /// No host behind this TUI (a `--socket` client): both ends `None`, and
+    /// `/tab new|close` refuse before any `Action` is emitted (`App.remote`).
+    pub fn none() -> Self {
+        Self::default()
+    }
 }
 
 #[cfg(test)]

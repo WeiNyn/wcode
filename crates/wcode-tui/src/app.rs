@@ -152,85 +152,15 @@ pub enum Action {
     /// `skill_turn(name, body, args)` as `Request::Submit`.
     LoadSkill { name: String, path: PathBuf, args: Option<String> },
 
-    // ==== SKETCH (review-only, not real code) ====
-    // W040 §13.2 item 8 — THE REVERSE CHANNEL. Two new variants; no other
-    // change to this enum. `RootSpec`/`ConversationId` come from
-    // `wcode_protocol` (`crates/wcode-protocol/src/conversation.rs`, new), so the
-    // derive above still holds: both are `Clone + Debug + PartialEq`.
-    //
-    // WHY A NEW VARIANT AND NOT A `pending_*` FLAG. Every outward decision this
-    // enum describes is *local* today; the only things the TUI cannot do itself
-    // are answered at EXIT (`pending_resume`/`pending_team`/`pending_reload`/
-    // `pending_new`, `app.rs:2951`-region) and the CLI re-execs. A tab cannot
-    // re-exec — the other conversations' actors would die with the process — so
-    // "new conversation" needs a LIVE round trip: `Action` out to the event loop,
-    // `ConversationRequest` out to the CLI, `ConversationEvent` back down the
-    // inbound side, exactly as `new_surfaces` already does for members
-    // (`lib.rs:579` `Some(spec) = recv_opt(&mut new_surfaces) => {`).
-    //
-    // WHY THE APP CANNOT DO IT (and why the variant is data, not a closure):
-    // `Options` (`lib.rs:284`) is this crate's whole injection list — no `llm`, no
-    // session dir, no `Background`, no `Agent`, no `cfg`. A conversation is built
-    // by the *composition root*: `load_session` + `build_runtime` +
-    // `build_agent_for` + `SessionActor::spawn` (`main.rs:1286`, `:1462`, `:1737`,
-    // `agent.rs:273`). §13.2 item 2: the factory is injected by the CLI, per the
-    // `DefineHandler` precedent (`wcode-protocol/src/server.rs:68`).
-    //
-    // WHAT HAPPENS TO THE PENDING REPLY (the part that bites):
-    //  - `App` sets `pending_conversation = true` when it emits this, and clears it
-    //    on `ConversationEvent::Added` OR `::Failed` (never on a timeout — there
-    //    is no timeout: the factory is a sync build, milliseconds).
-    //  - The event loop sends `ConversationRequest::Start(spec)` and, if the CLI's
-    //    receiver is GONE (the CLI dropped it: a shutdown in progress), it answers
-    //    the app itself with `ConversationEvent::Failed { error: "host is gone" }`
-    //    — the `AskTo` synthetic-error rule (`lib.rs:641`-region, "answer it
-    //    SYNTHETICALLY so the collector can finish"), applied to the same hazard.
-    //  - Conversely, if the TUI's `Added` receiver is gone (the user quit while
-    //    the CLI was building), the CLI's `send` fails and the CLI MUST tear the
-    //    freshly built root down — `Background::shutdown_scope(id)` + drop the
-    //    handle; otherwise a `/tab new` + immediate `Ctrl-C` leaks an actor, a
-    //    session file and a `bg` scope. That obligation is why the CLI-side
-    //    `SpawnedRoot` owns its `bg` (see the `main.rs` block).
-    //
-    // WHY `Start` CARRIES A `RootSpec` AND NOT A MESSAGE: `RootSpec` is the TUI's
-    // *intent* (`Fresh` / `Resume { dir }`). The CLI converts it into its own
-    // `RootSpec`-shaped work; the TUI never names a build step.
-    //
-    // Ask the host to build ONE more conversation (§13.2 item 8). Not emitted
-    // over a socket (`remote`), where `/tab new` refuses first — the
-    // `/reload`/`/new`/`/team` precedent (`app.rs:6472`, `:6484`, `:6059`).
-    //
-    // # Contracts
-    // - Only emitted when `!remote` and `!pending_conversation`.
-    // - The engine performs it by sending [`crate::conversations::ConversationRequest::Start`];
-    //   a closed outbound channel is answered with
-    //   [`crate::conversations::ConversationEvent::Failed`], never silently
-    //   dropped.
-    // - It does NOT change `App.focus`, `App.surfaces` or `Conversations` — the
-    //   tab appears when the reply lands.
-    // NewConversation(RootSpec),
-
-    // Ask the host to tear ONE conversation down (§13.2 items 3–4). Emitted by
-    // `/tab close`, and refused before that by the reducer when ANY of its
-    // surfaces is running (a running MEMBER counts — see
-    // `request_close_conversation`) or when it is the only conversation.
-    //
-    // The host's verb is **cancel-then-abandon**: `Request::Cancel` best-effort,
-    // the orchestrator token cancelled, `Background::shutdown_scope` for every
-    // `bg` child the conversation created (root and members), `Registry::remove`
-    // per id, handles dropped, and the group dir LEFT ON DISK. Idempotent (an
-    // unknown id is a no-op) and never awaited — the reducer's refusal is what
-    // keeps that abandonment from ever racing a live turn.
-    //
-    // # Contracts
-    // - The tab is NOT removed optimistically: the host echoes
-    //   [`crate::conversations::ConversationEvent::Stopped`] after it has
-    //   released the handles, and only then does `App` drop the surfaces. A
-    //   teardown that fails therefore leaves a tab whose backend still answers,
-    //   instead of a tab that lies.
-    // - Idempotent on the host side: closing an unknown id is a no-op.
-    // CloseConversation(ConversationId),
-    // ==== /SKETCH ====
+    /// Ask the host to build ONE more conversation (§13.2 item 8). Not emitted
+    /// over a socket, where `/tab new` refuses first (the `/reload`/`/new`/`/team`
+    /// precedent): the host performs it by answering
+    /// `ConversationEvent::Added` or `::Failed { error }`.
+    NewConversation(wcode_protocol::RootSpec),
+    /// Ask the host to tear ONE conversation down (§13.2 items 3–4). The tab is
+    /// NOT removed optimistically — the host echoes `ConversationEvent::Stopped`
+    /// after it has released the handles, and only then does the rail drop it.
+    CloseConversation(ConversationId),
 }
 
 /// One **exchange**: a user prompt → the assistant's answer, as ONE block.
@@ -3303,6 +3233,91 @@ impl App {
         &self.conversations
     }
 
+    /// **Register a conversation the host announced** (`ConversationEvent::Added`):
+    /// every surface body (the caller has already pushed its backend and forwarder,
+    /// so `bodies` must grow in lockstep or not at all), the container row, then the
+    /// switch to it — the user asked for this tab, so the `add_surface` "must not
+    /// steal focus" rule does not apply.
+    ///
+    /// Returns whether the conversation was registered. A variant's surfaces that
+    /// the container refuses are not added, per `add_surface_in`'s own contract.
+    pub fn add_conversation(
+        &mut self,
+        spec: crate::conversations::ConversationSpec,
+    ) -> bool {
+        let Some(root) = spec.surfaces.first().map(|s| s.id.clone()) else {
+            return false;
+        };
+        let row = Conversation {
+            id: spec.id,
+            label: spec.label,
+            root,
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+        };
+        if self.conversations.push(row).is_err() {
+            return false;
+        }
+        for surface in spec.surfaces {
+            self.add_surface_in(spec.id, surface.info());
+        }
+        if let Some(idx) = self.conversations.index_of(spec.id) {
+            self.activate_conversation(idx);
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// `ConversationEvent::Failed`: the host could not build it. Rendered as a
+    /// `transient` — the `/reload`-refusal idiom — so the reason is on screen.
+    pub fn conversation_failed(&mut self, error: String) {
+        self.transient(format!("conversation: {error}"));
+    }
+
+    /// `ConversationEvent::Died` (§13.2 item 4): mark the tab `Failed` and say so,
+    /// but KEEP it and its surfaces — a root whose actor panicked must remain
+    /// readable, so the user can see what it said before it died. Never unwinds.
+    pub fn conversation_died(&mut self, id: ConversationId) {
+        if self.conversations.mark_died(id) {
+            self.transient(format!("conversation {id} died"));
+            self.dirty = true;
+        }
+    }
+
+    /// `ConversationEvent::Stopped`, or `/tab close`'s echo: **the one place that
+    /// removes surfaces**, and it returns the ids it dropped so the caller can
+    /// shrink its `backends` by the same set (the alignment invariant).
+    ///
+    /// Remaps [`App::focus`] onto the NEW active conversation's root, and drops the
+    /// state that named a removed surface: the browse selection/search (they index
+    /// the focused surface's transcript), the `/usage` fan-out (a collector waiting
+    /// on a closed conversation would never open its modal) and the deferred-settings
+    /// marks (App-level intends, but they name per-surface requests).
+    pub fn remove_conversation(&mut self, id: ConversationId) -> Vec<SessionId> {
+        let Some(ids) = self.conversations.remove(id) else {
+            return Vec::new();
+        };
+        self.bodies_mut().retain(|surface| !ids.contains(&surface.id));
+        let root = self.conversations.active().root.clone();
+        if let Some(i) = self.surface_index(&root) {
+            self.focus_idx = i;
+        } else {
+            self.focus_idx = self.focus_idx.min(self.bodies().len().saturating_sub(1));
+        }
+        self.mode = Mode::Input;
+        self.search = None;
+        self.last_search = None;
+        self.usage_collect = None;
+        self.deferred_settings.clear();
+        self.dirty = true;
+        debug_assert!(
+            !self.bodies().is_empty(),
+            "the last conversation cannot be closed, so a body remains"
+        );
+        ids
+    }
+
     /// Activate conversation `idx` and point the focus at ITS root, so the
     /// composer, the header and the transcript switch atomically.
     ///
@@ -5410,9 +5425,20 @@ impl App {
             // reason) rather than silently doing nothing.
             "tab" => match arg {
                 None => self.transient(tab_summary(self.conversations())),
-                Some("new") => self.transient(
-                    "the host cannot open a conversation yet (W040 6b: the reverse channel)",
-                ),
+                Some("new") => {
+                    // The host builds it; `Added`/`Failed` come back through the
+                    // same channel. Refused before the emit over a socket, where
+                    // there is no host (the `/reload`/`/new`/`/team` precedent).
+                    if self.remote {
+                        self.transient("cannot open a conversation over a socket");
+                    } else {
+                        self.actions
+                            .push(Action::NewConversation(wcode_protocol::RootSpec::Fresh {
+                                label: None,
+                            }));
+                        self.transient("opening a conversation…");
+                    }
+                }
                 Some("close") => self.request_close_conversation(),
                 Some(n) => match n.parse::<usize>() {
                     Ok(k) if k >= 1 && self.activate_conversation(k - 1) => {
@@ -5701,7 +5727,11 @@ impl App {
             self.transient("cannot close a conversation while a surface is running");
             return;
         }
-        self.transient("the host cannot close a conversation yet (W040 6b: the reverse channel)");
+        // The host performs it (cancel-then-abandon, idempotent, never awaited) and
+        // answers `Stopped`; the tab leaves the rail on the echo, never before.
+        let active = self.conversations().active().id;
+        self.actions.push(Action::CloseConversation(active));
+        self.transient("closing the conversation…");
     }
 
     /// `Ctrl-N` / `Shift-Tab` (W040 §13.2 item 6): cycle CONVERSATIONS when there
@@ -9853,12 +9883,34 @@ mod tests {
         submit(&mut app, "/tab 9");
         assert_eq!(app.conversations().active_index(), 1, "out of range: unchanged");
 
-        // `new` refuses, naming the reason.
+        // `new` now ASKS the host: the action goes out and a transient says so.
+        let before = app.take_actions().len();
         submit(&mut app, "/tab new");
+        let actions = app.take_actions();
         assert!(
-            last_transient(&app).contains("cannot open a conversation yet"),
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::NewConversation(_))),
+            "the request reaches the host: {actions:?}"
+        );
+        let _ = before;
+        assert!(
+            last_transient(&app).contains("opening a conversation"),
             "{}",
             last_transient(&app)
+        );
+        // Over a socket there is no host, and it refuses before emitting.
+        let mut remote = two_conversations_for_the_band();
+        remote.set_remote(true);
+        submit(&mut remote, "/tab new");
+        assert!(
+            last_transient(&remote).contains("over a socket"),
+            "{}",
+            last_transient(&remote)
+        );
+        assert!(
+            !remote.take_actions().iter().any(|a| matches!(a, Action::NewConversation(_))),
+            "no request without a host"
         );
     }
 
@@ -9877,13 +9929,19 @@ mod tests {
             last_transient(&app)
         );
 
-        // Idle, but still not the host's to close yet (6b).
+        // Idle: the request goes to the host, and the tab leaves on its echo.
         let mut idle = two_conversations_idle();
         submit(&mut idle, "/tab close");
+        let actions = idle.take_actions();
         assert!(
-            last_transient(&idle).contains("cannot close a conversation yet"),
-            "{}",
-            last_transient(&idle)
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::CloseConversation(_))),
+            "the close reaches the host: {actions:?}"
+        );
+        assert!(
+            idle.conversations().len() == 2,
+            "and the tab is NOT removed optimistically"
         );
         // And the LAST conversation can never be closed.
         let mut single = App::new();

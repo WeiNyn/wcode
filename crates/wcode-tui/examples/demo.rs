@@ -185,5 +185,14 @@ async fn main() -> std::io::Result<()> {
             backend: Backend::from(handle),
         },
     ];
-    wcode_tui::run(surfaces, options, None, None).await.map(|_| ())
+    wcode_tui::run(
+        surfaces,
+        options,
+        None,
+        None,
+        // No host in the demo.
+        wcode_tui::conversations::ConversationFeeds::none(),
+    )
+    .await
+    .map(|_| ())
 }

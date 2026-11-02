@@ -392,6 +392,10 @@ pub async fn run(
     // associates every startup surface with its conversation.
     new_surfaces: Option<mpsc::UnboundedReceiver<(ConversationId, SurfaceSpec)>>,
     new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
+    // The reverse channel (W040 §13.2 item 8): `/tab new|close` out, and the
+    // host's `Added`/`Failed`/`Stopped`/`Died` back in. `none()` for a client
+    // that has no host behind it (a `--socket` TUI).
+    feeds: conversations::ConversationFeeds,
 ) -> io::Result<Outcome> {
     // Index 0 (the root) is mandatory — its backend drives the loop. Guard the
     // `pub` API against an empty list rather than panicking on `backends[0]`.
@@ -461,7 +465,8 @@ pub async fn run(
         app.load_history(read_history(path));
     }
 
-    let result = event_loop(&mut terminal, backends, &mut app, new_surfaces, new_tasks).await;
+    let result =
+        event_loop(&mut terminal, backends, &mut app, new_surfaces, new_tasks, feeds).await;
 
     if let Some(path) = &history {
         write_history(path, app.history());
@@ -544,6 +549,7 @@ async fn event_loop(
     // (`SurfaceSpec::info()` drops everything but the display fields).
     mut new_surfaces: Option<mpsc::UnboundedReceiver<(ConversationId, SurfaceSpec)>>,
     mut new_tasks: Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
+    mut feeds: conversations::ConversationFeeds,
 ) -> io::Result<()> {
     let mut events = EventStream::new();
 
@@ -605,6 +611,17 @@ async fn event_loop(
             Some(delivery) = recv_opt(&mut new_surfaces) => {
                 accept_member(app, &mut backends, &agent_tx, delivery);
             }
+            // The host answers a `/tab new` or a `/tab close`.
+            Some(event) = recv_conv(&mut feeds.incoming) => match event {
+                conversations::ConversationEvent::Added(spec) => {
+                    accept_conversation(app, &mut backends, &agent_tx, spec);
+                }
+                conversations::ConversationEvent::Failed { error } => app.conversation_failed(error),
+                conversations::ConversationEvent::Stopped { id } => {
+                    drop_surfaces(app, &mut backends, id);
+                }
+                conversations::ConversationEvent::Died { id } => app.conversation_died(id),
+            },
             // The orchestrator's plan changed: replace the whole list.
             Some(items) = recv_tasks(&mut new_tasks) => app.set_tasks(items),
             Some(event) = replies.recv() => app.handle(event),
@@ -648,6 +665,28 @@ async fn event_loop(
                 }
                 Action::Cancel => {
                     let _ = backend.send(Request::Cancel);
+                }
+                // The reverse channel: the host builds and tears down, the TUI
+                // never does. A client with no host (a `--socket` TUI) refuses
+                // upstream (`App.remote`), so an empty channel here is a bug
+                // worth saying out loud rather than swallowing.
+                Action::NewConversation(spec) => {
+                    match feeds.outbound.as_ref().map(|tx| {
+                        tx.send(conversations::ConversationRequest::Start(spec))
+                    }) {
+                        Some(Ok(())) => {}
+                        _ => app.conversation_failed("no host to open a conversation".into()),
+                    }
+                }
+                Action::CloseConversation(id) => {
+                    if feeds
+                        .outbound
+                        .as_ref()
+                        .map(|tx| tx.send(conversations::ConversationRequest::Stop(id)))
+                        .is_none()
+                    {
+                        app.conversation_failed("no host to close a conversation".into());
+                    }
                 }
                 Action::Ask(request) => spawn_ask(id, backend, &reply_tx, request),
                 Action::AskTo(target, request) => {
@@ -743,6 +782,57 @@ fn accept_member(
     true
 }
 
+/// **Accept one conversation the host announced** — and keep the two stores
+/// aligned: every surface gets a forwarder and a backend IFF `App` accepted its
+/// body, so `backends` and `bodies` stay index-for-index (the same invariant
+/// `accept_member` ends with, for the same reason).
+fn accept_conversation(
+    app: &mut App,
+    backends: &mut Vec<(SessionId, Backend)>,
+    agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
+    spec: conversations::ConversationSpec,
+) -> bool {
+    let wired: Vec<(SessionId, Backend)> = spec
+        .surfaces
+        .iter()
+        .map(|s| (s.id.clone(), s.backend.clone()))
+        .collect();
+    if !app.add_conversation(spec) {
+        return false;
+    }
+    for (id, backend) in wired {
+        spawn_forwarder(agent_tx, &id, &backend);
+        backends.push((id, backend));
+    }
+    debug_assert_eq!(
+        backends.len(),
+        app.bodies().len(),
+        "backends and bodies are index-for-index"
+    );
+    true
+}
+
+/// **Drop one conversation's surfaces** — the removal mirror of
+/// [`accept_conversation`]. `App` owns the bodies (and returns the ids it dropped,
+/// because `backends` is this module's), so the shrink happens here and both
+/// halves are asserted equal. The asymmetry is deliberate: growth is one body +
+/// one backend per surface; removal is `remove_conversation` then this.
+fn drop_surfaces(
+    app: &mut App,
+    backends: &mut Vec<(SessionId, Backend)>,
+    id: ConversationId,
+) -> usize {
+    let ids = app.remove_conversation(id);
+    let before = backends.len();
+    backends.retain(|(sid, _)| !ids.contains(sid));
+    debug_assert_eq!(
+        backends.len(),
+        app.bodies().len(),
+        "backends and bodies are index-for-index"
+    );
+    before - backends.len()
+}
+
 fn spawn_forwarder(
     agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
     id: &SessionId,
@@ -775,6 +865,17 @@ fn spawn_forwarder(
 async fn recv_tasks(
     rx: &mut Option<mpsc::UnboundedReceiver<Vec<TaskItem>>>,
 ) -> Option<Vec<TaskItem>> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The reverse channel's inbound end, with the same `Option` tolerance as the
+/// member feed: no host means the arm never fires.
+async fn recv_conv(
+    rx: &mut Option<mpsc::UnboundedReceiver<conversations::ConversationEvent>>,
+) -> Option<conversations::ConversationEvent> {
     match rx {
         Some(r) => r.recv().await,
         None => std::future::pending().await,
@@ -1266,7 +1367,15 @@ mod tests {
             conversations: Vec::new(),
         };
         assert_eq!(
-            run(Vec::new(), options, None, None).await.unwrap(),
+            run(
+                Vec::new(),
+                options,
+                None,
+                None,
+                conversations::ConversationFeeds::none(),
+            )
+            .await
+            .unwrap(),
             Outcome::Quit
         );
     }
