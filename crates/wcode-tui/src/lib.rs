@@ -602,12 +602,8 @@ async fn event_loop(
                 app.handle(AppEvent::Agent(id, event));
             }
             // A worker spawned at runtime: add its surface and forward its stream.
-            Some((conversation, spec)) = recv_opt(&mut new_surfaces) => {
-                spawn_forwarder(&agent_tx, &spec.id, &spec.backend);
-                // Tagged: a member for a tab that is gone is refused inside
-                // `add_surface_in`, so its body is never added.
-                app.add_surface_in(conversation, spec.info());
-                backends.push((spec.id.clone(), spec.backend));
+            Some(delivery) = recv_opt(&mut new_surfaces) => {
+                accept_member(app, &mut backends, &agent_tx, delivery);
             }
             // The orchestrator's plan changed: replace the whole list.
             Some(items) = recv_tasks(&mut new_tasks) => app.set_tasks(items),
@@ -714,6 +710,39 @@ async fn event_loop(
 /// Forward one surface's event stream into the merged `agent_tx`, tagged with
 /// its id; the forwarder ends when the subscriber closes or the loop is gone.
 /// Used for the surfaces at startup and for a worker added at runtime.
+/// **Accept one runtime member** — the ONLY place `backends` grows, so the two
+/// stores' alignment lives here rather than in a comment.
+///
+/// `App::add_surface_in` refuses a member whose conversation is not live (the CLI
+/// forwarded a worker for a tab the user had already closed). The body is then not
+/// added, so the backend must not be pushed either — and no forwarder may be
+/// spawned for a surface that has no row. Before this guard, the arm pushed the
+/// backend regardless: at N = 1 the refusal is unreachable (the last conversation
+/// cannot be closed), at N > 1 it desynchronised `backends` from `bodies` and
+/// `backends[app.focus()]` dispatched a keystroke into another conversation.
+///
+/// # Invariant (executable)
+/// `backends.len() == app.bodies().len()` — index-for-index, every conversation's
+/// surfaces flat in the same creation order.
+fn accept_member(
+    app: &mut App,
+    backends: &mut Vec<(SessionId, Backend)>,
+    agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
+    (conversation, spec): (ConversationId, SurfaceSpec),
+) -> bool {
+    if !app.add_surface_in(conversation, spec.info()) {
+        return false; // refused: no body, no backend, no forwarder
+    }
+    spawn_forwarder(agent_tx, &spec.id, &spec.backend);
+    backends.push((spec.id.clone(), spec.backend));
+    debug_assert_eq!(
+        backends.len(),
+        app.bodies().len(),
+        "backends and bodies are index-for-index"
+    );
+    true
+}
+
 fn spawn_forwarder(
     agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
     id: &SessionId,
@@ -1094,6 +1123,103 @@ mod tests {
         assert_eq!(got_tag, tag);
         assert_eq!(got.label, "explorer");
         assert_eq!(got.id.as_str(), "agent:explorer");
+    }
+
+    /// **The `backends`/`bodies` alignment (W040 6b blocker).** A runtime member
+    /// tagged for a conversation that is not live is refused by `App`; the arm must
+    /// then grow NEITHER vector and spawn no forwarder, or `backends[app.focus()]`
+    /// dispatches a keystroke into another conversation. Unreachable at N = 1 (the
+    /// last conversation cannot be closed), so this test is also the proof the band
+    /// made the bug reachable.
+    #[tokio::test]
+    async fn a_member_for_an_unknown_conversation_grows_neither_store() {
+        use crate::conversations::{Conversation, ConversationState};
+
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("r0"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+            SurfaceInfo {
+                id: SessionId::agent("r1"),
+                label: "second".into(),
+                model: "m".into(),
+                is_root: true,
+            },
+        ];
+        let mut app = App::new();
+        app.set_surfaces(infos.clone());
+        app.set_conversations(
+            vec![
+                Conversation {
+                    id: ConversationId::first(),
+                    label: "first".into(),
+                    root: SessionId::agent("r0"),
+                    members: Vec::new(),
+                    state: ConversationState::Idle,
+                    is_remote: false,
+                },
+                Conversation {
+                    id: ConversationId::new(1),
+                    label: "second".into(),
+                    root: SessionId::agent("r1"),
+                    members: Vec::new(),
+                    state: ConversationState::Idle,
+                    is_remote: false,
+                },
+            ],
+            &infos,
+        );
+        let mut backends: Vec<(SessionId, Backend)> = vec![
+            (SessionId::agent("r0"), backend()),
+            (SessionId::agent("r1"), backend()),
+        ];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let bodies_before = app.bodies().len();
+        let backends_before = backends.len();
+
+        let ghost = |name: &str| {
+            (
+                ConversationId::new(99), // not a live conversation
+                SurfaceSpec {
+                    id: SessionId::agent(name),
+                    label: name.into(),
+                    model: "m".into(),
+                    is_root: false,
+                    backend: backend(),
+                },
+            )
+        };
+        assert!(
+            !accept_member(&mut app, &mut backends, &agent_tx, ghost("ghost")),
+            "a member for a dead conversation is refused"
+        );
+        assert_eq!(app.bodies().len(), bodies_before, "no body was added");
+        assert_eq!(backends.len(), backends_before, "and no backend either");
+        assert!(
+            app.conversations()
+                .iter()
+                .all(|c| !c.members.iter().any(|m| m.as_str() == "agent:ghost")),
+            "the container did not record it"
+        );
+
+        // The control: the same delivery tagged for the LIVE conversation is
+        // accepted, and both stores grow together.
+        let live = (
+            ConversationId::first(),
+            SurfaceSpec {
+                id: SessionId::agent("w9"),
+                label: "w9".into(),
+                model: "m".into(),
+                is_root: false,
+                backend: backend(),
+            },
+        );
+        assert!(accept_member(&mut app, &mut backends, &agent_tx, live));
+        assert_eq!(app.bodies().len(), bodies_before + 1);
+        assert_eq!(backends.len(), backends_before + 1);
     }
 
     /// A task-list update handed over the feed is delivered to the loop's arm —

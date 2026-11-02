@@ -3263,9 +3263,9 @@ impl App {
     pub fn set_surfaces(&mut self, surfaces: Vec<SurfaceInfo>) {
         // W040 5a: the container RECONCILES from the same list — a `/rename` or a
         // `Failed` on the startup conversation survives the rebuild
-        // (`Conversations::reset_from`), so the derived view can never disagree
-        // with the authoritative flat store.
-        self.conversations.reset_from(&surfaces);
+        // (`Conversations::reconcile_first`), so the derived view can never
+        // disagree with the authoritative flat store.
+        self.conversations.reconcile_first(&surfaces);
         self.bodies = surfaces.into_iter().map(Surface::new).collect();
         if self.bodies.is_empty() {
             self.bodies.push(default_root());
@@ -3281,7 +3281,7 @@ impl App {
         // An untagged member belongs to the ACTIVE conversation — the pre-W040
         // feed's shape, and the same default `Options.conversations` uses.
         let tag = self.conversations.active().id;
-        self.add_surface_in(tag, info);
+        let _ = self.add_surface_in(tag, info);
     }
 
     /// **Adopt the CLI's startup conversation list** (W040 §13.2 item 5), after
@@ -3330,15 +3330,25 @@ impl App {
     /// it for a tab the user just closed — so the body is never added and the
     /// container's invariant ("every surface id is in exactly one conversation")
     /// cannot break.
-    pub fn add_surface_in(&mut self, conversation: ConversationId, info: SurfaceInfo) {
+    ///
+    /// # Why it returns `bool`
+    /// `crates/wcode-tui/src/lib.rs` feeds a runtime member through this method
+    /// and then pushes the member's backend, so the two stores must grow together
+    /// or not at all: a REFUSED member (unknown conversation, duplicate id) must
+    /// leave `backends` and `bodies` index-for-index. Returning the outcome is
+    /// what lets the caller enforce that; before it did, a member for a tab that
+    /// had just closed was refused here and pushed there — at N = 1 unreachable,
+    /// at N > 1 a keystroke dispatched into another conversation.
+    pub fn add_surface_in(&mut self, conversation: ConversationId, info: SurfaceInfo) -> bool {
         if self.surface_index(&info.id).is_some() {
-            return;
+            return false;
         }
         if self.conversations.add_surface_in(conversation, info.clone()).is_err() {
-            return;
+            return false;
         }
         self.bodies_mut().push(Surface::new(info));
         self.dirty = true;
+        true
     }
 
     /// The focused surface's index (the run loop resolves its backend by it).
@@ -3640,7 +3650,7 @@ impl App {
     }
 
     /// `Alt-1..9`: focus sidebar row `N` — the Nth MEMBER in
-    /// [`App::canonical_order`] (D34), not raw `surfaces[N - 1]` (which is the root
+    /// [`App::canonical_order`] (D34), not raw `bodies[N - 1]` (which is the root
     /// for `Alt-1`). `Alt-0` and an out-of-range `N` are a no-op.
     fn focus_digit(&mut self, c: char) {
         if let Some(n) = c.to_digit(10)
@@ -5676,7 +5686,6 @@ impl App {
     /// conversation. The host verb itself (cancel-then-abandon, idempotent, never
     /// awaited) is 6b's.
     fn request_close_conversation(&mut self) {
-        let active = self.conversations().active().id;
         if self.conversations().len() <= 1 {
             self.transient("the only conversation cannot be closed");
             return;
@@ -5692,7 +5701,6 @@ impl App {
             self.transient("cannot close a conversation while a surface is running");
             return;
         }
-        let _ = active;
         self.transient("the host cannot close a conversation yet (W040 6b: the reverse channel)");
     }
 
@@ -9919,12 +9927,13 @@ mod tests {
         let mut app = two_conversations_for_the_band();
         let wide = crate::render_plain(&mut app, 80, 10);
         let row0 = wide.lines().next().expect("a first row");
-        assert!(row0.contains("▌ first"), "the active tab is marked: {row0:?}");
-        assert!(row0.contains('⠋'), "a running tab carries the spinner: {row0:?}");
-        assert!(row0.contains("second"), "the neighbour is drawn: {row0:?}");
-        assert!(row0.contains("remote"), "a remote tab says so: {row0:?}");
-        assert!(row0.contains('✗'), "a failed tab carries the mark: {row0:?}");
-        assert!(row0.contains('·'), "tabs are separated by `·`: {row0:?}");
+        // The WHOLE row, not four `contains`: the marks must sit on the right tab,
+        // and a per-glyph assertion would pass with `⠋` on the failed one.
+        assert_eq!(
+            row0.trim_end(),
+            "▌ first ⠋  ·  second remote ✗",
+            "the band's grammar, tab by tab: {row0:?}"
+        );
         // The header is the SECOND row, so the band is above it (D010's chrome is
         // never pushed down by a tab strip).
         assert!(

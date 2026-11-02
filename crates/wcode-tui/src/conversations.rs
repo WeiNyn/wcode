@@ -14,7 +14,7 @@
 //! never be able to disagree with it.
 //!
 //! The invariant that keeps them agreeing in 5a is
-//! [`Conversations::reset_from`]: a roster rebuild RECONCILES (labels and states
+//! [`Conversations::reconcile_first`]: a roster rebuild RECONCILES (labels and states
 //! of surviving conversations survive) instead of replacing, so a `/rename`
 //! followed by any refresh cannot silently lose the tab's name.
 //!
@@ -89,8 +89,9 @@ pub struct Conversation {
     /// The non-root surfaces' routing ids, in creation order. Never contains
     /// `root`.
     pub members: Vec<SessionId>,
-    /// The tab's state. Written by [`Conversations::reset_from`] (which preserves
-    /// it) and [`Conversations::set_state_from`] (the sticky `Failed` rule) only.
+    /// The tab's state. Written by [`Conversations::reconcile_first`] (which
+    /// preserves it) and [`Conversations::set_state_from`] (the sticky `Failed`
+    /// rule) only.
     pub state: ConversationState,
     /// `true` when this conversation's backends are `Backend::Remote` (a
     /// `--socket` client). One remote conversation per process today, so it is
@@ -255,10 +256,16 @@ impl Conversations {
     ///   dropped).
     /// - An empty list keeps the current conversation and re-points it at the
     ///   default root only when it had none.
-    /// - 5a has exactly one conversation (the CLI cannot mint a second yet), so
-    ///   this reconciles `items[0]`; the multi-conversation reconcile lands with
-    ///   5b's narrowing.
-    pub fn reset_from(&mut self, surfaces: &[crate::SurfaceInfo]) {
+    /// - **It reconciles `items[0]` and TRUNCATES the rest** — the name says so
+    ///   (`reconcile_first`), because until 6b's channel there is exactly one
+    ///   conversation and a second item with no body behind it would draw a tab
+    ///   over nothing. The multi-conversation reconcile arrives with the commit
+    ///   that can create one.
+    pub fn reconcile_first(&mut self, surfaces: &[crate::SurfaceInfo]) {
+        // One conversation is the whole assumption: anything beyond `items[0]`
+        // has no body behind it here.
+        self.items.truncate(1);
+        self.active = 0;
         let Some((first, rest)) = surfaces.split_first() else {
             return;
         };
@@ -626,10 +633,10 @@ mod tests {
     /// `/rename` and a `Failed` survive `set_surfaces`, or the two stores would
     /// silently disagree — the class the sketch review removed.
     #[test]
-    fn reset_from_keeps_the_label_and_state_of_the_surviving_conversation() {
+    fn reconcile_first_keeps_the_label_and_state_of_the_surviving_conversation() {
         let surfaces = [info("root", true), info("a", false)];
         let mut c = Conversations::single(&[]);
-        c.reset_from(&surfaces);
+        c.reconcile_first(&surfaces);
 
         let root = SessionId::agent("root");
         assert!(c.set_label(&root, "api".into()), "the root renames the tab");
@@ -638,7 +645,7 @@ mod tests {
         assert_eq!(c.active().state, ConversationState::Failed);
 
         // The same ids arrive again — the roster refresh — and nothing is lost.
-        c.reset_from(&surfaces);
+        c.reconcile_first(&surfaces);
         assert_eq!(c.active().label, "api", "the label survived the rebuild");
         assert_eq!(
             c.active().state,
@@ -648,7 +655,7 @@ mod tests {
         assert_eq!(ids(&c), vec!["agent:root".to_string(), "agent:a".into()]);
 
         // A different root IS a new conversation: name and state start over.
-        c.reset_from(&[info("other", true)]);
+        c.reconcile_first(&[info("other", true)]);
         assert_eq!(c.active().label, "other");
         assert_eq!(c.active().state, ConversationState::Idle);
         assert_eq!(ids(&c), vec!["agent:other".to_string()]);

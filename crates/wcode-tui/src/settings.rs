@@ -699,7 +699,8 @@ pub enum SettingAction {
 /// - `Tab`/`BackTab` put the cursor on the first row of the next/previous
 ///   SECTION, wrapping (`session` ⇄ `config`). New grammar with no precedent
 ///   (§4.2): inside the panel `BackTab` no longer switches surfaces —
-///   `app.rs:4031` `Key::BackTab => self.focus_prev(),` is shadowed.
+///   `Key::BackTab` is shadowed while the panel is open (it routed to
+///   `self.focus_prev()` when this note was written; `cycle_or_focus` owns it now).
 /// - `Esc` → [`KeyOutcome::Close`]. No other key closes: no `q`, no `Enter`.
 /// - Any cursor move clears `state.hint`; `Esc` leaves `pending` untouched.
 /// - Everything else → [`KeyOutcome::None`] (swallowed — the panel owns the

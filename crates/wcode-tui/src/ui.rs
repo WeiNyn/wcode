@@ -19,7 +19,6 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 use crate::TeamState;
 use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::conversations::{Conversation, ConversationState, Conversations};
-use wcode_protocol::ConversationId;
 use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
 use crate::settings::{Setting, SettingKind};
 use crate::markdown;
@@ -305,7 +304,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// The popup anchors on a 1-row `above` rect at the composer band's top row
 /// (the input line), so it floats over the transcript interior and never covers
 /// the composer.
-/// Draw the conversation tab bar (W040) and publish its click geometry.
+/// Draw the conversation tab bar (W040).
+///
+/// **Not yet clickable**: the row's tab extents are not published into a hit map,
+/// so a click on the band does nothing. That is deliberate here — the band is
+/// unreachable at N = 1, and 6b is the commit that makes two conversations live —
+/// and the deferral is recorded in `docs/next-steps.md` row 112 rather than
+/// claimed in this doc.
 ///
 /// One row, left-aligned from the band's gutter, clipped at the right edge by a
 /// `Paragraph` (no wrap, no scroll): `▌ wcode  ·  api  ⠋ tests  ·  ✗ broken`.
@@ -339,7 +344,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let (row, _tabs) = tab_row(
+    let row = tab_row(
         app.conversations(),
         app.conversations().active_index(),
         area.width as usize,
@@ -363,12 +368,8 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) {
 /// `▌ <label>[ remote][ ⠋| ✗]  ·  <label> …`, and R6's shed rule applies: the
 /// spans are added from the ACTIVE tab onward (wrapping around), so when the band
 /// is too narrow the tabs SHED to the right of the active one and the `▌` stays
-/// visible. The returned `Vec` is each tab's `(id, start, end)` column extent.
-fn tab_row(
-    conversations: &Conversations,
-    active: usize,
-    width: usize,
-) -> (Line<'static>, Vec<(ConversationId, u16, u16)>) {
+/// visible. `width` is the band's; the clip itself is the `Paragraph`'s.
+fn tab_row(conversations: &Conversations, active: usize, width: usize) -> Line<'static> {
     let items: Vec<&Conversation> = conversations.iter().collect();
     // R6: start at the active tab, wrap once — the active tab is drawn first, so
     // a narrow band can only ever lose the ones to its right.
@@ -376,8 +377,6 @@ fn tab_row(
         .map(|k| (active + k) % items.len().max(1))
         .collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut extents: Vec<(ConversationId, u16, u16)> = Vec::new();
-    let mut col = 0u16;
     for (n, &idx) in order.iter().enumerate() {
         let c = items[idx];
         let is_active = idx == active;
@@ -404,22 +403,17 @@ fn tab_row(
         // Every glyph the bar can emit is single-width (`▌`, `⠋`, `✗`, `·` and
         // the labels), so the char count IS the column count — no width crate
         // (W040 adds no dependency).
-        let len: u16 = parts.iter().map(|sp| sp.content.chars().count() as u16).sum();
         // A separator JOINs everything after the active tab (the `▌` needs no
         // leading gap) — the design's `▌ wcode  ·  api`.
         if n > 0 {
             spans.push(Span::styled("  ·  ", muted()));
-            col = col.saturating_add(5);
         }
-        let start = col;
         spans.extend(parts);
-        col = col.saturating_add(len);
-        extents.push((c.id, start, col));
     }
     // The clip is structural: `Paragraph` truncates at the band's width, and the
     // shed order above guarantees the `▌` is inside it.
     let _ = width;
-    (Line::from(spans), extents)
+    Line::from(spans)
 }
 
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
