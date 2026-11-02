@@ -53,6 +53,7 @@ use wcode_harness::protocol::{Request, SessionId};
 use wcode_protocol::{ConversationId, Registry, Roster, RootSpec};
 
 use crate::agents::Orchestrator;
+use crate::repl::RunInputs;
 use crate::session_groups::SessionGroup;
 use crate::tools::background::Background;
 
@@ -442,7 +443,8 @@ impl Roots {
             return Err(RootError::AlreadyLive(dir.display().to_string()));
         }
         let id = self.mint();
-        let root = factory(id, spec)?;
+        let parts = factory(id, spec)?;
+        let root = self.adopt(parts);
         self.insert(root)?;
         Ok(id)
     }
@@ -674,6 +676,13 @@ fn spawn_supervisor(
 /// `io::Result`, `repl::build_agent` is a plain `fn`, and
 /// `SessionActor::spawn` internally `tokio::spawn`s).
 ///
+/// # Why it returns `RootParts`, not `Root` (§13.2.1(c))
+/// A `Root` cannot be built without the supervisor's event sink, and the sink
+/// belongs to the [`Roots`] the root joins — `Root::adopt` is private for exactly
+/// that reason. So the factory hands back the parts and [`Roots::start`] adopts
+/// them with its own sink. A factory that could mint a `Root` would be able to
+/// report its death into the void.
+///
 /// # Why the id is an ARGUMENT (first-layer finding 7)
 /// The id is minted by the host ([`Roots::mint`]) because it is the host's
 /// uniqueness authority — but the build cannot produce a `Root` without it: it
@@ -681,7 +690,8 @@ fn spawn_supervisor(
 /// the factory did not receive it, the closure would have to invent one, and two
 /// authorities minting ids is how a `c0` gets reused. The closure is pure in it
 /// (no state), which keeps it `Send + Sync` and `Fn` rather than `FnMut`.
-pub type Factories = Arc<dyn Fn(ConversationId, RootSpec) -> Result<Root, RootError> + Send + Sync>;
+pub type Factories =
+    Arc<dyn Fn(ConversationId, RootSpec) -> Result<RootParts, RootError> + Send + Sync>;
 
 /// **The surface id for conversation `id`** — the F1 resolution, applied to the
 /// ROOT **and** every MEMBER (finding 3).
@@ -703,6 +713,168 @@ pub fn mint_surface_id(id: ConversationId, base: &SessionId) -> SessionId {
         return base.clone();
     }
     SessionId::new(format!("{base}@c{}", id.seq()))
+}
+
+/// **Build the closure the host calls.** Pure: it captures `inputs` and returns;
+/// the building happens on call.
+///
+/// `pub(crate)`, not `pub`: its parameter is a `pub(crate)` type.
+///
+/// # Contract
+/// - The returned `Fn` takes the already-minted [`ConversationId`] and never mints
+///   one (finding 7: [`Roots::mint`] is the only authority).
+/// - **One build at a time.** The build mutates no process-global state, but the
+///   client's `Failed` reply carries no id, so the host serialises `Start`s.
+/// - It never `exit`s and never prints: every failure comes back as
+///   [`RootError`] (`build_runtime`/`build_agent_for` now return them).
+pub(crate) fn factory_for(inputs: RunInputs) -> Factories {
+    Arc::new(move |id, spec| build_root(&inputs, id, spec))
+}
+
+/// **Build one root** — [`RootSpec::Fresh`](../../wcode_protocol/enum.RootSpec.html)
+/// or `Resume`, from nothing, in one synchronous pass.
+///
+/// # Contract
+///
+/// **Session first.** `Fresh` creates a group dir + its `root.jsonl`; `Resume {
+/// dir }` validates the dir name, opens the group and loads the root (restoring
+/// the session's model/effort unless the flags were given); `--no-session` does
+/// neither. Distinct dirs come from the fs: `create_group` uses `fs::create_dir`,
+/// which fails on a collision instead of merging.
+///
+/// **The runtime and the agent** are `build_runtime`/`build_agent_for` in their
+/// `Result` form, carrying the SAME id this root was minted with — one value for
+/// `Background`'s tag, the orchestrator's workers and every surface id derived
+/// from it.
+///
+/// **The label** (`W040` §13.6.1): `agent.title()` → the requested seed → the
+/// cwd's basename. `title()` first because it is the same source the header
+/// reads, so a `--title` root and its tab cannot disagree.
+///
+/// **The members** are A2A addresses in display order: `[team]` for a fresh root,
+/// `scan_members` for a resumed group, none for a served `--owner` worker.
+///
+/// It does NOT spawn: [`Roots::adopt`] does, so the sink is the registry's.
+///
+/// # Errors
+///
+/// [`RootError`]: `BadResume`/`Session` from the group, `Config` from the
+/// previously-exiting build path. Never `exit`, never a stdout write, never a
+/// panic on a user-supplied path.
+pub(crate) fn build_root(
+    inputs: &RunInputs,
+    id: ConversationId,
+    spec: RootSpec,
+) -> Result<RootParts, RootError> {
+    let args = &inputs.args;
+    let cfg = &inputs.cfg;
+    let mut llm = inputs.llm.clone();
+
+    // 1. The session — created for `Fresh`, loaded for `Resume`, absent for
+    // `--no-session`.
+    let (session, context, group, resuming_group) = match &spec {
+        RootSpec::Fresh { .. } => {
+            if args.no_session {
+                (None, Vec::new(), None, false)
+            } else {
+                let group =
+                    crate::session_groups::create_group(&inputs.dir).map_err(RootError::Session)?;
+                let session = crate::session_groups::create_root_session(&group.dir, &inputs.cwd)
+                    .map_err(RootError::Session)?;
+                (Some(session), Vec::new(), Some(group), false)
+            }
+        }
+        RootSpec::Resume { dir } => {
+            let name = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !crate::session_groups::is_group_dir_name(name) {
+                return Err(RootError::BadResume(dir.clone()));
+            }
+            let group = crate::session_groups::open_group(dir).map_err(RootError::Session)?;
+            let (session, context) =
+                crate::session_groups::load_root(&group).map_err(RootError::Session)?;
+            // A resumed root restores the session's own model/effort unless the
+            // flags said otherwise (the root keeps what it was using).
+            if args.model.is_none()
+                && let Some(model) = session.model()
+            {
+                llm.model = model;
+            }
+            if args.effort.is_none()
+                && let Some(effort) = session.effort()
+            {
+                llm.effort = effort;
+            }
+            (Some(session), context, Some(group), true)
+        }
+    };
+    // `build_runtime` reads only these three fields; the owned session/context
+    // are single-use and stay here (they are now `Copy`-free locals, not state
+    // captured by the factory — finding 9's edge).
+    let setup = crate::SessionSetup {
+        cwd: inputs.cwd.clone(),
+        active_group: group.clone(),
+        resuming_group,
+        session: None,
+        context: Vec::new(),
+    };
+
+    // 2. The runtime, then the agent — both carrying THIS root's id.
+    let rt = crate::build_runtime(args, cfg, &llm, &setup, id)
+        .map_err(|e| RootError::Config(e.message))?;
+    let root = crate::RootCtx {
+        team: if args.owner.is_some() { &[] } else { &cfg.team },
+        guidelines: if args.owner.is_some() {
+            None
+        } else {
+            cfg.orchestrator.guidelines.as_deref()
+        },
+    };
+    let (agent, bg) = crate::build_agent_for(args, cfg, &llm, &rt, root, session, context, id)
+        .map_err(|e| RootError::Config(e.message))?;
+
+    // 3. The label: `agent.title()` → the requested seed → the cwd basename.
+    let session_path = agent.session_path().map(std::path::Path::to_path_buf);
+    let seed = match &spec {
+        RootSpec::Fresh { label } => label.clone(),
+        RootSpec::Resume { dir } => dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned()),
+    };
+    let label = agent
+        .title()
+        .or(seed)
+        .unwrap_or_else(|| crate::label_from_cwd(&inputs.cwd));
+
+    // 4. The team, in display order — A2A addresses, never surface ids.
+    let members: Vec<SessionId> = if args.owner.is_some() {
+        Vec::new()
+    } else if let (true, Some(group)) = (resuming_group, group.as_ref()) {
+        crate::session_groups::scan_members(group)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(SessionId::agent))
+            .collect()
+    } else {
+        cfg.team
+            .iter()
+            .map(|m| SessionId::agent(&m.name))
+            .collect()
+    };
+
+    Ok(RootParts {
+        id,
+        label,
+        agent,
+        bg,
+        orchestrator: rt.orchestrator.clone(),
+        group,
+        session_path,
+        model: llm.model.clone(),
+        members,
+    })
 }
 
 // ==========================================================================
@@ -1070,6 +1242,133 @@ mod tests {
         assert_eq!(roots.len(), 1, "nothing half-inserted");
     }
 
+    /// The factory's inputs, deterministically: a default config (no file, no
+    /// env), no team, no network (the refused-port base URL is never dialled —
+    /// these tests build roots, they do not run them).
+    fn run_inputs(dir: &Path) -> RunInputs {
+        let args = crate::Args {
+            no_project_config: true,
+            ..crate::Args::default()
+        };
+        // `merge` insists on a model; the startup path always resolves one from
+        // flags/env/config, and here it is the fixture's.
+        let cfg = crate::config::merge(
+            crate::config::EnvLike::default(),
+            crate::config::FileConfig {
+                model: Some("m1".into()),
+                ..crate::config::FileConfig::default()
+            },
+        )
+        .expect("a default config");
+        RunInputs {
+            args,
+            cfg,
+            llm: LlmOpts {
+                model: "m1".into(),
+                base_url: Some("http://127.0.0.1:9/v1".into()),
+                ..LlmOpts::default()
+            },
+            hooks: HooksSet::default(),
+            tools: ToolsConfig::default(),
+            compaction: CompactionPolicy::default(),
+            title_after_turns: 0,
+            instructions: InstructionSet::default(),
+            skills: SkillSet::default(),
+            team: Vec::new(),
+            guidelines: None,
+            overlay: None,
+            no_project_config: true,
+            owner: None,
+            name: None,
+            orchestrator: None,
+            cwd: dir.to_path_buf(),
+            dir: dir.to_path_buf(),
+        }
+    }
+
+    /// The factory half of W040 commit 4: two `Fresh` builds mint two distinct
+    /// group dirs (the fs guarantees it — `create_group` uses `create_dir`), and a
+    /// `Resume` of one returns THAT dir, with the session's model restored.
+    #[tokio::test]
+    async fn fresh_mints_a_distinct_group_dir_and_resume_reuses_one() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let factory = factory_for(run_inputs(tmp.path()));
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 200);
+
+        let a = roots
+            .start(&factory, RootSpec::Fresh { label: None })
+            .expect("a fresh root");
+        let b = roots
+            .start(&factory, RootSpec::Fresh { label: None })
+            .expect("a second fresh root");
+        let dir_a = roots
+            .get(a)
+            .expect("live")
+            .group
+            .as_ref()
+            .expect("a group")
+            .dir
+            .clone();
+        let dir_b = roots
+            .get(b)
+            .expect("live")
+            .group
+            .as_ref()
+            .expect("a group")
+            .dir
+            .clone();
+        assert_ne!(dir_a, dir_b, "each Fresh root mints its own group dir");
+        for dir in [&dir_a, &dir_b] {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            assert!(
+                crate::session_groups::is_group_dir_name(name),
+                "the dir name is a group id: {name}"
+            );
+            assert!(dir.join("root.jsonl").is_file(), "root.jsonl exists");
+        }
+        // The label's last resort: the cwd basename, since nothing named it.
+        assert_eq!(
+            roots.get(a).expect("live").label,
+            tmp.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            "an unnamed root takes the cwd's basename (§13.6.1)"
+        );
+
+        // Resume the first dir: the same dir, and the session's model back. `a`
+        // must be closed first — a LIVE root over the dir is what the guard
+        // refuses (two writers to one `root.jsonl`).
+        assert!(roots.close(a), "the first root closes, its files stay");
+        let c = roots
+            .start(
+                &factory,
+                RootSpec::Resume {
+                    dir: dir_a.clone(),
+                },
+            )
+            .expect("the resume builds");
+        let resumed = roots.get(c).expect("live");
+        assert_eq!(
+            resumed.group.as_ref().expect("a group").dir,
+            dir_a,
+            "Resume reuses the group dir"
+        );
+        assert_eq!(resumed.model, "m1", "the session's model was restored");
+
+        // A second live root over one dir is refused BEFORE the build.
+        let err = roots
+            .start(
+                &factory,
+                RootSpec::Resume {
+                    dir: dir_a.clone(),
+                },
+            )
+            .expect_err("a live Resume dir is refused");
+        assert!(matches!(err, RootError::AlreadyLive(_)), "{err}");
+    }
+
     #[tokio::test]
     async fn a_closed_roots_files_remain_on_disk() {
         let tmp = tempfile::tempdir().expect("a tempdir");
@@ -1131,12 +1430,9 @@ mod tests {
         assert_eq!(roots.len(), 0, "nothing half-inserted");
 
         // The next attempt gets c3, not the c2 the failure consumed.
-        // A factory cannot reach `Roots::adopt` (it is the host's method), so it
-        // builds through a scratch registry of its own — infallibly.
-        let ok: Factories = Arc::new(|id, _spec| {
-            let mut scratch = Roots::new(mpsc::unbounded_channel().0);
-            Ok(scratch.adopt(parts(id, None)))
-        });
+        // A factory returns PARTS (§13.2.1(c)): the sink is the registry's, so a
+        // factory cannot even express a root reporting elsewhere.
+        let ok: Factories = Arc::new(|id, _spec| Ok(parts(id, None)));
         let id = roots
             .start(&ok, RootSpec::Fresh { label: None })
             .expect("the second build");

@@ -147,8 +147,8 @@ env: WCODE_PROJECT_CONFIG=off disables PROJECT config (./.wcode/{config,team}.to
 env: WCODE_TASK supplies --task when the flag is absent
 env: WCODE_RETRY_MAX, WCODE_RETRY_BASE_MS, WCODE_RETRY_CAP_MS, WCODE_RETRY_TTFT_MS, WCODE_RETRY_IDLE_MS override the toml retry table";
 
-#[derive(Debug, Default, PartialEq)]
-struct Args {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Args {
     /// `--task <text>`: run a `[workflow]` headless on `<text>`. Requires
     /// `[workflow]` + `--agents`; `WCODE_TASK` is the env fallback.
     task: Option<String>,
@@ -1239,26 +1239,32 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                 // The server owns the system prompt and skills, so a remote
                 // client discovers none of its own.
                 repl::run(
+                    repl::RunInputs {
+                        args: args.clone(),
+                        cfg: cfg.clone(),
+                        llm: llm.clone(),
+                        hooks: default_hooks(&cfg.hooks),
+                        tools: cfg.tools,
+                        compaction: cfg.compaction,
+                        title_after_turns: cfg.session.title_after_turns,
+                        instructions: InstructionSet::default(),
+                        skills: SkillSet::default(),
+                        team: Vec::new(),
+                        guidelines: None,
+                        overlay: None,
+                        no_project_config: args.no_project_config,
+                        owner: args.owner.clone(),
+                        name: args.name.clone(),
+                        orchestrator: None,
+                        cwd: std::env::current_dir().unwrap_or_default(),
+                        dir: repl::session_dir(),
+                    },
                     match roster.first() {
                         Some(root) => {
                             repl::SessionSource::Remote(client.with_session(root.id.clone()))
                         }
                         None => repl::SessionSource::Remote(client),
                     },
-                    llm.clone(),
-                    default_hooks(&cfg.hooks),
-                    cfg.tools,
-                    cfg.compaction,
-                    cfg.session.title_after_turns,
-                    InstructionSet::default(),
-                    SkillSet::default(),
-                    &[],
-                    None,
-                    None,
-                    args.no_project_config,
-                    args.owner.as_deref(),
-                    args.name.as_deref(),
-                    None,
                 )
                 .await;
                 std::process::exit(0)
@@ -1288,7 +1294,7 @@ struct SessionSetup {
 /// restoring the session's model/effort unless the flag was set; otherwise
 /// create a fresh group unless `--no-session`. Mutates `llm` in place because
 /// the resume branch restores model/effort from the session.
-fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
+fn load_session(args: &Args, llm: &mut LlmOpts) -> Result<SessionSetup, BootError> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // The active session group, when this run owns one (a fresh root always
     // creates one; a resumed group sets it below). Threaded into the worker
@@ -1305,14 +1311,13 @@ fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
                     Ok(list) => match list.into_iter().next() {
                         Some(p) => p,
                         None => {
-                            eprintln!("no sessions in {}", session_dir().display());
-                            std::process::exit(1);
+                            return Err(BootError::bare(
+                                format!("no sessions in {}", session_dir().display()),
+                                1,
+                            ));
                         }
                     },
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    }
+                    Err(e) => return Err(BootError::session(e.to_string())),
                 },
             };
             // A group dir (or a `<dir>/root.jsonl` from a `/reload`, 6b) resumes
@@ -1336,13 +1341,17 @@ fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
                             (Some(s), ctx)
                         }
                         Err(e) => {
-                            eprintln!("error: open {}: {e}", group.root().display());
-                            std::process::exit(1);
+                            return Err(BootError::session(format!(
+                                "open {}: {e}",
+                                group.root().display()
+                            )));
                         }
                     },
                     Err(e) => {
-                        eprintln!("error: open group {}: {e}", dir.display());
-                        std::process::exit(1);
+                        return Err(BootError::session(format!(
+                            "open group {}: {e}",
+                            dir.display()
+                        )));
                     }
                 },
                 None => match Session::open(&p) {
@@ -1363,8 +1372,10 @@ fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
                         (Some(s), ctx)
                     }
                     Err(e) => {
-                        eprintln!("error: open {}: {e}", p.display());
-                        std::process::exit(1);
+                        return Err(BootError::session(format!(
+                            "open {}: {e}",
+                            p.display()
+                        )));
                     }
                 },
             }
@@ -1382,20 +1393,75 @@ fn load_session(args: &Args, llm: &mut LlmOpts) -> SessionSetup {
                 active_group = Some(group);
                 (Some(s), Vec::new())
             }
-            Some(Err(e)) => {
-                eprintln!("error: create session: {e}");
-                std::process::exit(1);
-            }
+            Some(Err(e)) => return Err(BootError::session(format!("create session: {e}"))),
             None => (None, Vec::new()),
         },
     };
-    SessionSetup {
+    Ok(SessionSetup {
         cwd,
         active_group,
         resuming_group,
         session,
         context,
+    })
+}
+
+/// **A boot failure the CALLER surfaces** (W040 §13.2 item 8's `Failed` reply).
+///
+/// The build path used to `eprintln!` + `std::process::exit` at fifteen sites.
+/// That was correct while one process was one conversation; in a tabbed process
+/// every one of them kills the others. Each site now returns this instead, and
+/// the caller decides: the single-root path prints `message` verbatim and exits
+/// with `code` (byte-identical to the old pair), while the `RootSpec` factory
+/// hands it back to the client as `RootError::Config` and lets the other
+/// conversations live.
+#[derive(Debug)]
+pub(crate) struct BootError {
+    /// The exact line the old code printed — prefix included, so the single-root
+    /// path stays byte-identical.
+    pub message: String,
+    /// The exit code the single-root path uses (`2` for misconfiguration, `1`
+    /// for session IO — the historical split, unchanged).
+    pub code: i32,
+}
+
+impl BootError {
+    /// A misconfiguration: `exit(2)` territory.
+    pub(crate) fn config(message: impl Into<String>) -> Self {
+        Self {
+            message: format!("error: {}", message.into()),
+            code: 2,
+        }
     }
+    /// Session IO: `exit(1)` territory.
+    pub(crate) fn session(message: impl Into<String>) -> Self {
+        Self {
+            message: format!("error: {}", message.into()),
+            code: 1,
+        }
+    }
+    /// A line that was printed without the `error: ` prefix.
+    pub(crate) fn bare(message: impl Into<String>, code: i32) -> Self {
+        Self {
+            message: message.into(),
+            code,
+        }
+    }
+}
+
+/// The tab label's last resort (W040 §13.6.1): the cwd's basename, which is what
+/// `main` puts in `Options.status` and what a fresh root's tab shows when neither
+/// the agent nor the `RootSpec` seed names it.
+fn label_from_cwd(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cwd.display().to_string())
+}
+
+/// Print a [`BootError`] the way the pre-W040 code did, then exit with its code.
+fn boot_exit(e: BootError) -> ! {
+    eprintln!("{}", e.message);
+    std::process::exit(e.code)
 }
 
 /// P5: the run's discovered context — instructions, skills, hooks, and the
@@ -1464,7 +1530,13 @@ fn check_status_args(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup) -> Runtime {
+fn build_runtime(
+    args: &Args,
+    cfg: &Config,
+    llm: &LlmOpts,
+    setup: &SessionSetup,
+    conversation: wcode_protocol::ConversationId,
+) -> Result<Runtime, BootError> {
     let cwd = &setup.cwd;
     // Instruction ("reference") files: discover the configured candidates
     // from the working dir up to the repo root (plus the config-dir global
@@ -1526,7 +1598,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             wcode_protocol::Registry::new(),
             template,
             tasks,
-            wcode_protocol::ConversationId::first(),
+            conversation,
         )
             .with_team(std::sync::Arc::new(cfg.team.clone()), !cfg.team.is_empty())
             .with_cancel(cancel)
@@ -1563,12 +1635,10 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     // Register remote peers (`--peer name=socket`): a served session becomes an
     // addressable A2A peer reachable over its socket (S4-4).
     if !args.peers.is_empty() && orchestrator.is_none() {
-        eprintln!("error: --peer requires --agents");
-        std::process::exit(2);
+        return Err(BootError::config("--peer requires --agents"));
     }
     if let Err(msg) = check_task_args(args, cfg.workflow.as_ref(), orchestrator.is_some()) {
-        eprintln!("error: {msg}");
-        std::process::exit(2);
+        return Err(BootError::config(msg));
     }
     // LOCKED: a [workflow] with no --task is INERT — notice, then boot
     // normally (interactive). Printed whenever a template is present but no
@@ -1577,8 +1647,7 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         eprintln!("{INERT_WORKFLOW_NOTICE}");
     }
     if !cfg.team.is_empty() && orchestrator.is_none() {
-        eprintln!("error: [team] requires --agents");
-        std::process::exit(2);
+        return Err(BootError::config("[team] requires --agents"));
     }
     if cfg
         .orchestrator
@@ -1587,15 +1656,15 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
         .is_some_and(|g| !g.trim().is_empty())
         && orchestrator.is_none()
     {
-        eprintln!("error: [orchestrator] requires --agents");
-        std::process::exit(2);
+        return Err(BootError::config("[orchestrator] requires --agents"));
     }
     #[cfg(unix)]
     if let Some(o) = &orchestrator {
         for spec in &args.peers {
             let Some((name, path)) = spec.split_once('=') else {
-                eprintln!("error: --peer expects <name>=<socket>, got `{spec}`");
-                std::process::exit(2);
+                return Err(BootError::config(format!(
+                    "--peer expects <name>=<socket>, got `{spec}`"
+                )));
             };
             // Lazy: a peer may not be up yet (two peers can be waiting on each
             // other); the supervisor connects once it is.
@@ -1607,8 +1676,9 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
     }
     #[cfg(not(unix))]
     if !args.peers.is_empty() {
-        eprintln!("error: `--peer` is not supported on this platform");
-        std::process::exit(2);
+        return Err(BootError::config(
+            "`--peer` is not supported on this platform",
+        ));
     }
     // `[peers]` (config): persistent peers — a socket path connects a remote
     // peer, an address (`agent:<id>`) is a phonebook alias (§13.15).
@@ -1671,8 +1741,10 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
                 effort: member.effort.clone(),
             };
             if let Err(e) = o.spawn_worker(spec) {
-                eprintln!("error: team member `{}`: {e}", member.name);
-                std::process::exit(2);
+                return Err(BootError::config(format!(
+                    "team member `{}`: {e}",
+                    member.name
+                )));
             }
         }
     }
@@ -1723,12 +1795,12 @@ fn build_runtime(args: &Args, cfg: &Config, llm: &LlmOpts, setup: &SessionSetup)
             judger,
         );
     }
-    Runtime {
+    Ok(Runtime {
         instructions,
         skills,
         hooks,
         orchestrator,
-    }
+    })
 }
 
 /// The root's team and guidelines: `&[]`/`None` for a served `--owner` worker,
@@ -1746,6 +1818,7 @@ struct RootCtx<'a> {
 /// worker tools (`--owner` without `--agents` → `exit(2)`). `root_team` /
 /// `root_guidelines` are computed in `main` (not here) because `dispatch`
 /// (P8) also needs them.
+#[allow(clippy::too_many_arguments)]
 fn build_agent_for(
     args: &Args,
     cfg: &Config,
@@ -1754,7 +1827,8 @@ fn build_agent_for(
     root: RootCtx<'_>,
     session: Option<Session>,
     context: Vec<AgentMessage>,
-) -> (Agent, Arc<Background>) {
+    conversation: wcode_protocol::ConversationId,
+) -> Result<(Agent, Arc<Background>), BootError> {
     // A session with `--owner` is a **served worker** (S4-4 reply): it gets a
     // `message` tool bound to its owner and a `ReportBack` hook, and the
     // ownership edge is recorded so its report is permitted.
@@ -1768,8 +1842,7 @@ fn build_agent_for(
         }
         (Some(o), None) => o.tools(),
         (None, Some(_)) => {
-            eprintln!("error: --owner requires --agents");
-            std::process::exit(2);
+            return Err(BootError::config("--owner requires --agents"));
         }
         (None, None) => Vec::new(),
     };
@@ -1788,9 +1861,9 @@ fn build_agent_for(
         session,
         context,
         extra_tools,
-        // The startup conversation's tag (§13.2.1(a)): this agent's `Background`
-        // must be found by `close(c0)` and by no other conversation's close.
-        wcode_protocol::ConversationId::first(),
+        // Which conversation owns this agent (§13.2.1(a)): a parameter, because
+        // the tag is host topology and a default hid the finding-1 bug.
+        conversation,
     );
     // W031: an explicit name is written BEFORE any run — so it is on disk before
     // the auto-titler's first short-circuit sees it, and `-p` cannot race turn 1
@@ -1798,10 +1871,9 @@ fn build_agent_for(
     if let Some(title) = args.title.as_deref()
         && let Err(e) = agent.set_title(title)
     {
-        eprintln!("error: --title: {e}");
-        std::process::exit(2);
+        return Err(BootError::config(format!("--title: {e}")));
     }
-    (agent, bg)
+    Ok((agent, bg))
 }
 
 /// Record the ROOT's effective metadata (model, effort, context window) into `registry`,
@@ -1825,7 +1897,7 @@ fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) 
 // W040 §13.2 items 1–2 — `serve()` IS THE FACTORY IT ALREADY ALMOST IS.
 //
 // `serve()`'s transport-free head (`:1895`-`:1959`) is exactly what
-// `roots::Root::adopt` must do, in exactly today's order. That is the whole
+// `roots::Roots::adopt` must do, in exactly today's order. That is the whole
 // argument for §13.2 item 2 (`RootSpec` factory injected by the CLI): there is no
 // new construction logic to invent, only a name and a struct. Compare, line for
 // line:
@@ -1842,7 +1914,7 @@ fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) 
 //
 // So the edit is a DELETION plus one call. The head of `serve()` becomes:
 //
-//     let root = roots::Root::adopt(roots::RootParts {
+//     let root = roots.adopt(roots::RootParts {
 //         id: ConversationId::first(),   // the RESERVED startup id: `Roots::new`
 //                                        // begins minting at 1, so seq 0 is this
 //                                        // root's and `serve` never calls `mint`
@@ -2175,7 +2247,7 @@ async fn dispatch(
             // with
             //
             //     let mut roots = roots::Roots::new(root_event_tx.clone());
-            //     let root0 = roots::Root::adopt(roots::RootParts {
+            //     let root0 = roots.adopt(roots::RootParts {
             //         // THE RESERVED ID (finding 8). `Roots::new` starts its mint at
             //         // 1 precisely so `ConversationId::first()` (seq 0) belongs to
             //         // THIS root, which is built outside `Roots::start` because it
@@ -2536,21 +2608,27 @@ async fn dispatch(
             orchestrator,
         } = rt;
         repl::run(
+            repl::RunInputs {
+                args: args.clone(),
+                cfg: cfg.clone(),
+                llm: llm.clone(),
+                hooks,
+                tools: cfg.tools,
+                compaction: cfg.compaction,
+                title_after_turns: cfg.session.title_after_turns,
+                instructions,
+                skills,
+                team: root.team.to_vec(),
+                guidelines: root.guidelines.map(str::to_string),
+                overlay: args.config.clone(),
+                no_project_config: args.no_project_config,
+                owner: args.owner.clone(),
+                name: args.name.clone(),
+                orchestrator,
+                cwd: setup.cwd.clone(),
+                dir: repl::session_dir(),
+            },
             repl::SessionSource::Local(Box::new(agent), bg),
-            llm,
-            hooks,
-            cfg.tools,
-            cfg.compaction,
-            cfg.session.title_after_turns,
-            instructions,
-            skills,
-            root.team,
-            root.guidelines,
-            args.config.as_deref(),
-            args.no_project_config,
-            args.owner.as_deref(),
-            args.name.as_deref(),
-            orchestrator,
         )
         .await;
     }
@@ -2674,10 +2752,25 @@ async fn main() {
     if run_socket_client(&args, &cfg, &llm).await {
         unreachable!("run_socket_client only returns when it handled nothing");
     }
+    // W040 §13.2 item 8: the boot path RETURNS its failures instead of exiting,
+    // and this single-root caller keeps the operator experience byte-identical
+    // (`eprintln!` the same line, exit with the same code) — the factory path in
+    // `roots::build_root` hands the same error to its client instead.
+    //
     // Phase 4: resolve/create the session (may restore model/effort into `llm`).
-    let mut setup = load_session(&args, &mut llm);
-    // Phase 5: instructions/skills/hooks + orchestrator wiring.
-    let rt = build_runtime(&args, &cfg, &llm, &setup);
+    let mut setup = load_session(&args, &mut llm).unwrap_or_else(|e| boot_exit(e));
+    // Phase 5: instructions/skills/hooks + orchestrator wiring. The startup
+    // conversation is `c0`, the reserved id — a real value, not a default
+    // (§13.2.1(a)): `Roots::new` mints from 1, so this id can never collide with
+    // a `/tab new`.
+    let rt = build_runtime(
+        &args,
+        &cfg,
+        &llm,
+        &setup,
+        wcode_protocol::ConversationId::first(),
+    )
+    .unwrap_or_else(|e| boot_exit(e));
     // The root orchestrator sees the team; a served worker (`--owner`) does not.
     let root = RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },
@@ -2697,7 +2790,9 @@ async fn main() {
         root,
         setup.session.take(),
         std::mem::take(&mut setup.context),
-    );
+        wcode_protocol::ConversationId::first(),
+    )
+    .unwrap_or_else(|e| boot_exit(e));
     // Phase 7: `serve` owns the session; it diverges when taken.
     if args.serve {
         serve(&args, &llm, agent, bg.clone(), &rt.orchestrator).await;

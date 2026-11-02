@@ -811,142 +811,77 @@ pub enum SessionSource {
     Remote(Client),
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// W040 §13.2 item 2 — THIS PARAMETER LIST IS THE FACTORY'S INPUT. It has 15
-// positional parameters, four of them `&`-borrows of `dispatch`'s locals, and a
-// `RootSpec` factory is `Arc<dyn Fn(..) + Send + Sync>` — i.e. `'static` — so the
-// list cannot be captured as-is and cannot be cloned field-by-field without a
-// name. This block does ONE thing: give the set that name. No behaviour changes.
-//
-// The comment below (`:807`) predicted exactly this: "grouping them into a struct
-// would not earn its keep yet." It earns it now — a second consumer (the factory)
-// reads every field.
-//
-// ---------------------------------------------------------------------
-// (1) THE NAMED BUNDLE. Add above `pub async fn run(` and change `run` to take it
-//     (TWO call sites: `main.rs:1236` — the socket client's REPL — and
-//     `main.rs:2453` — the local REPL; plus any test that calls `run`).
-//
-//     /// **THE ONE AUTHORITATIVE INPUT SET** — the parameters this function has
-//     /// always taken positionally, plus the process-level values a second
-//     /// consumer (the `RootSpec` factory) needs (first-layer finding 9). There is
-//     /// exactly ONE declaration of this struct, and it is this one:
-//     /// `crates/wcode-cli/src/roots.rs` **imports** it (`use crate::repl::RunInputs;`)
-//     /// and must never re-declare it — two declarations of one input set is the
-//     /// drift the finding named. It is NOT a wrapper around anything, and
-//     /// `roots::RootInputs` is deleted.
-//     ///
-//     /// # Why owned, not `&`
-//     /// A `RootSpec` factory is `Arc<dyn Fn(..) + Send + Sync>` and therefore
-//     /// `'static`; `&ToolsConfig`/`&InstructionSet`/`&SkillSet`/`&[TeamMember]`
-//     /// cannot be captured. All four are `Clone` today
-//     /// (`config.rs:28`, `instructions.rs:57`, `skills.rs:35`, `config.rs:193`),
-//     /// so the clone is shallow and one-time.
-//     ///
-//     /// # What is NOT here, and must not be (finding 9's edge)
-//     /// `SessionSetup`'s `session: Option<Session>` / `context: Vec<AgentMessage>`
-//     /// / `resuming_group: bool` are PER-BUILD, not per-process: the first two
-//     /// are owned, single-use and not `Clone` (a `Session` is a file handle), and
-//     /// they are exactly what `RootSpec` already encodes — `Fresh` creates a
-//     /// group, `Resume { dir }` loads one
-//     /// (`session_groups.rs:290` `pub fn open_group(`, `:658` `pub fn load_root(`),
-//     /// and `resuming_group == matches!(spec, RootSpec::Resume { .. })`. A field
-//     /// here would be CAPTURED by the closure, so every `/tab new` would re-open
-//     /// the startup conversation's transcript. The startup root, which does have
-//     /// those values, goes through `Root::adopt(RootParts)` instead — never
-//     /// through the factory.
-//     ///
-//     /// # `Args` must gain `Clone` AND be `pub(crate)` (finding 9)
-//     /// `pub args: Args` from a `pub(crate)` struct is clean; the same field on a
-//     /// `pub` struct is a `private_interfaces` warning, and `Args` today is
-//     /// neither `Clone` nor `pub` (`main.rs:145`-`146`). Both edits are one line
-//     /// each in `main.rs` (`#[derive(Clone)] pub(crate) struct Args`), which is
-//     /// why `RunInputs` and the factory entry points are `pub(crate)`:
-//     ///     -        struct Args {
-//     ///     +        #[derive(Clone)]  // + `pub(crate)`
-//     ///     +        pub(crate) struct Args {
-//     pub(crate) struct RunInputs {
-//         pub args: Args,
-//         pub cfg: Config,
-//         pub llm: LlmOpts,
-//         pub hooks: HooksSet,
-//         pub tools: ToolsConfig,
-//         pub compaction: CompactionPolicy,
-//         pub title_after_turns: usize,
-//         pub instructions: InstructionSet,
-//         pub skills: SkillSet,
-//         pub team: Vec<TeamMember>,
-//         pub guidelines: Option<String>,
-//         pub overlay: Option<String>,
-//         pub no_project_config: bool,
-//         pub owner: Option<String>,
-//         pub name: Option<String>,
-//         pub orchestrator: Option<crate::agents::Orchestrator>,
-//         pub cwd: PathBuf,
-//         pub session_dir: PathBuf,
-//     }
-//
-//     pub async fn run(inputs: RunInputs, source: SessionSource) { todo!() }
-//
-//     NOTE the two parameters that do NOT move: `source` (a `Local(Box<Agent>,
-//     Arc<Background>)` or a `Remote(Client)`) and everything after it. The
-//     `#[allow(clippy::too_many_arguments)]` above `run` is then deletable — a
-//     small proof the change is a simplification, not a wrapper.
-//
-// ---------------------------------------------------------------------
-// (2) `build_agent` NEEDS NO SIGNATURE CHANGE — say so out loud, because it looks
-//     like it should. `AgentSpec<'_>` (`:374`) borrows `&ToolsConfig`,
-//     `&InstructionSet`, `&SkillSet`, `&[TeamMember]`, `Option<&str>`; inside a
-//     `Fn` closure those borrows come from the CLOSURE'S OWN captured fields, so
-//     `AgentSpec { tools: &inputs.tools, … }` is legal and `'static` by
-//     construction. The only thing `build_agent` gains is the ambient
-//     `Background` scope around its `:396` `let bg = Background::new(wcode_protocol::ConversationId::first());` — which
-//     is a caller-side wrapper (`Background::with_scope`), not a new parameter.
-//     See the `background.rs` block.
-//
-// ---------------------------------------------------------------------
-// (3) THE THREE REBUILD ARMS (`:1048`, `:1204`, `:1253` — `/new` and both
-//     `/resume` shapes) keep their inline `build_agent` + `SessionActor::spawn`
-//     (`:1067`-region) **unchanged**. They are the REPL's in-place rebuild, they
-//     are single-root by design, and routing them through `Roots` would give the
-//     REPL a container it has no UI for. §13.2 item 5 makes the TUI the proof
-//     surface, not the REPL. Recorded so nobody "unifies" them later without
-//     deciding to.
-//
-// ---------------------------------------------------------------------
-// (4) THE LOCAL ARM (`:924` `SessionSource::Local(agent, background) => {`) is
-//     the third copy of "spawn, bind, register_root" in the tree (`serve()` at
-//     `main.rs:1896`, the TUI branch at `:2284`, this one). It MAY become
-//     `Root::adopt` for uniformity — but only if it also keeps the `Root` alive
-//     for the loop's lifetime, because `adopt` installs a supervisor that will
-//     report `Died` the moment the actor's handles drop. Recommendation: leave it
-//     alone in W040 (it is not a tab), and let W040's reviewer decide whether the
-//     three copies collapse into one call — "the three copies of
-//     spawn/bind/register_root".
-// ==== /SKETCH ====
+/// **THE ONE AUTHORITATIVE INPUT SET** — the parameters `run` always took
+/// positionally, plus the process-level values a second consumer needs (W040
+/// first-layer finding 9). There is exactly ONE declaration of this struct and it
+/// is this one: `crate::roots` **imports** it and must never re-declare it — two
+/// declarations of one input set is the drift the finding named.
+///
+/// # Why owned, not `&`
+/// A `RootSpec` factory is `Arc<dyn Fn(..) + Send + Sync>` and therefore
+/// `'static`; `&ToolsConfig`/`&InstructionSet`/`&SkillSet`/`&[TeamMember]` cannot
+/// be captured. All four are `Clone`, so the clone is shallow and one-time.
+///
+/// # What is NOT here, and must not be (finding 9's edge)
+/// `SessionSetup`'s `session: Option<Session>` / `context: Vec<AgentMessage>` /
+/// `resuming_group: bool` are PER-BUILD, not per-process: the first two are
+/// owned, single-use and not `Clone` (a `Session` is a file handle), and they are
+/// exactly what `RootSpec` already encodes — `Fresh` creates a group, `Resume {
+/// dir }` loads one, and `resuming_group == matches!(spec, RootSpec::Resume {
+/// .. })`. A field here would be CAPTURED by the factory closure, so every
+/// `/tab new` would re-open the startup conversation's transcript: a data-loss
+/// bug, not an inconvenience.
+pub(crate) struct RunInputs {
+    pub args: crate::Args,
+    pub cfg: crate::config::Config,
+    pub llm: LlmOpts,
+    pub hooks: HooksSet,
+    pub tools: ToolsConfig,
+    pub compaction: CompactionPolicy,
+    /// W031: the resolved `[session] title_after_turns`, so `/new` and `/resume`
+    /// rebuild with the launch value instead of the kernel default.
+    pub title_after_turns: usize,
+    pub instructions: InstructionSet,
+    pub skills: SkillSet,
+    pub team: Vec<TeamMember>,
+    pub guidelines: Option<String>,
+    pub overlay: Option<String>,
+    pub no_project_config: bool,
+    pub owner: Option<String>,
+    pub name: Option<String>,
+    pub orchestrator: Option<crate::agents::Orchestrator>,
+    /// The working dir this run was launched in.
+    pub cwd: std::path::PathBuf,
+    /// The sessions store (`]session_dir()`), so a second consumer need not
+    /// re-read the environment.
+    pub dir: std::path::PathBuf,
+}
 
-// The rebuild inputs (llm/hooks/tools/…/orchestrator) are threaded positionally;
-// grouping them into a struct would not earn its keep yet.
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    source: SessionSource,
-    mut llm: LlmOpts,
-    hooks: HooksSet,
-    tools: ToolsConfig,
-    compaction: CompactionPolicy,
-    // W031: the resolved `[session] title_after_turns`, so `/new` and `/resume`
-    // rebuild with the launch value instead of the kernel default.
-    title_after_turns: usize,
-    instructions: InstructionSet,
-    skills: SkillSet,
-    team: &[TeamMember],
-    guidelines: Option<&str>,
-    overlay: Option<&str>,
-    no_project_config: bool,
-    owner: Option<&str>,
-    name: Option<&str>,
-    orchestrator: Option<crate::agents::Orchestrator>,
-) {
+pub async fn run(inputs: RunInputs, source: SessionSource) {
+    // One destructure, borrowed exactly as the old positional parameters were, so
+    // the body below is unchanged.
+    let RunInputs {
+        mut llm,
+        hooks,
+        tools,
+        compaction,
+        title_after_turns,
+        instructions,
+        skills,
+        team,
+        guidelines,
+        overlay,
+        no_project_config,
+        owner,
+        name,
+        orchestrator,
+        ..
+    } = inputs;
+    let team = team.as_slice();
+    let guidelines = guidelines.as_deref();
+    let overlay = overlay.as_deref();
+    let owner = owner.as_deref();
+    let name = name.as_deref();
     #[cfg(unix)]
     let remote = matches!(source, SessionSource::Remote(_));
     #[cfg(not(unix))]
