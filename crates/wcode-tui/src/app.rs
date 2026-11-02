@@ -1152,7 +1152,7 @@ const COMMANDS: &[Command] = &[
 //     ///
 //     ///        let busy = self.active_conversation().surface_ids().iter()
 //     ///            .filter_map(|id| self.surface_index(id))
-//     ///            .any(|i| self.surfaces[i].state() == TeamState::Running);
+//     ///            .any(|i| self.bodies()[i].state() == TeamState::Running);
 //     ///
 //     ///    (`Surface::state()` is reachable from `impl App` — same module,
 //     ///    `app.rs:2150` `fn state(&self) -> TeamState {`.)
@@ -2925,9 +2925,15 @@ pub(crate) struct SidebarHit {
 pub struct App {
     /// One entry per conversation surface. Index 0 is the root; the rest are
     /// team members. Always non-empty (see [`App::new`]).
-    surfaces: Vec<Surface>,
-    /// Index into `surfaces` of the focused surface.
-    focus: usize,
+    ///
+    /// **The FLAT store** (W040 amendment (i)): indices here are the ones
+    /// `lib.rs`'s `backends` vector and [`App::canonical_order`] use, so the
+    /// accessors are NOT narrowed to the active conversation — a narrowing
+    /// `focus()` would pass every N = 1 gate and break `backends[idx]` at N = 2.
+    /// The narrowing seam is 6a's `active_surface_indices`.
+    bodies: Vec<Surface>,
+    /// Index into [`App::bodies`] of the focused surface.
+    focus_idx: usize,
     /// **The tab container (W040 5a: a DERIVED VIEW).** Written by three paths —
     /// `set_surfaces` reconciles it, the `SessionTitle` arm renames a tab, the
     /// agent-event arm records a tab's state — and not yet read for rendering:
@@ -3149,8 +3155,8 @@ impl App {
     /// A fresh app with one root surface — so [`App::focused`] is always valid.
     pub fn new() -> Self {
         App {
-            surfaces: vec![default_root()],
-            focus: 0,
+            bodies: vec![default_root()],
+            focus_idx: 0,
             // The placeholder N = 1 conversation: valid before `set_surfaces`
             // runs, and replaced by it (same shape, same default root).
             conversations: Conversations::single(&[]),
@@ -3235,11 +3241,11 @@ impl App {
         // (`Conversations::reset_from`), so the derived view can never disagree
         // with the authoritative flat store.
         self.conversations.reset_from(&surfaces);
-        self.surfaces = surfaces.into_iter().map(Surface::new).collect();
-        if self.surfaces.is_empty() {
-            self.surfaces.push(default_root());
+        self.bodies = surfaces.into_iter().map(Surface::new).collect();
+        if self.bodies.is_empty() {
+            self.bodies.push(default_root());
         }
-        self.focus = 0;
+        self.focus_idx = 0;
         self.dirty = true;
     }
 
@@ -3287,23 +3293,37 @@ impl App {
         if self.conversations.add_surface_in(conversation, info.clone()).is_err() {
             return;
         }
-        self.surfaces.push(Surface::new(info));
+        self.bodies_mut().push(Surface::new(info));
         self.dirty = true;
     }
 
     /// The focused surface's index (the run loop resolves its backend by it).
+    /// Every surface body, in creation order — the **flat** store (amendment (i)).
+    /// Mutations go through [`App::bodies_mut`] so a write site is visible.
+    pub(crate) fn bodies(&self) -> &[Surface] {
+        &self.bodies
+    }
+
+    /// The mutable flat store: `push`/`retain`/`get_mut` and friends.
+    pub(crate) fn bodies_mut(&mut self) -> &mut Vec<Surface> {
+        &mut self.bodies
+    }
+
+    /// The focused surface's index into [`App::bodies`] — the same number
+    /// `lib.rs` uses to index its `backends` vector.
     pub fn focus(&self) -> usize {
-        self.focus
+        self.focus_idx
     }
 
     /// The focused surface — the one input and commands target.
     pub fn focused(&self) -> &Surface {
-        &self.surfaces[self.focus]
+        &self.bodies()[self.focus()]
     }
 
     /// Mutable access to the focused surface.
     pub fn focused_mut(&mut self) -> &mut Surface {
-        &mut self.surfaces[self.focus]
+        let idx = self.focus();
+        &mut self.bodies_mut()[idx]
     }
 
     /// The focused surface's id.
@@ -3312,7 +3332,7 @@ impl App {
     }
 
     fn surface_index(&self, id: &SessionId) -> Option<usize> {
-        self.surfaces.iter().position(|s| &s.id == id)
+        self.bodies().iter().position(|s| &s.id == id)
     }
 
     /// The canonical surface order (D34): the root first, then every member in
@@ -3321,9 +3341,9 @@ impl App {
     /// (The invariant `surfaces[0]` is the root makes this the identity today, but
     /// naming it keeps the three consumers from drifting apart again.)
     pub(crate) fn canonical_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.surfaces.len()).collect();
+        let mut order: Vec<usize> = (0..self.bodies().len()).collect();
         // Stable sort: the root first, everything else in its (creation) order.
-        order.sort_by_key(|&i| !self.surfaces[i].is_root);
+        order.sort_by_key(|&i| !self.bodies()[i].is_root);
         order
     }
 
@@ -3335,7 +3355,7 @@ impl App {
     /// Advance focus by `step` positions along [`App::canonical_order`], wrapping.
     fn focus_step(&mut self, step: isize) {
         let order = self.canonical_order();
-        let Some(pos) = order.iter().position(|&i| i == self.focus) else {
+        let Some(pos) = order.iter().position(|&i| i == self.focus()) else {
             return;
         };
         let next = (pos as isize + step).rem_euclid(order.len() as isize) as usize;
@@ -3344,8 +3364,8 @@ impl App {
 
     /// Focus surface `idx`, if it exists.
     fn set_focus(&mut self, idx: usize) {
-        if idx < self.surfaces.len() {
-            self.focus = idx;
+        if idx < self.bodies().len() {
+            self.focus_idx = idx;
             self.dirty = true;
         }
     }
@@ -3363,7 +3383,7 @@ impl App {
     //
     //     /// The tab container (W040): conversations in creation order, each
     //     /// holding IDs ONLY — the `Surface` bodies stay in [`App::surfaces`],
-    //     /// so every `self.surfaces[i]` / `self.focus` site in this file is
+    //     /// so every `self.bodies()[i]` / `self.focus()` site in this file is
     //     /// untouched. INVARIANT: every `Surface.id` is owned by exactly one
     //     /// conversation (see `conversations.rs`, "the N = 1 delegation
     //     /// contract").
@@ -3394,7 +3414,7 @@ impl App {
     //         // separately, once, from the injected list:
     //         //     self.conversations =
     //         //         Conversations::from_parts(options.conversations, &infos);
-    //         // and `self.focus = 0` stays (index 0 is conversation 0's root,
+    //         // and `self.focus() = 0` stays (index 0 is conversation 0's root,
     //         // because the CLI emits the startup conversation first — `main.rs`
     //         // surface list). An EMPTY `options.conversations` (a test, a socket
     //         // client, `examples/dump.rs`) falls back to
@@ -3486,8 +3506,8 @@ impl App {
     //     /// `ConversationEvent::Stopped`, or `/tab close`'s echo: THE ONE PLACE
     //     /// that removes surfaces. `Conversations::close` returns the ids; this
     //     /// method then
-    //     ///   1. drains each id from `self.surfaces` (by `retain`, keeping order);
-    //     ///   2. remaps `self.focus`: if it pointed into the removed set, focus
+    //     ///   1. drains each id from `self.bodies()` (by `retain`, keeping order);
+    //     ///   2. remaps `self.focus()`: if it pointed into the removed set, focus
     //     ///      the NEW active conversation's root index; otherwise subtract the
     //     ///      number of removed indices BELOW it;
     //     ///   3. drops state that names a removed surface: `usage_collect`
@@ -3501,9 +3521,9 @@ impl App {
     //     ///      one (a `Failed` reply can then find no tab);
     //     ///   5. marks the frame dirty.
     //     /// # Contract
-    //     /// - `self.surfaces` is NEVER left empty (the `App::focused` invariant):
+    //     /// - `self.bodies()` is NEVER left empty (the `App::focused` invariant):
     //     ///   the container refuses closing the last conversation, so at least one
-    //     ///   root remains — `debug_assert!(!self.surfaces.is_empty())`.
+    //     ///   root remains — `debug_assert!(!self.bodies().is_empty())`.
     //     /// - Removing an id that is not present is not an error (the host may
     //     ///   echo `Stopped` twice; the second is a no-op).
     //     pub fn remove_conversation(&mut self, id: ConversationId) { todo!() }
@@ -3641,10 +3661,10 @@ impl App {
     /// and `AskTo` resolves whichever backend `lib.rs` holds for that id.
     fn usage_targets(&self) -> Vec<(SessionId, String)> {
         let focused = self.focus();
-        let mut targets = Vec::with_capacity(self.surfaces.len());
-        let s = &self.surfaces[focused];
+        let mut targets = Vec::with_capacity(self.bodies().len());
+        let s = &self.bodies()[focused];
         targets.push((s.id.clone(), s.label.clone()));
-        for (i, s) in self.surfaces.iter().enumerate() {
+        for (i, s) in self.bodies().iter().enumerate() {
             if i != focused {
                 targets.push((s.id.clone(), s.label.clone()));
             }
@@ -3689,7 +3709,7 @@ impl App {
         let complete = collect.is_complete();
         // `collect`'s borrow ends here.
         if let (Some(idx), Some(used)) = (idx, used) {
-            self.surfaces[idx].context_used = Some(used);
+            self.bodies_mut()[idx].context_used = Some(used);
         }
         if complete {
             let rows = self.usage_rows();
@@ -3721,8 +3741,8 @@ impl App {
             return Vec::new();
         };
         let focused = self.focus();
-        let focused_id = &self.surfaces[focused].id;
-        let focused_limit = self.surfaces[focused].status.context_limit;
+        let focused_id = &self.bodies()[focused].id;
+        let focused_limit = self.bodies()[focused].status.context_limit;
         let mut rows: Vec<InfoRow> = Vec::with_capacity(collect.asked.len() + 1);
         for (i, (id, label)) in collect.asked.iter().enumerate() {
             let detail = match &collect.answers[i] {
@@ -3919,11 +3939,11 @@ impl App {
     pub fn working_team_rows(&self) -> Vec<(&str, TeamState, Option<&str>)> {
         self.canonical_order()
             .into_iter()
-            .filter(|&i| !self.surfaces[i].is_root)
-            .filter(|&i| self.surfaces[i].state() == TeamState::Running)
+            .filter(|&i| !self.bodies()[i].is_root)
+            .filter(|&i| self.bodies()[i].state() == TeamState::Running)
             .take(3)
             .map(|i| {
-                let s = &self.surfaces[i];
+                let s = &self.bodies()[i];
                 (s.label.as_str(), s.state(), s.last_action.as_deref())
             })
             .collect()
@@ -4521,14 +4541,14 @@ impl App {
     pub(crate) fn member_rows_indexed(&self) -> Vec<(usize, &str, TeamState, bool, Option<&str>)> {
         self.canonical_order()
             .into_iter()
-            .filter(|&i| !self.surfaces[i].is_root)
+            .filter(|&i| !self.bodies()[i].is_root)
             .map(|i| {
-                let s = &self.surfaces[i];
+                let s = &self.bodies()[i];
                 (
                     i,
                     s.label.as_str(),
                     s.state(),
-                    i == self.focus,
+                    i == self.focus(),
                     s.last_action.as_deref(),
                 )
             })
@@ -4546,7 +4566,7 @@ impl App {
     /// # Contract
     ///
     /// * `len() == surfaces.len()` — one row per surface, root included. Unlike
-    ///   `member_rows_indexed` (`.filter(|&i| !self.surfaces[i].is_root)`) it
+    ///   `member_rows_indexed` (`.filter(|&i| !self.bodies()[i].is_root)`) it
     ///   drops NOTHING.
     /// * Row 0 is ALWAYS the root: `canonical_order` sorts `!is_root` first.
     ///   Should `set_surfaces` ever hand in a list with no root, the list still
@@ -4554,7 +4574,7 @@ impl App {
     ///   keys the badge on the flag (presence) and the member ordinal (number).
     /// * Every field except the last is exactly what `member_rows_indexed`
     ///   yields for the same surface: the root is not a special case in the DATA,
-    ///   only in the RENDERING (its badge). `focused` is `i == self.focus`, so
+    ///   only in the RENDERING (its badge). `focused` is `i == self.focus()`, so
     ///   the root row carries the `*` marker and the focused row's run elapsed
     ///   exactly like a member row.
     /// * Order is stable (D34): activity never reorders; `TeamState` is a marker,
@@ -4575,12 +4595,12 @@ impl App {
         self.canonical_order()
             .into_iter()
             .map(|i| {
-                let s = &self.surfaces[i];
+                let s = &self.bodies()[i];
                 (
                     i,
                     s.label.as_str(),
                     s.state(),
-                    i == self.focus,
+                    i == self.focus(),
                     s.last_action.as_deref(),
                     s.is_root,
                 )
@@ -4717,7 +4737,7 @@ impl App {
                 //     Place it just after `if let Some(idx) = self.surface_index(&id)`
                 //     closes, i.e. at the very END of this arm:
                 //
-                //     if let Some(s) = self.surface_index(&id).map(|i| self.surfaces[i].state()) {
+                //     if let Some(s) = self.surface_index(&id).map(|i| self.bodies()[i].state()) {
                 //         self.conversations.set_state_from(&id, s);
                 //     }
                 //
@@ -4778,13 +4798,13 @@ impl App {
                         // Clear the D5 hint FIRST: `apply` appends via `push_block`
                         // (which clears the hint), so it would otherwise shift
                         // `before` one PAST the append and no-op the stamp.
-                        self.surfaces[idx].clear_hint();
-                        let before = self.surfaces[idx].transcript.len();
+                        self.bodies_mut()[idx].clear_hint();
+                        let before = self.bodies()[idx].transcript.len();
                         // Snapshot the OPEN turn's rev BEFORE `apply` grows it in
                         // place (a `Turn` appends no block), so a turn that changes
                         // is re-stamped to the tail (W027: order by last activity).
-                        let open = self.surfaces[idx].open_turn.and_then(|i| {
-                            self.surfaces[idx].block_revs.get(i).map(|r| (i, *r))
+                        let open = self.bodies()[idx].open_turn.and_then(|i| {
+                            self.bodies()[idx].block_revs.get(i).map(|r| (i, *r))
                         });
                         // A run's END is the dequeue seam (W029). Captured BEFORE
                         // `apply` consumes the event, and acted on AFTER
@@ -4792,7 +4812,7 @@ impl App {
                         // block and seals the turn, so the dequeued `Block::User`
                         // must land under the finished exchange, not above it.
                         let ended = matches!(&event, AgentEvent::AgentEnd);
-                        if self.surfaces[idx].apply(event) {
+                        if self.bodies_mut()[idx].apply(event) {
                             self.dirty = true;
                         }
                         // Re-stamp a grown OPEN turn BEFORE stamping appended
@@ -4862,7 +4882,7 @@ impl App {
                 // there). A member's state never promotes the tab
                 // (`set_state_from` ignores a non-root surface) and `Failed` is
                 // sticky until the next `Running`.
-                if let Some(state) = self.surface_index(&id).map(|i| self.surfaces[i].state()) {
+                if let Some(state) = self.surface_index(&id).map(|i| self.bodies()[i].state()) {
                     self.conversations.set_state_from(&id, state);
                 }
             }
@@ -5011,9 +5031,9 @@ impl App {
             // and says so. Under auto-dequeue this is nearly unreachable (every
             // `AgentEnd` drains the queue), which is exactly why it must be
             // announced if it happens.
-            let idx = self.focus;
-            let n = self.surfaces[idx].queue.len();
-            self.surfaces[idx].queue.clear();
+            let idx = self.focus();
+            let n = self.bodies()[idx].queue.len();
+            self.bodies_mut()[idx].queue.clear();
             let queued = if n == 1 { "message" } else { "messages" };
             self.push_on(idx, Block::Notice(format!("dropped {n} queued {queued}")));
         } else {
@@ -5084,15 +5104,15 @@ impl App {
             // the persistent state is the foot line's `⇥ N queued` count. The
             // prompt enters the recall history HERE, at enqueue time, so ↑
             // finds it before it ever ran.
-            let idx = self.focus;
-            self.surfaces[idx].queue.push_back(text.clone());
-            self.surfaces[idx].history.push(text);
-            let n = self.surfaces[idx].queue.len();
+            let idx = self.focus();
+            self.bodies_mut()[idx].queue.push_back(text.clone());
+            self.bodies_mut()[idx].history.push(text);
+            let n = self.bodies()[idx].queue.len();
             self.push_on(idx, Block::Transient(format!("queued · {n} waiting")));
             return;
         }
         self.focused_mut().history.push(text.clone());
-        let idx = self.focus;
+        let idx = self.focus();
         self.begin_run(idx, text.clone());
         self.actions.push(Action::Submit(text));
     }
@@ -5107,12 +5127,12 @@ impl App {
     /// The `Block::User` goes through [`App::push_on`], never a raw
     /// `push_block`, so the `seqs` arrival ordinal is stamped.
     fn begin_run(&mut self, idx: usize, text: String) {
-        if idx >= self.surfaces.len() {
+        if idx >= self.bodies().len() {
             return;
         }
-        self.surfaces[idx].retire_transient();
+        self.bodies_mut()[idx].retire_transient();
         self.push_on(idx, Block::User(text));
-        let surface = &mut self.surfaces[idx];
+        let surface = &mut self.bodies_mut()[idx];
         surface.running = true;
         surface.finished = false;
         surface.cancelled = false;
@@ -5128,14 +5148,14 @@ impl App {
     /// exactly once per ended run. A no-op on an empty queue.
     fn dequeue_next(&mut self, idx: usize) {
         let Some(text) = self
-            .surfaces
+            .bodies_mut()
             .get_mut(idx)
             .and_then(|surface| surface.queue.pop_front())
         else {
             return;
         };
         self.begin_run(idx, text.clone());
-        let id = self.surfaces[idx].id.clone();
+        let id = self.bodies()[idx].id.clone();
         self.actions.push(Action::SubmitTo(id, text));
     }
 
@@ -5562,7 +5582,7 @@ impl App {
     }
 
     fn notice(&mut self, text: impl Into<String>) {
-        let idx = self.focus;
+        let idx = self.focus();
         self.push_on(idx, Block::Notice(text.into()));
         self.dirty = true;
     }
@@ -5571,7 +5591,7 @@ impl App {
     /// [`App::notice`], one word different. Used for `/`-command chatter, which
     /// [`Surface::retire_transient`] clears at the next submit.
     pub(crate) fn transient(&mut self, text: impl Into<String>) {
-        let idx = self.focus;
+        let idx = self.focus();
         self.push_on(idx, Block::Transient(text.into()));
         self.dirty = true;
     }
@@ -5680,14 +5700,14 @@ impl App {
     /// Seed the **root** surface's prompt history (oldest first), e.g. loaded
     /// from disk. Member histories stay in-memory (D25).
     pub fn load_history(&mut self, lines: Vec<String>) {
-        if let Some(root) = self.surfaces.first_mut() {
+        if let Some(root) = self.bodies_mut().first_mut() {
             root.history = lines;
         }
     }
 
     /// The root surface's prompt history, oldest first, for persistence.
     pub fn history(&self) -> &[String] {
-        self.surfaces.first().map_or(&[], |s| s.history.as_slice())
+        self.bodies().first().map_or(&[], |s| s.history.as_slice())
     }
 
     pub fn transcript(&self) -> &[Block] {
@@ -5697,7 +5717,7 @@ impl App {
     /// A surface's display label for the All-mode origin head (`wcode` for the
     /// root, `w1`… for members). # Contracts: `si` out of range ⇒ `""`.
     pub(crate) fn surface_label(&self, si: usize) -> &str {
-        self.surfaces.get(si).map_or("", |s| s.label.as_str())
+        self.bodies().get(si).map_or("", |s| s.label.as_str())
     }
 
     /// The merged view's iteration order: `(surface index, block index)` over EVERY
@@ -5708,12 +5728,12 @@ impl App {
     /// `transcript()` instead and never calls this.
     pub(crate) fn merged_order(&self) -> Vec<(usize, usize)> {
         let canonical = self.canonical_order();
-        let mut rank = vec![0usize; self.surfaces.len()];
+        let mut rank = vec![0usize; self.bodies().len()];
         for (r, &si) in canonical.iter().enumerate() {
             rank[si] = r;
         }
         let mut items: Vec<(u64, usize, usize, usize)> = Vec::new();
-        for (si, surface) in self.surfaces.iter().enumerate() {
+        for (si, surface) in self.bodies().iter().enumerate() {
             for bi in 0..surface.transcript.len() {
                 let seq = surface.seqs.get(bi).copied().unwrap_or(0);
                 items.push((seq, rank[si], bi, si));
@@ -5735,12 +5755,12 @@ impl App {
     /// otherwise shift `before` one PAST the append on a hint-present surface.
     /// # Contracts: `idx` out of range ⇒ no-op.
     fn push_on(&mut self, idx: usize, block: Block) {
-        if idx >= self.surfaces.len() {
+        if idx >= self.bodies().len() {
             return;
         }
-        self.surfaces[idx].clear_hint();
-        let before = self.surfaces[idx].transcript.len();
-        self.surfaces[idx].push_block(block);
+        self.bodies_mut()[idx].clear_hint();
+        let before = self.bodies()[idx].transcript.len();
+        self.bodies_mut()[idx].push_block(block);
         self.stamp_new(idx, before);
     }
 
@@ -5750,19 +5770,19 @@ impl App {
     /// # Contracts: stamps EXACTLY the appended tail `[before..]`; a no-op when
     /// `before >= transcript.len()`; keeps `seqs` aligned with `transcript`.
     fn stamp_new(&mut self, idx: usize, before: usize) {
-        if idx >= self.surfaces.len() {
+        if idx >= self.bodies().len() {
             return;
         }
-        let len = self.surfaces[idx].transcript.len();
+        let len = self.bodies()[idx].transcript.len();
         if before >= len {
             return;
         }
-        if self.surfaces[idx].seqs.len() < len {
-            self.surfaces[idx].seqs.resize(len, 0);
+        if self.bodies()[idx].seqs.len() < len {
+            self.bodies_mut()[idx].seqs.resize(len, 0);
         }
         let mut seq = self.next_seq;
         for i in before..len {
-            self.surfaces[idx].seqs[i] = seq;
+            self.bodies_mut()[idx].seqs[i] = seq;
             seq += 1;
         }
         self.next_seq = seq;
@@ -5799,13 +5819,13 @@ impl App {
         let Some((i, rev)) = open else {
             return;
         };
-        if self.surfaces[idx].open_turn != Some(i) {
+        if self.bodies()[idx].open_turn != Some(i) {
             return; // sealed (an `AgentEnd`) — the turn keeps its ordinal
         }
-        if self.surfaces[idx].block_revs.get(i).copied() == Some(rev) {
+        if self.bodies()[idx].block_revs.get(i).copied() == Some(rev) {
             return; // the turn did not grow
         }
-        self.surfaces[idx].seqs[i] = self.next_seq;
+        self.bodies_mut()[idx].seqs[i] = self.next_seq;
         self.next_seq += 1;
         self.dirty = true;
     }
@@ -5827,10 +5847,10 @@ impl App {
         origin: Option<&str>,
         out: &mut Vec<Line<'static>>,
     ) -> Range<usize> {
-        if si >= self.surfaces.len() {
+        if si >= self.bodies().len() {
             return 0..0;
         }
-        let surface = &mut self.surfaces[si];
+        let surface = &mut self.bodies_mut()[si];
         if bi >= surface.transcript.len() {
             return 0..0;
         }
@@ -6047,7 +6067,7 @@ impl App {
         if diff.is_empty() {
             return;
         }
-        let idx = self.focus;
+        let idx = self.focus();
         self.push_on(
             idx,
             Block::Diff {
@@ -6119,7 +6139,7 @@ impl App {
                     text.push_str("\n\n");
                     text.push_str(args);
                 }
-                let idx = self.focus;
+                let idx = self.focus();
                 self.begin_run(idx, text);
                 self.actions.push(Action::LoadSkill {
                     name: name.to_string(),
@@ -6196,11 +6216,11 @@ impl App {
     /// Open the `/surface` picker over the surfaces.
     fn open_surface_picker(&mut self) {
         let items = self
-            .surfaces
+            .bodies()
             .iter()
             .map(|s| format!("{} · {}", s.label, s.status.model))
             .collect();
-        let values = (0..self.surfaces.len()).map(|i| i.to_string()).collect();
+        let values = (0..self.bodies().len()).map(|i| i.to_string()).collect();
         self.overlay = Some(Overlay::Pick(Picker::with_values(
             PickerKind::Surface,
             "surface",
@@ -6481,7 +6501,7 @@ impl App {
             return;
         }
         self.theme_gen = generation;
-        for surface in &mut self.surfaces {
+        for surface in self.bodies_mut() {
             for rev in &mut surface.block_revs {
                 *rev = rev.wrapping_add(1);
             }
@@ -6617,7 +6637,7 @@ impl App {
     /// reducer. Marks the app dirty so the status line repaints.
     pub fn set_run_elapsed(&mut self, id: &SessionId, elapsed: std::time::Duration) {
         if let Some(i) = self.surface_index(id) {
-            self.surfaces[i].run_elapsed = Some(elapsed);
+            self.bodies_mut()[i].run_elapsed = Some(elapsed);
             // R1 (D018): the timer is PART of the cached live row, so a tick that
             // moves it must re-render — but only while a THINKING row is on
             // screen. Unguarded, every 120 ms tick would re-render a prose-only
@@ -6625,8 +6645,8 @@ impl App {
             // `a_frame_with_no_delta_does_zero_live_renders` invariant. The chip
             // needs no bump: `corner_titles` rebuilds from `run_elapsed` each
             // frame. No focus test — only the focused surface's row is drawn.
-            if self.surfaces[i].live_is_thinking() {
-                self.surfaces[i].bump_live();
+            if self.bodies()[i].live_is_thinking() {
+                self.bodies_mut()[i].bump_live();
             }
             self.dirty = true;
         }
@@ -6877,7 +6897,7 @@ impl App {
     /// the focused surface. # Contracts: infallible (`surfaces` is never empty).
     fn chrome_surface(&self) -> &Surface {
         if self.view == ViewMode::All {
-            &self.surfaces[0]
+            &self.bodies()[0]
         } else {
             self.focused()
         }
@@ -6936,7 +6956,7 @@ impl App {
     /// are readable (and scrollable) instead of missing.
     pub fn seed_history(&mut self, id: &SessionId, messages: &[AgentMessage]) {
         if let Some(idx) = self.surface_index(id)
-            && self.surfaces[idx].seed(messages)
+            && self.bodies_mut()[idx].seed(messages)
         {
             // A replay does not go through the receipt arm: stamp every seeded
             // block so the first live ordinal is strictly greater than each.
@@ -7017,8 +7037,8 @@ mod tests {
     #[test]
     fn a_fresh_app_has_one_focused_surface() {
         let app = App::new();
-        assert_eq!(app.surfaces.len(), 1, "exactly one surface");
-        assert_eq!(app.focus, 0, "focused on it");
+        assert_eq!(app.bodies().len(), 1, "exactly one surface");
+        assert_eq!(app.focus(), 0, "focused on it");
     }
 
     #[test]
@@ -7267,7 +7287,8 @@ mod tests {
         let mut app = App::new();
         // Nearly unreachable through keys (every `AgentEnd` drains the queue), so
         // stage the state directly: an IDLE surface with one queued prompt.
-        app.surfaces[app.focus].queue.push_back("orphan".into());
+        let focused = app.focus();
+        app.bodies_mut()[focused].queue.push_back("orphan".into());
         app.handle(AppEvent::Key(Key::Esc));
         assert_eq!(app.queued_count(), 0);
         assert!(matches!(
@@ -7295,7 +7316,7 @@ mod tests {
             app.take_actions(),
             vec![Action::SubmitTo(member.clone(), "second".into())]
         );
-        assert!(app.surfaces[1].running, "the member's queued prompt started");
+        assert!(app.bodies()[1].running, "the member's queued prompt started");
         assert!(!app.running(), "the focused root must not start");
     }
 
@@ -7314,8 +7335,8 @@ mod tests {
             app.take_actions(),
             vec![Action::SubmitTo(member.clone(), "member queued".into())]
         );
-        assert!(app.surfaces[0].running, "the root's run is untouched");
-        assert!(app.surfaces[1].running, "the member's queued prompt started");
+        assert!(app.bodies()[0].running, "the root's run is untouched");
+        assert!(app.bodies()[1].running, "the member's queued prompt started");
     }
 
     #[test]
@@ -9679,18 +9700,18 @@ mod tests {
     #[test]
     fn sync_theme_bumps_block_revs_on_a_generation_change() {
         let mut app = App::new();
-        app.surfaces[0].block_revs.push(0);
+        app.bodies_mut()[0].block_revs.push(0);
         // Make the app lag the current generation.
         app.theme_gen = crate::theme::generation().wrapping_sub(1);
         app.sync_theme();
         assert_eq!(
-            app.surfaces[0].block_revs,
+            app.bodies()[0].block_revs,
             vec![1],
             "a generation change bumps every block rev"
         );
         // A second call is a no-op once caught up.
         app.sync_theme();
-        assert_eq!(app.surfaces[0].block_revs, vec![1]);
+        assert_eq!(app.bodies()[0].block_revs, vec![1]);
     }
 
     fn completion_labels(app: &App) -> Vec<String> {
@@ -12089,10 +12110,10 @@ mod tests {
         let (mut app, root_id, _member) = two_surfaces();
         app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
         // Hand-stamp the member's first block at the SAME ordinal (0).
-        app.surfaces[1].transcript.push(Block::Notice("m".into()));
-        app.surfaces[1].block_revs.push(0);
-        app.surfaces[1].cache.push(CacheEntry::never());
-        app.surfaces[1].seqs.push(0);
+        app.bodies_mut()[1].transcript.push(Block::Notice("m".into()));
+        app.bodies_mut()[1].block_revs.push(0);
+        app.bodies_mut()[1].cache.push(CacheEntry::never());
+        app.bodies_mut()[1].seqs.push(0);
         let order = app.merged_order();
         assert_eq!(order, vec![(0, 0), (1, 0)], "the root wins a seq tie: {order:?}");
     }
@@ -12177,7 +12198,7 @@ mod tests {
         app.seed_history(&root_id, &[assistant("hi")]);
         app.seed_history(&member, &[assistant("yo")]);
         let seeded_max = app
-            .surfaces
+            .bodies()
             .iter()
             .flat_map(|s| s.seqs.iter().copied())
             .max()
@@ -12203,11 +12224,11 @@ mod tests {
         submit(&mut app, "hi");
         assert_eq!(app.take_actions(), vec![Action::Submit("hi".into())]);
         assert!(
-            matches!(app.surfaces[1].transcript.last(), Some(Block::User(t)) if t == "hi"),
+            matches!(app.bodies()[1].transcript.last(), Some(Block::User(t)) if t == "hi"),
             "the focused (member) surface got the prompt"
         );
         assert!(
-            !matches!(app.surfaces[0].transcript.last(), Some(Block::User(_))),
+            !matches!(app.bodies()[0].transcript.last(), Some(Block::User(_))),
             "the root did not"
         );
         let _ = member;
@@ -12401,7 +12422,7 @@ mod tests {
             },
         ));
         // ... and a change makes `AgentEnd` append a summary notice after the turn.
-        app.surfaces[0].changes.push(Change {
+        app.bodies_mut()[0].changes.push(Change {
             path: "x.rs".into(),
             added: 1,
             removed: 0,
@@ -13090,13 +13111,13 @@ mod live_cache_tests {
         let width = 80;
         committed_frame(&mut app, width);
         let misses = app.focused().cache_misses();
-        let before = app.surfaces[0].block_revs.clone();
+        let before = app.bodies()[0].block_revs.clone();
 
         // Browse-select block 0 and toggle it (the `Enter` path).
-        app.surfaces[0].selected = Some(0);
+        app.bodies_mut()[0].selected = Some(0);
         app.toggle_selected();
 
-        let after = app.surfaces[0].block_revs.clone();
+        let after = app.bodies()[0].block_revs.clone();
         let moved: Vec<usize> = before
             .iter()
             .zip(&after)
