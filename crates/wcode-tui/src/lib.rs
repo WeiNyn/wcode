@@ -255,6 +255,10 @@ pub struct SurfaceInfo {
     pub label: String,
     pub model: String,
     pub is_root: bool,
+    /// The path `--resume` would take to reopen this surface's conversation:
+    /// the group dir for a group, the flat `.jsonl` for a legacy session,
+    /// `None` for a member or a surface that is not a conversation root.
+    pub resume_path: Option<std::path::PathBuf>,
 }
 
 /// A surface to run: its identity plus the backend that streams it. Index 0 is
@@ -264,6 +268,8 @@ pub struct SurfaceSpec {
     pub label: String,
     pub model: String,
     pub is_root: bool,
+    /// See [`SurfaceInfo::resume_path`].
+    pub resume_path: Option<std::path::PathBuf>,
     pub backend: Backend,
 }
 
@@ -276,6 +282,7 @@ impl SurfaceSpec {
             label: self.label.clone(),
             model: self.model.clone(),
             is_root: self.is_root,
+            resume_path: self.resume_path.clone(),
         }
     }
 }
@@ -1091,12 +1098,14 @@ mod tests {
                 label: "root".into(),
                 model: "m".into(),
                 is_root: true,
+            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("w1"),
                 label: "w1".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
             },
         ]);
         let backends = vec![
@@ -1211,6 +1220,7 @@ mod tests {
             label: "first".into(),
             model: "m".into(),
             is_root: true,
+            resume_path: None,
         }];
         app.set_surfaces(infos.clone());
         app.set_conversations(
@@ -1231,6 +1241,7 @@ mod tests {
                     label: "wcode".into(),
                     model: "m".into(),
                     is_root: true,
+            resume_path: None,
                     backend: backend(),
                 },
                 SurfaceSpec {
@@ -1238,6 +1249,7 @@ mod tests {
                     label: "m1".into(),
                     model: "m".into(),
                     is_root: false,
+            resume_path: None,
                     backend: backend(),
                 },
                 SurfaceSpec {
@@ -1245,6 +1257,7 @@ mod tests {
                     label: "m2".into(),
                     model: "m".into(),
                     is_root: false,
+            resume_path: None,
                     backend: backend(),
                 },
             ],
@@ -1295,12 +1308,14 @@ mod tests {
                 label: "first".into(),
                 model: "m".into(),
                 is_root: true,
+            resume_path: None,
             },
             SurfaceInfo {
                 id: owned.clone(),
                 label: "taken".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
             },
         ];
         app.set_surfaces(infos.clone());
@@ -1322,6 +1337,7 @@ mod tests {
                     label: "wcode".into(),
                     model: "m".into(),
                     is_root: true,
+            resume_path: None,
                     backend: backend(),
                 },
                 SurfaceSpec {
@@ -1329,6 +1345,7 @@ mod tests {
                     label: "taken".into(),
                     model: "m".into(),
                     is_root: false,
+            resume_path: None,
                     backend: backend(),
                 },
             ],
@@ -1359,6 +1376,7 @@ mod tests {
                 label: "explorer".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
                 backend: backend(),
             },
         ))
@@ -1386,12 +1404,14 @@ mod tests {
                 label: "first".into(),
                 model: "m".into(),
                 is_root: true,
+            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("r1"),
                 label: "second".into(),
                 model: "m".into(),
                 is_root: true,
+            resume_path: None,
             },
         ];
         let mut app = App::new();
@@ -1433,6 +1453,7 @@ mod tests {
                     label: name.into(),
                     model: "m".into(),
                     is_root: false,
+            resume_path: None,
                     backend: backend(),
                 },
             )
@@ -1459,6 +1480,7 @@ mod tests {
                 label: "w9".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
                 backend: backend(),
             },
         );

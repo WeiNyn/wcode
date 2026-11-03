@@ -1664,6 +1664,8 @@ pub struct Surface {
     label: String,
     /// The root surface (full status line); members are the team.
     is_root: bool,
+    /// The path `--resume` would take to reopen this surface's conversation.
+    resume_path: Option<std::path::PathBuf>,
     /// The status line (the root's; members get a reduced one).
     status: Status,
     transcript: Vec<Block>,
@@ -1775,6 +1777,7 @@ impl Surface {
             id: info.id,
             label: info.label,
             is_root: info.is_root,
+            resume_path: info.resume_path,
             status,
             transcript: Vec::new(),
             live: None,
@@ -2696,7 +2699,7 @@ fn default_root() -> Surface {
         id: SessionId::agent("root"),
         label: "wcode".to_string(),
         model: String::new(),
-        is_root: true,
+        is_root: true,            resume_path: None,
     })
 }
 
@@ -6732,8 +6735,29 @@ impl App {
             self.transient("cannot open a conversation over a socket");
             return;
         }
+        // Dedupe: a `Resume` of a session that is already a tab switches to it.
+        if let wcode_protocol::RootSpec::Resume { dir } = &spec
+            && let Some(idx) = self.conversation_of_session(dir)
+        {
+            self.activate_conversation(idx);
+            self.dirty = true;
+            return;
+        }
         self.actions.push(Action::NewConversation(spec));
         self.transient("opening a conversation…");
+    }
+
+    /// Index of the conversation whose root surface resumes `path`, if any.
+    pub(crate) fn conversation_of_session(&self, path: &std::path::Path) -> Option<usize> {
+        for (idx, conv) in self.conversations().iter().enumerate() {
+            let root_id = conv.surface_ids().first().cloned()?;
+            if let Some(body) = self.bodies().iter().find(|s| s.id == root_id)
+                && body.resume_path.as_deref() == Some(path)
+            {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// The run's changed files so far (view-owned changeset), for the status
@@ -9000,13 +9024,13 @@ mod tests {
                 id: root(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: id.clone(),
                 label: "w1".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
         assert_eq!(app.member_rows()[0].1, TeamState::Idle);
@@ -9026,13 +9050,13 @@ mod tests {
                 id: root(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: id.clone(),
                 label: "w1".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
 
@@ -9075,13 +9099,13 @@ mod tests {
                 id: root(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: id.clone(),
                 label: "w1".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
 
@@ -9112,19 +9136,19 @@ mod tests {
                 id: root(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("explorer"),
                 label: "explorer".into(),
                 model: "m1".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("reviewer"),
                 label: "reviewer".into(),
                 model: "m2".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
         let reviewer = SessionId::agent("reviewer");
@@ -9313,7 +9337,7 @@ mod tests {
             id: SessionId::agent("explorer"),
             label: "explorer".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         assert_eq!(app.member_rows().len(), 1);
         assert_eq!(app.member_rows()[0].0, "explorer");
@@ -9332,7 +9356,7 @@ mod tests {
             id: SessionId::agent("explorer"),
             label: "dup".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         assert_eq!(app.member_rows().len(), 1);
     }
@@ -9345,7 +9369,7 @@ mod tests {
             id: id.clone(),
             label: "explorer".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         // Focus is still the root, so routing must be by id, not by focus.
         assert_eq!(app.focus(), 0);
@@ -9471,13 +9495,13 @@ mod tests {
                 id: root_id.clone(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: member.clone(),
                 label: "w1".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
         (app, root_id, member)
@@ -9679,19 +9703,19 @@ mod tests {
                 id: SessionId::agent("r0"),
                 label: "first".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("m0"),
                 label: "m0".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("r1"),
                 label: "second".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
         ];
         app.set_surfaces(infos.clone());
@@ -9802,13 +9826,13 @@ mod tests {
                 id: SessionId::agent("r0"),
                 label: "first".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("r1"),
                 label: "second".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
         ];
         app.set_surfaces(infos.clone());
@@ -10104,6 +10128,91 @@ mod tests {
             Action::NewConversation(wcode_protocol::RootSpec::Resume { dir }) if dir == &PathBuf::from("/s/c3d4.jsonl")
         ));
         assert!(!app.should_quit(), "no quit");
+    }
+
+    #[test]
+    fn a_pick_of_an_already_open_session_activates_that_tab() {
+        use crate::conversations::Conversation;
+        use wcode_protocol::ConversationId;
+
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("r0"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,                resume_path: Some(PathBuf::from("/s/c3d4.jsonl")),
+            },
+            SurfaceInfo {
+                id: SessionId::agent("r1"),
+                label: "second".into(),
+                model: "m".into(),
+                is_root: true,                resume_path: None,
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        let list = vec![
+            Conversation {
+                id: ConversationId::first(),
+                label: "first".into(),
+                root: SessionId::agent("r0"),
+                members: Vec::new(),
+                state: crate::conversations::ConversationState::Idle,
+                is_remote: false,
+            },
+            Conversation {
+                id: ConversationId::new(1),
+                label: "second".into(),
+                root: SessionId::agent("r1"),
+                members: Vec::new(),
+                state: crate::conversations::ConversationState::Idle,
+                is_remote: false,
+            },
+        ];
+        app.set_conversations(list, &infos);
+        app.set_sessions(sessions());
+
+        // Move to second tab first, so activation is observable.
+        app.activate_conversation(1);
+        assert_eq!(app.conversations().active_index(), 1);
+
+        submit(&mut app, "/resume c3d4");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.conversations().active_index(), 0, "activates the open tab");
+        assert!(app.take_actions().is_empty(), "emits nothing");
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn a_pick_of_an_already_open_session_activates_that_tab_legacy() {
+        use crate::conversations::Conversation;
+        use wcode_protocol::ConversationId;
+
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("r0"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,                resume_path: Some(PathBuf::from("/s/a1b2.jsonl")),
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        let list = vec![Conversation {
+            id: ConversationId::first(),
+            label: "first".into(),
+            root: SessionId::agent("r0"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+        }];
+        app.set_conversations(list, &infos);
+        app.set_sessions(sessions());
+
+        submit(&mut app, "/resume a1b2");
+        app.handle(AppEvent::Key(Key::Enter));
+        assert_eq!(app.conversations().active_index(), 0);
+        assert!(app.take_actions().is_empty(), "emits nothing");
     }
 
     #[test]
@@ -10554,6 +10663,7 @@ mod tests {
                     label: (*label).to_string(),
                     model: "m".to_string(),
                     is_root: i == 0,
+            resume_path: None,
                 })
                 .collect(),
         );
@@ -10866,13 +10976,13 @@ mod tests {
                 id: root(),
                 label: "wcode".into(),
                 model: "root-model".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: SessionId::agent("w1"),
                 label: "w1".into(),
                 model: "member-model".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
         app.set_focus(1);
@@ -11665,13 +11775,13 @@ mod tests {
                 id: root(),
                 label: "root".into(),
                 model: "m".into(),
-                is_root: true,
+                is_root: true,            resume_path: None,
             },
             SurfaceInfo {
                 id: id.clone(),
                 label: "w1".into(),
                 model: "m".into(),
-                is_root: false,
+                is_root: false,            resume_path: None,
             },
         ]);
         app.handle(AppEvent::Agent(id.clone(), AgentEvent::AgentStart));
@@ -12261,13 +12371,13 @@ mod tests {
             id: SessionId::agent("w1"),
             label: "w1".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         app.add_surface(SurfaceInfo {
             id: SessionId::agent("w2"),
             label: "w2".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         submit(&mut app, "/usage");
         assert!(app.overlay().is_none(), "nothing opens on submit");
@@ -12319,7 +12429,7 @@ mod tests {
             id: SessionId::agent("w1"),
             label: "w1".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         // Focus the member: its ask comes first, then the root.
         app.set_focus(1);
@@ -12345,7 +12455,7 @@ mod tests {
             id: SessionId::agent("w1"),
             label: "w1".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         // Focus the member and start an optimistic `/plan on` (plan_pending =
         // Some(false), status.plan = true).
@@ -12393,7 +12503,7 @@ mod tests {
             id: SessionId::agent("w1"),
             label: "w1".into(),
             model: "m".into(),
-            is_root: false,
+            is_root: false,            resume_path: None,
         });
         submit(&mut app, "/usage");
         let _ = app.take_actions();

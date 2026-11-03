@@ -117,6 +117,7 @@ fn empty_app() -> App {
         label: "wcode".into(),
         model: "zephyr-9".into(),
         is_root: true,
+        resume_path: None,
     }]);
     // A root surface seeds `Status::default()` from its `SurfaceInfo` (the model
     // field is a member's), which would print `wcode   wcode` in the head — a
@@ -140,18 +141,21 @@ fn fixture() -> App {
             label: "wcode".into(),
             model: "zephyr-9".into(),
             is_root: true,
+        resume_path: None,
         },
         SurfaceInfo {
             id: explorer.clone(),
             label: "explorer".into(),
             model: "zephyr-9".into(),
             is_root: false,
+        resume_path: None,
         },
         SurfaceInfo {
             id: reviewer.clone(),
             label: "reviewer".into(),
             model: "zephyr-9-mini".into(),
             is_root: false,
+        resume_path: None,
         },
     ]);
 

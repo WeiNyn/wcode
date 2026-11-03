@@ -3088,12 +3088,14 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                 label: "root".into(),
                 model: "rm".into(),
                 is_root: true,
+            resume_path: None,
             },
             crate::SurfaceInfo {
                 id: SessionId::agent(label),
                 label: label.into(),
                 model: model.into(),
                 is_root: false,
+            resume_path: None,
             },
         ]);
     }
@@ -4805,6 +4807,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             label: label.into(),
             model: "m".into(),
             is_root,
+            resume_path: None,
         };
         app.set_surfaces(vec![
             surf("root", "wcode", true),
@@ -4831,6 +4834,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             label: label.into(),
             model: "m".into(),
             is_root,
+            resume_path: None,
         };
         app.set_surfaces(vec![
             surf("root", "wcode", true),
@@ -5555,18 +5559,21 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
                 label: "root".into(),
                 model: "rm".into(),
                 is_root: true,
+            resume_path: None,
             },
             crate::SurfaceInfo {
                 id: SessionId::agent("explorer"),
                 label: "explorer".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
             },
             crate::SurfaceInfo {
                 id: SessionId::agent("reviewer"),
                 label: "reviewer".into(),
                 model: "m".into(),
                 is_root: false,
+            resume_path: None,
             },
         ]);
         // Only explorer runs; reviewer stays idle and must not appear.
@@ -7396,6 +7403,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
             label: label.into(),
             model: "m".into(),
             is_root: false,
+            resume_path: None,
         });
     }
 

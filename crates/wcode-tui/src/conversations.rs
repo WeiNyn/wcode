@@ -588,6 +588,7 @@ mod tests {
             label: id.to_string(),
             model: "m1".into(),
             is_root,
+            resume_path: None,
         }
     }
 

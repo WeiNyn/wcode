@@ -1132,6 +1132,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                             label: "wcode".to_string(),
                             model: llm.model.clone(),
                             is_root: true,
+                            resume_path: None,
                             backend: Backend::from(client.clone()),
                         }]
                     } else {
@@ -1149,6 +1150,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                                 },
                                 model: info.model.clone().unwrap_or_else(|| llm.model.clone()),
                                 is_root: &info.id == root,
+                                resume_path: None,
                                 backend: Backend::from(client.with_session(info.id.clone())),
                             })
                             .collect()
@@ -1188,6 +1190,7 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                                         },
                                         model: info.model.clone().unwrap_or_else(|| model.clone()),
                                         is_root: Some(&info.id) == root_id.as_ref(),
+                                        resume_path: None,
                                         backend: Backend::from(
                                             client.with_session(info.id.clone()),
                                         ),

@@ -194,9 +194,9 @@ pub struct Root {
     /// The root's session file, when sessions are on. `None` for `--no-session`
     /// and for a served worker with no local file.
     ///
-    /// Read by nobody yet (amendment (k)): it retires when `serve()` adopts a root
-    /// (`as_protocol_root`'s neighbour) or with W041's hub.
-    #[allow(dead_code)]
+    /// The root's session file, when sessions are on. `None` for `--no-session`
+    /// and for a served worker with no local file. Feeds `surface_specs`'s
+    /// `resume_path` (W046 dedupe).
     pub session_path: Option<PathBuf>,
     /// The group dir, when this root has one. The unit of "resume this
     /// conversation".
@@ -1199,6 +1199,7 @@ impl Root {
             label: "wcode".to_string(),
             model: self.model.clone(),
             is_root: true,
+            resume_path: self.group.as_ref().map(|g| g.dir.clone()).or_else(|| self.session_path.clone()),
             backend: wcode_protocol::Backend::Local(self.handle.clone()),
         });
         for address in &self.members {
@@ -1222,6 +1223,7 @@ impl Root {
                 label: name,
                 model,
                 is_root: false,
+                resume_path: None,
                 backend,
             });
         }

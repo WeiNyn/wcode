@@ -398,6 +398,7 @@ impl SessionFactory {
                 label: short_name(id),
                 model: meta.model.clone(),
                 is_root: false,
+                resume_path: None,
                 backend,
             });
         }

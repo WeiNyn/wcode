@@ -168,6 +168,7 @@ async fn main() -> std::io::Result<()> {
             label: "wcode".to_string(),
             model: "demo".to_string(),
             is_root: true,
+        resume_path: None,
             backend: Backend::from(handle.clone()),
         },
         wcode_tui::SurfaceSpec {
@@ -175,6 +176,7 @@ async fn main() -> std::io::Result<()> {
             label: "explorer".to_string(),
             model: "demo".to_string(),
             is_root: false,
+        resume_path: None,
             backend: Backend::from(handle.clone()),
         },
         wcode_tui::SurfaceSpec {
@@ -182,6 +184,7 @@ async fn main() -> std::io::Result<()> {
             label: "reviewer".to_string(),
             model: "demo-mini".to_string(),
             is_root: false,
+        resume_path: None,
             backend: Backend::from(handle),
         },
     ];
