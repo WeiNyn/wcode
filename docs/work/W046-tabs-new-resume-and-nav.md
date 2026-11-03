@@ -1,6 +1,6 @@
 # W046 — Tabs that stay put: `/new` and `/resume` open a conversation, and a chord to move between them — brief
 
-- **Status:** **first-layer review returned BLOCK (2 blockers + 4 plan amendments); all cleared in §13, which is AUTHORITATIVE over §4 wherever the two disagree.** No code written. §12 records the orchestrator's resolution of the one decision the brief left open (the chord), taken on the designer's ruling. The docs half is DONE (§13.4).
+- **Status:** **SHIPPED** — 8 commits `ed5309e`…`30486ec` plus the review-clearance commits; second-layer review **BLOCKED on 3 cheap items then cleared** (§14). Recorded in the tracker as row **113** and as **D046** (`docs/decisions/D046-one-chord-one-axis.md`). Scope narrowed in one place against the brief: §13.2 (the dedupe carries `resume_path`, not `Status.session`).
 - **Item:** W046 (W041–W045 reserved per `docs/work/W040-multi-root-conversations.md` §14; W046 was free).
 - **Predecessor:** W040, which shipped the machinery this item only *steers*. Read `docs/work/W040-multi-root-conversations.md` §13.2, §13.6.1 and §13.2.1 before this brief.
 - **Brief author:** `agent:brainstormer` (read-only; no build was run). §12's chord table is `agent:designer`'s, recorded by the orchestrator.
@@ -412,3 +412,21 @@ Why not cut it: with the dedupe gone, a pick of your own session answers `RootEr
 No live terminal (`Ctrl-P` delivery under foot/tmux/kitty is read from `event.rs`/`terminal.rs`), `session_groups::list_groups`' ordering, W040 §13/§15 in full (taken on trust), and whether `/new`'s `Fresh` should inherit the *focused tab's* cwd (it does not — `Fresh` uses `inputs.dir`).
 
 ---
+
+---
+
+## 14. Second-layer review, and what shipped
+
+**Verdict: BLOCK on three cheap items, then cleared.** The feature itself was accepted as correct on the first pass: both first-layer blockers landed (§13.1's `repl::new_session_args` survives and is still called by the `Outcome::Team` arm; §13.2's `resume_path` is filled by `Root::surface_specs`, so **one** fill point reaches both the startup root and every runtime root), gates green (`cargo build`/`cargo test`/`cargo clippy` — 612 + 247 + 21 + 12 tests, zero warnings), `check-book: ok`, scope clean, `SKETCH` at exactly the two labelled pairs, `/reload` and `/team` still re-exec, `repl.rs` untouched.
+
+The three blockers, and why each was real rather than cosmetic:
+
+1. **`cycle_keys_are_inert_at_n1` could not fail.** Its fixture is one conversation, so restoring the retired `Ctrl-N => focus_step(1)` fallback still left the transcript unchanged and `active_index == 0` — all three assertions passed. The test existed to prevent exactly that regression, so it gained `assert_eq!(app.focus(), 0, "no surface fallback at N = 1")`.
+2. **Nothing pinned `Root::surface_specs`' `resume_path`.** Delete that one production line and all 612 tests stayed green while a self-`/resume` silently reverted to the `AlreadyLive` transient — the amendment was landed but unprovable. The roots test that already holds a live root now asserts the spec's `resume_path`, legacy shape and group shape.
+3. **The diff left false statements behind** — orphaned `pending_*` doc comments above unrelated functions, a test doc still describing the deleted `cycle_or_focus` and its N-dependent rule, `Outcome`'s doc still naming a pending `/resume`, `roots.rs`'s duplicated `session_path` sentence, "three aliased commands" when deleting `/clear` left two, and — the sharpest — `docs/book/04-the-tui.html`'s figcaption pinned to `app.rs:1321` for `KEYS`, which this item's own `SKETCH` deletion moved to `:1173`. A comments-only commit fixed all of it.
+
+**Where the shipped tree differs from this brief, deliberately:**
+
+- **§14.1 (recorded, not fixed):** the dedupe is path *equality*, and `--resume` does not canonicalize (`repl.rs:313`-region `if p.exists() { p } else { session_dir().join(arg) }`), so a boot with a relative `--resume ./x.jsonl` stores a relative `session_path` while the picker yields absolute paths — no match, and the self-resume falls back to today's `AlreadyLive` transient. Same worst case as before W046; filed for a follow-up, not fixed here.
+- **§7.1 test 14 (`new_and_resume_never_end_the_tui`) was not written** — with the variants deleted the assertion became structural, and the reviewer agreed it is not worth a commit. Recorded so the absence is deliberate.
+- **The `/tab` band is still not clickable**, and the two surviving `SKETCH` blocks now name their retirement: the click, and `serve()` adopting root 0.

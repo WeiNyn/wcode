@@ -549,10 +549,10 @@ The container and the root lifecycle live in the CLI + TUI, which is what makes 
 
 ### 13.4 Open questions for the sketcher's first-layer review
 
-- Does `Ctrl-N` get redefined, or does a new chord take conversation cycling (and `Shift-Tab` keep member cycling)?
+- Does `Ctrl-N` get redefined, or does a new chord take conversation cycling (and `Shift-Tab` keep member cycling)? — **settled by W046 / D046: `Ctrl-N`/`Ctrl-P` cycle conversations at every N; `Shift-Tab` stays the previous-SURFACE key; the forward surface cycle retired** (see §15).
 - Where does the tab bar live — band 0 above the pinned header (D010), or inside it? `docs/tui-design.md` is the authority and a new band amends it.
 - `/tab close` on the focused conversation mid-run: cancel-then-close, or refuse while `Running`?
-- `/new` keeps its destructive re-exec meaning, or becomes `/tab new`'s alias? (Recommendation: keep `/new` unchanged for this item.)
+- `/new` keeps its destructive re-exec meaning, or becomes `/tab new`'s alias? — **overruled by W046: `/new` opens a conversation tab, and the fresh-*process* meaning survives only at the process boundary and in `/reload --no-session`** (see §15).
 
 ---
 
@@ -645,6 +645,9 @@ Written as a table because silently rewriting nine sections is how a design doc 
 | §10 | the old four-item succession | §14's five-item table |
 | §13.3 | "`wcode-harness` and `wcode-protocol` are unchanged" | corrected in place: **the wire** is unchanged; two additive non-wire exceptions |
 | §14 | W041 "reuses" `Roots` | **candidate** reuse, conditional on finding 6 |
+| §13.2 item 6, §13.4 bullet 1 | `Ctrl-N`/`Shift-Tab` cycle conversations at N > 1 and surfaces at N = 1 | **W046 / D046**: `Ctrl-N`/`Ctrl-P` cycle conversations at every N (inert at N = 1, and silent — no `tab N of M` block); `Shift-Tab` is the previous-SURFACE key at every N; the forward surface cycle is retired as redundant with `Alt-1..9` |
+| §13.4 bullet 4 | "keep `/new` unchanged for this item" | **overruled by W046**: `/new` opens a conversation tab (`RootSpec::Fresh`), `/resume` opens the picked session as one, and the `/clear` alias is deleted. The only commands that still replace the process are `/reload` and `/team` |
+| §13.2 item 2, §13.5.2 | `RootSpec` is the only thing W040 promotes and the wire is untouched | still true. W046 added **no** wire field: `SurfaceInfo.resume_path` is TUI-local (`PROTOCOL_VERSION` stays 1) |
 
 ### 13.6.1 Two rulings that belong in the ledger
 
@@ -669,3 +672,25 @@ The sketch's §13.2 items 3–4 were partly wrong, and the review found it in co
 **(e) The `#[allow(dead_code)]` are scaffolding with a deadline:** exactly **one** of the developer's own remains, `main.rs:27` (`mod roots;`); the four in `background.rs` (`416/442/455/579`) are gone, because amendment (a) made `scope()`/`release_notify`/`shutdown_scope` genuinely live — the attribute had been complaining that they had no real callers, which was true and was the bug. **Commit 6's diff must contain zero `allow(dead_code)`.**
 
 Two guards now hold in tests as well as in production: `debug_assert_eq!(bg.scope(), id)` in `adopt` (+ a `#[should_panic]` test that a mis-tagged `bg` trips it), and a test that a runtime `spawn_worker` inside `c1` produces a `Background` whose `scope()` is `c1`.
+
+**(f) `Factories` returns `RootParts`, not `Root`** (commit 4). A `Root` cannot exist without the supervisor sink, and §13.2.1(c) puts the sink in `Roots::adopt`; returning parts means `Roots::start` adopts them with its own sink, so "a root's death is reported to the registry it joined" is enforced by **privacy plus a single call site** rather than by a caller's discipline. The sketch's `Factories -> Root` was unimplementable; `RootParts { events }` was two independent parameters `insert` could not check. This is the best of the three.
+
+**(g) A partial root build tears itself down** (commit 4b). `build_root` is a wrapper over `build_root_inner`; on `Err` it runs `Background::shutdown_scope(id)` and removes the group dir *that this build created* (never an existing one, so a `Resume` is not damaged). Why it is needed: the `?` on the factory fires **after** `build_runtime` has spawned the `[team]`, and each worker's `Background` holds its own notifier — so dropping the local `Orchestrator` freed the handles but left every already-spawned worker actor parked, plus one `Registry` watcher per peer, i.e. unbounded growth per failed `/tab new`. Before commit 4 the same failure `exit(2)`d and the process died, so this was a defect *created* by making the boot path exit-free. The teardown was available only because amendment (a) tagged every worker with its conversation.
+
+**(h) Open, and commit 6's to decide:** `build_root` still emits the three informational stderr lines the single-root boot does (`INERT_WORKFLOW_NOTICE`, `team: …`, `workflow: {n} nodes`), because it runs the same `build_runtime`. On one terminal they interleave; in a TUI they would paint over the alternate screen. Either they move into `RootParts`/`ConversationSpec` so the host chooses where they go, or the TUI tolerates them — but `build_root`'s "never a stdout write" is true and insufficient.
+
+**(i) The flat index is the currency; the container narrows at ONE seam** (found while starting 5b). The sketch's "derived `surfaces()`/`focus()` accessors" was **wrong** and this supersedes it. `focus()` is not a field but a cross-module contract: `crates/wcode-tui/src/lib.rs:628` `let idx = app.focus(); let (id, backend) = &backends[idx];` — it is the index into the flat backend vector the event loop dispatches against — and `canonical_order()` builds `(0..self.surfaces.len())` as the source for the sidebar rows, the working strip, `Alt-1..N` (`focus_digit`), `focus_next`, `stamp_new`, `touch_open_turn`, the mouse hit map and browse-mode block indices, all **flat**.
+
+A narrowing accessor would therefore be identical at N = 1 (byte-identical frame, the five named tests green) and silently shift every one of those at N > 1 — a defect visible only in 6a's two-tab frame, i.e. exactly the gate-blindness this item exists to avoid.
+
+So: `App` keeps **one bodies vector + one focus index** (renamed `bodies` / `focus_idx`), the accessors keep **flat** semantics (`bodies()`, `bodies_mut()`, `focus()`, `focus_mut()`), and the narrowing lives in **one function** — `active_surface_indices()`, consumed by `canonical_order` — instead of 190 call-site judgements. That also matches `conversations.rs`'s own note that the narrowing belongs in `canonical_order` ("everything built on it narrows for free"). 5b is therefore a rename + four accessors (mechanical); 6a carries the narrowing seam, the band and `/tab`.
+
+**(j) The narrowing seam is TWO changes, and the second one is a behaviour change** (found while starting 6a). `canonical_order` has **7 call sites** — `focus_step` (`:3357`), `focus_digit`/`Alt-1..9` (`:3579`), `working_team_rows` (`:3940`), `member_rows_indexed` (`:4542`), `sidebar_rows_indexed` (`:4595`), `merged_order` (`:5730`) and three test assertions — all assuming a **global** index into `bodies`. Narrowing `canonical_order` makes the first five read correctly at N > 1, but it is **not sufficient**: `merged_order` builds `let mut rank = vec![0usize; self.bodies().len()]`, fills it from `canonical`, then pushes **every** body into `items` with its `rank[si]`. Once `canonical` covers only the active conversation, every skipped surface keeps `rank[si] == 0` and is still pushed — so another conversation's blocks would sort *first* in the All view, not merely appear.
+
+So the seam is `active_surface_indices()` **plus** a filter in `merged_order` (the sketch's `surface_in_active_conversation`), and the filter changes behaviour in a path with its own tests (`merged_order_breaks_seq_ties_by_canonical_surface_then_index`, the browse-mode All-view tests). Therefore **6a splits**: **6a-i** the seam + the filter (proved by N = 2 unit tests over all six callers and the All view, with the N = 1 frame diff empty), then **6a-ii** the band + `/tab` + keys + the `ui.rs:276` locator.
+
+**(k) The zero-`allow(dead_code)` rule was too blunt — corrected** (measured at 6b-ii-a). Removing `mod roots;`'s allow exposes six items: `RootState::Failed` (never constructed — a client-derived mirror), `roster`/`session_path` (never read), `take_supervisor` (test-only), `Roots::{iter,len,is_empty,state_of}` (the band reads `App`'s container, not the registry), and **`as_protocol_root`** — which with `roster` *is* the accepted W041 seam (§13.5.2 pending). Taken literally, "zero allows" would delete accepted API to hit a number, so the rule becomes:
+
+> **Zero *new* allows, and every surviving one names its items and its retirement condition.** Delete what nothing will consume (`Roots::{iter,len,is_empty,state_of}`, `RootState::Failed`), `#[cfg(test)]`-gate `take_supervisor`, and keep **one** allow covering exactly `as_protocol_root`/`roster`/`session_path`, whose comment names the retirement: W041's hub, or `serve()` adopting a root through `Roots`.
+
+The general lesson, which has now cost three review rounds: **a numeric gate can be satisfied by removing the thing it measures.** The invariant that matters is "nothing here is dead because nothing here is unfinished", and only naming each item distinguishes the two.
