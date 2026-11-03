@@ -9642,6 +9642,7 @@ mod tests {
         assert_eq!(app.transcript().len(), before, "no transcript write");
         // single conversation stays active
         assert_eq!(app.conversations().active_index(), 0);
+        assert_eq!(app.focus(), 0, "no surface fallback at N = 1");
     }
 
     #[test]

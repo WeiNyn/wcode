@@ -1628,6 +1628,12 @@ mod tests {
         let a = roots
             .start(&factory, RootSpec::Fresh { label: None })
             .expect("a fresh root");
+        // Fresh root's surface_specs carries its group dir as resume_path.
+        let group_dir = roots.get(a).unwrap().group.as_ref().unwrap().dir.clone();
+        assert_eq!(
+            roots.get(a).unwrap().surface_specs().unwrap()[0].resume_path.as_deref(),
+            Some(group_dir.as_path())
+        );
         let b = roots
             .start(&factory, RootSpec::Fresh { label: None })
             .expect("a second fresh root");
@@ -1893,8 +1899,11 @@ mod tests {
         assert!(root.group.is_none(), "no group for a legacy file");
         // no sibling members/ dir created for a legacy file
         assert!(!path.parent().unwrap().join("members").exists());
-        // stronger: the file's parent has no `members` created by this root
-        let _ = id;
+        // The production fill: surface_specs carries the resume path.
+        assert_eq!(
+            root.surface_specs().unwrap()[0].resume_path.as_deref(),
+            Some(path.as_path())
+        );
     }
 
     #[tokio::test]
