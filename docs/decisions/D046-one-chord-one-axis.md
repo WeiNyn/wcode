@@ -50,7 +50,7 @@ bounded axis keeps its direct keys plus the one direction it cannot address.
 | axis | chord | note |
 |---|---|---|
 | next / previous **conversation tab** | `Ctrl-N` / `Ctrl-P` | every N, wraps, **inert** at N = 1, **silent** |
-| previous **surface** | `Shift-Tab` | unchanged at N ≤ 1 (that is the contract the four surface tripwires pin); at N > 1 it stops switching conversations — which *was* the defect — and it is now the only surface-cycle key |
+| previous **surface** | `Shift-Tab` | unchanged at N ≤ 1 (the contract those surface tests pin — three of them press `Shift-Tab`, the fourth clicks a row and jumps with `Alt-1`); at N > 1 it stops switching conversations — which *was* the defect — and it is now the only surface-cycle key |
 | direct **surface** jump | `Alt-1..9` | unchanged |
 | direct **tab** jump | `/tab <n>` | no chord — the band prints no numbers and draws the active tab first, so a digit would have two meanings |
 
@@ -70,9 +70,10 @@ bounded axis keeps its direct keys plus the one direction it cannot address.
 
 ## Consequences
 
-- `Shift-Tab`'s N = 1 contract is preserved for the right reason: the four tests that
-  used `Ctrl-N` to move between surfaces were re-pointed at `Shift-Tab` (one at
-  `Alt-1`, which moves off the root rather than back to it), so
+- `Shift-Tab`'s N = 1 contract is preserved for the right reason: the three tests
+  that used `Ctrl-N` to move *between surfaces* now press `Shift-Tab`, and the fourth
+  (`the_root_row_is_clickable_through_the_published_hits`) jumps with `Alt-1` because
+  it needs to move off the root rather than back to it — so
   `backtab_moves_focus_backwards_and_wraps` is untouched.
 - Tab switching is input-mode-only, shadowed by overlays, the settings panel, the
   completion popup and browse — exactly as every other chord is.
