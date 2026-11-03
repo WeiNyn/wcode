@@ -1604,7 +1604,7 @@ fn build_runtime(
                 let path = group.plan_path();
                 if path.exists() {
                     TaskList::load_at(&path, cap).unwrap_or_else(|e| {
-                        eprintln!("warning: plan not loaded: {e}");
+                        notices.push(format!("warning: plan not loaded: {e}"));
                         TaskList::with_journal_at(path, cap)
                     })
                 } else {
