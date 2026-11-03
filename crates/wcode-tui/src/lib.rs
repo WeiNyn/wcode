@@ -375,7 +375,6 @@ fn outcome_of(app: &App) -> Outcome {
             Some(path) => Outcome::Resume(path.to_path_buf()),
             None => match app.pending_team() {
                 Some(name) => Outcome::Team(name.to_string()),
-                None if app.pending_new() => Outcome::New,
                 None => Outcome::Quit,
             },
         },
@@ -1566,17 +1565,6 @@ mod abort_signal_tests {
         );
         app.handle(AppEvent::Key(Key::Esc));
         assert_eq!(outcome_of(&app), Outcome::Abandoned);
-    }
-
-    #[test]
-    fn new_command_maps_to_outcome_new() {
-        let mut app = App::new();
-        for c in "/new".chars() {
-            app.handle(AppEvent::Key(Key::Char(c)));
-        }
-        app.handle(AppEvent::Key(Key::Enter));
-        assert_eq!(outcome_of(&app), Outcome::New);
-        assert_ne!(outcome_of(&app), Outcome::Abandoned);
     }
 
     #[test]

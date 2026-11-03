@@ -829,9 +829,9 @@ fn tab_summary(conversations: &Conversations) -> String {
 const COMMANDS: &[Command] = &[
     Command {
         name: "new",
-        aliases: &["clear"],
+        aliases: &[],
         args: None,
-        summary: "start a new session",
+        summary: "open a new conversation",
     },
     Command {
         name: "exit",
@@ -1366,7 +1366,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
 
 /// The `/help` item label for `cmd`: `"/"` + `name`, then its `args`
 /// (`/model <id>`, `/reload [--no-session]`); with no args, its aliases in
-/// brackets (`/new [clear]`, `/exit [quit]`, `/resume [sessions]`, `|`-joined if
+/// brackets (`/new`, `/exit [quit]`, `/resume [sessions]`, `|`-joined if
 /// ever more than one). Precedence args-then-aliases is unobservable today (the
 /// three aliased commands all have `args: None`), but stated.
 fn command_label(cmd: &Command) -> String {
@@ -2925,9 +2925,6 @@ pub struct App {
     /// Set by `/reload`; the run returns it so the CLI can rebuild + re-exec
     /// into the same session (`no_session` = start fresh with `--no-session`).
     pending_reload: Option<bool>,
-    /// Set by `/new` (alias `/clear`); the run returns it so the CLI can re-exec
-    /// with no `--resume` — startup mints a fresh session (a fresh group for a team).
-    pending_new: bool,
     /// True when this TUI is a `--socket` client: there is no local binary or
     /// session to rebuild/re-exec, so `/reload` is refused.
     remote: bool,
@@ -3126,7 +3123,6 @@ impl App {
             pending_resume: None,
             pending_team: None,
             pending_reload: None,
-            pending_new: false,
             remote: false,
             overlay: None,
             completion: None,
@@ -5279,7 +5275,7 @@ impl App {
     /// Run a looked-up command; `arg` is the text after the name, if any.
     fn run_command(&mut self, cmd: &Command, arg: Option<&str>) {
         match cmd.name {
-            "new" => self.request_new(),
+            "new" => self.open_conversation_tab(wcode_protocol::RootSpec::Fresh { label: None }),
             "exit" => self.should_quit = true,
             "model" => match arg {
                 Some(m) => {
@@ -5438,18 +5434,7 @@ impl App {
             "tab" => match arg {
                 None => self.transient(tab_summary(self.conversations())),
                 Some("new") => {
-                    // The host builds it; `Added`/`Failed` come back through the
-                    // same channel. Refused before the emit over a socket, where
-                    // there is no host (the `/reload`/`/new`/`/team` precedent).
-                    if self.remote {
-                        self.transient("cannot open a conversation over a socket");
-                    } else {
-                        self.actions
-                            .push(Action::NewConversation(wcode_protocol::RootSpec::Fresh {
-                                label: None,
-                            }));
-                        self.transient("opening a conversation…");
-                    }
+                    self.open_conversation_tab(wcode_protocol::RootSpec::Fresh { label: None });
                 }
                 Some("close") => self.request_close_conversation(),
                 Some(n) => match n.parse::<usize>() {
@@ -6730,10 +6715,6 @@ impl App {
 
     /// Set by `/new` (alias `/clear`): the run returns `true` so the CLI can
     /// re-exec with no `--resume`, starting a fresh session.
-    pub fn pending_new(&self) -> bool {
-        self.pending_new
-    }
-
     /// Mark this TUI as a `--socket` client, so `/reload` is refused.
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
@@ -6751,16 +6732,15 @@ impl App {
         self.should_quit = true;
     }
 
-    /// `/new` (alias `/clear`): ask the composition root to start a fresh
-    /// session (a new session file, or a new group for a team) by re-exec'ing
-    /// with no `--resume`. Over a socket the server owns the session, so refuse.
-    fn request_new(&mut self) {
+    /// Open a new conversation tab (shared by `/new` and `/tab new`). Refused
+    /// over a socket, where there is no host.
+    fn open_conversation_tab(&mut self, spec: wcode_protocol::RootSpec) {
         if self.remote {
-            self.transient("/new (start a fresh session) is unavailable over a socket");
+            self.transient("cannot open a conversation over a socket");
             return;
         }
-        self.pending_new = true;
-        self.should_quit = true;
+        self.actions.push(Action::NewConversation(spec));
+        self.transient("opening a conversation…");
     }
 
     /// The run's changed files so far (view-owned changeset), for the status
@@ -10194,39 +10174,42 @@ mod tests {
     }
 
     #[test]
-    fn a_new_command_starts_a_fresh_session_and_quits() {
+    fn slash_new_opens_a_conversation_instead_of_quitting() {
         let mut app = App::new();
         submit(&mut app, "/new");
-        assert!(app.pending_new(), "a fresh session is requested");
-        assert!(app.should_quit(), "a new session quits the TUI to re-exec");
-        assert!(app.take_actions().is_empty());
-        assert_eq!(app.pending_reload(), None);
-        assert_eq!(app.pending_resume(), None);
-    }
-
-    #[test]
-    fn new_is_refused_over_a_socket() {
-        let mut app = App::new();
-        app.set_remote(true);
-        submit(&mut app, "/new");
-        assert!(
-            !app.pending_new(),
-            "a socket client cannot start a fresh session"
-        );
-        assert!(!app.should_quit());
+        let actions = app.take_actions();
+        assert_eq!(actions.len(), 1, "exactly one conversation request");
+        assert!(matches!(
+            &actions[0],
+            Action::NewConversation(wcode_protocol::RootSpec::Fresh { label: None })
+        ));
+        assert!(!app.should_quit(), "no quit");
         assert!(matches!(
             app.transcript().last(),
-            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("unavailable over a socket")
+            Some(Block::Transient(t)) if t.contains("opening a conversation")
         ));
     }
 
     #[test]
-    fn clear_is_an_alias_for_new() {
+    fn slash_new_and_slash_tab_new_emit_the_same_request() {
+        let mut a = App::new();
+        submit(&mut a, "/new");
+        let mut b = App::new();
+        submit(&mut b, "/tab new");
+        assert_eq!(a.take_actions(), b.take_actions());
+    }
+
+    #[test]
+    fn slash_new_is_refused_over_a_socket() {
         let mut app = App::new();
-        submit(&mut app, "/clear");
-        assert!(app.pending_new(), "/clear aliases /new");
-        assert!(app.should_quit());
-        assert_eq!(command_named("clear").map(|c| c.name), Some("new"));
+        app.set_remote(true);
+        submit(&mut app, "/new");
+        assert!(app.take_actions().is_empty(), "no Action over a socket");
+        assert!(!app.should_quit());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("socket")
+        ));
     }
 
     #[test]
@@ -12488,7 +12471,7 @@ mod tests {
         let label = |name: &str| command_label(command_named(name).unwrap());
         assert_eq!(label("model"), "/model <id>", "args win");
         assert_eq!(label("reload"), "/reload [--no-session]");
-        assert_eq!(label("new"), "/new [clear]", "aliases, no args");
+        assert_eq!(label("new"), "/new", "no aliases");
         assert_eq!(label("exit"), "/exit [quit]");
         assert_eq!(label("resume"), "/resume [sessions]");
         assert_eq!(label("tasks"), "/tasks", "neither args nor aliases");
