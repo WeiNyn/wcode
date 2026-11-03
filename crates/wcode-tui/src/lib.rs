@@ -1549,6 +1549,29 @@ mod tests {
             Outcome::Quit
         );
     }
+
+    #[tokio::test]
+    async fn an_added_conversation_carries_its_notices_end_to_end() {
+        let mut app = App::new();
+        let root = SessionId::agent("r0");
+        let mut backends: Vec<(SessionId, Backend)> = vec![(SessionId::agent("root"), backend())];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let spec = conversations::ConversationSpec {
+            id: ConversationId::new(9),
+            label: "second".into(),
+            notices: vec!["team: a, b".into()],
+            surfaces: vec![SurfaceSpec {
+                id: root.clone(),
+                label: "wcode".into(),
+                model: "m".into(),
+                is_root: true,
+                resume_path: None,
+                backend: backend(),
+            }],
+        };
+        assert!(accept_conversation(&mut app, &mut backends, &agent_tx, spec));
+        assert!(app.transcript().iter().any(|b| matches!(b, Block::Notice(t) if t == "team: a, b")));
+    }
 }
 
 #[cfg(test)]

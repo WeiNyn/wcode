@@ -1941,6 +1941,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fresh_root_s_added_carries_the_team_notice() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let cwd = tmp.path();
+        let mut inputs = run_inputs(cwd);
+        inputs.args.agents = true;
+        inputs.cfg.team = vec![
+            crate::config::TeamMember { name: "a".into(), ..Default::default() },
+            crate::config::TeamMember { name: "b".into(), ..Default::default() },
+        ];
+        let factory = factory_for(inputs);
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 300);
+        let id = roots
+            .start(&factory, RootSpec::Fresh { label: None })
+            .expect("fresh team builds");
+        let root = roots.get(id).expect("live");
+        assert!(root.notices.iter().any(|n| n == "team: a, b"), "{:?}", root.notices);
+        // probe second half: a root without a team carries no notice
+        let inputs2 = run_inputs(cwd);
+        let factory2 = factory_for(inputs2);
+        let mut roots2 = roots_in(tx.clone(), 301);
+        let id2 = roots2
+            .start(&factory2, RootSpec::Fresh { label: None })
+            .expect("fresh no-team builds");
+        let root2 = roots2.get(id2).expect("live");
+        assert!(root2.notices.is_empty(), "{:?}", root2.notices);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_team_says_it_restored() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let cwd = tmp.path();
+        let group = crate::session_groups::create_group(cwd).expect("a group");
+        crate::session_groups::create_root_session(&group.dir, cwd).expect("root session");
+        // Seed a member transcript so rebuild_team has something to restore.
+        let members_dir = group.members_dir.clone();
+        std::fs::create_dir_all(&members_dir).expect("members dir");
+        let _ = crate::Session::create_named_with_cwd(&members_dir, "w1", cwd).expect("member session");
+
+        let mut inputs = run_inputs(cwd);
+        inputs.args.agents = true;
+        // team empty so fresh spawn doesn't run; resume uses files
+        let factory = factory_for(inputs);
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 310);
+        let id = roots
+            .start(&factory, RootSpec::Resume { dir: group.dir.clone() })
+            .expect("resumed group builds");
+        let root = roots.get(id).expect("live");
+        assert!(
+            root.notices.iter().any(|n| n.contains("restored")),
+            "{:?}",
+            root.notices
+        );
+    }
+
+    #[tokio::test]
     async fn a_resume_of_a_path_that_is_neither() {
         let tmp = tempfile::tempdir().expect("a tempdir");
         let (tx, _rx) = channels();

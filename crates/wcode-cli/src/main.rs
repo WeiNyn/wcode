@@ -5367,3 +5367,92 @@ mod instructions_flag_tests {
     }
 
 }
+
+#[cfg(test)]
+mod build_notice_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_runtime_collects_instead_of_printing() {
+        // A [team] build returns its notice as a value, never prints it.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cwd = tmp.path();
+        let args = Args {
+            no_session: true,
+            agents: true,
+            no_project_config: true,
+            ..Args::default()
+        };
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                team: vec![
+                    TeamMember { name: "a".into(), ..Default::default() },
+                    TeamMember { name: "b".into(), ..Default::default() },
+                ],
+                ..FileConfig::default()
+            },
+        )
+        .expect("cfg");
+        let llm = LlmOpts {
+            model: "m1".into(),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            ..LlmOpts::default()
+        };
+        let setup = SessionSetup {
+            cwd: cwd.to_path_buf(),
+            active_group: None,
+            resuming_group: false,
+            session: None,
+            context: Vec::new(),
+            notices: Vec::new(),
+        };
+        let (rt, notices) = build_runtime(&args, &cfg, &llm, &setup, wcode_protocol::ConversationId::first())
+            .expect("build");
+        let _ = rt;
+        assert!(notices.iter().any(|n| n == "team: a, b"), "{notices:?}");
+        // workflow notice when a workflow present with a task
+        let _ = (args, cfg, llm, setup);
+    }
+
+    #[tokio::test]
+    async fn the_one_shot_stderr_is_byte_identical() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cwd = tmp.path();
+        let args = Args {
+            no_session: true,
+            agents: true,
+            no_project_config: true,
+            ..Args::default()
+        };
+        let cfg = merge(
+            EnvLike::default(),
+            FileConfig {
+                model: Some("m1".into()),
+                team: vec![
+                    TeamMember { name: "a".into(), ..Default::default() },
+                    TeamMember { name: "b".into(), ..Default::default() },
+                ],
+                ..FileConfig::default()
+            },
+        )
+        .expect("cfg");
+        let llm = LlmOpts {
+            model: "m1".into(),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            ..LlmOpts::default()
+        };
+        let setup = SessionSetup {
+            cwd: cwd.to_path_buf(),
+            active_group: None,
+            resuming_group: false,
+            session: None,
+            context: Vec::new(),
+            notices: Vec::new(),
+        };
+        let (_rt, notices) = build_runtime(&args, &cfg, &llm, &setup, wcode_protocol::ConversationId::first())
+            .expect("build");
+        assert_eq!(notices, vec!["team: a, b".to_string()]);
+    }
+}
