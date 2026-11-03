@@ -98,6 +98,10 @@ pub struct Conversation {
     /// never rendered while it is true (the tab band needs `len() > 1`); it exists
     /// so the tab bar has a place to say `remote` the day a client has two.
     pub is_remote: bool,
+    /// What the build would have printed; rendered as `Notice` blocks on the
+    /// root surface when the tab is added. Printed by the boot to stderr too
+    /// (two media, one fact) — do not "fix" the apparent duplication.
+    pub notices: Vec<String>,
 }
 
 /// The tab's state. **Deliberately three**, not `TeamState`'s four: a conversation
@@ -200,6 +204,7 @@ impl Conversations {
                 members,
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             }],
             active: 0,
         }
@@ -290,6 +295,7 @@ impl Conversations {
                     members,
                     state: ConversationState::Idle,
                     is_remote: false,
+            notices: Vec::new(),
                 });
                 self.active = 0;
             }
@@ -655,6 +661,7 @@ mod tests {
                 members: vec![SessionId::agent("m0")],
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
             Conversation {
                 id: ConversationId::new(1),
@@ -663,6 +670,7 @@ mod tests {
                 members: Vec::new(),
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
         ];
         let c = Conversations::from_parts(two, &surfaces);
@@ -696,6 +704,7 @@ mod tests {
                 members: Vec::new(),
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             }],
             &surfaces,
         );

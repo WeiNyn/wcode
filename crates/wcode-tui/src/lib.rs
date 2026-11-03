@@ -1427,6 +1427,7 @@ mod tests {
                     members: Vec::new(),
                     state: ConversationState::Idle,
                     is_remote: false,
+            notices: Vec::new(),
                 },
                 Conversation {
                     id: ConversationId::new(1),
@@ -1435,6 +1436,7 @@ mod tests {
                     members: Vec::new(),
                     state: ConversationState::Idle,
                     is_remote: false,
+            notices: Vec::new(),
                 },
             ],
             &infos,

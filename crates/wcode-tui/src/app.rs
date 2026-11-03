@@ -3073,7 +3073,19 @@ impl App {
     /// the pre-W040 shape exactly, and no surface is ever orphaned from the
     /// narrowed accessors.
     pub fn set_conversations(&mut self, list: Vec<Conversation>, surfaces: &[SurfaceInfo]) {
+        // Carry each conversation's build notices as blocks on its root surface,
+        // before any replayed history is touched (§4.2 / §4.3).
+        let notices_by_conv: Vec<(usize, Vec<String>)> = list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.notices.clone()))
+            .collect();
         self.conversations = Conversations::from_parts(list, surfaces);
+        for (idx, notices) in notices_by_conv {
+            if !notices.is_empty() {
+                self.push_build_notices(idx, &notices);
+            }
+        }
         self.dirty = true;
     }
 
@@ -3091,6 +3103,20 @@ impl App {
     ///
     /// Returns whether the conversation was registered. A variant's surfaces that
     /// the container refuses are not added, per `add_surface_in`'s own contract.
+    /// Push a build's notices as permanent `Notice` blocks on the given
+    /// conversation's root surface, above any replayed history.
+    fn push_build_notices(&mut self, idx: usize, notices: &[String]) {
+        let Some(root_id) = self.conversations().iter().nth(idx).and_then(|c| c.surface_ids().first().cloned()) else {
+            return;
+        };
+        let Some(body_idx) = self.bodies().iter().position(|s| s.id == root_id) else {
+            return;
+        };
+        for notice in notices {
+            self.push_on(body_idx, crate::Block::Notice(notice.clone()));
+        }
+    }
+
     pub fn add_conversation(
         &mut self,
         spec: crate::conversations::ConversationSpec,
@@ -3098,6 +3124,7 @@ impl App {
         let Some(root) = spec.surfaces.first().map(|s| s.id.clone()) else {
             return false;
         };
+        let notices = spec.notices.clone();
         let row = Conversation {
             id: spec.id,
             label: spec.label,
@@ -3105,6 +3132,7 @@ impl App {
             members: Vec::new(),
             state: crate::conversations::ConversationState::Idle,
             is_remote: false,
+            notices: notices.clone(),
         };
         if self.conversations.push(row).is_err() {
             return false;
@@ -3126,6 +3154,7 @@ impl App {
         }
         if let Some(idx) = self.conversations.index_of(spec.id) {
             self.activate_conversation(idx);
+            self.push_build_notices(idx, &notices);
         }
         self.dirty = true;
         true
@@ -9377,6 +9406,7 @@ mod tests {
                 members: vec![SessionId::agent("m0")],
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
             Conversation {
                 id: ConversationId::new(1),
@@ -9385,6 +9415,7 @@ mod tests {
                 members: Vec::new(),
                 state: ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
         ];
         app.set_conversations(list, &infos);
@@ -9494,6 +9525,7 @@ mod tests {
                 members: Vec::new(),
                 state: first,
                 is_remote: false,
+            notices: Vec::new(),
             },
             Conversation {
                 id: ConversationId::new(1),
@@ -9502,6 +9534,7 @@ mod tests {
                 members: Vec::new(),
                 state: second,
                 is_remote: true,
+            notices: Vec::new(),
             },
         ];
         app.set_conversations(list, &infos);
@@ -9828,6 +9861,7 @@ mod tests {
                 members: Vec::new(),
                 state: crate::conversations::ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
             Conversation {
                 id: ConversationId::new(1),
@@ -9836,6 +9870,7 @@ mod tests {
                 members: Vec::new(),
                 state: crate::conversations::ConversationState::Idle,
                 is_remote: false,
+            notices: Vec::new(),
             },
         ];
         app.set_conversations(list, &infos);
@@ -9874,6 +9909,7 @@ mod tests {
             members: Vec::new(),
             state: crate::conversations::ConversationState::Idle,
             is_remote: false,
+            notices: Vec::new(),
         }];
         app.set_conversations(list, &infos);
         app.set_sessions(sessions());
@@ -9969,6 +10005,160 @@ mod tests {
             app.transcript().last(),
             Some(Block::Notice(t) | Block::Transient(t)) if t.contains("unavailable over a socket")
         ));
+    }
+
+    #[test]
+    fn an_arriving_tab_carries_its_build_notices_on_its_root() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: vec!["team: a, b".into(), "workflow: 3 nodes".into()],
+        };
+        app.set_conversations(vec![conv], &infos);
+        let tx = &app.bodies()[0].transcript;
+        assert_eq!(tx.len(), 2);
+        assert!(matches!(&tx[0], Block::Notice(t) if t == "team: a, b"));
+        assert!(matches!(&tx[1], Block::Notice(t) if t == "workflow: 3 nodes"));
+    }
+
+    #[test]
+    fn a_build_notice_sits_above_the_replayed_history() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: vec!["team: a, b".into()],
+        };
+        app.set_conversations(vec![conv], &infos);
+        let tx = &app.bodies()[0].transcript;
+        assert!(matches!(&tx[0], Block::Notice(_)));
+    }
+
+    #[test]
+    fn a_build_notice_survives_the_next_submit() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: vec!["team: a, b".into()],
+        };
+        app.set_conversations(vec![conv], &infos);
+        // no transient added by notices
+        assert!(chatter(&app).is_empty());
+    }
+
+    #[test]
+    fn a_tab_with_notices_never_shows_the_empty_state() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: vec!["team: a, b".into()],
+        };
+        app.set_conversations(vec![conv], &infos);
+        app.seed_empty_hint();
+        let tx = &app.bodies()[0].transcript;
+        assert!(!tx.iter().any(|b| matches!(b, Block::Notice(t) if t == EMPTY_HINT || t == ROOT_EMPTY_HINT)));
+    }
+
+    #[test]
+    fn the_startup_root_carries_its_notices_once() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: vec!["team: a, b".into()],
+        };
+        app.set_conversations(vec![conv], &infos);
+        let tx = &app.bodies()[0].transcript;
+        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t == "team: a, b")));
+    }
+
+    #[test]
+    fn a_tab_without_notices_seeds_the_hint_as_today() {
+        let mut app = App::new();
+        let infos = vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }];
+        app.set_surfaces(infos.clone());
+        let conv = crate::conversations::Conversation {
+            id: wcode_protocol::ConversationId::first(),
+            label: "wcode".into(),
+            root: SessionId::agent("root"),
+            members: Vec::new(),
+            state: crate::conversations::ConversationState::Idle,
+            is_remote: false,
+            notices: Vec::new(),
+        };
+        app.set_conversations(vec![conv], &infos);
+        app.seed_empty_hint();
+        let tx = &app.bodies()[0].transcript;
+        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t == EMPTY_HINT || t == ROOT_EMPTY_HINT)));
     }
 
     #[test]

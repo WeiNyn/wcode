@@ -1181,6 +1181,7 @@ impl Root {
                 RootState::Dead => ConversationState::Failed,
             },
             is_remote: false,
+            notices: self.notices.clone(),
         }
     }
 
