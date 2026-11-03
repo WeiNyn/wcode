@@ -760,6 +760,14 @@ async fn event_loop(
 /// # Invariant (executable)
 /// `backends.len() == app.bodies().len()` — index-for-index, every conversation's
 /// surfaces flat in the same creation order.
+///
+/// # Why this does not replay (W049)
+/// A worker spawned at runtime is a fresh `Agent` with an EMPTY context, so its
+/// `GetHistory` would answer `[]` and `Surface::seed` no-ops on an empty slice
+/// (`app.rs:2449`) — there is nothing to ask for. A member that DOES hold a
+/// transcript arrives with its whole conversation (`ConversationEvent::Added`),
+/// and that path replays every surface it brought, this one included
+/// ([`accept_conversation`]).
 fn accept_member(
     app: &mut App,
     backends: &mut Vec<(SessionId, Backend)>,

@@ -13216,6 +13216,14 @@ mod tests {
         app.handle(AppEvent::Replayed(root, vec![AgentMessage::user_text("old question")]));
 
         let tx = app.transcript();
+        // The replayed block itself, not just the divider — the assertion the
+        // startup twin makes (`lib.rs`'s `attach_replay_seeds_every_surface_not_just_the_root`),
+        // so the divider cannot be the only witness that a replay landed.
+        assert!(
+            tx.iter()
+                .any(|b| matches!(b, Block::User(t) if t.as_str() == "old question")),
+            "the replayed turn is in the transcript: {tx:?}"
+        );
         let notice = tx
             .iter()
             .position(|b| matches!(b, Block::Notice(t) if t == "team: a, b"))
@@ -13227,6 +13235,37 @@ mod tests {
         assert!(
             notice < divider,
             "the notice sits ABOVE the divider ({notice} < {divider}): {tx:?}"
+        );
+    }
+
+    /// **`/tab new`'s unchanged-ness, executable.** A fresh conversation's
+    /// backend answers `GetHistory` with `[]`, so the runtime replay fires with
+    /// no messages — and that must be a no-op: `Surface::seed` returns on an
+    /// empty slice BEFORE `clear_hint` (`app.rs:2449`), so neither the transcript
+    /// nor the D5 empty-state hint moves. Reddens if that empty-guard is deleted:
+    /// a replay carrying nothing would retire the hint and insert a
+    /// `⋯ 0 earlier message(s)` divider.
+    #[test]
+    fn an_empty_replay_is_a_no_op() {
+        let (mut app, root_id, _member) = two_surfaces();
+        // The renderer's own call (`ui::draw` → `seed_empty_hint`), so the hint
+        // is genuinely present rather than hand-pushed.
+        app.seed_empty_hint();
+        let before = app.transcript().to_vec();
+        assert!(
+            matches!(before.first(), Some(Block::Notice(t)) if t == ROOT_EMPTY_HINT),
+            "the surface starts on the D5 empty-state hint: {before:?}"
+        );
+
+        app.handle(AppEvent::Replayed(root_id, Vec::new()));
+
+        assert_eq!(app.transcript(), before.as_slice(), "an empty replay changed nothing");
+        assert!(
+            app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Notice(t) if t == ROOT_EMPTY_HINT)),
+            "and the D5 hint survives: {:?}",
+            app.transcript()
         );
     }
 
