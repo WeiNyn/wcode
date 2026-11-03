@@ -1917,6 +1917,7 @@ fn record_root_meta(registry: &Registry, session_id: &SessionId, llm: &LlmOpts) 
 }
 
 // ==== SKETCH (review-only, not real code) ====
+// Waiting for: serve() adopting root 0 into Roots. Retired by: W041 or its own item.
 // W040 §13.2 items 1–2 — `serve()` IS THE FACTORY IT ALREADY ALMOST IS.
 //
 // `serve()`'s transport-free head (`:1895`-`:1959`) is exactly what
