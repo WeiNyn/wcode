@@ -542,13 +542,12 @@ fn render_todos(todos: &[TodoItem]) -> String {
 #[derive(Clone, Debug)]
 pub enum Overlay {
     Pick(Picker),
-    /// The `F1` keymap. A pure modal: it dismisses only on `Esc` / `F1`.
-    Help,
-    /// A scrollable informational modal opened by a `/`-command (`/help`,
-    /// `/verify`, `/tasks`, `/team roster`, `/usage`) — the visual twin of
-    /// [`Overlay::Help`], with content from outside `KEYS` and with scroll. Its
-    /// own variant rather than a widened `Help` (Q6): the two have different
-    /// content sources and `F1` stays byte-identical (§2 non-scope).
+    /// A scrollable informational modal — the help document (`F1` and `/help`),
+    /// and every `/`-command report (`/verify`, `/tasks`, `/team roster`,
+    /// `/usage`). ONE variant for all of them (D047): `F1` and `/help` open the
+    /// same `help_rows()` body and differ only in the row they start on, so "the
+    /// keymap" and "the commands" are two views of one page — never two panels
+    /// that can disagree about their size, their scroll, or their overflow hint.
     ///
     /// - `title` is the BARE lowercase word (`"help"`, `"usage"`, `"verify"`,
     ///   `"tasks"`, `"team"`); the renderer pads it into ` title ` (Q5) — the
@@ -975,7 +974,7 @@ const COMMANDS: &[Command] = &[
         name: "help",
         aliases: &[],
         args: None,
-        summary: "list commands",
+        summary: "list commands and keys",
     },
 ];
 
@@ -1183,7 +1182,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl-T", "expand / collapse all tool output"),
     ("Ctrl-N / Ctrl-P", "next / previous tab"),
     ("Shift-Tab", "focus the previous surface"),
-    ("Alt-1..9", "focus sidebar row N"),
+    ("Alt-0..9", "focus sidebar row N (0 = the root)"),
     ("Ctrl-G", "browse the transcript"),
     ("Ctrl-B", "toggle the sidebar"),
     ("Ctrl-O", "toggle the transcript view (all/focus)"),
@@ -1195,7 +1194,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Home / End (browse)", "jump to the top / bottom block in view"),
     ("{ / } (browse)", "previous / next block"),
     ("/ (browse)", "search the transcript (n / N repeat)"),
-    ("F1", "toggle this help"),
+    ("F1", "open help at the keys section"),
     // The settings panel's grammar, scoped as the `(info)` rows are: the hint
     // line sheds whole clauses at 48 cols, and the keymap is the channel that
     // cannot (`tui-design.md` §4 amendment 7 — five rows, not one). `F2` says
@@ -3402,18 +3401,28 @@ impl App {
     /// [`App::canonical_order`] (D34), not raw `bodies[N - 1]` (which is the root
     /// for `Alt-1`). `Alt-0` and an out-of-range `N` are a no-op.
     fn focus_digit(&mut self, c: char) {
+        // 0 = the root: `canonical_order` sorts the root first, so `get(0)` is
+        // THIS conversation's root — the numbering the sidebar badges already use,
+        // completed (D046/D047). No `already focused` special case: `set_focus`
+        // is a no-op when the index is the same.
         if let Some(n) = c.to_digit(10)
-            && n >= 1
             && let Some(&idx) = self.canonical_order().get(n as usize)
         {
             self.set_focus(idx);
         }
     }
 
-    /// Open the keymap overlay (`F1`).
+    /// Open the help document at its `keys` section (`F1`, D047). `/help` opens
+    /// the same body at the top; the two verbs choose a starting row, nothing
+    /// else. The anchor is the section LABEL, not arithmetic, so adding a command
+    /// cannot silently shift where `F1` lands.
     fn open_help(&mut self) {
-        self.overlay = Some(Overlay::Help);
-        self.dirty = true;
+        let rows = help_rows();
+        let at = rows
+            .iter()
+            .position(|r| *r == InfoRow::Prose("keys".to_string()))
+            .unwrap_or(0);
+        self.open_info_rows_at("help", rows, u16::try_from(at).unwrap_or(u16::MAX));
     }
 
     /// Open the settings panel (`F2` / `/settings`, W032 §4.7). A fresh
@@ -3616,19 +3625,34 @@ impl App {
         rows
     }
 
-    /// Open an info modal from EXPLICIT rows — the door `/help` uses, so the row
-    /// SHAPE is built by the caller ([`help_rows`]) and never inferred from a
-    /// string. Same contract as [`App::open_info`], which is now a wrapper:
-    /// replaces any open overlay, resets `scroll` to `0`, marks the frame dirty,
-    /// touches neither the transcript nor the input, never sends a `Request`,
-    /// never panics.
-    fn open_info_rows(&mut self, title: impl Into<String>, rows: Vec<InfoRow>) {
+    /// Open an info modal from EXPLICIT rows — the door `/help` and `F1` use, so
+    /// the row SHAPE is built by the caller ([`help_rows`]) and never inferred
+    /// from a string. Same contract as [`App::open_info`], which is now a
+    /// wrapper: replaces any open overlay, sets `scroll` to `scroll_at` (clamped
+    /// by the renderer), marks the frame dirty, touches neither the transcript
+    /// nor the input, never sends a `Request`, never panics.
+    ///
+    /// `scroll_at` is what lets `F1` land on the `keys` section while `/help`
+    /// starts at the top (D047). It is a ROW INDEX into `rows`, not a line — a
+    /// row is a drawn line, which is what keeps the scroll arithmetic
+    /// row-agnostic.
+    fn open_info_rows_at(
+        &mut self,
+        title: impl Into<String>,
+        rows: Vec<InfoRow>,
+        scroll_at: u16,
+    ) {
         self.overlay = Some(Overlay::Info {
             title: title.into(),
             rows,
-            scroll: 0,
+            scroll: scroll_at,
         });
         self.dirty = true;
+    }
+
+    /// [`App::open_info_rows_at`] entering at the top — every `/`-command caller.
+    fn open_info_rows(&mut self, title: impl Into<String>, rows: Vec<InfoRow>) {
+        self.open_info_rows_at(title, rows, 0);
     }
 
     /// Scroll the open info modal by `delta` body rows: `-1` = up (toward row 0),
@@ -6082,18 +6106,14 @@ impl App {
     /// picker: ↑/↓ move, printable chars filter, Backspace deletes, Enter
     /// selects, Esc dismisses; everything else is swallowed.
     fn on_overlay_key(&mut self, key: Key) {
-        if matches!(self.overlay, Some(Overlay::Help)) {
-            if matches!(key, Key::Esc | Key::F(1)) {
-                self.overlay = None;
-                self.dirty = true;
-            }
-            return;
-        }
         // The info modal: `Esc` closes; the scroll chords move the body; every
-        // other key is swallowed. The `return` is load-bearing — without it a
-        // `Key::Enter` would reach `Key::Enter => self.accept_picker()` below,
-        // whose `.take()` clears the overlay *before* the `let-else` returns, so
-        // the modal would be silently destroyed.
+        // other key is swallowed. `F1`'s page is this modal now (D047), so `Esc`
+        // is the only close key for it too — an opener says *open*, `Esc` closes,
+        // exactly as `F2`'s panel has said since W032.
+        // The `return` is load-bearing: without it `Key::Enter` would reach
+        // `Key::Enter => self.accept_picker()` below, whose `.take()` clears the
+        // overlay *before* the `let-else` returns, so the modal would be silently
+        // destroyed.
         if matches!(self.overlay, Some(Overlay::Info { .. })) {
             match key {
                 Key::Esc => self.overlay = None, // the only close key (Q2)
@@ -10618,13 +10638,18 @@ mod tests {
         assert_eq!(app.focus(), 1, "Alt-1 focuses the first member, not the root");
         app.handle(AppEvent::Key(Key::Alt('2')));
         assert_eq!(app.focus(), 2, "Alt-2 focuses the second member");
-        // Alt-0 and an out-of-range row are a no-op.
-        app.handle(AppEvent::Key(Key::Alt('0')));
-        assert_eq!(app.focus(), 2);
+        // An out-of-range row is a no-op.
         app.handle(AppEvent::Key(Key::Alt('3')));
         assert_eq!(app.focus(), 2, "only two members: Alt-3 is out of range");
         app.handle(AppEvent::Key(Key::Alt('9')));
         assert_eq!(app.focus(), 2);
+        // Alt-0 is the ROOT — the badges' numbering, completed (D046): the root
+        // is row 0 in the canonical order, and it is the one row no other digit
+        // can reach.
+        app.handle(AppEvent::Key(Key::Alt('0')));
+        assert_eq!(app.focus(), 0, "Alt-0 focuses the root surface");
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 1, "and back to a member");
     }
 
     #[test]
@@ -10654,19 +10679,41 @@ mod tests {
     }
 
     #[test]
-    fn f1_opens_the_help_overlay_and_only_esc_or_f1_closes_it() {
+    fn f1_and_slash_help_open_one_document_at_different_rows() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
-        assert!(matches!(app.overlay(), Some(Overlay::Help)));
-        // Every other key is ignored — it neither closes the modal nor edits.
-        app.handle(AppEvent::Key(Key::Char('x')));
-        assert!(matches!(app.overlay(), Some(Overlay::Help)));
+        // ONE document (D047): `F1` shows the help body, entered at its `keys`
+        // section, so the keymap is on screen and the commands are above it.
+        let Some(Overlay::Info { title, rows, scroll }) = app.overlay() else {
+            panic!("F1 opens the help document: {:?}", app.overlay());
+        };
+        assert_eq!(title, "help");
+        assert_eq!(*rows, help_rows(), "the body is the one body");
+        let at = help_rows()
+            .iter()
+            .position(|r| *r == InfoRow::Prose("keys".to_string()))
+            .expect("the keys section");
+        assert_eq!(*scroll as usize, at, "F1 lands on the keys section");
+        // `?` and `/help` open the SAME page — `/help` at the top.
         assert_eq!(app.input(), "", "the modal gates the input");
         app.handle(AppEvent::Key(Key::Esc));
         assert!(app.overlay().is_none());
-        // F1 also closes it.
+        submit(&mut app, "/help");
+        let Some(Overlay::Info { rows, scroll, .. }) = app.overlay() else {
+            panic!("`/help` opens the document: {:?}", app.overlay());
+        };
+        assert_eq!(*rows, help_rows());
+        assert_eq!(*scroll, 0, "`/help` starts at the top");
+        // An OPENER says `open`, and `Esc` closes: F1 no longer toggles (D047).
+        app.handle(AppEvent::Key(Key::Esc));
         app.handle(AppEvent::Key(Key::F(1)));
+        assert!(app.overlay().is_some(), "F1 opened it again");
         app.handle(AppEvent::Key(Key::F(1)));
+        assert!(
+            app.overlay().is_some(),
+            "F1 does not close its own page: `Esc` is the only close key"
+        );
+        app.handle(AppEvent::Key(Key::Esc));
         assert!(app.overlay().is_none());
     }
 
@@ -11479,7 +11526,7 @@ mod tests {
 
         app.handle(AppEvent::Key(Key::F(1)));
         assert!(
-            matches!(app.overlay(), Some(Overlay::Help)),
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
             "F1 opens help from browse"
         );
         assert_eq!(app.mode(), Mode::Browse, "browse survives under the overlay");
@@ -11488,10 +11535,10 @@ mod tests {
         assert_eq!(app.mode(), Mode::Browse, "closing help returns to browse");
         assert_eq!(app.selected(), Some(1), "the selection is preserved");
 
-        // `?` is the same overlay.
+        // `?` is the same page.
         app.handle(AppEvent::Key(Key::Char('?')));
-        assert!(matches!(app.overlay(), Some(Overlay::Help)));
-        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(matches!(app.overlay(), Some(Overlay::Info { .. })));
+        app.handle(AppEvent::Key(Key::Esc));
         assert_eq!(app.mode(), Mode::Browse);
     }
 
@@ -12032,13 +12079,16 @@ mod tests {
 
         app.handle(AppEvent::Key(Key::F(1)));
         assert!(
-            matches!(app.overlay(), Some(Overlay::Help)),
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
             "F1 opens help from the search prompt"
         );
         assert_eq!(app.search_query(), Some("alpha"), "the prompt survives help");
         app.handle(AppEvent::Key(Key::Esc)); // close help
         app.handle(AppEvent::Key(Key::Char('?')));
-        assert!(matches!(app.overlay(), Some(Overlay::Help)), "? opens help too");
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
+            "? opens help too"
+        );
         app.handle(AppEvent::Key(Key::Esc));
 
         app.handle(AppEvent::Key(Key::Ctrl('c')));

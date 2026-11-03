@@ -17,7 +17,7 @@ use wcode_harness::event::{TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
 
 use crate::TeamState;
-use crate::app::{App, Block, InputView, InfoRow, KEYS, Mode, Overlay, Picker, SessionHead, Tool, Turn};
+use crate::app::{App, Block, InputView, InfoRow, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::conversations::{Conversation, ConversationState, Conversations};
 use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
 use crate::settings::{Setting, SettingKind};
@@ -391,7 +391,6 @@ fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {
 fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
     match app.overlay() {
         Some(Overlay::Pick(picker)) => draw_picker(frame, area, picker),
-        Some(Overlay::Help) => draw_help(frame, area),
         Some(Overlay::Info { title, rows, scroll }) => {
             draw_info(frame, area, title, rows, *scroll)
         }
@@ -415,28 +414,6 @@ fn item_line(label: &str, detail: &str) -> Line<'static> {
         ),
         Span::styled(detail.to_string(), dim()),
     ])
-}
-
-/// Draw the `F1` keymap, centered like the picker — a thin caller of
-/// [`draw_info_panel`], so its rendered bytes are identical to the modal it was
-/// before the info panel was factored out.
-fn draw_help(frame: &mut Frame, area: Rect) {
-    let mut lines: Vec<Line> = KEYS
-        .iter()
-        .map(|(chord, what)| item_line(chord, what))
-        .collect();
-    lines.push(Line::default());
-    draw_info_panel(
-        frame,
-        area,
-        InfoPanel {
-            title: "keys",
-            lines,
-            scroll: 0,
-            footer: " esc / F1 to close",
-            more: false,
-        },
-    );
 }
 
 /// The hint line — the panel's footer, the row that `Info` spends on
@@ -2974,7 +2951,7 @@ pub(crate) fn code_style() -> Style {
 mod tests {
     use super::*;
     use crate::app::{
-        Action, App, AppEvent, EMPTY_HINT, EMPTY_MARK, Key, MouseEvent, MouseKind,
+        Action, App, AppEvent, EMPTY_HINT, EMPTY_MARK, KEYS, Key, MouseEvent, MouseKind,
         ROOT_EMPTY_HINT, help_rows,
     };
     use ratatui::Terminal;
@@ -4124,16 +4101,41 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn f1_renders_the_help_overlay_with_the_keymap() {
         let mut app = App::new();
         app.handle(AppEvent::Key(Key::F(1)));
-        // Tall enough for the whole body (KEYS grew when the info chords landed).
+        // `F1` enters the one help document at its `keys` section (D047), so at
+        // 40 rows the whole keymap is on screen — this assertion is now about
+        // the SCROLL POSITION, not about the body fitting.
         let text = buffer_text(&render(&mut app, 64, 40));
-        assert!(text.contains("keys"), "help title missing:\n{text}");
-        // Every chord in `KEYS` must be rendered — so this can never go stale.
+        assert!(text.contains("help"), "help title missing:\n{text}");
         for (chord, _) in KEYS {
             assert!(text.contains(chord), "chord {chord:?} missing:\n{text}");
         }
-        assert!(text.contains("toggle this help"), "F1's description missing:\n{text}");
-        // F1 is not scrollable and must never show the info modal's overflow hint.
-        assert!(!text.contains("more —"), "F1 must show no `— N more —` hint:\n{text}");
+        assert!(
+            text.contains("open help at the keys section"),
+            "F1's description missing:\n{text}"
+        );
+        // At 40 rows the keymap ends at the bottom of the body, so the panel's
+        // `— N more —` hint (which counts rows BELOW the fold) is absent: nothing
+        // is cut off below. The commands are above, reachable with `↑`.
+        assert!(
+            !text.contains("more —"),
+            "nothing is below the fold, so no tail hint:\n{text}"
+        );
+        assert!(
+            !text.contains("list commands"),
+            "the command rows must not share the first F1 screen:\n{text}"
+        );
+    }
+
+    /// The other half of the same rule: a SHORT terminal keeps the keymap
+    /// readable and still says how much is missing — the silent clip the old
+    /// `F1`-only panel had, gone (D047).
+    #[test]
+    fn f1_on_a_short_terminal_says_how_much_is_missing() {
+        let mut app = App::new();
+        app.handle(AppEvent::Key(Key::F(1)));
+        let text = buffer_text(&render(&mut app, 64, 24));
+        assert!(text.contains("more —"), "no overflow hint at 24 rows:\n{text}");
+        assert!(text.contains("keys"), "the keys section header is missing:\n{text}");
     }
 
     #[test]
@@ -7291,22 +7293,15 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
     }
 
-    /// Guards the `item_line` extraction: with `draw_help` now a caller, F1's
-    /// frame is unchanged — its first body row is exactly the first KEYS item, its
-    /// footer is intact, and it shows no `— N more —`.
+    /// Pins the `item_line` ROW (D027): one-space indent, accent label padded to
+    /// [`ITEM_LABEL_COLS`], dim detail. It no longer compares two panels — there
+    /// is one panel now (D047) — so this is the row's only golden.
     #[test]
-    fn f1_stays_byte_identical_after_the_item_row_extraction() {
-        let mut app = App::new();
-        app.handle(AppEvent::Key(Key::F(1)));
-        let text = buffer_text(&render(&mut app, 64, 40));
-        let (chord, what) = KEYS[0];
-        let row = format!(" {chord:<width$}{what}", width = ITEM_LABEL_COLS);
-        assert!(text.contains(&row), "F1's first row drifted: {row:?}\n{text}");
-        assert!(!text.contains("more —"), "F1 leaked the overflow hint:\n{text}");
-        assert!(
-            text.contains("esc / F1 to close"),
-            "F1's footer drifted:\n{text}"
-        );
+    fn the_item_row_is_indented_padded_and_dim() {
+        let row = item_line("F1", "open help at the keys section");
+        let spans = row.spans;
+        assert_eq!(spans[0].content, format!(" {:<width$}", "F1", width = ITEM_LABEL_COLS));
+        assert_eq!(spans[1].content, "open help at the keys section");
     }
 
     // ---- All mode (the merged transcript) -------------------------------------
