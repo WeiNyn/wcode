@@ -97,6 +97,11 @@ pub enum AppEvent {
     /// A fact from a session, tagged with the surface it belongs to (an
     /// unmatched id is ignored).
     Agent(SessionId, AgentEvent),
+    /// A **replay** reply: the transcript a surface's backend already holds,
+    /// sent when its conversation arrives (`spawn_replay`). Distinct from
+    /// `Agent(_, AgentEvent::History)`, whose arm renders a `/usage` one-liner
+    /// (`app.rs:2183`) — the same wire event, two jobs, so the caller decides.
+    Replayed(SessionId, Vec<AgentMessage>),
     Tick,
     /// The terminal was resized; force a redraw and re-measure the scroll.
     Resize,
@@ -4723,6 +4728,10 @@ impl App {
                     self.conversations.set_state_from(&id, state);
                 }
             }
+            // A runtime tab's history, asked for when its conversation arrived
+            // and answered off the loop (`spawn_replay` in `lib.rs`). Its own
+            // arm, not `Agent(_, AgentEvent::History)`: that one renders usage.
+            AppEvent::Replayed(id, messages) => self.seed_replay(&id, &messages),
             AppEvent::Tick => {}
             AppEvent::Resize => {
                 // Force a redraw; the width change resets the scroll pin.
@@ -6867,6 +6876,35 @@ impl App {
             self.stamp_replayed(idx);
             self.dirty = true;
         }
+    }
+
+    /// Seed a **runtime** replay (`AppEvent::Replayed`, W049), but only while
+    /// the tab is still clean — then delegate to [`App::seed_history`] unchanged.
+    ///
+    /// The guard is the whole reason this is not `seed_history` itself: the ask
+    /// is fire-and-forget, so a reply can land after the user has already
+    /// submitted on the tab. Splicing old blocks under a live turn would put the
+    /// `⋯ N earlier message(s)` divider mid-transcript, above the message it
+    /// claims is earlier.
+    ///
+    /// "Clean" = no [`Block::User`] and no [`Block::Turn`] in that surface's
+    /// transcript. Notices, transients, tool notes and the D5 empty-state hint
+    /// are all fine — they are what a fresh tab legitimately holds (the build
+    /// notices `add_conversation` pushes, W047). A reply for a surface that has
+    /// since been closed needs no check here: `seed_history` looks the id up and
+    /// no-ops when it is gone.
+    fn seed_replay(&mut self, id: &SessionId, messages: &[AgentMessage]) {
+        let Some(idx) = self.surface_index(id) else {
+            return;
+        };
+        let occupied = self.bodies()[idx]
+            .transcript
+            .iter()
+            .any(|b| matches!(b, Block::User(_) | Block::Turn(_)));
+        if occupied {
+            return;
+        }
+        self.seed_history(id, messages);
     }
 }
 
@@ -13067,6 +13105,129 @@ mod tests {
         app.handle(AppEvent::Agent(root_id, AgentEvent::Compaction { summarized: 1, kept: 0 }));
         let live = *app.focused().seqs.last().unwrap();
         assert!(live > seeded_max, "the live block is strictly greater: {live} > {seeded_max}");
+    }
+
+    // ---- W049: a runtime tab replays its history ----
+
+    /// `AppEvent::Replayed(id, ..)` seeds **that** surface — never whichever one
+    /// happens to be focused when the reply lands. Reddens if the arm routes to
+    /// `focused()` instead of looking the id up.
+    #[test]
+    fn a_replayed_history_seeds_the_tab_it_names() {
+        let (mut app, _root_id, member) = two_surfaces();
+        app.set_focus(0); // the focus is NOT on the tab the reply names
+        app.handle(AppEvent::Replayed(
+            member.clone(),
+            vec![AgentMessage::user_text("member question"), assistant("member answer")],
+        ));
+
+        assert!(
+            !app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::User(t) if t == "member question")),
+            "the focused (root) surface must not take the reply: {:?}",
+            app.transcript()
+        );
+        app.set_focus(1);
+        let tx = app.transcript();
+        assert!(
+            tx.iter().any(|b| matches!(b, Block::User(t) if t == "member question")),
+            "the named surface was seeded: {tx:?}"
+        );
+        assert!(
+            tx.iter().any(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))),
+            "and it carries the replayed prefix divider: {tx:?}"
+        );
+    }
+
+    /// A replay that lands **after the user already submitted** is dropped: the
+    /// ask is fire-and-forget, so the reply can arrive mid-turn. Seeding then
+    /// would splice old blocks under a live turn and put the
+    /// `⋯ N earlier message(s)` divider mid-transcript. Reddens if the guard in
+    /// `seed_replay` is deleted.
+    #[test]
+    fn a_replay_after_a_live_turn_is_dropped() {
+        let mut app = App::new();
+        submit(&mut app, "a live question"); // a `Block::User` on the root
+        let before = app.transcript().to_vec();
+
+        app.handle(AppEvent::Replayed(
+            root(),
+            vec![AgentMessage::user_text("old question"), assistant("old answer")],
+        ));
+
+        assert_eq!(app.transcript(), before.as_slice(), "the late replay changed nothing");
+        assert!(
+            !app.transcript()
+                .iter()
+                .any(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))),
+            "no divider was inserted mid-transcript: {:?}",
+            app.transcript()
+        );
+    }
+
+    /// A backend for the `ConversationSpec` the ordering test builds: the app
+    /// never asks it anything (a spec's `backend` belongs to the loop), so an
+    /// idle, never-streaming session is enough. Mirrors `lib.rs`'s `backend()`.
+    fn idle_backend() -> crate::Backend {
+        let agent = wcode_harness::agent::Agent::new(wcode_harness::agent::AgentConfig {
+            system: "test".into(),
+            tools: Vec::new(),
+            llm: wcode_harness::streamfn::LlmOpts::default(),
+            stream_fn: std::sync::Arc::new(|_c, _s, _t, _o| {
+                Box::pin(futures::stream::empty()) as wcode_harness::streamfn::LlmStream
+            }),
+            hooks: wcode_harness::hooks::HooksSet::default(),
+            session: None,
+            context: Vec::new(),
+            working_dir: std::env::temp_dir(),
+            max_turns: wcode_harness::loop_::DEFAULT_MAX_TURNS,
+            parallel_tools: false,
+            compaction: wcode_harness::compaction::CompactionPolicy::default(),
+            plan_mode: wcode_harness::hooks::PlanModeHandle::new(),
+            title_after_turns: wcode_harness::title::DEFAULT_TITLE_AFTER_TURNS,
+        });
+        crate::Backend::from(wcode_harness::actor::SessionActor::spawn(agent))
+    }
+
+    /// W047's clause, for a runtime tab: the build notice `add_conversation`
+    /// pushes at accept time sits **above** the replayed prefix divider. Reddens
+    /// if the replay is moved before `push_build_notices` — the ordering the
+    /// startup seam reproduces (`set_conversations`, then `replay_history`).
+    #[tokio::test]
+    async fn a_tab_notice_sits_above_the_replayed_divider() {
+        let mut app = App::new();
+        let root = SessionId::agent("r0");
+        let added = app.add_conversation(crate::conversations::ConversationSpec {
+            id: ConversationId::new(1),
+            label: "resumed".into(),
+            notices: vec!["team: a, b".into()],
+            surfaces: vec![crate::SurfaceSpec {
+                id: root.clone(),
+                label: "wcode".into(),
+                model: "m".into(),
+                is_root: true,
+                resume_path: None,
+                backend: idle_backend(),
+            }],
+        });
+        assert!(added, "the host announced a resumable tab");
+
+        app.handle(AppEvent::Replayed(root, vec![AgentMessage::user_text("old question")]));
+
+        let tx = app.transcript();
+        let notice = tx
+            .iter()
+            .position(|b| matches!(b, Block::Notice(t) if t == "team: a, b"))
+            .expect("the tab's build notice");
+        let divider = tx
+            .iter()
+            .position(|b| matches!(b, Block::Notice(t) if t.contains("earlier message")))
+            .expect("the replayed prefix divider");
+        assert!(
+            notice < divider,
+            "the notice sits ABOVE the divider ({notice} < {divider}): {tx:?}"
+        );
     }
 
     #[test]

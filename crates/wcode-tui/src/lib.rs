@@ -611,7 +611,7 @@ async fn event_loop(
             // The host answers a `/tab new` or a `/tab close`.
             Some(event) = recv_conv(&mut feeds.incoming) => match event {
                 conversations::ConversationEvent::Added(spec) => {
-                    accept_conversation(app, &mut backends, &agent_tx, spec);
+                    accept_conversation(app, &mut backends, &agent_tx, &reply_tx, spec);
                 }
                 conversations::ConversationEvent::Failed { error } => app.conversation_failed(error),
                 conversations::ConversationEvent::Stopped { id } => {
@@ -783,10 +783,18 @@ fn accept_member(
 /// aligned: every surface gets a forwarder and a backend IFF `App` accepted its
 /// body, so `backends` and `bodies` stay index-for-index (the same invariant
 /// `accept_member` ends with, for the same reason).
+///
+/// An ACCEPTED conversation also asks every surface it brought for its history
+/// ([`spawn_replay`], W049): the tab arrives blank though its backend already
+/// holds the session's transcript (a `/resume` pick), so it replays on the same
+/// seam the startup root uses — root *and* members, because replaying only the
+/// root is the D1 bug `replay_history` names. A refused conversation has no
+/// bodies to seed, so it asks nothing.
 fn accept_conversation(
     app: &mut App,
     backends: &mut Vec<(SessionId, Backend)>,
     agent_tx: &mpsc::UnboundedSender<(SessionId, AgentEvent)>,
+    reply_tx: &mpsc::UnboundedSender<AppEvent>,
     spec: conversations::ConversationSpec,
 ) -> bool {
     let wired: Vec<(SessionId, Backend)> = spec
@@ -799,6 +807,14 @@ fn accept_conversation(
     }
     for (id, backend) in wired {
         spawn_forwarder(agent_tx, &id, &backend);
+        // The tab arrives BLANK though its backend holds the session's
+        // transcript (a `/resume` pick, W049): ask it for `GetHistory` on the
+        // same seam the startup replay uses — EVERY surface, root *and*
+        // members (replaying only the root is the D1 bug `replay_history`
+        // names). Off the loop, so a wedged backend cannot freeze input.
+        // Only an ACCEPTED conversation asks: a refused one has no bodies to
+        // seed.
+        spawn_replay(&id, &backend, reply_tx);
         backends.push((id, backend));
     }
     debug_assert_eq!(
@@ -942,6 +958,32 @@ fn spawn_ask_within(
             },
         };
         let _ = reply_tx.send(AppEvent::Agent(id, event));
+    });
+}
+
+/// The **runtime** twin of [`replay_history`] (W049): ask one surface for its
+/// history and feed the answer back as [`AppEvent::Replayed`], so a tab that
+/// arrives while the loop is running (a `/resume` pick) shows the session its
+/// backend already holds.
+///
+/// Off the loop, on the same bounded seam as [`spawn_ask_within`]: a
+/// hung-but-open backend must not freeze input and draws for `ASK_TIMEOUT` (the
+/// rule `spawn_ask_within` states — "bound the ask so a hung-but-open backend
+/// cannot wedge the spinner").
+///
+/// **Silent on anything that is not an `Ok(History)`**: a backend that errors or
+/// answers something else leaves its surface empty, exactly as the startup
+/// replay does. A replay is not a run — no `Block::Error`, no transient.
+fn spawn_replay(id: &SessionId, backend: &Backend, reply_tx: &mpsc::UnboundedSender<AppEvent>) {
+    let id = id.clone();
+    let backend = backend.clone();
+    let reply_tx = reply_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(AgentEvent::History { messages }) =
+            backend.ask_within(Request::GetHistory, ASK_TIMEOUT).await
+        {
+            let _ = reply_tx.send(AppEvent::Replayed(id, messages));
+        }
     });
 }
 
@@ -1231,6 +1273,7 @@ mod tests {
         );
         let mut backends: Vec<(SessionId, Backend)> = vec![(SessionId::agent("c0root"), backend())];
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let (reply_tx, _reply_rx) = mpsc::unbounded_channel();
 
         let spec = conversations::ConversationSpec {
             id: ConversationId::new(1),
@@ -1264,7 +1307,7 @@ mod tests {
             ],
         };
         assert!(
-            accept_conversation(&mut app, &mut backends, &agent_tx, spec),
+            accept_conversation(&mut app, &mut backends, &agent_tx, &reply_tx, spec),
             "the conversation is accepted"
         );
         assert_eq!(
@@ -1326,6 +1369,7 @@ mod tests {
             (owned.clone(), backend()),
         ];
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let (reply_tx, _reply_rx) = mpsc::unbounded_channel();
         let before_bodies = app.bodies().len();
         let before_backends = backends.len();
 
@@ -1353,7 +1397,7 @@ mod tests {
             ],
         };
         assert!(
-            !accept_conversation(&mut app, &mut backends, &agent_tx, spec),
+            !accept_conversation(&mut app, &mut backends, &agent_tx, &reply_tx, spec),
             "a refused surface fails the conversation"
         );
         assert_eq!(app.conversations().len(), 1, "the row was rolled back");
@@ -1556,6 +1600,7 @@ mod tests {
         let root = SessionId::agent("r0");
         let mut backends: Vec<(SessionId, Backend)> = vec![(SessionId::agent("root"), backend())];
         let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let (reply_tx, _reply_rx) = mpsc::unbounded_channel();
         let spec = conversations::ConversationSpec {
             id: ConversationId::new(9),
             label: "second".into(),
@@ -1569,8 +1614,162 @@ mod tests {
                 backend: backend(),
             }],
         };
-        assert!(accept_conversation(&mut app, &mut backends, &agent_tx, spec));
+        assert!(accept_conversation(
+            &mut app,
+            &mut backends,
+            &agent_tx,
+            &reply_tx,
+            spec
+        ));
         assert!(app.transcript().iter().any(|b| matches!(b, Block::Notice(t) if t == "team: a, b")));
+    }
+
+    /// **W049's load-bearing test.** A conversation that arrives at runtime
+    /// replays EVERY surface it brought — the root **and** its members — off the
+    /// loop, on the same seam the startup replay uses. Reddens if the ask covers
+    /// only `spec.surfaces.first()`, which is the exact D1 bug
+    /// `attach_replay_seeds_every_surface_not_just_the_root` guards at startup.
+    #[tokio::test]
+    async fn an_arriving_conversation_replays_every_surface() {
+        let mut app = App::new();
+        let root = SessionId::agent("r0");
+        let member = SessionId::agent("m1");
+        let mut backends: Vec<(SessionId, Backend)> = vec![(SessionId::agent("root"), backend())];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+        let spec = conversations::ConversationSpec {
+            id: ConversationId::new(1),
+            label: "resumed".into(),
+            notices: Vec::new(),
+            surfaces: vec![
+                SurfaceSpec {
+                    id: root.clone(),
+                    label: "wcode".into(),
+                    model: "m".into(),
+                    is_root: true,
+                    resume_path: None,
+                    backend: backend_with(vec![AgentMessage::user_text("root turn")]),
+                },
+                SurfaceSpec {
+                    id: member.clone(),
+                    label: "m1".into(),
+                    model: "m".into(),
+                    is_root: false,
+                    resume_path: None,
+                    backend: backend_with(vec![AgentMessage::user_text("member turn")]),
+                },
+            ],
+        };
+        assert!(accept_conversation(
+            &mut app,
+            &mut backends,
+            &agent_tx,
+            &reply_tx,
+            spec
+        ));
+
+        // One reply per surface, each carrying its OWN backend's history.
+        let mut seen: Vec<(SessionId, String)> = Vec::new();
+        while seen.len() < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(2), reply_rx.recv())
+                .await
+                .expect("a replay reply per surface within the timeout")
+                .expect("the channel stays open");
+            match event {
+                AppEvent::Replayed(id, messages) => {
+                    let text: Vec<String> = messages.iter().map(|m| m.as_text()).collect();
+                    seen.push((id, text.join(" ")));
+                }
+                other => panic!("expected Replayed, got {other:?}"),
+            }
+        }
+        let reply = |id: &SessionId| {
+            seen.iter()
+                .find(|(sid, _)| sid == id)
+                .unwrap_or_else(|| panic!("no replay for {id:?}; saw {seen:?}"))
+                .1
+                .clone()
+        };
+        assert!(reply(&root).contains("root turn"), "the root replays its own: {seen:?}");
+        assert!(
+            !reply(&root).contains("member turn"),
+            "and not another surface's: {seen:?}"
+        );
+        assert!(
+            reply(&member).contains("member turn"),
+            "the MEMBER replays too — replaying only the root is the D1 bug: {seen:?}"
+        );
+    }
+
+    /// A **refused** conversation has no bodies to seed, so nothing is asked and
+    /// no backend is pushed. Reddens if the replay loop is hoisted above the
+    /// `add_conversation` check.
+    #[tokio::test]
+    async fn an_arriving_conversation_that_was_refused_asks_nothing() {
+        let owned = SessionId::agent("taken");
+        let mut app = App::new();
+        let infos = vec![
+            SurfaceInfo {
+                id: SessionId::agent("root"),
+                label: "first".into(),
+                model: "m".into(),
+                is_root: true,
+                resume_path: None,
+            },
+            SurfaceInfo {
+                id: owned.clone(),
+                label: "taken".into(),
+                model: "m".into(),
+                is_root: false,
+                resume_path: None,
+            },
+        ];
+        app.set_surfaces(infos.clone());
+        app.set_conversations(
+            vec![crate::Conversations::single(&infos).active().clone()],
+            &infos,
+        );
+        let mut backends: Vec<(SessionId, Backend)> =
+            vec![(SessionId::agent("root"), backend()), (owned.clone(), backend())];
+        let (agent_tx, _agent_rx) = mpsc::unbounded_channel();
+        let (reply_tx, mut reply_rx) = mpsc::unbounded_channel();
+        let before = backends.len();
+        let spec = conversations::ConversationSpec {
+            id: ConversationId::new(7),
+            label: "doomed".into(),
+            notices: Vec::new(),
+            surfaces: vec![
+                SurfaceSpec {
+                    id: SessionId::agent("r7"),
+                    label: "wcode".into(),
+                    model: "m".into(),
+                    is_root: true,
+                    resume_path: None,
+                    backend: backend_with(vec![AgentMessage::user_text("old")]),
+                },
+                SurfaceSpec {
+                    id: owned, // already a member of the startup conversation
+                    label: "taken".into(),
+                    model: "m".into(),
+                    is_root: false,
+                    resume_path: None,
+                    backend: backend_with(vec![AgentMessage::user_text("old")]),
+                },
+            ],
+        };
+        assert!(
+            !accept_conversation(&mut app, &mut backends, &agent_tx, &reply_tx, spec),
+            "a refused surface fails the conversation"
+        );
+        assert_eq!(backends.len(), before, "no backend was pushed");
+        // Nothing was asked: no `Replayed` arrives even for the root that WOULD
+        // have been accepted on its own.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), reply_rx.recv())
+                .await
+                .is_err(),
+            "a refused conversation asks nothing"
+        );
     }
 }
 
