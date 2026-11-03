@@ -315,6 +315,8 @@ fn tab_row(
         .collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut extents: Vec<(ConversationId, u16, u16)> = Vec::new();
+    // Whether the previous tab was published — the separator credit depends on it.
+    let mut prev_published = false;
     // The running column, so an extent is measured from the spans actually drawn.
     let mut col = 0usize;
     for (n, &idx) in order.iter().enumerate() {
@@ -342,16 +344,21 @@ fn tab_row(
         }
         // Every glyph the bar can emit is single-width (`▌`, `⠋`, `✗`, `·` and
         // the labels), so the char count IS the column count — no width crate
-        // (W040 adds no dependency).
+        // (W040 adds no dependency). Since W048 this also decides the HIT
+        // extents: a wide-character label (`/rename 日本語`) would drift them by
+        // one cell per wide char, and is not handled.
         // A separator JOINs everything after the active tab (the `▌` needs no
         // leading gap) — the design's `▌ wcode  ·  api`.
         if n > 0 {
             // The separator belongs to the tab on its LEFT: `·` is not a boundary
             // glyph, so a dead strip between two labels would be a rule the user
-            // cannot see (D048). It extends the previous extent instead.
+            // cannot see (D048). It extends the previous extent instead — but only
+            // when that tab was PUBLISHED: a separator after a clipped tab starts
+            // past `width`, is never drawn, and crediting it would let a published
+            // extent reach over the drawn fragment of the next tab.
             spans.push(Span::styled("  ·  ", muted()));
             col += 5;
-            if let Some(last) = extents.last_mut() {
+            if prev_published && let Some(last) = extents.last_mut() {
                 last.2 += 5;
             }
         }
@@ -360,7 +367,8 @@ fn tab_row(
         col += cell_len;
         // A tab that the band's width cannot hold is NOT published: it is not
         // drawn, so it must not be a target.
-        if start + cell_len <= width {
+        prev_published = start + cell_len <= width;
+        if prev_published {
             extents.push((c.id, start as u16, cell_len as u16));
         }
         spans.extend(parts);

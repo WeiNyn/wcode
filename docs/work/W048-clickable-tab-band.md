@@ -150,3 +150,20 @@ cargo build --bin wcode
 3. The stale doc comments the ruling named were fixed in the same diff: `activate_conversation`'s "`Ctrl-N`/`Shift-Tab` call this" (D046/D047 made it `Ctrl-N`/`Ctrl-P` and the click) and `ui.rs`'s "**Not yet clickable**" note, which is now the published-hits contract.
 
 **Mutation-checked:** removing the activation from the click branch reddens `clicking_a_tab_activates_that_conversation` (`left: ConversationId(0) / right: ConversationId(1)`); restoring it greens. The sketch block at `app.rs` is deleted, so `grep -rn "==== SKETCH" crates/` returns exactly one labelled pair (`main.rs`'s `serve()` adoption).
+
+### 9.1 The second layer found a real arithmetic bug, and it is worth naming
+
+**A separator that is not drawn was still credited to a tab.** The separator credit was unconditional on the tab on its left having been *published*: once a tab was clipped, every later iteration still added 5 cells to the last **published** extent. At a narrow band that let the active tab's extent reach *past* the band's width — `(c0, 0, 19)` against `width == 18` — so a click on the drawn fragment of the next tab activated the previous one. That contradicted three things the item had stated as shipped: the separator ownership rule, "the hit map cannot disagree with its pixels", and the new spec sentence "any cell it does not draw is a no-op".
+
+**The fix is one guard** (`if prev_published && let Some(last) = extents.last_mut()`), with the separator still pushed — a separator after a clipped tab begins past `width`, so it is never drawn, and only the credit was wrong.
+
+**And the test that would have caught it did not exist**, which is the more useful finding: `the_band_publishes_one_extent_per_drawn_tab` claimed "one extent per DRAWN tab" with a doc line "a tab the clip dropped publishes nothing", but its fixture was two tabs at 80 columns — it could never clip, so the half of its name that mattered was unexercised, and its own invariant (`x + w <= rect.width`) never saw a clipped band. The new `a_clipped_band_publishes_only_the_tabs_it_draws_whole` renders **three** tabs at **16** columns (a three-tab fixture did not exist in the crate at all), asserts exactly one published extent of `(0, 12)` — the active tab's 7 cells plus its drawn 5-cell separator — and clicks the drawn fragment of the clipped tab to prove it resolves to nothing. Mutation-proved: restoring the unguarded credit reddens it with `left: (0, 17) / right: (0, 12)`.
+
+Two smaller findings, both now stated rather than assumed:
+
+- **`a_drag_starting_on_a_tab_selects_nothing` guarded the outcome, not the line.** The outcome was already prevented by the rect-bounded `transcript_pos_at`, so removing `mouse_down = None` would not have reddened it. A `#[cfg(test)] mouse_gesture()` accessor now asserts the field directly after the `Down`.
+- **`cell_len` counts `chars()`,** so a wide-character label (`/rename 日本語`) drifts the extents by one cell per wide char. Harmless while the band was only pixels; it now decides hit-testing, so the assumption ("every glyph the bar can emit is single-width") is called out in `tab_row` rather than left implicit.
+
+### 9.2 The live-verification gap, stated instead of implied
+
+A click can be wrong about (a) which conversation a cell resolves to, (b) what activation does, and (c) whether the terminal delivers the event. The tests cover (a) against **real rendered geometry** and (b) through the real reducer; (c) rides the pre-existing `translate_mouse` → `AppEvent::Mouse` path the sidebar and transcript clicks already use. **Terminal delivery was not exercised live**: injecting an SGR mouse sequence through `tmux send-keys -l` did not move the active tab, and that is not evidence about this code — tmux arbitrates mouse input itself, so the injection may never have reached the pane. The manual check is two tabs, a click, and `/tab` before and after.

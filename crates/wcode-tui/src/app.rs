@@ -4253,6 +4253,15 @@ impl App {
         self.hit.tabs.as_ref()
     }
 
+    /// The live pointer gesture, if any. Test-only: `mouse_down = None` is what
+    /// stops a drag *starting on chrome* from becoming a transcript selection, and
+    /// that line needs an assertion of its own (the outcome is already prevented
+    /// by the rect-bounded resolvers).
+    #[cfg(test)]
+    pub(crate) fn mouse_gesture(&self) -> Option<(u16, u16)> {
+        self.mouse_down
+    }
+
     /// The conversation a click cell lands on, if any (W048). `row` must be the
     /// band's own row: the band is one row tall, and the header below it must not
     /// be clickable through it.
@@ -9742,6 +9751,88 @@ mod tests {
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col, row }));
     }
 
+    /// Three conversations, one surface each — the narrow-band case needs more
+    /// tabs than fit, which the two-tab fixture can never produce.
+    fn three_conversations() -> App {
+        use crate::conversations::Conversation;
+        use wcode_protocol::ConversationId;
+
+        let mut app = App::new();
+        let infos: Vec<SurfaceInfo> = ["r0", "r1", "r2"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| SurfaceInfo {
+                id: SessionId::agent(id),
+                label: ["first", "second", "third"][i].into(),
+                model: "m".into(),
+                is_root: true,
+                resume_path: None,
+            })
+            .collect();
+        app.set_surfaces(infos.clone());
+        let list = ["r0", "r1", "r2"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| Conversation {
+                id: if i == 0 {
+                    ConversationId::first()
+                } else {
+                    ConversationId::new(i as u64)
+                },
+                label: ["first", "second", "third"][i].into(),
+                root: SessionId::agent(id),
+                members: Vec::new(),
+                state: crate::conversations::ConversationState::Idle,
+                is_remote: false,
+                notices: Vec::new(),
+            })
+            .collect();
+        app.set_conversations(list, &infos);
+        app
+    }
+
+    /// **A clipped tab publishes nothing, and no extent reaches over its drawn
+    /// fragment.** The band is 16 cells and the three tabs need ~39: only the
+    /// active tab (`▌ first`, 7) plus its separator (5) fit, so tab 2 is clipped
+    /// mid-label and only tab 1 is clickable. The separator after the
+    /// *clipped* tab is never drawn, so it must not be credited — without that
+    /// guard the active extent grew to 19 inside a band 18 wide, and a click on
+    /// the visible fragment of tab 2 activated tab 1 (D048's own invariant).
+    #[test]
+    fn a_clipped_band_publishes_only_the_tabs_it_draws_whole() {
+        let mut app = three_conversations();
+        let _ = crate::render_plain(&mut app, 16, 10);
+        let hit = app.tabs_hit().expect("the band drew a hit map");
+        assert_eq!(hit.rect.width, 16);
+        assert_eq!(
+            hit.tabs.len(),
+            1,
+            "only the active tab fits whole: {:?}",
+            hit.tabs
+        );
+        let (id, x, w) = hit.tabs[0];
+        assert_eq!(id, app.conversations().active().id);
+        assert_eq!(
+            (x, w),
+            (0, 12),
+            "the active tab's cells plus its drawn separator (7 + 5); the separator \
+             after the CLIPPED tab is not drawn and is not credited"
+        );
+        assert!(
+            x + w <= hit.rect.width,
+            "an extent may never reach past the band"
+        );
+        // The drawn fragment of the second tab (cells 12..16) belongs to nobody:
+        // clicking it must not activate anything.
+        let active = app.conversations().active_index();
+        click(&mut app, 14, 0);
+        assert_eq!(
+            app.conversations().active_index(),
+            active,
+            "a click on a clipped tab's fragment is a no-op, not a hit on another tab"
+        );
+    }
+
     /// **One extent per DRAWN tab, and none at N = 1.** The band's hit map comes
     /// from the renderer, so a tab the clip dropped publishes nothing.
     #[test]
@@ -9860,6 +9951,10 @@ mod tests {
         let _ = crate::render_plain(&mut app, 80, 10);
         let (_, x, _) = app.tabs_hit().expect("hit map").tabs[0];
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x, row: 0 }));
+        assert!(
+            app.mouse_gesture().is_none(),
+            "the tab branch clears the gesture: a drag from chrome is dead"
+        );
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x + 5, row: 3 }));
         app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: x + 5, row: 3 }));
         assert!(

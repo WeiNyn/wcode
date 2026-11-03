@@ -41,8 +41,13 @@ reaching the fifth was four `Ctrl-N` presses or a typed command.
    click target.
 3. **The `·` separators belong to the tab on their left**, because the band draws no
    boundary glyph — a dead strip between two labels would be a rule the user cannot
-   see. (The sidebar's "a click between rows is a no-op" applies *vertically*, where
-   every row has its own line; it does not transfer to a glyph-less horizontal run.)
+   see. **Only a DRAWN separator is credited**: a separator after a clipped tab begins
+   past the band's width, so it is not drawn and extends nothing. Without that guard a
+   published extent swallowed the drawn fragment of the next tab and could exceed the
+   band's own width — the hit map disagreeing with its pixels, which is the one thing
+   this design may not do. (The sidebar's "a click between rows is a no-op" applies
+   *vertically*, where every row has its own line; it does not transfer to a
+   glyph-less horizontal run.)
 4. **A miss is a no-op, and the branch returns.** The band is chrome: a press on its
    gutter, on the clip boundary, or on any cell it does not draw changes nothing and
    begins no selection. `mouse_down = None` is load-bearing — `on_mouse_drag` returns
@@ -70,3 +75,12 @@ band into a selection surface.
   apart from `dirty`); a click on a `Running` or `Failed` tab is allowed, because
   switching is reading, unlike `/tab close`'s `Running` refusal.
 - No chord, no glyph, no palette role, no `KEYS` row: a click is not a key.
+- **Known limit:** the extents count `chars()`, so a wide-character tab label would
+  drift them by one cell per wide char. The band's own doc states the assumption ("every
+  glyph the bar can emit is single-width"); it was harmless while the row was only
+  pixels and it now decides hit-testing.
+- **Verification limit:** the click is proven at the reducer against real rendered
+  geometry, and mutation-checked; terminal delivery rides the pre-existing
+  `translate_mouse` path (exercised by the sidebar click) but was not observed live —
+  injecting an SGR sequence through tmux did not move the active tab, which says more
+  about tmux's mouse arbitration than about this code.
