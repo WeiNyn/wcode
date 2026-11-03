@@ -346,7 +346,7 @@ pub struct Options {
 }
 
 /// How a TUI run ended — the return value tells the composition root whether to
-/// continue or hand off.
+/// continue or hand off. Four variants: `Quit · Abandoned · Team · Reload`.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     /// The user quit; nothing more to do.
@@ -365,7 +365,7 @@ pub enum Outcome {
 
 /// Map the app's exit state to the TUI [`Outcome`]. A force-quit (a second
 /// Ctrl-C, or SIGTERM, on a running surface) wins over a pending `/reload` or
-/// `/resume`: the run was abandoned, so there is nothing to hand off.
+/// `/team`: the run was abandoned, so there is nothing to hand off.
 fn outcome_of(app: &App) -> Outcome {
     if app.force_quit() {
         return Outcome::Abandoned;

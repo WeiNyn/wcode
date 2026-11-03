@@ -65,8 +65,8 @@ use crate::tools::background::Background;
 /// client sees, so every variant must be a sentence a human can act on.
 #[derive(Debug)]
 pub enum RootError {
-    /// The client asked for a conversation whose group dir does not exist or is
-    /// not a group (`session_groups::is_group_dir_name`).
+    /// The client asked for a conversation whose path is neither a group dir
+    /// (resolved by `group_dir_of`) nor a legacy flat `.jsonl` file.
     BadResume(PathBuf),
     /// Session IO (create/open a group, `root.jsonl`, a member file).
     Session(std::io::Error),
@@ -191,9 +191,6 @@ pub struct Root {
     /// what `message`/`member` address and what `Registry::remove` takes — NOT
     /// surface ids.
     pub members: Vec<SessionId>,
-    /// The root's session file, when sessions are on. `None` for `--no-session`
-    /// and for a served worker with no local file.
-    ///
     /// The root's session file, when sessions are on. `None` for `--no-session`
     /// and for a served worker with no local file. Feeds `surface_specs`'s
     /// `resume_path` (W046 dedupe).

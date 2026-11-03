@@ -5375,7 +5375,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
     fn the_mark_is_seeded_only_on_the_root_surface() {
         let mut app = App::new();
         with_member(&mut app, "w1", "m");
-        // Ctrl-N cycles root → first member; the hint is seeded on the FOCUSED
+        // BackTab cycles root → last (here, the only member); the hint is seeded on the FOCUSED
         // surface, so this pins the member's arm of `seed_hint_if_empty`.
         app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 1, "focus is on the member");

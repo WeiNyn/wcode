@@ -1221,7 +1221,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
 /// (`/model <id>`, `/reload [--no-session]`); with no args, its aliases in
 /// brackets (`/new`, `/exit [quit]`, `/resume [sessions]`, `|`-joined if
 /// ever more than one). Precedence args-then-aliases is unobservable today (the
-/// three aliased commands all have `args: None`), but stated.
+/// two aliased commands (`/exit`, `/resume`) all have `args: None`), but stated.
 fn command_label(cmd: &Command) -> String {
     let mut label = format!("/{}", cmd.name);
     match cmd.args {
@@ -2774,7 +2774,6 @@ pub struct App {
     /// The orchestrator's plan — injected by the composition root and refreshed
     /// live by the `new_tasks` feed to `run`.
     tasks: Vec<TaskItem>,
-    /// Set when the user picks a session to resume; the run returns it so the CLI
     /// Set when the user picks a `/team`; the run returns it so the CLI can
     /// re-exec with `--team <name>` (a fresh session with that project team).
     pending_team: Option<String>,
@@ -6350,8 +6349,6 @@ impl App {
         self.skills = skills;
     }
 
-    /// The session the user chose to resume, if any — read by the event loop
-    /// after it exits so the composition root can re-exec with `--resume`.
     /// The project team the user chose, if any — read after exit so the
     /// composition root can re-exec with `--team <name>`.
     pub fn pending_team(&self) -> Option<&str> {
@@ -6364,8 +6361,6 @@ impl App {
         self.pending_reload
     }
 
-    /// Set by `/new` (alias `/clear`): the run returns `true` so the CLI can
-    /// re-exec with no `--resume`, starting a fresh session.
     /// Mark this TUI as a `--socket` client, so `/reload` is refused.
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
@@ -9617,9 +9612,8 @@ mod tests {
         );
     }
 
-    /// `Ctrl-N`/`Shift-Tab` cycle SURFACES at N = 1 (the four tripwires' rule) and
-    /// CONVERSATIONS at N > 1 — `cycle_or_focus` is a function of
-    /// `conversations.len()`.
+    /// `Ctrl-N` / `Ctrl-P` switch conversations at every N, wrap at both ends,
+    /// are inert (and silent) at N = 1, and never write a block.
     #[test]
     fn ctrl_p_is_the_previous_tab_and_ctrl_n_the_next() {
         let mut app = two_conversations_for_the_band();
