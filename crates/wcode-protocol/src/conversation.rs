@@ -147,9 +147,9 @@ impl std::fmt::Display for ConversationId {
 ///   `dir`/`root_path`/`members_dir`), so every conversation has its own
 ///   `root.jsonl`, `members/`, and `plan.ndjson` (`:81`
 ///   `pub fn plan_path(&self) -> PathBuf {`).
-/// - `Resume` takes a group dir, not a file, because a resumed team must come back
-///   with its root (`load_root`); a bare flat `.jsonl` is the legacy path and
-///   stays reachable by resuming it as a one-member group.
+/// - `Resume` takes a group dir or a legacy flat `.jsonl`. A group dir (or
+///   a `<dir>/root.jsonl`) resumes the whole team through `group_dir_of`; a
+///   flat file resumes as itself, not as a manufactured one-member group.
 ///
 /// # Not promised
 ///
@@ -175,8 +175,9 @@ pub enum RootSpec {
     },
     /// Resume an existing group dir on disk (`--resume <dir>` semantics).
     Resume {
-        /// `<session_dir>/<millis>_<id8>` — the group directory
-        /// (`crates/wcode-cli/src/session_groups.rs:49` `    pub dir: PathBuf,`).
+        /// A group dir (`<session_dir>/<millis>_<id8>`) or a legacy flat
+        /// `.jsonl`, resolved by `group_dir_of`
+        /// (`crates/wcode-cli/src/session_groups.rs:315`).
         dir: PathBuf,
     },
 }

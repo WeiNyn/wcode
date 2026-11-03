@@ -82,7 +82,7 @@ impl std::fmt::Display for RootError {
         match self {
             RootError::BadResume(dir) => write!(
                 f,
-                "{} is not a session group directory",
+                "{} is not a session",
                 dir.display()
             ),
             RootError::Session(e) => write!(f, "session io: {e}"),
@@ -550,9 +550,14 @@ impl Roots {
     /// interleaved transcript on resume. §13 does not name this case; refusing is
     /// the only reading consistent with "a conversation is an independent root".
     pub fn contains_session_path(&self, dir: &Path) -> bool {
-        self.items
-            .iter()
-            .any(|root| root.group.as_ref().is_some_and(|g| g.dir == dir))
+        // A legacy root has `group: None`, so it is invisible to the group-only
+        // check above; fall back to its `session_path` (the flat file). `insert`'s
+        // own guard is narrower for the same reason, and `start`'s pre-build
+        // check (`:449`-region) is what catches a legacy duplicate.
+        self.items.iter().any(|root| {
+            root.group.as_ref().is_some_and(|g| g.dir == dir)
+                || root.session_path.as_deref() == Some(dir)
+        })
     }
 
     /// Take the root out **without** tearing it down — for a caller that needs the
@@ -844,29 +849,48 @@ fn build_root_inner(
             }
         }
         RootSpec::Resume { dir } => {
-            let name = dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if !crate::session_groups::is_group_dir_name(name) {
-                return Err(RootError::BadResume(dir.clone()));
+            // Mirror `main.rs`'s boot dispatch (`group_dir_of`): a group dir (or
+            // a `<dir>/root.jsonl`) resumes the whole team; a flat `.jsonl`
+            // resumes as itself. Anything else is not a session.
+            match crate::session_groups::group_dir_of(dir) {
+                Some(group_dir) => {
+                    let group = crate::session_groups::open_group(&group_dir)
+                        .map_err(RootError::Session)?;
+                    let (session, context) =
+                        crate::session_groups::load_root(&group).map_err(RootError::Session)?;
+                    // A resumed root restores the session's own model/effort unless
+                    // the flags said otherwise (the root keeps what it was using).
+                    if args.model.is_none()
+                        && let Some(model) = session.model()
+                    {
+                        llm.model = model;
+                    }
+                    if args.effort.is_none()
+                        && let Some(effort) = session.effort()
+                    {
+                        llm.effort = effort;
+                    }
+                    (Some(session), context, Some(group), true)
+                }
+                None => {
+                    if !dir.is_file() {
+                        return Err(RootError::BadResume(dir.clone()));
+                    }
+                    let session = crate::Session::open(dir).map_err(RootError::Session)?;
+                    let context = session.messages();
+                    if args.model.is_none()
+                        && let Some(model) = session.model()
+                    {
+                        llm.model = model;
+                    }
+                    if args.effort.is_none()
+                        && let Some(effort) = session.effort()
+                    {
+                        llm.effort = effort;
+                    }
+                    (Some(session), context, None, false)
+                }
             }
-            let group = crate::session_groups::open_group(dir).map_err(RootError::Session)?;
-            let (session, context) =
-                crate::session_groups::load_root(&group).map_err(RootError::Session)?;
-            // A resumed root restores the session's own model/effort unless the
-            // flags said otherwise (the root keeps what it was using).
-            if args.model.is_none()
-                && let Some(model) = session.model()
-            {
-                llm.model = model;
-            }
-            if args.effort.is_none()
-                && let Some(effort) = session.effort()
-            {
-                llm.effort = effort;
-            }
-            (Some(session), context, Some(group), true)
         }
     };
     // `build_runtime` reads only these three fields; the owned session/context
@@ -898,9 +922,14 @@ fn build_root_inner(
     let session_path = agent.session_path().map(std::path::Path::to_path_buf);
     let seed = match spec {
         RootSpec::Fresh { label } => label.clone(),
-        RootSpec::Resume { dir } => dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned()),
+        RootSpec::Resume { dir } => {
+            if dir.is_file() {
+                dir.file_stem()
+            } else {
+                dir.file_name()
+            }
+            .map(|n| n.to_string_lossy().into_owned())
+        }
     };
     let label = agent
         .title()
@@ -1843,6 +1872,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_from_a_legacy_flat_jsonl_builds_a_root() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let cwd = tmp.path();
+        let session = crate::Session::create_with_cwd(cwd, cwd).expect("a session");
+        let path = session.path().expect("path").to_path_buf();
+        assert!(path.is_file(), "flat file exists");
+
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 200);
+        let inputs = run_inputs(cwd);
+        let factory = factory_for(inputs);
+        let id = roots
+            .start(&factory, RootSpec::Resume { dir: path.clone() })
+            .expect("legacy resume builds");
+        let root = roots.get(id).expect("live");
+        assert_eq!(root.session_path.as_deref(), Some(path.as_path()));
+        assert!(root.group.is_none(), "no group for a legacy file");
+        // no sibling members/ dir created for a legacy file
+        assert!(!path.parent().unwrap().join("members").exists());
+        // stronger: the file's parent has no `members` created by this root
+        let _ = id;
+    }
+
+    #[tokio::test]
+    async fn a_legacy_file_resumed_twice_is_refused() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let cwd = tmp.path();
+        let session = crate::Session::create_with_cwd(cwd, cwd).expect("a session");
+        let path = session.path().expect("path").to_path_buf();
+
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 210);
+        let inputs = run_inputs(cwd);
+        let factory = factory_for(inputs);
+        let _id = roots
+            .start(&factory, RootSpec::Resume { dir: path.clone() })
+            .expect("first resume builds");
+
+        let never_called: Factories = Arc::new(|_id, _spec| {
+            panic!("the factory must not run for a live legacy file")
+        });
+        let err = roots
+            .start(&never_called, RootSpec::Resume { dir: path.clone() })
+            .expect_err("refused");
+        assert!(matches!(err, RootError::AlreadyLive(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_resume_of_a_path_that_is_neither() {
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 220);
+        let inputs = run_inputs(tmp.path());
+        let factory = factory_for(inputs);
+        let err = roots
+            .start(
+                &factory,
+                RootSpec::Resume {
+                    dir: tmp.path().join("nope.jsonl"),
+                },
+            )
+            .expect_err("refused");
+        assert!(matches!(err, RootError::BadResume(_)), "{err}");
+        assert!(
+            err.to_string().ends_with("is not a session"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
     async fn stop_is_close_and_an_unknown_id_is_a_no_op() {
         let (tx, _rx) = channels();
         let mut roots = roots_in(tx.clone(), 10);
@@ -2195,7 +2294,7 @@ mod tests {
     async fn a_root_error_says_what_a_human_must_do() {
         assert_eq!(
             RootError::BadResume(PathBuf::from("/tmp/x")).to_string(),
-            "/tmp/x is not a session group directory"
+            "/tmp/x is not a session"
         );
         assert_eq!(
             RootError::AlreadyLive("c3".into()).to_string(),
