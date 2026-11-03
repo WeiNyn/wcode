@@ -3095,16 +3095,9 @@ impl App {
         &self.conversations
     }
 
-    /// **Register a conversation the host announced** (`ConversationEvent::Added`):
-    /// every surface body (the caller has already pushed its backend and forwarder,
-    /// so `bodies` must grow in lockstep or not at all), the container row, then the
-    /// switch to it — the user asked for this tab, so the `add_surface` "must not
-    /// steal focus" rule does not apply.
-    ///
-    /// Returns whether the conversation was registered. A variant's surfaces that
-    /// the container refuses are not added, per `add_surface_in`'s own contract.
     /// Push a build's notices as permanent `Notice` blocks on the given
-    /// conversation's root surface, above any replayed history.
+    /// conversation's root surface, above any replayed history. One `Block::Notice`
+    /// per notice; `push_on`/`push_block` retires the seeded hint by design.
     fn push_build_notices(&mut self, idx: usize, notices: &[String]) {
         let Some(root_id) = self.conversations().iter().nth(idx).and_then(|c| c.surface_ids().first().cloned()) else {
             return;
@@ -3117,6 +3110,14 @@ impl App {
         }
     }
 
+    /// **Register a conversation the host announced** (`ConversationEvent::Added`):
+    /// every surface body (the caller has already pushed its backend and forwarder,
+    /// so `bodies` must grow in lockstep or not at all), the container row, then the
+    /// switch to it — the user asked for this tab, so the `add_surface` "must not
+    /// steal focus" rule does not apply.
+    ///
+    /// Returns whether the conversation was registered. A variant's surfaces that
+    /// the container refuses are not added, per `add_surface_in`'s own contract.
     pub fn add_conversation(
         &mut self,
         spec: crate::conversations::ConversationSpec,
@@ -10055,8 +10056,15 @@ mod tests {
             notices: vec!["team: a, b".into()],
         };
         app.set_conversations(vec![conv], &infos);
+        // Simulate the replayed-history divider landing AFTER the build notice.
+        app.bodies_mut()[0].transcript.push(Block::Notice("⋯ 3 earlier message(s)".into()));
         let tx = &app.bodies()[0].transcript;
-        assert!(matches!(&tx[0], Block::Notice(_)));
+        assert!(matches!(&tx[0], Block::Notice(t) if t == "team: a, b"));
+        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))));
+        // divider is below the notice
+        let notice_pos = tx.iter().position(|b| matches!(b, Block::Notice(t) if t == "team: a, b")).unwrap();
+        let divider_pos = tx.iter().position(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))).unwrap();
+        assert!(notice_pos < divider_pos);
     }
 
     #[test]
@@ -10080,8 +10088,11 @@ mod tests {
             notices: vec!["team: a, b".into()],
         };
         app.set_conversations(vec![conv], &infos);
-        // no transient added by notices
+        submit(&mut app, "hi");
+        // notice is not a transient, so it survives the submit's retire_transient
         assert!(chatter(&app).is_empty());
+        let tx = &app.bodies()[0].transcript;
+        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t == "team: a, b")));
     }
 
     #[test]
@@ -10132,7 +10143,11 @@ mod tests {
         };
         app.set_conversations(vec![conv], &infos);
         let tx = &app.bodies()[0].transcript;
-        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t == "team: a, b")));
+        assert_eq!(
+            tx.iter().filter(|b| matches!(b, Block::Notice(_))).count(),
+            1,
+            "exactly one notice"
+        );
     }
 
     #[test]
