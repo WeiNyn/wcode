@@ -700,7 +700,9 @@ pub enum SettingAction {
 ///   SECTION, wrapping (`session` ⇄ `config`). New grammar with no precedent
 ///   (§4.2): inside the panel `BackTab` no longer switches surfaces —
 ///   `Key::BackTab` is shadowed while the panel is open (it routed to
-///   `self.focus_prev()` when this note was written; `cycle_or_focus` owns it now).
+///   `self.focus_prev()` when this note was written; `self.focus_step(-1)` owns
+///   it now — `app.rs`'s `Key::BackTab` arm, since W046 retired the N-dependent
+///   surface/conversation dispatch).
 /// - `Esc` → [`KeyOutcome::Close`]. No other key closes: no `q`, no `Enter`.
 /// - Any cursor move clears `state.hint`; `Esc` leaves `pending` untouched.
 /// - Everything else → [`KeyOutcome::None`] (swallowed — the panel owns the

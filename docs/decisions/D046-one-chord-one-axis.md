@@ -50,7 +50,7 @@ bounded axis keeps its direct keys plus the one direction it cannot address.
 | axis | chord | note |
 |---|---|---|
 | next / previous **conversation tab** | `Ctrl-N` / `Ctrl-P` | every N, wraps, **inert** at N = 1, **silent** |
-| previous **surface** | `Shift-Tab` | unchanged behaviour; now the only surface-cycle key |
+| previous **surface** | `Shift-Tab` | unchanged at N ≤ 1 (that is the contract the four surface tripwires pin); at N > 1 it stops switching conversations — which *was* the defect — and it is now the only surface-cycle key |
 | direct **surface** jump | `Alt-1..9` | unchanged |
 | direct **tab** jump | `/tab <n>` | no chord — the band prints no numbers and draws the active tab first, so a digit would have two meanings |
 
