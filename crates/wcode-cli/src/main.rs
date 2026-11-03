@@ -1237,16 +1237,8 @@ async fn run_socket_client(args: &Args, cfg: &Config, llm: &LlmOpts) -> bool {
                             eprintln!("tui: cannot reload over a socket");
                             std::process::exit(1);
                         }
-                        Ok(wcode_tui::Outcome::Resume(_)) => {
-                            eprintln!("tui: cannot resume over a socket");
-                            std::process::exit(1);
-                        }
                         Ok(wcode_tui::Outcome::Team(_)) => {
                             eprintln!("tui: cannot switch team over a socket");
-                            std::process::exit(1);
-                        }
-                        Ok(wcode_tui::Outcome::New) => {
-                            eprintln!("tui: cannot start a new session over a socket");
                             std::process::exit(1);
                         }
                         Err(e) => {
@@ -2428,36 +2420,6 @@ async fn dispatch(
                     )
                     .await;
                     std::process::exit(1); // reached only if the build failed
-                }
-                Ok(wcode_tui::Outcome::Resume(path)) => {
-                    // The TUI cannot rebuild an agent: hand off by re-exec'ing
-                    // with `--resume <path>` (the terminal is already restored).
-                    repl::exec_self(&repl::reload_args(
-                        &llm,
-                        Some(&path),
-                        false,
-                        args.agents,
-                        args.no_project_config,
-                        args.config.as_deref(),
-                        args.owner.as_deref(),
-                        args.name.as_deref(),
-                    ));
-                    std::process::exit(1); // only reached if the exec failed
-                }
-                Ok(wcode_tui::Outcome::New) => {
-                    // A fresh session: re-exec with no `--resume` (startup
-                    // mints a new session file, or a fresh group for a team).
-                    // The terminal is already restored.
-                    println!("starting a new session ...");
-                    repl::exec_self(&repl::new_session_args(
-                        &llm,
-                        args.agents,
-                        args.no_project_config,
-                        args.config.as_deref(),
-                        args.owner.as_deref(),
-                        args.name.as_deref(),
-                    ));
-                    std::process::exit(1); // reached only if the exec failed
                 }
                 Ok(wcode_tui::Outcome::Team(name)) => {
                     // `/team <name>`: a NEW session with that project team. Drop

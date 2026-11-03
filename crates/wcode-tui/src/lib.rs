@@ -347,9 +347,6 @@ pub enum Outcome {
     /// A force-quit abandoned an in-flight run (a second Ctrl-C, or SIGTERM) —
     /// the caller exits 0 without the relaunch banner.
     Abandoned,
-    /// The user picked a session to resume (`/resume`); the caller should
-    /// re-exec with `--resume <path>`.
-    Resume(PathBuf),
     /// The user picked a project team (`/team`); the caller should re-exec with
     /// `--team <name>` — a NEW session with that team (D017).
     Team(String),
@@ -357,9 +354,6 @@ pub enum Outcome {
     /// the caller runs the build then re-execs (the REPL's `/reload`).
     /// `no_session` = start fresh with `--no-session`.
     Reload { no_session: bool },
-    /// The user asked for a fresh session (`/new`, alias `/clear`); the caller
-    /// re-execs with no `--resume` — a new session file, or a new group for a team.
-    New,
 }
 
 /// Map the app's exit state to the TUI [`Outcome`]. A force-quit (a second

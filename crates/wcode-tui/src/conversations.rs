@@ -498,7 +498,7 @@ impl Conversations {
 /// # Why the reverse is needed at all
 ///
 /// Every mutator the TUI has ever had is *local*: it can only answer the CLI at
-/// EXIT (`pending_resume`/`pending_team`/`pending_reload`/`pending_new`) and let
+/// EXIT (`pending_team`/`pending_reload`) and let
 /// the CLI re-exec — which is exactly why "new conversation" means "new terminal"
 /// today. A tab cannot re-exec: the other conversations would die with the
 /// process. So the TUI needs a live request/response pair, and the *build* half
