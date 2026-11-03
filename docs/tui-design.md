@@ -528,11 +528,14 @@ D046) · `Shift-Tab` focuses the **previous surface** in the **canonical order**
 (the unbadged root row above member `1` is reachable this way and no other; the
 *forward* surface cycle is retired as redundant with `Alt-N`, D046) — both are
 shadowed while the settings panel is open, where `Tab`/`BackTab` jump sections
-(see **Settings panel** below), `Alt-1..9` focuses
-**member row N** (the numbered order, not the raw index; the unbadged root row
-above member `1` belongs to `Shift-Tab`, not to `Alt-N`) · `Ctrl-B`
-docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
-same `KEYS` table is printed by `/help`, in the same two-column style) · `F2` opens the
+(see **Settings panel** below), `Alt-0..9` focuses
+**row N** of the canonical order — `Alt-0` is the unbadged **root** row and `Alt-1..9` the
+members (the numbered order, not the raw index; `Shift-Tab` still walks backwards through the
+same order) · `Ctrl-B`
+docks/undocks the left sidebar · `F1` opens **the same document `/help` does, entered at its
+`keys` section** (`Esc` closes; there is no toggle — an opener says *open*, as `F2` does), and
+`/help` enters at the top. One body (`help_rows()`), one renderer, one scroll: they cannot
+disagree, and at 40 rows `F1` still lands on the whole keymap · `F2` opens the
 **settings panel** below, which `Esc` alone closes ·
 `/help`, `/verify`, `/usage`, `/tasks`, and `/team roster` open an
 **information modal** instead — `↑`/`↓`
@@ -557,11 +560,11 @@ conversation the same way and keeps its old meaning only at the process boundary
 - **Information modals** (D026) — `/help`, `/verify`, `/usage`, `/tasks`, and
   `/team roster` open a `Clear`ed, centered, rounded-border modal: the frame
   glyphs are §2's `overlay frame` row (`╭ ╮ ╰ ╯ ─ │`) and no glyph is new. It is
-  the visual twin of the `F1` keymap — title = the lowercase command name
-  (` help `, ` usage `, ` verify `, ` tasks `, ` team `), and its geometry is the
-  same panel `F1` draws (width `area.width − 4` clamped to 64, centered, height
-  from the row window), so ` help ` and ` keys ` are always the **same size**:
-  one is never widened past the other. A report is prose you read, not a row
+  the help screen itself: `F1` and `/help` open **one** modal (title ` help `),
+  differing only in the row it starts on — so "the keymap" and "the commands"
+  are two views of one body, never two panels of different sizes. Every other
+  report uses the same panel with `title` = the lowercase command name
+  (` usage `, ` verify `, ` tasks `, ` team `). A report is prose you read, not a row
   that scrolls away, which is why it earns a surface instead of a `Notice` (the
   echoed `/<command>` line still prints in the transcript, so the record of what
   was asked survives). The body scrolls (`↑`/`↓` one line, `PgUp`/`PgDn` a page,
@@ -588,8 +591,14 @@ conversation the same way and keeps its old meaning only at the process boundary
   honesty, applied to members.
   Rows never wrap — an over-long one clips horizontally, exactly as `F1` clips,
   so an item's detail is budgeted to the ~39-col column the 64-col panel leaves
-  (D027). The `F1` keymap modal (`Overlay::Help`) is unchanged: ` keys `,
-  ` esc / F1 to close`, no `— N more —`.
+  (D027; amended by D047). There is no separate `F1` modal: `F1` opens the help
+  document at its `keys` section and `/help` at its top, both through the same
+  panel, both with the modal's scroll (`↑`/`↓` a line, `PgUp`/`PgDn` a page, the
+  wheel three lines) **and its `— N more —` footer**. A table that does not fit
+  says how much is missing below instead of hiding its tail — the reason `F1`
+  and `/help` had to become one page. (The hint counts rows BELOW the fold; the
+  rows above are reached with `↑`, which needs no hint because the scroll itself
+  is the affordance.)
 
 **Settings panel** (W032) — `F2` and `/settings` open an editable **settings
 panel**: a keyboard-driven list of the session's knobs, one row cursor, no dirty
@@ -816,6 +825,12 @@ Amended later — a decision §4 now rests on:
   `Alt-N`. `/tab <n>` is the tabs' direct jump — no chord, because the band
   prints no numbers and its drawn order is rotated to the active tab, so a digit
   would have two meanings.
+- **One help page, and the root gets a digit (D047; this item).** `Overlay::Help` and `draw_help` are gone: `F1` and `/help`
+  open one document through one panel, differing only in the row they start on (`F1` at its
+  `keys` section, `/help` at the top), so the modal's scroll and its `— N more —` footer apply to
+  both — a table that does not fit says how much is missing instead of hiding its tail. An opener
+  says *open* and `Esc` closes, so `F1` no longer toggles, exactly as `F2`'s panel does not. And
+  `Alt-0` focuses the root: the canonical order's row 0, the one row no other digit could reach.
 
 ## 6. Open questions
 
