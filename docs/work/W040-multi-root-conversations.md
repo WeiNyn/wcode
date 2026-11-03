@@ -648,6 +648,7 @@ Written as a table because silently rewriting nine sections is how a design doc 
 | §13.2 item 6, §13.4 bullet 1 | `Ctrl-N`/`Shift-Tab` cycle conversations at N > 1 and surfaces at N = 1 | **W046 / D046**: `Ctrl-N`/`Ctrl-P` cycle conversations at every N (inert at N = 1, and silent — no `tab N of M` block); `Shift-Tab` is the previous-SURFACE key at every N; the forward surface cycle is retired as redundant with `Alt-1..9` |
 | §13.4 bullet 4 | "keep `/new` unchanged for this item" | **overruled by W046**: `/new` opens a conversation tab (`RootSpec::Fresh`), `/resume` opens the picked session as one, and the `/clear` alias is deleted. The only commands that still replace the process are `/reload` and `/team` |
 | §13.2 item 2, §13.5.2 | `RootSpec` is the only thing W040 promotes and the wire is untouched | still true. W046 added **no** wire field: `SurfaceInfo.resume_path` is TUI-local (`PROTOCOL_VERSION` stays 1) |
+| amendment (h) | "`build_root` still emits the three informational stderr lines … in a TUI they would paint over the alternate screen" | **fixed by W047**: `build_runtime` returns its notices, the boot prints them unchanged, and each conversation's tab renders them as `Block::Notice`s on its root (with the one deliberate string edit: the `warning:` line lost its backticks) |
 
 ### 13.6.1 Two rulings that belong in the ledger
 

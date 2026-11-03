@@ -254,7 +254,27 @@ selection bar.
   notice is pluralized, so it reads `dropped 1 queued message` / `dropped 2
   queued messages`), and the `⋯ N earlier message(s)` divider stay for the
   session: they are the record of what the run did. The seeded hint has its own
-  retirement (`clear_hint` at the first block) and is in neither list.
+  retirement (`clear_hint` at the first block) and is in neither list. **Build
+  events are permanent too, and they land on the tab they built.** A
+  conversation that arrives already built (`/new`, `/resume`, `/tab new`)
+  carries the notices its root's build produced — `team: …`,
+  `team: … (restored, N prior messages)`, `warning: member … not resumed: …`,
+  `workflow: …` — as **one `Notice` block per notice, on that conversation's
+  ROOT surface**, pushed when the tab is added and therefore **above** the
+  replayed history: the prologue the `⋯ N earlier message(s)` divider already
+  teaches. The strings cross over **verbatim** — the fact is the CLI's, the
+  role is the TUI's — and a notice is plain text, never markdown, so no
+  backticks and no emphasis: **emphasis inside a notice is a WORD, never a
+  hue** (`⏹`, `⋯`, `warning:`), because `error` red is reserved for a run
+  that failed (`Block::Error`) and a skipped team member is not a failed
+  conversation. One block per notice, not one block of several lines: the
+  block is what browse selects and what `y` copies, and `todos:` is the app's
+  one multi-row notice because it has a single subject. **The consequence is
+  deliberate:** a real block retires the seeded hint, so a tab that arrives
+  with a team opens without the `❯▌` mark — it is not a blank page, and the
+  mark is "retired by the first block" (§1.4). A tab with nothing to
+  announce is unchanged, and no tab dedupes another's notice: each transcript
+  explains itself alone.
 
 - **Tab band** (W040) — the conversation selector: ONE bare row, no rule, above
   the pinned header — never inside it. It is a band, not a transcript block, and
