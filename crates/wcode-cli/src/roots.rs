@@ -126,6 +126,9 @@ pub struct RootParts {
     /// The team, in display order. Empty at startup for a fresh root — the
     /// `[team]` loop inside the build fills it.
     pub members: Vec<SessionId>,
+    /// What the build would have printed; the host forwards these to the tab,
+    /// and the single-root boot prints them instead.
+    pub notices: Vec<String>,
 }
 
 /// **One live conversation's runtime.** Everything the host needs to talk to it,
@@ -195,6 +198,8 @@ pub struct Root {
     /// and for a served worker with no local file. Feeds `surface_specs`'s
     /// `resume_path` (W046 dedupe).
     pub session_path: Option<PathBuf>,
+    /// What the build would have printed; forwarded to the tab.
+    pub notices: Vec<String>,
     /// The group dir, when this root has one. The unit of "resume this
     /// conversation".
     pub group: Option<SessionGroup>,
@@ -253,6 +258,7 @@ impl Root {
             session_path,
             model,
             members,
+            notices,
         } = parts;
         debug_assert_eq!(
             bg.scope(),
@@ -295,6 +301,7 @@ impl Root {
             session_path,
             group,
             model,
+            notices,
             state: RootState::Live,
             closing,
             supervisor: Some(supervisor),
@@ -899,13 +906,13 @@ fn build_root_inner(
         resuming_group,
         session: None,
         context: Vec::new(),
+        notices: Vec::new(),
     };
 
     // 2. The runtime, then the agent — both carrying THIS root's id.
     let (rt, notices) = crate::build_runtime(args, cfg, &llm, &setup, id)
         .map_err(|e| RootError::Config(e.detail()))?;
-    // Consumed in commit 2 (W047): forwarded to the tab as build notices.
-    let _ = &notices;
+
     let root = crate::RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },
         guidelines: if args.owner.is_some() {
@@ -961,6 +968,7 @@ fn build_root_inner(
         session_path,
         model: llm.model.clone(),
         members,
+        notices,
     })
 }
 
@@ -1049,6 +1057,7 @@ pub async fn run_host(roots: Roots, factory: Factories, channel: HostChannels) -
                                             id,
                                             label: root.label.clone(),
                                             surfaces,
+                                            notices: root.notices.clone(),
                                         }
                                     }),
                                     None => Err(RootError::AlreadyLive(id.to_string())),
@@ -1340,6 +1349,7 @@ mod tests {
             session_path: None,
             model: "m1".into(),
             members: Vec::new(),
+            notices: Vec::new(),
         }
     }
 
@@ -2016,6 +2026,7 @@ mod tests {
             session_path: None,
             model: "m1".into(),
             members: Vec::new(),
+            notices: Vec::new(),
         });
     }
 
@@ -2210,6 +2221,7 @@ mod tests {
                 session_path: None,
                 model: "m1".into(),
                 members: addresses,
+                notices: Vec::new(),
             }
         };
         for id in [c0, c1] {

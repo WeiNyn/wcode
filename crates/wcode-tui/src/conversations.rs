@@ -551,6 +551,9 @@ pub struct ConversationSpec {
     /// conversation id is THIS struct's `id`: `SurfaceSpec` carries no tag, so the
     /// payload's shape is what associates every listed surface with `id`.
     pub surfaces: Vec<SurfaceSpec>,
+    /// What the build would have printed, rendered as `Notice` blocks on the
+    /// root surface when the tab is added.
+    pub notices: Vec<String>,
 }
 
 /// The two directions the CLI hands `wcode_tui::run`, bundled so `run` gains ONE

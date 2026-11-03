@@ -1301,6 +1301,7 @@ struct SessionSetup {
     resuming_group: bool,
     session: Option<Session>,
     context: Vec<AgentMessage>,
+    notices: Vec<String>,
 }
 
 /// P4: compute the working dir; on `--resume` resolve and open the session (a
@@ -1417,6 +1418,7 @@ fn load_session(args: &Args, llm: &mut LlmOpts) -> Result<SessionSetup, BootErro
         resuming_group,
         session,
         context,
+        notices: Vec::new(),
     })
 }
 
@@ -2284,6 +2286,7 @@ async fn dispatch(
                     .iter()
                     .map(SessionId::agent)
                     .collect(),
+                notices: setup.notices.clone(),
             });
             // The client surface list comes from the ROOT (one ordering rule).
             let surfaces = root0.surface_specs().unwrap_or_else(|e| {
@@ -2628,8 +2631,8 @@ async fn main() {
     for notice in &root0_notices {
         eprintln!("{notice}");
     }
-    // Kept for commit 2 (W047): root 0's notices also ride its ConversationSpec.
-    let _ = &root0_notices;
+    // Root 0's notices ride its ConversationSpec (W047 §4.3).
+    setup.notices = root0_notices;
     // The root orchestrator sees the team; a served worker (`--owner`) does not.
     let root = RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },

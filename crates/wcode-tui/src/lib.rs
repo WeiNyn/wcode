@@ -1235,6 +1235,7 @@ mod tests {
         let spec = conversations::ConversationSpec {
             id: ConversationId::new(1),
             label: "second".into(),
+            notices: Vec::new(),
             surfaces: vec![
                 SurfaceSpec {
                     id: root.clone(),
@@ -1331,6 +1332,7 @@ mod tests {
         let spec = conversations::ConversationSpec {
             id: ConversationId::new(7),
             label: "doomed".into(),
+            notices: Vec::new(),
             surfaces: vec![
                 SurfaceSpec {
                     id: SessionId::agent("r7"),
