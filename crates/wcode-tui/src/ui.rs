@@ -19,6 +19,7 @@ use wcode_harness::message::{AgentMessage, ContentBlock};
 use crate::TeamState;
 use crate::app::{App, Block, InputView, InfoRow, Mode, Overlay, Picker, SessionHead, Tool, Turn};
 use crate::conversations::{Conversation, ConversationState, Conversations};
+use wcode_protocol::ConversationId;
 use crate::app::{ChangeRow, ViewMode, change_totals, changes_header, info_visible_rows};
 use crate::settings::{Setting, SettingKind};
 use crate::markdown;
@@ -230,11 +231,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// the composer.
 /// Draw the conversation tab bar (W040).
 ///
-/// **Not yet clickable**: the row's tab extents are not published into a hit map,
-/// so a click on the band does nothing. That is deliberate here — the band is
-/// unreachable at N = 1, and 6b is the commit that makes two conversations live —
-/// and the deferral is recorded in `docs/next-steps.md` row 112 rather than
-/// claimed in this doc.
+/// **Clickable** (W048): each drawn tab publishes its own column extent into the
+/// one hit map — the sidebar's rule (`set_sidebar_hit`), laid horizontally — so
+/// the extents follow R6's shed rule without a second implementation of it. A
+/// click activates that conversation and moves nothing else; a press on the
+/// gutter, on the clip boundary, or on any cell the band does not draw is a
+/// no-op. A tab the clip dropped has no extent, so it cannot be clicked.
 ///
 /// One row, left-aligned from the band's gutter, clipped at the right edge by a
 /// `Paragraph` (no wrap, no scroll): `▌ wcode  ·  api  ⠋ tests  ·  ✗ broken`.
@@ -268,20 +270,23 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let row = tab_row(
+    let (row, extents) = tab_row(
         app.conversations(),
         app.conversations().active_index(),
         area.width as usize,
     );
-    frame.render_widget(
-        Paragraph::new(row),
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        },
-    );
+    let band = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(row), band);
+    // The drawn extents, in draw order — the ONLY source of the band's hit map.
+    // A clipped tab is not among them (the `Paragraph` truncates, and this row's
+    // builder stops adding extents past the width), so the shed rule needs no
+    // second implementation here.
+    app.set_tabs_hit(band, extents);
 }
 
 /// The pure row builder `draw_tab_bar` renders and the pixel tests assert on —
@@ -293,7 +298,15 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &mut App) {
 /// spans are added from the ACTIVE tab onward (wrapping around), so when the band
 /// is too narrow the tabs SHED to the right of the active one and the `▌` stays
 /// visible. `width` is the band's; the clip itself is the `Paragraph`'s.
-fn tab_row(conversations: &Conversations, active: usize, width: usize) -> Line<'static> {
+/// Returns the row AND one `(conversation, x, width)` per DRAWN tab, in draw
+/// order, with `x` relative to the band's left edge. `width` is passed in because
+/// the extents must stop where the `Paragraph` clips: a tab with no room is not
+/// drawn, so it publishes nothing and cannot be clicked (W048).
+fn tab_row(
+    conversations: &Conversations,
+    active: usize,
+    width: usize,
+) -> (Line<'static>, Vec<(ConversationId, u16, u16)>) {
     let items: Vec<&Conversation> = conversations.iter().collect();
     // R6: start at the active tab, wrap once — the active tab is drawn first, so
     // a narrow band can only ever lose the ones to its right.
@@ -301,6 +314,9 @@ fn tab_row(conversations: &Conversations, active: usize, width: usize) -> Line<'
         .map(|k| (active + k) % items.len().max(1))
         .collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut extents: Vec<(ConversationId, u16, u16)> = Vec::new();
+    // The running column, so an extent is measured from the spans actually drawn.
+    let mut col = 0usize;
     for (n, &idx) in order.iter().enumerate() {
         let c = items[idx];
         let is_active = idx == active;
@@ -330,14 +346,28 @@ fn tab_row(conversations: &Conversations, active: usize, width: usize) -> Line<'
         // A separator JOINs everything after the active tab (the `▌` needs no
         // leading gap) — the design's `▌ wcode  ·  api`.
         if n > 0 {
+            // The separator belongs to the tab on its LEFT: `·` is not a boundary
+            // glyph, so a dead strip between two labels would be a rule the user
+            // cannot see (D048). It extends the previous extent instead.
             spans.push(Span::styled("  ·  ", muted()));
+            col += 5;
+            if let Some(last) = extents.last_mut() {
+                last.2 += 5;
+            }
+        }
+        let start = col;
+        let cell_len: usize = parts.iter().map(|p| p.content.chars().count()).sum();
+        col += cell_len;
+        // A tab that the band's width cannot hold is NOT published: it is not
+        // drawn, so it must not be a target.
+        if start + cell_len <= width {
+            extents.push((c.id, start as u16, cell_len as u16));
         }
         spans.extend(parts);
     }
     // The clip is structural: `Paragraph` truncates at the band's width, and the
     // shed order above guarantees the `▌` is inside it.
-    let _ = width;
-    Line::from(spans)
+    (Line::from(spans), extents)
 }
 
 fn draw_search_prompt(frame: &mut Frame, area: Rect, above: Rect, app: &App) {

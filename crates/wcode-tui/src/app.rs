@@ -2639,6 +2639,9 @@ pub(crate) struct HitMap {
     /// is closed, the terminal is narrower than `SIDEBAR_MIN_WIDTH`, or before
     /// the sidebar is drawn.
     pub(crate) sidebar: Option<SidebarHit>,
+    /// The tab band, when it was drawn this frame (N > 1) — the `sidebar`
+    /// field's exact contract, and cleared with it by `clear_hit_map`.
+    pub(crate) tabs: Option<TabsHit>,
 }
 
 /// The transcript viewport as drawn: where it sits, which global line is its top
@@ -2671,68 +2674,24 @@ pub(crate) struct SidebarHit {
     pub(crate) members: Vec<(usize, u16)>,
 }
 
-// ==== SKETCH (review-only, not real code) ====
-// Waiting for: the clickable band (W040/W041 follow-up). Retired by: a click item that ships TabsHit/tab_at/activate_conversation_id.
-// W040 — THE TAB BAR'S HIT MAP. Three additions; the fourth is a ONE-FIELD edit
-// inside an existing struct, given below as a diff so it is unmistakable.
-//
-// ---------------------------------------------------------------------
-// (1) THE HIT STRUCT — add beside `SidebarHit` above (same file, same idiom:
-//     a drawn-geometry record the click handler reads back):
-//
-//     /// The tab bar as drawn: its rect and, per drawn tab, the conversation it
-//     /// opens and its horizontal extent. The tab-bar sibling of [`SidebarHit`].
-//     /// `None` on any frame where the band has height 0 (the N = 1 case), so a
-//     /// click there falls through to the bands exactly as today.
-//     #[derive(Clone, Debug, Default)]
-//     pub(crate) struct TabsHit {
-//         /// The band's rect. `row != rect.y` is not a tab hit.
-//         pub(crate) rect: Rect,
-//         /// `(conversation id, x, width)` per drawn tab, in draw order. `x` is
-//         /// absolute (screen col), so `x..x + width` is the clickable span —
-//         /// including the `·` separators, which belong to the tab on their LEFT
-//         /// (the sidebar's badge column precedent: a click between rows is a
-//         /// no-op, a click on a row is precise).
-//         pub(crate) tabs: Vec<(ConversationId, u16, u16)>,
-//     }
-//
-// ---------------------------------------------------------------------
-// (2) THE `HitMap` FIELD — a ONE-LINE addition inside
-//     `pub(crate) struct HitMap {` (`app.rs:2820`, beside
-//     `pub(crate) sidebar: Option<SidebarHit>,` at `:2827`):
-//
-//     +    /// The tab band, when it was drawn this frame (i.e. N > 1). `None`
-//     +    /// otherwise — the `sidebar` field's exact contract.
-//     +    pub(crate) tabs: Option<TabsHit>,
-//
-//     `HitMap` derives/constructs with `Option` defaults, and
-//     `clear_hit_map` (`app.rs:4332`) resets the whole value each frame,
-//     so a closed tab band can never leave stale geometry — the same reason the
-//     sidebar field exists.
-//
-// ---------------------------------------------------------------------
-// (3) THE PUBLISHER + THE CLICK — beside `set_sidebar_hit`
-//     (`app.rs:4346`) and inside `on_mouse_down` (`:4368`-region):
-//
-//     /// Publish the tab band's geometry for this frame.
-//     pub(crate) fn set_tabs_hit(&mut self, rect: Rect, tabs: Vec<(ConversationId, u16, u16)>) { todo!() }
-//
-//     /// The conversation a click cell lands on, if any.
-//     pub(crate) fn tab_at(&self, col: u16, row: u16) -> Option<ConversationId> { todo!() }
-//
-//     In `on_mouse_down`, BEFORE the sidebar branch (the tab band is above it on
-//     screen, and the two rects cannot overlap — different bands — so the order
-//     is for readability, not correctness):
-//
-//     +        if let Some(id) = self.tab_at(col, row) {
-//     +            self.activate_conversation_id(id);
-//     +            return; // a tab click never starts a transcript selection
-//     +        }
-//
-//     /// Activate by id — the click path, and the `ConversationEvent` path's
-//     /// sibling of `activate_conversation(idx)`.
-//     fn activate_conversation_id(&mut self, id: ConversationId) -> bool { todo!() }
-// ==== /SKETCH ====
+/// The tab band as drawn (W048): its rect and, per DRAWN tab, the conversation it
+/// opens and its horizontal extent, with `x` relative to the band's left edge.
+///
+/// The band's sibling of [`SidebarHit`], laid horizontally — and the same
+/// contract: what the renderer drew is what the pointer can hit, so the shed rule
+/// (R6) is implemented once, in `tab_row`, and a clipped tab is simply absent.
+/// `None` on any frame where the band has height 0 (N = 1), so a click on that row
+/// falls through to the header, which is chrome and ignores it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TabsHit {
+    /// The band's rect — one row tall.
+    pub(crate) rect: Rect,
+    /// `(conversation, x, width)` per drawn tab, in DRAW order (the active tab
+    /// first, per R6). The `·` separators belong to the tab on their LEFT and are
+    /// included in its width: the band draws no boundary glyph, so a dead strip
+    /// between two labels would be a rule the user cannot see (D048).
+    pub(crate) tabs: Vec<(ConversationId, u16, u16)>,
+}
 
 /// The whole UI state. Flat by design — grow submodules only when it hurts.
 pub struct App {
@@ -3215,7 +3174,7 @@ impl App {
     /// composer, the header and the transcript switch atomically.
     ///
     /// `false` (and no change) when `idx` is out of range — the `set_focus`
-    /// tolerance. 6a-ii's `/tab <n>` and `Ctrl-N`/`Shift-Tab` call this; it is
+    /// tolerance. 6a-ii's `/tab <n>`, `Ctrl-N`/`Ctrl-P` and a tab-band click call this; it is
     /// also what the narrowing tests use to prove the seam moves rows.
     pub fn activate_conversation(&mut self, idx: usize) -> bool {
         if !self.conversations.activate(idx) {
@@ -4275,6 +4234,50 @@ impl App {
         self.hit.sidebar = Some(SidebarHit { rect, members });
     }
 
+    /// Publish the tab band for hit-testing (called by `draw_tab_bar`, W048):
+    /// the band's rect and one `(conversation, x, width)` per DRAWN tab, in draw
+    /// order. Called on every frame the band is drawn, so `tab_at` never reads a
+    /// stale extent — `clear_hit_map` resets the whole map each frame.
+    pub(crate) fn set_tabs_hit(
+        &mut self,
+        rect: Rect,
+        tabs: Vec<(ConversationId, u16, u16)>,
+    ) {
+        self.hit.tabs = Some(TabsHit { rect, tabs });
+    }
+
+    /// The band's published geometry, for the tests that must click the cell the
+    /// renderer actually drew. Test-only: production reads it through `tab_at`.
+    #[cfg(test)]
+    pub(crate) fn tabs_hit(&self) -> Option<&TabsHit> {
+        self.hit.tabs.as_ref()
+    }
+
+    /// The conversation a click cell lands on, if any (W048). `row` must be the
+    /// band's own row: the band is one row tall, and the header below it must not
+    /// be clickable through it.
+    fn tab_at(&self, col: u16, row: u16) -> Option<ConversationId> {
+        let hit = self.hit.tabs.as_ref()?;
+        if row != hit.rect.y || col < hit.rect.x || col >= hit.rect.x + hit.rect.width {
+            return None;
+        }
+        let rel = col - hit.rect.x;
+        hit.tabs
+            .iter()
+            .find(|(_, x, w)| rel >= *x && rel < x.saturating_add(*w))
+            .map(|(id, _, _)| *id)
+    }
+
+    /// Activate a conversation by id — the click path, and the by-id sibling of
+    /// [`App::activate_conversation`] (which `/tab <n>`, `Ctrl-N`/`Ctrl-P` and the
+    /// `Added` reply use). Returns whether the conversation exists.
+    fn activate_conversation_id(&mut self, id: ConversationId) -> bool {
+        match self.conversations.index_of(id) {
+            Some(idx) => self.activate_conversation(idx),
+            None => false,
+        }
+    }
+
     /// Dispatch a positioned mouse event. NOT gated by `Mode` (plan #3): the wheel
     /// arms already live in `on_key`/`on_browse_key` and are untouched; only
     /// Down/Drag/Up reach here. A modal — the help/picker overlay or the browse
@@ -4296,6 +4299,16 @@ impl App {
     fn on_mouse_down(&mut self, col: u16, row: u16) {
         self.mouse_down = Some((col, row));
         self.mouse_focus = (col, row);
+        // The tab band (W048) is above the sidebar on screen and is the one row
+        // that addresses CONVERSATIONS: a click activates one and moves nothing
+        // else, exactly as `Ctrl-N` would. `mouse_down = None` is load-bearing —
+        // `on_mouse_drag` returns early on it, so a drag that starts on a tab and
+        // ends in the transcript selects nothing and copies nothing.
+        if let Some(id) = self.tab_at(col, row) {
+            self.activate_conversation_id(id);
+            self.mouse_down = None;
+            return;
+        }
         if let Some(idx) = self.sidebar_member_at(row, col) {
             self.set_focus(idx);
             self.mouse_down = None; // no drag follows a focus click
@@ -9719,6 +9732,140 @@ mod tests {
     #[test]
     fn the_keymap_names_the_conversation_chord() {
         assert!(KEYS.iter().any(|(_, d)| d.contains("tab")));
+    }
+
+    // ---- The clickable band (W048) --------------------------------------------
+
+    /// Click a cell as the terminal would: a `Down` and an `Up` on the same cell.
+    fn click(app: &mut App, col: u16, row: u16) {
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col, row }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col, row }));
+    }
+
+    /// **One extent per DRAWN tab, and none at N = 1.** The band's hit map comes
+    /// from the renderer, so a tab the clip dropped publishes nothing.
+    #[test]
+    fn the_band_publishes_one_extent_per_drawn_tab() {
+        let mut app = two_conversations_for_the_band();
+        let _ = crate::render_plain(&mut app, 80, 10);
+        let hit = app.tabs_hit().expect("the band drew a hit map");
+        assert_eq!(hit.rect.height, 1, "the band is one row");
+        assert_eq!(hit.tabs.len(), 2, "one extent per drawn tab: {hit:?}");
+        assert_eq!(
+            hit.tabs[0].0,
+            app.conversations().active().id,
+            "the active tab is drawn (and published) first"
+        );
+        for (_, x, w) in &hit.tabs {
+            assert!(*w > 0, "an empty extent is not a tab");
+            assert!(
+                *x + *w <= hit.rect.width,
+                "an extent past the clip would be a click target that is not drawn"
+            );
+        }
+
+        // N = 1: the band has height 0, so nothing is published.
+        let mut one = App::new();
+        one.set_surfaces(vec![SurfaceInfo {
+            id: SessionId::agent("root"),
+            label: "wcode".into(),
+            model: "m".into(),
+            is_root: true,
+            resume_path: None,
+        }]);
+        let _ = crate::render_plain(&mut one, 80, 10);
+        assert!(one.tabs_hit().is_none(), "no band, no hit map");
+    }
+
+    /// **A click activates that conversation and its root — nothing else.**
+    #[test]
+    fn clicking_a_tab_activates_that_conversation() {
+        let mut app = two_conversations_for_the_band();
+        let _ = crate::render_plain(&mut app, 80, 10);
+        let (id, x, w) = *app
+            .tabs_hit()
+            .and_then(|h| h.tabs.iter().find(|(id, _, _)| *id != app.conversations().active().id))
+            .expect("the non-active tab's extent");
+        assert!(app.take_actions().is_empty());
+        click(&mut app, x + w / 2, 0);
+        assert_eq!(
+            app.conversations().active().id,
+            id,
+            "the clicked tab is the active one"
+        );
+        // The clicked conversation's ROOT surface, resolved independently of the
+        // code under test: the conversation row's `surface_ids().first()`.
+        let root = app
+            .conversations()
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.surface_ids().first().cloned())
+            .expect("the clicked conversation has a root");
+        let expect = app.surface_index(&root).expect("the root is a live body");
+        assert_eq!(
+            app.focus(),
+            expect,
+            "the surface focus lands on the clicked tab's root"
+        );
+        assert!(
+            app.take_actions().is_empty(),
+            "a click is not a `Request`"
+        );
+    }
+
+    /// **A click on the already-active tab moves nothing** — activation is
+    /// idempotent, so the frame is unchanged and no focus is stolen.
+    #[test]
+    fn clicking_the_active_tab_is_a_no_op() {
+        let mut app = two_conversations_for_the_band();
+        let _ = crate::render_plain(&mut app, 80, 10);
+        let active = app.conversations().active_index();
+        let focus = app.focus();
+        let (_, x, w) = app.tabs_hit().expect("hit map").tabs[0];
+        click(&mut app, x + w / 2, 0);
+        assert_eq!(app.conversations().active_index(), active);
+        assert_eq!(app.focus(), focus, "no focus stolen by a same-tab click");
+        assert!(app.text_sel().is_none(), "and no selection started");
+    }
+
+    /// **Chrome takes the pointer away from nothing**: a press on the band's row
+    /// but off every tab changes nothing and starts no transcript selection.
+    #[test]
+    fn clicking_the_band_off_a_tab_is_a_no_op() {
+        let mut app = two_conversations_for_the_band();
+        app.seed_history(&root(), &[AgentMessage::user_text("some transcript text")]);
+        let _ = crate::render_plain(&mut app, 80, 10);
+        let active = app.conversations().active_index();
+        let focus = app.focus();
+        let hit = app.tabs_hit().expect("hit map");
+        let last_end = hit
+            .tabs
+            .iter()
+            .map(|(_, x, w)| x + w)
+            .max()
+            .expect("at least one tab");
+        let gutter = last_end + 1;
+        assert!(gutter < hit.rect.width, "the fixture needs a trailing gutter");
+        click(&mut app, gutter, 0);
+        assert_eq!(app.conversations().active_index(), active);
+        assert_eq!(app.focus(), focus);
+        assert!(app.text_sel().is_none(), "a band press starts no selection");
+    }
+
+    /// **A drag that starts on a tab copies nothing** — the tab branch clears
+    /// `mouse_down`, so the gesture never becomes a transcript selection.
+    #[test]
+    fn a_drag_starting_on_a_tab_selects_nothing() {
+        let mut app = two_conversations_for_the_band();
+        let _ = crate::render_plain(&mut app, 80, 10);
+        let (_, x, _) = app.tabs_hit().expect("hit map").tabs[0];
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Down, col: x, row: 0 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Drag, col: x + 5, row: 3 }));
+        app.handle(AppEvent::Mouse(MouseEvent { kind: MouseKind::Up, col: x + 5, row: 3 }));
+        assert!(
+            app.text_sel().is_none(),
+            "a drag from chrome into the transcript selects nothing"
+        );
     }
 
     /// **The band at N = 2** (a render-level test — the live two-tab frame is

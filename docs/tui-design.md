@@ -306,6 +306,25 @@ selection bar.
   is not a tab. A switch is silent in the transcript — the `▌` and the label's
   weight are the feedback — and the count, when the clip hides it, is `/tab`'s
   bare form (`tabs: 1 wcode (active) · 2 api`), not a notice per switch.
+
+  It is **clickable, and a click moves exactly one thing: the active conversation**
+  — the same `activate_conversation` that `Ctrl-N`/`Ctrl-P` and `/tab <n>` call, so
+  the surface focus lands on that tab's root because *that is what activation is*,
+  never because the pointer remembers a focus per tab: the band addresses
+  conversations, not surfaces (`Alt-0..9` is the surface vocabulary), and it must
+  never write surface state into a conversation the user is not in. Each drawn tab
+  publishes its own column extent into the one hit map — §4 Sidebar's rule, laid
+  horizontally — so the extents follow the shed rule without a second
+  implementation of it: a tab the clip dropped has no extent and cannot be clicked,
+  and the `·` separators belong to the tab on their **left**, because the band draws
+  no boundary glyph and a dead strip between two labels would be a rule the user
+  cannot see. **The band is a target for the pointer and nothing else**: it is never
+  a browse target, never a text-selection surface, never copied. A press on its
+  gutter, on the clip boundary, or on any cell it does not draw is a **no-op** —
+  and no press outside the transcript's own rect may ever begin a selection in it,
+  the same rule the header band lives under, so chrome can take the pointer away
+  from nothing. At N = 1 the band has height 0 and publishes nothing (row 0 is the
+  header, which is chrome too), so a click there does nothing.
 - **Header** (D010; amended by D023) — a **pinned top band**, not a transcript
   block: ONE bare row, no rule, carrying the running
   head `WCODE · session <id> ──── project · ⎇ branch`. The only `─` is the
