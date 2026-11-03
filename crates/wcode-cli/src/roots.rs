@@ -902,8 +902,10 @@ fn build_root_inner(
     };
 
     // 2. The runtime, then the agent — both carrying THIS root's id.
-    let rt = crate::build_runtime(args, cfg, &llm, &setup, id)
+    let (rt, notices) = crate::build_runtime(args, cfg, &llm, &setup, id)
         .map_err(|e| RootError::Config(e.detail()))?;
+    // Consumed in commit 2 (W047): forwarded to the tab as build notices.
+    let _ = &notices;
     let root = crate::RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },
         guidelines: if args.owner.is_some() {

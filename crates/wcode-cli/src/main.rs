@@ -1507,7 +1507,7 @@ const INERT_WORKFLOW_NOTICE: &str = "workflow: present but inert (no --task)";
 /// `[team]` / non-empty `[orchestrator].guidelines` each `exit(2)` without
 /// `--agents`; register `--peer` remotes; non-unix `--peer` `exit(2)`; register
 /// `[peers]` aliases/remotes; rebuild a resumed group's team; spawn `[team]`
-/// members; print the `team: ...` line.
+/// members; collect the `team: ...` notice.
 /// The `--task`/`--timeout` boot guards (§4.5): `Err(message)` for a
 /// misconfiguration the caller prints and exits 2 on. Pure, so each case is
 /// unit-tested; the `eprintln!` + `exit(2)` shape lives at the call site.
@@ -1559,7 +1559,8 @@ fn build_runtime(
     llm: &LlmOpts,
     setup: &SessionSetup,
     conversation: wcode_protocol::ConversationId,
-) -> Result<Runtime, BootError> {
+) -> Result<(Runtime, Vec<String>), BootError> {
+    let mut notices = Vec::new();
     let cwd = &setup.cwd;
     // Instruction ("reference") files: discover the configured candidates
     // from the working dir up to the repo root (plus the config-dir global
@@ -1667,7 +1668,7 @@ fn build_runtime(
     // normally (interactive). Printed whenever a template is present but no
     // task drives it (`uses_task()` is irrelevant to inertness now).
     if cfg.workflow.is_some() && args.task.is_none() {
-        eprintln!("{INERT_WORKFLOW_NOTICE}");
+        notices.push(INERT_WORKFLOW_NOTICE.to_string());
     }
     if !cfg.team.is_empty() && orchestrator.is_none() {
         return Err(BootError::config("[team] requires --agents"));
@@ -1734,15 +1735,15 @@ fn build_runtime(
                     names.push(crate::agents::short_name(&id));
                 }
                 session_groups::MemberResume::Skipped { name, reason } => {
-                    eprintln!("warning: member `{name}` not resumed: {reason}");
+                    notices.push(format!("warning: member {name} not resumed: {reason}"));
                 }
             }
         }
         if !names.is_empty() {
-            eprintln!(
+            notices.push(format!(
                 "team: {} (restored, {seeded} prior messages)",
                 names.join(", ")
-            );
+            ));
         }
     }
     // `[team]` (F3): spawn each member through the orchestrator, which validates
@@ -1773,7 +1774,7 @@ fn build_runtime(
     }
     if args.owner.is_none() && !cfg.team.is_empty() && !setup.resuming_group {
         let names: Vec<&str> = cfg.team.iter().map(|m| m.name.as_str()).collect();
-        eprintln!("team: {}", names.join(", "));
+        notices.push(format!("team: {}", names.join(", ")));
     }
     // Instantiate a `[workflow]` template AFTER the `[team]` loop (so member names
     // resolve) and BEFORE the scheduler spawn. Nodes are created in TOPOLOGICAL
@@ -1789,7 +1790,7 @@ fn build_runtime(
     {
         let n = instantiate_workflow(o.tasks(), workflow, args.task.as_deref());
         register_adjacency(o.registry(), workflow);
-        eprintln!("workflow: {n} nodes");
+        notices.push(format!("workflow: {n} nodes"));
     }
     // Spawn the DAG scheduler here — after the `[team]` loop and before
     // `Runtime { .. }`, so it is live for one-shot / REPL / TUI alike. The
@@ -1818,12 +1819,15 @@ fn build_runtime(
             judger,
         );
     }
-    Ok(Runtime {
-        instructions,
-        skills,
-        hooks,
-        orchestrator,
-    })
+    Ok((
+        Runtime {
+            instructions,
+            skills,
+            hooks,
+            orchestrator,
+        },
+        notices,
+    ))
 }
 
 /// The root's team and guidelines: `&[]`/`None` for a served `--owner` worker,
@@ -2611,7 +2615,7 @@ async fn main() {
     // conversation is `c0`, the reserved id — a real value, not a default
     // (§13.2.1(a)): `Roots::new` mints from 1, so this id can never collide with
     // a `/tab new`.
-    let rt = build_runtime(
+    let (rt, root0_notices) = build_runtime(
         &args,
         &cfg,
         &llm,
@@ -2619,6 +2623,13 @@ async fn main() {
         wcode_protocol::ConversationId::first(),
     )
     .unwrap_or_else(|e| boot_exit(e));
+    // Print the build's notices in order, before anything else, so `wcode -p …`,
+    // the REPL and `--dump-*` paths stay byte-identical to today.
+    for notice in &root0_notices {
+        eprintln!("{notice}");
+    }
+    // Kept for commit 2 (W047): root 0's notices also ride its ConversationSpec.
+    let _ = &root0_notices;
     // The root orchestrator sees the team; a served worker (`--owner`) does not.
     let root = RootCtx {
         team: if args.owner.is_some() { &[] } else { &cfg.team },
