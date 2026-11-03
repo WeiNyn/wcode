@@ -1916,6 +1916,79 @@ mod tests {
         );
     }
 
+    /// **The backend half of W049 §7.2 item 3.** A resumed tab renders its old
+    /// turns from `GetHistory` (`crates/wcode-tui`'s `spawn_replay`) — that is the
+    /// display half, checked on a pty. This pins the other half: the resumed
+    /// root's agent really carries the session's messages, so what the tab shows
+    /// and what the next prompt continues from are the same facts.
+    ///
+    /// `resume_from_a_legacy_flat_jsonl_builds_a_root` above asserts the paths
+    /// (`session_path`, `resume_path`) only — never that the loaded messages
+    /// survived.
+    #[tokio::test]
+    async fn a_resumed_root_answers_get_history_with_its_session() {
+        use wcode_harness::message::{AgentMessage, ContentBlock, StopReason};
+        use wcode_harness::session::{Session, SessionEntry};
+
+        let tmp = tempfile::tempdir().expect("a tempdir");
+        let cwd = tmp.path();
+        let session = crate::Session::create_with_cwd(cwd, cwd).expect("a session");
+        let path = session.path().expect("path").to_path_buf();
+        // Two entries through the real writer — what a run would have recorded.
+        {
+            let mut session = Session::open(&path).expect("the transcript");
+            for (n, message) in [
+                AgentMessage::user_text("an earlier question"),
+                AgentMessage::Assistant {
+                    content: vec![ContentBlock::Text {
+                        text: "an earlier answer".into(),
+                    }],
+                    stop_reason: StopReason::Stop,
+                    usage: None,
+                    model: None,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                session
+                    .append(SessionEntry::Message {
+                        id: format!("m{n}"),
+                        parent_id: None,
+                        message,
+                    })
+                    .expect("record the message");
+            }
+        }
+
+        let (tx, _rx) = channels();
+        let mut roots = roots_in(tx.clone(), 220);
+        let factory = factory_for(run_inputs(cwd));
+        let id = roots
+            .start(&factory, RootSpec::Resume { dir: path.clone() })
+            .expect("the resume builds");
+
+        let reply = roots
+            .get(id)
+            .expect("live")
+            .handle
+            .ask(Request::GetHistory)
+            .await
+            .expect("the resumed root answers");
+        let AgentEvent::History { messages } = reply else {
+            panic!("expected History, got {reply:?}");
+        };
+        let text: Vec<String> = messages.iter().map(|m| m.as_text()).collect();
+        assert!(
+            text.iter().any(|t| t.contains("an earlier question")),
+            "the user turn survived the resume: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("an earlier answer")),
+            "and the assistant turn: {text:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_legacy_file_resumed_twice_is_refused() {
         let tmp = tempfile::tempdir().expect("a tempdir");
