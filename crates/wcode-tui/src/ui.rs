@@ -398,10 +398,11 @@ fn draw_overlay(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// One item row — `F1`'s row, byte-for-byte: a one-space indent, an `accent`
+/// One item row — the keymap's row, byte-for-byte: a one-space indent, an `accent`
 /// label padded to [`ITEM_LABEL_COLS`], then a `dim` detail. The ONLY definition
-/// of that row: `draw_help` and `draw_info`'s `Item` arm both call it, so a
-/// change to the look is a one-line change, not a hunt.
+/// of that row (`draw_info`'s `Item` arm): D047 deleted `draw_help`, the second
+/// renderer that used to duplicate it, so a change to the look is one line in one
+/// place rather than a comparison between two.
 ///
 /// # Contracts: `label` shorter than the column is padded; longer is NOT
 /// truncated (it overflows into the detail column, as `{:<22}` pads-only does);
@@ -622,7 +623,9 @@ fn draw_info(frame: &mut Frame, area: Rect, title: &str, rows: &[InfoRow], scrol
 }
 /// The arguments of [`draw_info_panel`]: a centered rounded panel over `lines`
 /// scrolled to `scroll`, titled ` {title} `, with one dim `footer` row. `more`
-/// gates the `— N more —` overflow hint, so `F1` (`more: false`) never shows it.
+/// gates the `— N more —` overflow hint, which counts the rows BELOW the fold —
+/// the pages that need it (`F1`'s help and every `/`-command report) pass `true`,
+/// and nothing passes `false` any more (D047 deleted the F1-only panel that did).
 struct InfoPanel<'a> {
     title: &'a str,
     lines: Vec<Line<'a>>,
@@ -636,8 +639,9 @@ struct InfoPanel<'a> {
 /// dim `footer` row carrying `— N more —` when the body is clipped and `more`.
 ///
 /// # Contracts
-/// - `title` is BARE (`"keys"`, `"help"`); this fn adds the two padding spaces —
-///   that is how `draw_help` keeps `" keys "` byte-identical.
+/// - `title` is BARE (`"help"`, `"usage"`, `"tasks"`, …); this fn adds the two
+///   padding spaces. `F1`'s page is titled ` help ` like every other page of the
+///   one document (D047) — the separate ` keys ` title is gone.
 /// - Geometry: `visible = info_visible_rows(lines.len(), area.height)`, panel
 ///   height `visible + 3` (2 borders + footer), width
 ///   `area.width.saturating_sub(4).clamp(1, 64)`.
@@ -7302,6 +7306,9 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         let spans = row.spans;
         assert_eq!(spans[0].content, format!(" {:<width$}", "F1", width = ITEM_LABEL_COLS));
         assert_eq!(spans[1].content, "open help at the keys section");
+        // The roles, which the name promises and the pair-render test never checked.
+        assert_eq!(spans[0].style, accent(), "the label is the accent role");
+        assert_eq!(spans[1].style, dim(), "the detail is the dim role");
     }
 
     // ---- All mode (the merged transcript) -------------------------------------

@@ -69,7 +69,10 @@ otherwise, and the test asserts the shipped truth.
   than two identical ones; its golden test (`the_item_row_is_indented_padded_and_dim`)
   replaces the pair-render comparison, which could only ever prove two identical
   functions agreed.
-- `esc_closes_the_info_modal_and_nothing_else_does` now covers `F1`'s page too.
+- `esc_closes_the_info_modal_and_nothing_else_does` now opens with `F1` as well as with `/help`, so the `Esc`-only rule is asserted for both entries (the reviewer caught that the doc claimed this before the test did).
 - The `KEYS` budget stops being a cliff: a 37th row is now safe, because the panel
-  scrolls and says how much is missing below.
+  scrolls and says how much is missing below. "Safe" means **nothing is lost**,
+  not "nothing is silent": the hint counts rows below the fold only, so a page
+  entered mid-document hides its top with no announcement — reachable with `↑`,
+  which is the affordance, and the reason no `— N above —` row was invented.
 - One habit changes: `F1` no longer dismisses itself; `Esc` does.

@@ -551,8 +551,9 @@ pub enum Overlay {
     ///
     /// - `title` is the BARE lowercase word (`"help"`, `"usage"`, `"verify"`,
     ///   `"tasks"`, `"team"`); the renderer pads it into ` title ` (Q5) — the
-    ///   padding is never stored, so `draw_help`'s `" keys "` and an info
-    ///   `" help "` render through one panel helper.
+    ///   padding is never stored, so every page renders through one panel helper.
+    ///   `F1`'s page is ` help `, like `/help`'s: they differ in the row they
+    ///   start on, not in their title (D047).
     /// - `rows` is the whole body, one [`InfoRow`] per DRAWN line — a row is a
     ///   line, which is what keeps the scroll arithmetic row-agnostic
     ///   ([`App::info_lines`], [`info_visible_rows`], [`App::info_scroll`]). An
@@ -1236,10 +1237,11 @@ fn command_label(cmd: &Command) -> String {
     label
 }
 
-/// The `/help` body: a `commands` table (one [`InfoRow::Item`] per [`COMMANDS`]
-/// entry) above the `keys` table (one item per [`KEYS`] entry, styled exactly as
-/// `F1` styles them), with a blank [`InfoRow::Prose`] between the sections. This
-/// is the single `/help` body source; no trailing blank row.
+/// The help document — the ONE body `F1` and `/help` both open (D047): a
+/// `commands` table (one [`InfoRow::Item`] per [`COMMANDS`] entry) above the
+/// `keys` table (one item per [`KEYS`] entry), with a blank [`InfoRow::Prose`]
+/// between the sections. `F1` enters at the `keys` label, `/help` at the top, so
+/// neither verb owns a slice of it. No trailing blank row.
 pub(crate) fn help_rows() -> Vec<InfoRow> {
     let mut rows = vec![InfoRow::Prose("commands".to_string())];
     rows.extend(COMMANDS.iter().map(|cmd| InfoRow::Item {
@@ -3422,7 +3424,11 @@ impl App {
             .iter()
             .position(|r| *r == InfoRow::Prose("keys".to_string()))
             .unwrap_or(0);
-        self.open_info_rows_at("help", rows, u16::try_from(at).unwrap_or(u16::MAX));
+        // `at` is `COMMANDS.len() + 2` today; the clamp only exists so a
+        // pathologically long command table cannot truncate silently — the
+        // renderer clamps the scroll anyway, so `u16::MAX` renders the last page.
+        let at = u16::try_from(at).unwrap_or(u16::MAX);
+        self.open_info_rows_at("help", rows, at);
     }
 
     /// Open the settings panel (`F2` / `/settings`, W032 §4.7). A fresh
@@ -3881,8 +3887,10 @@ impl App {
         }
         match key {
             Key::Esc | Key::Ctrl('g') | Key::Char('q') => self.exit_browse(),
-            // Global: the keymap overlay and the panic button. Neither leaves
-            // browse — closing help returns to the mode you opened it from.
+            // Global: the help page (the same `Overlay::Info` `/help` opens —
+            // there is no separate keymap overlay since D047) and the panic
+            // button. Neither leaves browse — closing help returns to the mode
+            // you opened it from.
             Key::F(1) | Key::Char('?') => self.open_help(),
             // `F2` is global like `F1` (W032 §4.7, site 2 of 3): it opens the
             // panel ABOVE the mode and leaves the browse selection where it was.
@@ -9490,6 +9498,12 @@ mod tests {
         assert!(app.activate_conversation(1));
         assert_eq!(app.canonical_order(), vec![2], "now r1 alone");
         assert_eq!(app.focus(), 2, "focus follows to the new root");
+        // `Alt-0` is the ACTIVE conversation's root — canonical row 0, never the
+        // global surface 0. Moving off it first is what makes the claim testable.
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 2, "Alt-1 is out of range at N = 2 too");
+        app.handle(AppEvent::Key(Key::Alt('0')));
+        assert_eq!(app.focus(), 2, "Alt-0 is this tab's root, not global 0");
         assert!(
             app.working_team_rows().is_empty(),
             "conversation 1 has no members"
@@ -12169,6 +12183,22 @@ mod tests {
     #[test]
     fn esc_closes_the_info_modal_and_nothing_else_does() {
         let mut app = App::new();
+        // `F1`'s page is the same modal since D047, so the `Esc`-only rule is
+        // asserted for BOTH entries.
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(matches!(app.overlay(), Some(Overlay::Info { .. })));
+        app.handle(AppEvent::Key(Key::Char('x')));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
+            "a char is swallowed on F1's page"
+        );
+        app.handle(AppEvent::Key(Key::F(1)));
+        assert!(
+            matches!(app.overlay(), Some(Overlay::Info { .. })),
+            "F1 does not close its own page"
+        );
+        app.handle(AppEvent::Key(Key::Esc));
+        assert!(app.overlay().is_none(), "Esc closes it");
         submit(&mut app, "/help");
         // A Char is swallowed, not typed into the composer.
         app.handle(AppEvent::Key(Key::Char('x')));
