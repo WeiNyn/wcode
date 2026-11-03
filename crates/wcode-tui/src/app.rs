@@ -1329,7 +1329,8 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("PgUp / PgDn", "scroll the transcript a page"),
     ("wheel", "scroll three lines"),
     ("Ctrl-T", "expand / collapse all tool output"),
-    ("Ctrl-N / Shift-Tab", "focus the next / previous surface"),
+    ("Ctrl-N / Ctrl-P", "next / previous tab"),
+    ("Shift-Tab", "focus the previous surface"),
     ("Alt-1..9", "focus sidebar row N"),
     ("Ctrl-G", "browse the transcript"),
     ("Ctrl-B", "toggle the sidebar"),
@@ -5069,8 +5070,9 @@ impl App {
             Key::Ctrl('y') => self.copy_last(false),
             // Ctrl-N / Shift-Tab cycle the focused surface (Ctrl-C cancels,
             // Ctrl-J/Ctrl-Y are taken; Tab/Enter/Esc/Up/Down belong to the composer).
-            Key::Ctrl('n') => self.cycle_or_focus(1),
-            Key::BackTab => self.cycle_or_focus(-1),
+            Key::Ctrl('n') => self.cycle_conversation(1),
+            Key::Ctrl('p') => self.cycle_conversation(-1),
+            Key::BackTab => self.focus_step(-1),
             Key::Alt('[') => self.bump_measure(-(MEASURE_STEP as isize)),
             Key::Alt(']') => self.bump_measure(MEASURE_STEP as isize),
             Key::Alt(c) => self.focus_digit(c),
@@ -5731,20 +5733,16 @@ impl App {
         self.transient("closing the conversation…");
     }
 
-    /// `Ctrl-N` / `Shift-Tab` (W040 §13.2 item 6): cycle CONVERSATIONS when there
-    /// is more than one, and otherwise delegate to `focus_step` — byte-identical
-    /// at N = 1, which is what keeps the four key tripwires green unmodified.
-    fn cycle_or_focus(&mut self, step: isize) {
+    /// `Ctrl-N` / `Ctrl-P`: cycle conversations when there is more than one.
+    /// Inert (no-op) with a single conversation; never writes to the transcript.
+    fn cycle_conversation(&mut self, step: isize) {
         let len = self.conversations().len();
         if len <= 1 {
-            self.focus_step(step);
             return;
         }
         let active = self.conversations().active_index();
         let next = (active as isize + step).rem_euclid(len as isize) as usize;
-        if self.activate_conversation(next) {
-            self.transient(format!("tab {} of {len}", next + 1));
-        }
+        self.activate_conversation(next);
     }
 
     pub(crate) fn transient(&mut self, text: impl Into<String>) {
@@ -7476,12 +7474,12 @@ mod tests {
     fn dequeue_targets_the_queue_s_own_surface() {
         let (mut app, _root, member) = two_surfaces();
         // Queue on the MEMBER through the real keys, then look away at the root.
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 1);
         submit(&mut app, "first");
         submit(&mut app, "second");
         let _ = app.take_actions();
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 0);
         // The member's run ends while the ROOT is focused: the start must name
         // the member, not `Submit` the focused surface.
@@ -7500,7 +7498,7 @@ mod tests {
         // The root runs…
         submit(&mut app, "root prompt");
         // …while the member also runs and has a second prompt queued behind it.
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::BackTab));
         submit(&mut app, "member prompt");
         submit(&mut app, "member queued");
         let _ = app.take_actions();
@@ -9966,22 +9964,41 @@ mod tests {
     /// CONVERSATIONS at N > 1 — `cycle_or_focus` is a function of
     /// `conversations.len()`.
     #[test]
-    fn cycle_or_focus_cycles_surfaces_at_n1_and_conversations_at_n2() {
-        // N = 1 with two surfaces: unchanged behaviour.
-        let (mut app, _root, _member) = two_surfaces();
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
-        assert_eq!(app.focus(), 1, "N = 1 still cycles surfaces");
-        app.handle(AppEvent::Key(Key::BackTab));
-        assert_eq!(app.focus(), 0, "and back");
-
-        // N = 2: the same keys cycle conversations and move the focus.
+    fn ctrl_p_is_the_previous_tab_and_ctrl_n_the_next() {
         let mut app = two_conversations_for_the_band();
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
-        assert_eq!(app.conversations().active_index(), 1);
-        assert_eq!(app.focus(), 1, "the neighbour's root");
-        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.conversations().active_index(), 0);
-        assert_eq!(app.focus(), 0);
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.conversations().active_index(), 1, "Ctrl-N next");
+        assert_eq!(app.focus(), 1, "focus follows");
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        assert_eq!(app.conversations().active_index(), 0, "wraps");
+        app.handle(AppEvent::Key(Key::Ctrl('p')));
+        assert_eq!(app.conversations().active_index(), 1, "Ctrl-P previous");
+    }
+
+    #[test]
+    fn cycle_keys_are_inert_at_n1() {
+        let (mut app, _, _) = two_surfaces();
+        let before = app.transcript().len();
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::Ctrl('p')));
+        assert_eq!(app.transcript().len(), before, "no transcript write");
+        // single conversation stays active
+        assert_eq!(app.conversations().active_index(), 0);
+    }
+
+    #[test]
+    fn switching_tabs_writes_no_block() {
+        let mut app = two_conversations_for_the_band();
+        let before = app.transcript().len();
+        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::Ctrl('p')));
+        assert_eq!(app.transcript().len(), before, "no block written");
+    }
+
+    #[test]
+    fn the_keymap_names_the_conversation_chord() {
+        assert!(KEYS.iter().any(|(_, d)| d.contains("tab")));
     }
 
     /// **The band at N = 2** (a render-level test — the live two-tab frame is
@@ -10071,13 +10088,13 @@ mod tests {
     }
 
     #[test]
-    fn slash_surface_and_the_cycle_key_switch_focus() {
+    fn slash_surface_and_shift_tab_switch_focus() {
         let (mut app, _, _) = two_surfaces();
         assert_eq!(app.focus(), 0);
-        // Ctrl-N cycles, wrapping.
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        // Shift-Tab cycles surfaces at N = 1, wrapping.
+        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 1);
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 0, "wraps back to the root");
 
         // `/surface` opens the picker; selecting row 1 focuses surface 1.

@@ -4900,8 +4900,8 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         );
         // Move the focus OFF the root first, so the assertion reads "the click
         // MOVED focus to the root" rather than "nothing changed it".
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
-        assert_eq!(app.focus(), 1, "Ctrl-N moved the focus to member 1");
+        app.handle(AppEvent::Key(Key::Alt('1')));
+        assert_eq!(app.focus(), 1, "Alt-1 moved the focus to member 1");
         app.handle(AppEvent::Mouse(MouseEvent {
             kind: MouseKind::Down,
             col: rect.x + 3,
@@ -5453,7 +5453,7 @@ fn a_turn(content: Vec<ContentBlock>) -> Block {
         with_member(&mut app, "w1", "m");
         // Ctrl-N cycles root → first member; the hint is seeded on the FOCUSED
         // surface, so this pins the member's arm of `seed_hint_if_empty`.
-        app.handle(AppEvent::Key(Key::Ctrl('n')));
+        app.handle(AppEvent::Key(Key::BackTab));
         assert_eq!(app.focus(), 1, "focus is on the member");
         let text = buffer_text(&render(&mut app, 80, 12));
         assert!(
