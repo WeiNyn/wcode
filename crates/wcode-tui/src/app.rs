@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use wcode_harness::event::{AgentEvent, TodoItem, TodoStatus};
 use wcode_harness::message::{AgentMessage, ContentBlock};
@@ -2917,8 +2917,6 @@ pub struct App {
     /// live by the `new_tasks` feed to `run`.
     tasks: Vec<TaskItem>,
     /// Set when the user picks a session to resume; the run returns it so the CLI
-    /// can re-exec with `--resume <path>`.
-    pending_resume: Option<PathBuf>,
     /// Set when the user picks a `/team`; the run returns it so the CLI can
     /// re-exec with `--team <name>` (a fresh session with that project team).
     pending_team: Option<String>,
@@ -3120,7 +3118,6 @@ impl App {
             teams: Vec::new(),
             skills: Vec::new(),
             tasks: Vec::new(),
-            pending_resume: None,
             pending_team: None,
             pending_reload: None,
             remote: false,
@@ -6603,10 +6600,10 @@ impl App {
                 }
             }
             PickerKind::Resume => {
-                // Hand the choice back and quit; the composition root re-execs
-                // with `--resume <path>` — a client cannot rebuild the agent.
-                self.pending_resume = Some(PathBuf::from(selected));
-                self.should_quit = true;
+                // Open the picked session as a new conversation tab (W046).
+                self.open_conversation_tab(wcode_protocol::RootSpec::Resume {
+                    dir: PathBuf::from(selected),
+                });
             }
             PickerKind::Team => {
                 // Same hand-off as `/resume`, but for `--team <name>`: a fresh
@@ -6697,10 +6694,6 @@ impl App {
 
     /// The session the user chose to resume, if any — read by the event loop
     /// after it exits so the composition root can re-exec with `--resume`.
-    pub fn pending_resume(&self) -> Option<&Path> {
-        self.pending_resume.as_deref()
-    }
-
     /// The project team the user chose, if any — read after exit so the
     /// composition root can re-exec with `--team <name>`.
     pub fn pending_team(&self) -> Option<&str> {
@@ -10095,7 +10088,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_opens_the_picker_and_selection_hands_back_the_path() {
+    fn resume_selection_opens_a_tab_and_keeps_the_process() {
         let mut app = App::new();
         app.set_sessions(sessions());
         submit(&mut app, "/resume");
@@ -10104,18 +10097,46 @@ mod tests {
         app.handle(AppEvent::Key(Key::Down));
         app.handle(AppEvent::Key(Key::Enter));
         assert!(app.overlay().is_none(), "selecting closes the modal");
-        assert_eq!(app.pending_resume(), Some(Path::new("/s/c3d4.jsonl")));
-        assert!(app.should_quit(), "a resume selection quits the TUI");
+        let actions = app.take_actions();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::NewConversation(wcode_protocol::RootSpec::Resume { dir }) if dir == &PathBuf::from("/s/c3d4.jsonl")
+        ));
+        assert!(!app.should_quit(), "no quit");
     }
 
     #[test]
-    fn the_resume_filter_prefills_the_query() {
+    fn the_resume_filter_prefills_and_opens_a_tab() {
         let mut app = App::new();
         app.set_sessions(sessions());
         submit(&mut app, "/resume c3d4");
         // The filter narrows to one row, so Enter selects it directly.
         app.handle(AppEvent::Key(Key::Enter));
-        assert_eq!(app.pending_resume(), Some(Path::new("/s/c3d4.jsonl")));
+        let actions = app.take_actions();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            Action::NewConversation(wcode_protocol::RootSpec::Resume { dir }) if dir == &PathBuf::from("/s/c3d4.jsonl")
+        ));
+        assert!(!app.should_quit());
+    }
+
+    #[test]
+    fn resume_is_refused_over_a_socket() {
+        let mut app = App::new();
+        app.set_remote(true);
+        app.set_sessions(sessions());
+        submit(&mut app, "/resume");
+        // picker still opens; selecting refuses
+        app.handle(AppEvent::Key(Key::Down));
+        app.handle(AppEvent::Key(Key::Enter));
+        assert!(app.take_actions().is_empty(), "no Action over a socket");
+        assert!(!app.should_quit());
+        assert!(matches!(
+            app.transcript().last(),
+            Some(Block::Notice(t) | Block::Transient(t)) if t.contains("socket")
+        ));
     }
 
     #[test]
@@ -10124,7 +10145,7 @@ mod tests {
         submit(&mut app, "/resume");
         assert!(app.overlay().is_none());
         assert!(!app.should_quit());
-        assert_eq!(app.pending_resume(), None);
+        assert!(app.take_actions().is_empty());
         assert!(matches!(
             app.transcript().last(),
             Some(Block::Notice(t) | Block::Transient(t)) if t.contains("no sessions")
@@ -10137,7 +10158,6 @@ mod tests {
         submit(&mut app, "/reload");
         assert_eq!(app.pending_reload(), Some(false));
         assert!(app.should_quit(), "a reload quits the TUI to re-exec");
-        assert_eq!(app.pending_resume(), None);
     }
 
     #[test]

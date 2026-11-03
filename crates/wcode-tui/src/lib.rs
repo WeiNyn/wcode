@@ -371,12 +371,9 @@ fn outcome_of(app: &App) -> Outcome {
     }
     match app.pending_reload() {
         Some(no_session) => Outcome::Reload { no_session },
-        None => match app.pending_resume() {
-            Some(path) => Outcome::Resume(path.to_path_buf()),
-            None => match app.pending_team() {
-                Some(name) => Outcome::Team(name.to_string()),
-                None => Outcome::Quit,
-            },
+        None => match app.pending_team() {
+            Some(name) => Outcome::Team(name.to_string()),
+            None => Outcome::Quit,
         },
     }
 }
