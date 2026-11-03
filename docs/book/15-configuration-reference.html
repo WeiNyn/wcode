@@ -219,10 +219,10 @@
       <thead><tr><th>Command</th><th>Where</th><th>Effect</th></tr></thead>
       <tbody>
         <tr><td><code>/exit</code></td><td>both</td><td>Quit (prints the resume line).</td></tr>
-        <tr><td><code>/new</code></td><td>both</td><td>Fresh conversation + session (TUI: re-exec; refused over a socket).</td></tr>
+        <tr><td><code>/new</code></td><td>both</td><td>Fresh conversation + session (TUI: opens a conversation tab; needs a host, so refused over a socket).</td></tr>
         <tr><td><code>/model &lt;id&gt;</code> · <code>/models [filter]</code></td><td>both</td><td>Switch (logged) or list the provider catalog.</td></tr>
         <tr><td><code>/effort [level]</code></td><td>both</td><td>Show/set/clear reasoning effort.</td></tr>
-        <tr><td><code>/resume [path]</code> · <code>/sessions</code></td><td>REPL (TUI: picker)</td><td>Reopen a session; list them.</td></tr>
+        <tr><td><code>/resume [path]</code> · <code>/sessions</code></td><td>REPL (TUI: picker &rarr; new tab)</td><td>Reopen a session; list them.</td></tr>
         <tr><td><code>/compact [focus]</code></td><td>both</td><td>Summarize older messages now.</td></tr>
         <tr><td><code>/usage</code></td><td>both</td><td>Tokens, cache hit rate, per-tool stats, cost.</td></tr>
         <tr><td><code>/btw &lt;question&gt;</code></td><td>both</td><td>Tool-free side question; never recorded.</td></tr>
@@ -231,7 +231,7 @@
         <tr><td><code>/skills</code> · <code>/skill &lt;name&gt; [args]</code></td><td>REPL</td><td>List discovered skills; force one into a turn.</td></tr>
         <tr><td><code>/reload [--no-session]</code></td><td>both</td><td>Rebuild + re-exec into the session.</td></tr>
         <tr><td><code>/theme [name]</code> · <code>/width</code></td><td>TUI</td><td>Palette (bare = picker) · transcript measure.</td></tr>
-        <tr><td><code>/team [roster|&lt;name&gt;]</code> · <code>/surface</code></td><td>TUI</td><td>Team picker/listing · surface picker.</td></tr>
+        <tr><td><code>/team [roster|&lt;name&gt;]</code> · <code>/surface</code> · <code>/tab [new|close|&lt;n&gt;]</code></td><td>TUI</td><td>Team picker/listing · surface picker · conversation tabs (<code>Ctrl-N</code>/<code>Ctrl-P</code>).</td></tr>
         <tr><td><code>/tasks</code> · <code>/changes</code> · <code>/copy</code> · <code>/help</code></td><td>TUI</td><td>Plan modal · changed files with diffs · copy · keymap.</td></tr>
       </tbody>
     </table>

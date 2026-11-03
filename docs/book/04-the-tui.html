@@ -135,12 +135,13 @@
   </p>
 
   <figure class="code">
-    <figcaption><span class="f">crates/wcode-tui/src/app.rs:1046</span><span class="tag">the keymap (excerpt)</span></figcaption>
+    <figcaption><span class="f">crates/wcode-tui/src/app.rs:1321</span><span class="tag">the keymap (excerpt)</span></figcaption>
 <pre>    (<span class="s">"Enter"</span>, <span class="s">"submit the prompt"</span>),
     (<span class="s">"Shift-Enter / Ctrl-J"</span>, <span class="s">"insert a newline"</span>),
     (<span class="s">"Up / Down"</span>, <span class="s">"recall prompt history"</span>),
     (<span class="s">"Ctrl-T"</span>, <span class="s">"expand / collapse all tool output"</span>),
-    (<span class="s">"Ctrl-N / Shift-Tab"</span>, <span class="s">"focus the next / previous surface"</span>),
+    (<span class="s">"Ctrl-N / Ctrl-P"</span>, <span class="s">"next / previous tab"</span>),
+    (<span class="s">"Shift-Tab"</span>, <span class="s">"focus the previous surface"</span>),
     (<span class="s">"Alt-1..9"</span>, <span class="s">"focus sidebar row N"</span>),
     (<span class="s">"Ctrl-G"</span>, <span class="s">"browse the transcript"</span>),
     (<span class="s">"Ctrl-B"</span>, <span class="s">"toggle the sidebar"</span>),
@@ -179,8 +180,21 @@
     Input and <code>/</code>-commands go to the <strong>focused</strong> surface, so you can
     interrupt a worker mid-turn with a question without addressing it through the root.
   </p>
+  <p>
+    Above the surfaces there is one more level: a <strong>conversation</strong> is a tab, and
+    the tab band draws one row above the header <em>only</em> when there is more than one — a
+    single conversation's frame is unchanged. Each tab is an in-process root with its own
+    transcript, input draft, model/effort and live event stream; closing one leaves its files
+    on disk for <code>--resume</code>.
+  </p>
   <ul>
-    <li><code>Ctrl-N</code> / <code>Shift-Tab</code> — cycle surfaces.</li>
+    <li><code>Ctrl-N</code> / <code>Ctrl-P</code> — next / previous tab (wrapping, and inert
+      while there is only one). The band is the feedback: no legend, no transcript notice.</li>
+    <li><code>/tab new</code> / <code>/tab close</code> / <code>/tab &lt;n&gt;</code> — open,
+      close, jump; bare <code>/tab</code> lists them. The band prints no numbers, so a digit
+      chord would address something you cannot see.</li>
+    <li><code>Shift-Tab</code> — the previous surface (the one chord that reaches the unbadged
+      root backwards).</li>
     <li><code>Alt-1..9</code> — jump to sidebar row N.</li>
     <li><code>/surface</code> — open the picker.</li>
     <li><code>Ctrl-O</code> — <strong>All</strong> vs <strong>Focus</strong>: All merges every
@@ -278,10 +292,20 @@ D032 — The All-mode merge orders each turn by its last activity</pre>
     <code>/exit</code>.
   </p>
   <p>
-    Four commands are <em>client-side re-execs</em> and therefore refused over a socket:
-    <code>/resume</code>, <code>/new</code> (alias <code>/clear</code>), and
-    <code>/reload [--no-session]</code>. <code>/changes</code> lists the files this run
-    changed and re-shows their diffs.
+    <code>/new</code> and <code>/resume</code> open a <em>conversation tab</em> instead of
+    replacing the process: <code>/new</code> starts a fresh conversation, <code>/resume</code>
+    opens the session you pick (a session already open as a tab is switched to, never opened
+    twice, and a legacy flat <code>.jsonl</code> resumes as a bare root), and both switch to
+    the new tab when the host has built it. <code>/tab new</code> is the same as
+    <code>/new</code>, <code>/tab close</code> closes the active tab and
+    <code>/tab &lt;n&gt;</code> jumps to one; bare <code>/tab</code> lists them. All of these
+    need a host to build the root, so over a socket they refuse instead of quitting.
+  </p>
+  <p>
+    Two commands are still <em>client-side re-execs</em> — the process is replaced, every open
+    tab with it — and are refused over a socket: <code>/reload [--no-session]</code> rebuilds
+    the binary, and <code>/team &lt;name&gt;</code> passes a new team on the command line.
+    <code>/changes</code> lists the files this run changed and re-shows their diffs.
   </p>
   <p class="dim">
     The session-lifecycle commands that are not requests (<code>/sessions</code>,

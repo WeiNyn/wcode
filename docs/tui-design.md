@@ -6,7 +6,9 @@ popup) **and by D027** (the ` help ` body is `F1`'s two-column table — an item
 row per command and per key, prose for the rest) **and by W032/D036** (a settings
 panel: an `F2` modal with a row cursor, one row grammar for both sections, and
 `›` admitted to §2) **and by W037/D042** (the mark: `❯▌`, one ink, two tiers,
-root-surface-only; §2 unchanged). Companion to [`tui-plan.md`](tui-plan.md) (the
+root-surface-only; §2 unchanged) **and by D046** (one chord, one axis: `Ctrl-N`/
+`Ctrl-P` switch conversations, `Shift-Tab` the previous surface, `Alt-1..9` the
+direct one; W046). Companion to [`tui-plan.md`](tui-plan.md) (the
 architecture + phasing) and [`interface-protocol-brainstorm.md`](interface-protocol-brainstorm.md)
 (the `Backend` seam the TUI is a client of). This doc is the *look*: bands,
 glyphs, colors, and the mockups each phase should hit.
@@ -276,7 +278,14 @@ selection bar.
   never copied. Five roles, all already on `Theme` (`accent`, `dim`, `muted`,
   `error`, `body`) and no new glyph — §2's `▌`, spinner, `✗` and `·` — so under
   palette B every one but `error` resolves to the grey ramp and the `▌` plus the
-  label's weight carry the active tab with no hue (D023).
+  label's weight carry the active tab with no hue (D023). It is switched with
+  `Ctrl-N` / `Ctrl-P` (next / previous tab, wrapping, inert at N = 1) or
+  `/tab <n>`. The row carries **no legend of its own**: `F1`'s key map and
+  `/help` are the disclosure channel, because the row has exactly one reading
+  (`▌` = you are here) and its shed rule must never have to shed something that
+  is not a tab. A switch is silent in the transcript — the `▌` and the label's
+  weight are the feedback — and the count, when the clip hides it, is `/tab`'s
+  bare form (`tabs: 1 wcode (active) · 2 api`), not a notice per switch.
 - **Header** (D010; amended by D023) — a **pinned top band**, not a transcript
   block: ONE bare row, no rule, carrying the running
   head `WCODE · session <id> ──── project · ⎇ branch`. The only `─` is the
@@ -458,9 +467,10 @@ first:
    and a `*` on the focused surface. The badge counts **members, not drawn
    rows**, so `Alt-N` still means member N. The root row is **clickable to
    focus the root** — every drawn row publishes its index for hit-testing, so
-   no new hit geometry — and its keyboard parity is the existing
-   `Ctrl-N`/`Shift-Tab` surface cycle (the root is the first surface in the
-   canonical order); `Alt-N` never targets the root. Rows are in the
+   no new hit geometry — and its keyboard parity is `Shift-Tab` (the
+   previous-surface key: the root is the first surface in the
+   canonical order, and backwards is the only direction that reaches it);
+   `Alt-N` never targets the root. Rows are in the
    **canonical order** (D34: root first, then members in creation order —
    stable; `●` marks activity, it does not reorder), which the sidebar now
    draws in full. The **`/team` roster and the composer's working-team strip
@@ -492,11 +502,15 @@ message(s)` notice, pluralized to match the count (W029) · `Ctrl-Y` (`/copy`)
 copies the last reply (OSC-52) · `Ctrl-T` expands/collapses every tool's
 **output** (params stay visible — inlined on a collapsed tool's single row, as
 `key  value` rows when expanded; a failed tool always shows its error) ·
-`Ctrl-N`/`Shift-Tab` focus the next/previous surface in the **canonical order**
-(shadowed while the settings panel is open, where `Tab`/`BackTab` jump sections —
-`Esc` restores the cycle; see **Settings panel** below), `Alt-1..9` focuses
+`Ctrl-N`/`Ctrl-P` switch to the next/previous **conversation tab** (wrapping, and
+inert at one tab, where the band has height 0; silent — the band is the feedback,
+D046) · `Shift-Tab` focuses the **previous surface** in the **canonical order**
+(the unbadged root row above member `1` is reachable this way and no other; the
+*forward* surface cycle is retired as redundant with `Alt-N`, D046) — both are
+shadowed while the settings panel is open, where `Tab`/`BackTab` jump sections
+(see **Settings panel** below), `Alt-1..9` focuses
 **member row N** (the numbered order, not the raw index; the unbadged root row
-above member `1` belongs to the surface cycle, not to `Alt-N`) · `Ctrl-B`
+above member `1` belongs to `Shift-Tab`, not to `Alt-N`) · `Ctrl-B`
 docks/undocks the left sidebar · `F1` opens the keymap overlay (dismissed only by `Esc`/`F1`; the
 same `KEYS` table is printed by `/help`, in the same two-column style) · `F2` opens the
 **settings panel** below, which `Esc` alone closes ·
@@ -513,8 +527,12 @@ the text and navigation keys; `F1`/`?` (help) and `Ctrl-C` (cancel / quit) stay
 the files the current run changed (`path · +a −r`)
 in the overlay; selecting one re-shows its diff in the transcript. The changeset
 is per-run and ephemeral — durable history is git's. `/resume` opens the same
-overlay over the sessions on disk; choosing one quits and re-execs into it
-(`--resume`), since a pure client cannot rebuild a session in place.
+overlay over the sessions on disk; choosing one **opens it as a new conversation
+tab** and switches to it — the host builds the root, so the client no longer
+quits and re-execs (`--resume` stays a *process* flag, and a session already open
+as a tab is switched to rather than opened twice; W046). `/new` opens a fresh
+conversation the same way and keeps its old meaning only at the process boundary
+(nothing on screen, so nothing to reflow into a tab).
 
 - **Information modals** (D026) — `/help`, `/verify`, `/usage`, `/tasks`, and
   `/team roster` open a `Clear`ed, centered, rounded-border modal: the frame
@@ -539,7 +557,7 @@ overlay over the sessions on disk; choosing one quits and re-execs into it
   the four non-tabular commands, and the bare lowercase section labels
   `commands` / `keys`. `/help` is therefore the `F1` keymap with a commands table
   above it — `commands`, one item per `COMMANDS` entry (label `/name` + its
-  ` args`, or its aliases in brackets — `/new [clear]`; detail its `summary`),
+  ` args`, or its aliases in brackets — `/exit [quit]`; detail its `summary`),
   a blank row, `keys`, then one item per `KEYS` entry styled exactly as `F1`
   styles them. `/verify`, `/tasks`, and `/team roster` stay prose rows; `/usage`
   is an **item** ledger (D028) — one item per asked surface (label = the member,
@@ -685,12 +703,12 @@ gate all follow from `COMMANDS` for free.
 **`BackTab` is reassigned while the panel is open.** `Tab`/`BackTab` jump
 sections there, and because the panel swallows every key outside its grammar
 (`↑↓`, `←→`, `Enter`, `Tab`/`BackTab`, `PgUp`/`PgDn`, the wheel, `Esc`), the
-composer's `BackTab` (`focus_prev`, the other half of the surface cycle) is
-shadowed for the panel's lifetime — as `Ctrl-N`, `Alt-N`, `Ctrl-B` and `Ctrl-G`
+composer's `BackTab` (the previous-surface key) is shadowed for the panel's
+lifetime — as `Ctrl-N`/`Ctrl-P` (the tab pair), `Alt-N`, `Ctrl-B` and `Ctrl-G`
 are. That is a **documented consequence, not a defect**: `Esc` closes the panel
-and restores the cycle, and no key both changes a value and switches a surface.
-The **Keys** block above carries the shadow note where the cycle's semantics
-live.
+and restores them, and no key both changes a value and leaves the surface or the
+tab. The **Keys** block above carries the shadow note where the surface key's
+semantics live.
 
 At the 64-col panel, over the (hidden) base bands:
 
@@ -764,6 +782,20 @@ Agreed for P0 (see also `tui-plan.md` §9):
 - **Wire deltas**: P0 accepts whole-message `MessageUpdate`; the O(n²) matters
   only for a socket-backed TUI (already reachable via `--socket`) and is
   resolved before that path is a goal.
+
+Amended later — a decision §4 now rests on:
+
+- **One chord, one axis (D046; W046).** A cycle belongs to the axis with **no
+  direct addressing** — conversations, which are unbounded, carry no digit and
+  (still) no click target — so `Ctrl-N`/`Ctrl-P` are the tabs', unconditionally
+  at every N. The bounded axis keeps its direct keys plus the one direction they
+  cannot address: `Alt-1..9` jumps to a member, and `Shift-Tab` is the only key
+  that reaches the **unbadged root** backwards. A chord whose meaning depended on
+  N (`Ctrl-N`/`Shift-Tab`: conversations at N > 1, surfaces at N = 1) is the
+  ambiguity this replaces; the forward surface cycle retires as redundant with
+  `Alt-N`. `/tab <n>` is the tabs' direct jump — no chord, because the band
+  prints no numbers and its drawn order is rotated to the active tab, so a digit
+  would have two meanings.
 
 ## 6. Open questions
 

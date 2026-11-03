@@ -409,7 +409,8 @@ as the TUI.
 TUI keys: `Enter` submit · `Shift-Enter`/`Ctrl-J` newline · `Up`/`Down` recall
 prompts · `PgUp`/`PgDn` (or the wheel) scroll · `Esc`/`Ctrl-C` cancel a run or
 quit · `Ctrl-Y` copy the last reply (OSC-52) · `Ctrl-T` expand/collapse every
-tool's output · `Ctrl-N`/`Shift-Tab` (or `Alt-1..9`) switch surface · `Ctrl-B`
+tool's output · `Ctrl-N`/`Ctrl-P` switch conversation tab · `Shift-Tab` the
+previous surface (or `Alt-1..9` jump to one) · `Ctrl-B`
 toggle the sidebar · `Ctrl-A`/`E`/`W`/`U`/`K` readline-style input editing.
 `Ctrl-G` enters **browse mode**, a `▌` cursor over the transcript (`j`/`k` next/
 prev, `g`/`G` first/last, `Home`/`End` jump to the top/bottom block in view,
@@ -439,14 +440,26 @@ chip; the full text is sent (outer whitespace trimmed). TUI `/`-commands: `/exit
 `/help` — the
 subset that maps to a `Request` under the current session — plus `/changes` (list
 the files this run changed, re-showing a diff), `/resume` (pick a session — rows
-carry the title and ` · team` / ` · workflow`; the CLI re-execs into it), `/new` (alias `/clear`; start a fresh session — a new
-group for a team — by re-exec'ing with no `--resume`; refused over a socket), and
+carry the title and ` · team` / ` · workflow` — and open it as a **conversation
+tab**, switching to it; a session already open as a tab is switched to, never
+opened twice; refused over a socket), `/new` (open a fresh conversation tab the
+same way — the old fresh-*process* meaning now lives at the process boundary and
+in `/reload --no-session`, not here), `/tab [new|close|<n>]` (open a conversation,
+close the active one, or jump to tab `n`; bare `/tab` lists them, 1-based), and
 `/reload [--no-session]` (rebuild + re-exec into the current session, mirroring the REPL;
-refused over a socket). The remaining session-lifecycle commands below stay in
+refused over a socket — it replaces the process, so **every open tab goes with it**).
+The remaining session-lifecycle commands below stay in
 the REPL.
-`--agents` and a team, each member runs as its own **surface** (the root, plus one
+
+Conversations are **tabs**: a band above the header draws one row once there is more
+than one, `Ctrl-N`/`Ctrl-P` switch between them, and each tab is an independent session
+— its own transcript, input draft, model/effort and live event stream — so closing one
+leaves its files on disk for `--resume`.
+
+With `--agents` and a team, each member runs as its own **surface** (the root, plus one
 per member): input and `/`-commands go to the **focused** surface — switch with
-`/surface` (a picker), `Ctrl-N`/`Shift-Tab` (cycle), or `Alt-1..9` — and a
+`/surface` (a picker), `Shift-Tab` (the previous surface — the one chord that
+reaches the unbadged root), or `Alt-1..9` — and a
 **left-docked** sidebar (30 columns wide, shown only when the terminal is ≥ 80
 columns; `Ctrl-B` toggles it) with **Team / Todos / Changes** sections, the
 focused row marked by a `*`. Bare `/team` opens a picker to switch team;

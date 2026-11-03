@@ -47,8 +47,10 @@
 
   <p>
     This is why there is no separate "remote mode" in the TUI: <code>--socket</code> swaps a
-    constructor argument. Two features are honestly client-side and therefore refused over a
-    socket — <code>/new</code> and <code>/reload</code>, both of which re-exec the process.
+    constructor argument. Some features are honestly client-side and therefore refused over a
+    socket — <code>/reload</code> and <code>/team</code>, which replace the process, and
+    <code>/new</code>, <code>/resume</code> and <code>/tab new</code>, which need a host to
+    build the conversation root the tab stands for.
   </p>
 </section>
 
