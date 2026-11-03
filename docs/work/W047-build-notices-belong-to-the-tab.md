@@ -1,6 +1,6 @@
 # W047 — The build must not print: a conversation's notices belong to the tab that carries them — brief
 
-- **Status:** **SHIPPED** — commits `3225094`, `bc742ed`, `ee9415d`, `0d44c5b`. §4.2 implemented verbatim.
+- **Status:** **SHIPPED in substance; two review rounds.** Second layer BLOCKED on a sixth `eprintln!` inside `build_runtime` (`main.rs:1607`'s `warning: plan not loaded`) plus four unwritten and three under-asserting tests; cleared in the two commits that follow the first four. §4.2 implemented verbatim.
 - **Item:** W047 (W046 is closed; W041–W045 reserved per `docs/work/W040-multi-root-conversations.md` §14).
 - **Predecessor:** W040. This item **closes W040 amendment (h)**, which named the defect and deferred it:
   > "`build_root` still emits the three informational stderr lines the single-root boot does (`INERT_WORKFLOW_NOTICE`, `team: …`, `workflow: {n} nodes`), because it runs the same `build_runtime`. On one terminal they interleave; in a TUI they would paint over the alternate screen. **Either they move into `RootParts`/`ConversationSpec` so the host chooses where they go, or the TUI tolerates them** — but `build_root`'s 'never a stdout write' is true and insufficient."
@@ -167,3 +167,18 @@ cargo build --bin wcode
 - Every runtime root's build notices appear on **that tab**, in the designer's ruling's shape, and never paint over the alternate screen.
 - The startup root does not double-render.
 - W040 amendment (h) is closed by an errata row, not by a silent edit.
+
+---
+
+## 9. What the review found, and one honest limit
+
+**The mechanism and the render rule were accepted on the first pass** — the five strings, the boot's ordering, the root target (`surface_ids().first()`, never `self.focus()`), §4.3's no-double-render, zero wire change, and the designer's clause arriving verbatim in `docs/tui-design.md`.
+
+**Four blockers, all real:**
+
+1. **A sixth `eprintln!` survived inside `build_runtime`**: `main.rs:1607`-region's `warning: plan not loaded: {e}`, on the resumed-group path — so `/resume` of a group whose `plan.ndjson` fails to parse still painted the alternate screen. It was reachable exactly because `build_root_inner` sets `active_group` for a resumed group. The item's own §8 sentence ("No `eprintln!` inside `build_runtime`") was false, and the grep gate in §6 would have caught it had it been scoped with `sed -n '/fn build_runtime(/,/^}/p'` rather than run over the whole file.
+2. **Four of §7.1's nine tests were never written**, including the tripwire (`build_runtime_collects_instead_of_printing`) that would have caught (1), and the one that asserts the two-media chain (`RootParts.notices` → `ConversationSpec.notices` → `Conversation.notices`). And no test drove `add_conversation`'s push at all: every new test went through `set_conversations`, so **the `/tab new` and `/resume` path — the path this item exists for — was untested end to end**.
+3. **Three tests asserted less than their names**: the "above the replayed history" test seeded no history; the "survives the next submit" test never submitted; the "carries its notices once" test asserted presence, not count (and not the no-second-render half of §4.3).
+4. **`push_build_notices`'s doc was spliced into the middle of `add_conversation`'s**, leaving the public method undocumented and its rollback contract attached to a private helper.
+
+**The honest limit the review found (a W046-era gap, NOT a W047 defect):** the ruling says the notices sit "above the replayed history — the prologue the `⋯ N earlier message(s)` divider already teaches". That is true for **tab 0**, where `set_conversations` → `replay_history` runs (`lib.rs:460`). It is **not yet true for a runtime tab**: `ConversationEvent::Added` never asks for history and nothing else does, so a `/resume` or `/tab new` tab today replays nothing and its notice sits above nothing. The rendering is correct and harmless either way; the clause is **conditional on a replay that does not exist yet**, and closing that is W046's resumed-tab gap, not this item's scope. A test may seed history itself (which is what the rewritten test does) — that proves the ordering rule without pretending the replay exists.
