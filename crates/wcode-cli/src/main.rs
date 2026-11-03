@@ -5372,6 +5372,39 @@ mod instructions_flag_tests {
 mod build_notice_tests {
     use super::*;
 
+    /// **The tripwire the item actually needed.** `build_runtime` must never write
+    /// to the terminal: it is called by the host factory *inside* the TUI, where an
+    /// `eprintln!` lands in the alternate screen. A value-asserting test cannot see
+    /// a site that prints *and* returns, so this scans the function body for the
+    /// macro — the assertion that would have caught the sixth site (`warning: plan
+    /// not loaded`, reached on the resumed-group path) before a reviewer did.
+    #[test]
+    fn the_build_path_never_prints() {
+        const SRC: &str = include_str!("main.rs");
+        let start = SRC
+            .find("\nfn build_runtime(")
+            .expect("the function is in this file");
+        // Its body ends at the first line that is exactly `}` at column 0 — the
+        // next item's blank line follows, and every nested brace is indented.
+        let end = SRC[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("the body's closing brace");
+        let body = &SRC[start..end];
+        assert!(
+            !body.contains("eprintln!"),
+            "build_runtime writes to the terminal; it must push onto `notices` instead:\n{}",
+            body.lines()
+                .filter(|l| l.contains("eprintln!"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            !body.contains("println!"),
+            "build_runtime writes to stdout; it must push onto `notices` instead"
+        );
+    }
+
     #[tokio::test]
     async fn build_runtime_collects_instead_of_printing() {
         // A [team] build returns its notice as a value, never prints it.

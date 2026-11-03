@@ -10056,15 +10056,26 @@ mod tests {
             notices: vec!["team: a, b".into()],
         };
         app.set_conversations(vec![conv], &infos);
-        // Simulate the replayed-history divider landing AFTER the build notice.
-        app.bodies_mut()[0].transcript.push(Block::Notice("⋯ 3 earlier message(s)".into()));
+        // The REAL replay path (`replay_history`'s callee, `lib.rs:493`): `seed`
+        // ends by inserting `⋯ N earlier message(s)` at `transcript.len()`, i.e.
+        // AFTER whatever is already there. So this asserts production ordering:
+        // push the build notices after the replay and the divider lands first,
+        // putting `notice_pos` at 1 and this assertion red for a real reason.
+        app.seed_history(&SessionId::agent("root"), &[AgentMessage::user_text("old")]);
         let tx = &app.bodies()[0].transcript;
         assert!(matches!(&tx[0], Block::Notice(t) if t == "team: a, b"));
-        assert!(tx.iter().any(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))));
-        // divider is below the notice
-        let notice_pos = tx.iter().position(|b| matches!(b, Block::Notice(t) if t == "team: a, b")).unwrap();
-        let divider_pos = tx.iter().position(|b| matches!(b, Block::Notice(t) if t.contains("earlier message"))).unwrap();
-        assert!(notice_pos < divider_pos);
+        let notice_pos = tx
+            .iter()
+            .position(|b| matches!(b, Block::Notice(t) if t == "team: a, b"))
+            .expect("the build notice");
+        let divider_pos = tx
+            .iter()
+            .position(|b| matches!(b, Block::Notice(t) if t.contains("earlier message")))
+            .expect("the replay divider");
+        assert!(
+            notice_pos < divider_pos,
+            "the build notice is the prologue: {tx:?}"
+        );
     }
 
     #[test]
